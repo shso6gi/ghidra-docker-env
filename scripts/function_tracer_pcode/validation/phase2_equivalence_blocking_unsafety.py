@@ -916,6 +916,8 @@ def _object_target_key_is_specific(value: Any) -> bool:
         return _deferred_call_key_is_specific(value)
     if kind == "call_argument_evidence":
         return _call_argument_evidence_key_is_specific(value)
+    if kind == "call_target_resolution_evidence":
+        return _call_target_resolution_evidence_key_is_specific(value)
     return False
 
 
@@ -1067,16 +1069,102 @@ def _deferred_call_key_is_specific(value: Tuple[Any, ...]) -> bool:
 
 
 def _call_argument_evidence_key_is_specific(value: Tuple[Any, ...]) -> bool:
-    if len(value) < 7:
+    if len(value) < 8:
         return False
     return all(
         (
             value[1] in {"function1", "function2", None},
             _analysis_key_is_specific(value[2]),
+            _pcode_ref_is_specific(value[3]),
+            _call_argument_evidence_target_key_is_specific(value[4]),
             _argument_keys_are_specific(value[5]),
             value[6] is not None,
+            value[7] is not None,
         )
     )
+
+
+def _call_argument_evidence_target_key_is_specific(value: Any) -> bool:
+    return _function_ref_key_is_specific(value)
+
+
+def _call_target_resolution_evidence_key_is_specific(value: Tuple[Any, ...]) -> bool:
+    if len(value) < 9:
+        return False
+    runtime_ref = value[3]
+    callsite_storage = value[4]
+    resolution_kind = value[5]
+    path_conditions = value[6]
+    target_conditions = value[7]
+    effect_ordinal = value[8]
+    return all(
+        (
+            value[1] in {"function1", "function2", None},
+            _analysis_key_is_specific(value[2]),
+            _call_target_resolution_runtime_ref_is_specific(runtime_ref),
+            _callsite_storage_key_is_specific(callsite_storage),
+            _unsupported_call_effect_runtime_and_storage_match(runtime_ref, callsite_storage),
+            _resolution_kind_key_is_specific(resolution_kind),
+            _condition_set_key_is_specific(path_conditions),
+            _condition_set_key_is_specific(target_conditions),
+            _effect_ordinal_key_is_specific(effect_ordinal),
+        )
+    )
+
+
+def _call_target_resolution_runtime_ref_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 5 or value[0] != "runtime_ref":
+        return False
+    return all(
+        (
+            value[1] == "call_target_resolution",
+            _tagged_pcode_ref_is_specific(value[2]),
+            _tagged_callee_identity_is_specific(value[3]),
+            _tagged_typed_target_expression_is_specific(value[4]),
+        )
+    )
+
+
+def _resolution_kind_key_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "resolution_kind"
+        and value[1] in {"pathless_target_resolution", "pcode_target_ref"}
+    )
+
+
+def _condition_set_key_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] in {"path_conditions", "target_conditions"}
+        and isinstance(value[1], tuple)
+        and all(_condition_key_is_specific(item) for item in value[1])
+    )
+
+
+def _condition_key_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 3
+        and value[0] == "condition"
+        and isinstance(value[1], bool)
+        and _condition_payload_is_specific(value[2])
+    )
+
+
+def _condition_payload_is_specific(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (tuple, list)):
+        return bool(value) and all(_condition_payload_is_specific(item) for item in value)
+    if isinstance(value, Mapping):
+        return bool(value) and all(
+            _condition_payload_is_specific(key) and _condition_payload_is_specific(item)
+            for key, item in value.items()
+        )
+    return True
 
 
 def _analysis_key_is_specific(value: Any) -> bool:

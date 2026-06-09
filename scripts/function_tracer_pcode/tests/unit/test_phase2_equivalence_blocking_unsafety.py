@@ -521,6 +521,106 @@ def test_phase2_call_effect_specificity_requires_runtime_and_storage_consistency
     assert _object_target_key_is_specific(full_target) is True
 
 
+def test_phase2_call_argument_evidence_specificity_requires_pcode_and_target_identity():
+    full_target = (
+        "call_argument_evidence",
+        "function1",
+        ("function_ref", ("function", "B10", 0x401000)),
+        (
+            "pcode_op",
+            "B10",
+            ("function_entry", "ram", 0x401000),
+            ("seq_target", "ram", 0x401020),
+            31,
+            7,
+            8,
+            0,
+        ),
+        ("function", "B10", 0x402000),
+        (
+            ("argument", 0, ("runtime_ref", ("parameter", "B10", 0x401000, 1))),
+        ),
+        True,
+        "complete",
+    )
+    missing_binary_pcode = full_target[:3] + (
+        (
+            "pcode_op",
+            None,
+            ("function_entry", "ram", 0x401000),
+            ("seq_target", "ram", 0x401020),
+            31,
+            7,
+            8,
+            0,
+        ),
+    ) + full_target[4:]
+    missing_target_address = full_target[:4] + (("function", "B10", None),) + full_target[5:]
+    unknown_target = full_target[:4] + (("unknown", "B10", ("target_expression", ("runtime_ref", "fp"))),) + full_target[5:]
+    missing_status = full_target[:7] + (None,)
+
+    assert _object_target_key_is_specific(missing_binary_pcode) is False
+    assert _object_target_key_is_specific(missing_target_address) is False
+    assert _object_target_key_is_specific(unknown_target) is False
+    assert _object_target_key_is_specific(missing_status) is False
+    assert _object_target_key_is_specific(full_target) is True
+
+
+def test_phase2_call_target_resolution_specificity_requires_condition_payloads():
+    pcode_ref = (
+        "pcode_op",
+        "B10",
+        ("function_entry", "ram", 0x401000),
+        ("seq_target", "ram", 0x401020),
+        31,
+        7,
+        8,
+        0,
+    )
+    target_expr = ("typed_target_expression", ("storage", ("register", "a0", 8)))
+    callee_identity = ("callee_identity", ("function", "B10", 0x402000))
+    runtime_ref = (
+        "runtime_ref",
+        "call_target_resolution",
+        ("pcode_op_ref", pcode_ref),
+        callee_identity,
+        ("typed_target_expression", target_expr),
+    )
+    callsite_storage = (
+        "callsite_storage",
+        ("pcode_op_ref", pcode_ref),
+        callee_identity,
+        ("target_expression", target_expr),
+    )
+    full_target = (
+        "call_target_resolution_evidence",
+        "function1",
+        ("function_ref", ("function", "B10", 0x401000)),
+        runtime_ref,
+        callsite_storage,
+        ("resolution_kind", "pathless_target_resolution"),
+        ("path_conditions", (("condition", False, ("expr", "param_1", 0)),)),
+        ("target_conditions", ()),
+        ("effect_ordinal", 0),
+    )
+    path_condition_none = full_target[:6] + (("path_conditions", (None,)),) + full_target[7:]
+    missing_condition_payload = full_target[:6] + (
+        ("path_conditions", (("condition", False, None),)),
+    ) + full_target[7:]
+    wrong_condition_shape = full_target[:6] + (
+        ("path_conditions", (("condition", False),)),
+    ) + full_target[7:]
+    target_condition_with_none_nested = full_target[:7] + (
+        ("target_conditions", (("condition", True, ("expr", None)),)),
+    ) + full_target[8:]
+
+    assert _object_target_key_is_specific(path_condition_none) is False
+    assert _object_target_key_is_specific(missing_condition_payload) is False
+    assert _object_target_key_is_specific(wrong_condition_shape) is False
+    assert _object_target_key_is_specific(target_condition_with_none_nested) is False
+    assert _object_target_key_is_specific(full_target) is True
+
+
 def _old_blocking_reason():
     return make_unknown_reason(
         UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,

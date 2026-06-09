@@ -564,6 +564,10 @@ class FunctionReturnAnalysis:
             binary_id = getattr(getattr(site, "pcode_op_ref", None), "binary_id", None)
             if binary_id:
                 return str(binary_id)
+        for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ():
+            binary_id = getattr(getattr(evidence, "pcode_op_ref", None), "binary_id", None)
+            if binary_id:
+                return str(binary_id)
         return None
 
     def normalize_deferred_calls(self) -> None:

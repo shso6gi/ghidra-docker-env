@@ -918,6 +918,10 @@ class ReturnAnalyzer:
             for note in effect_incomplete_reasons:
                 if note not in result.analysis_notes:
                     result.analysis_notes.append(note)
+            if getattr(effect_summary, "call_target_resolution_evidence", None):
+                note = "effect_call_target_resolution_evidence"
+                if note not in result.analysis_notes:
+                    result.analysis_notes.append(note)
 
             if recovered_control_returns is None:
                 if (

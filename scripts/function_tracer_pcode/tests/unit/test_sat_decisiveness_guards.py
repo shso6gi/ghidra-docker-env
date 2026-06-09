@@ -6,6 +6,7 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     CallArgumentEvidence,
+    CallTargetResolutionEvidence,
     EffectSummary,
     StoreEffect,
     UnsupportedCallEffectRef,
@@ -265,6 +266,97 @@ def _analysis_with_self_recursive_unsupported_call_effect(
     )
 
 
+def _analysis_with_effect_call_argument_evidence() -> FunctionReturnAnalysis:
+    pcode_ref = PcodeOpRef(
+        address_offset=0x1020,
+        seq_time=5,
+        seq_order=1,
+        block_index=0,
+        mnemonic="CALL",
+        input_sizes=(8, 4),
+        binary_id="B1",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1020,
+        opcode=7,
+        local_op_ordinal=2,
+    )
+    target_ref = CallTargetRef.from_name("callee", program_id=1, entry_offset=0x2000)
+    evidence = CallArgumentEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=target_ref,
+        callee_param_identities=(("parameter", 0),),
+        arguments=(Expression.parameter("x", 0, size=4),),
+        sources=("reaching_def",),
+        path_conditions=((),),
+        coverage_complete=True,
+    )
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            call_argument_evidence={pcode_ref.stable_key(): evidence},
+        ),
+        binary_id="B1",
+    )
+
+
+def _analysis_with_effect_call_target_resolution_evidence() -> FunctionReturnAnalysis:
+    pcode_ref = PcodeOpRef(
+        address_offset=0x1030,
+        seq_time=7,
+        seq_order=1,
+        block_index=0,
+        mnemonic="CALLIND",
+        input_sizes=(8, 4),
+        binary_id="B1",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1030,
+        opcode=8,
+        local_op_ordinal=3,
+    )
+    target_expr = Expression.parameter("fp", 0, size=8)
+    target_ref = CallTargetRef.from_name("dispatch_impl", program_id=1, entry_offset=0x3000)
+    evidence = CallTargetResolutionEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=target_ref,
+        target_expr=target_expr,
+        resolution_kind="pathless_target_resolution",
+        path_condition_keys=(
+            (
+                "condition",
+                False,
+                _eq(Expression.parameter("selector", 0, size=4), _const(1)).structural_key(),
+            ),
+        ),
+        target_condition_keys=(),
+        order_key=3,
+    )
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
+        parameters=[_param("fp", index=0, size=8), _param("selector", index=1)],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["fp", "selector"],
+            effects=[],
+            call_target_resolution_evidence=(evidence,),
+        ),
+        binary_id="B1",
+    )
+
+
 def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
     object_target_key = object_target_key or (
         "unsupported_call_effect",
@@ -288,6 +380,84 @@ def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
     evidence["proof_obligation_id"] = _expected_call_effect_summary_proof_id(evidence)
     evidence.update(overrides)
     return evidence
+
+
+def _call_effect_summary_proof_content(object_target_key):
+    kind = object_target_key[0] if object_target_key else None
+    runtime_ref = ("runtime_ref", "unsupported_call_effect", object_target_key)
+    callsite_storage = ("callsite_storage", "unsupported_call_effect", object_target_key)
+    if kind == "call_argument_evidence":
+        runtime_ref = (
+            "runtime_ref",
+            "call_argument",
+            ("pcode_op_ref", object_target_key[3]),
+            ("callee_identity", object_target_key[4]),
+        )
+        callsite_storage = (
+            "callsite_storage",
+            "call_argument",
+            ("argument_keys", object_target_key[5]),
+        )
+    elif kind == "call_target_resolution_evidence":
+        runtime_ref = object_target_key[3]
+        callsite_storage = object_target_key[4]
+    return {
+        "object_derived": True,
+        "status": "complete",
+        "proof_rule": "call_effect_object_evidence_complete",
+        "object_target_key": object_target_key,
+        "call_effect_summary": {
+            "status": "complete",
+            "summary_source": ("effect_summary", kind),
+            "evidence_kind": "call_effect_summary",
+            "object_target_key": object_target_key,
+        },
+        "runtime_ref": {
+            "status": "complete",
+            "runtime_ref": runtime_ref,
+        },
+        "callsite_storage": {
+            "status": "complete",
+            "callsite_storage": callsite_storage,
+        },
+    }
+
+
+def _complete_call_effect_summary_proof_evidence(object_target_key, **overrides):
+    evidence = _call_effect_summary_proof_evidence(object_target_key=object_target_key)
+    evidence["proof_content"] = _call_effect_summary_proof_content(object_target_key)
+    evidence.update(overrides)
+    return evidence
+
+
+def _completed_proof_ids_for_call_effect_evidence(evidence):
+    analysis = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        completed_recovery_proof_evidence=(evidence,),
+    )
+    return PairwiseStrategy._completed_recovery_proof_ids(analysis)
+
+
+def _blocking_unsafety_object_target_key(blocking_reason, analysis1):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        blocking_reason,
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    return reason.object_target_key
 
 
 def _analysis_with_call_effect_summary_proof_evidence(**evidence_overrides) -> FunctionReturnAnalysis:
@@ -1994,6 +2164,319 @@ def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch
     assert len(evidence) == 1
     assert evidence[0]["proof_source"] == "self_recursive_no_store_call_effect_summary"
     assert evidence[0]["proof_content"]["proof_rule"] == "self_recursive_no_store_effect_summary"
+
+
+def test_pairwise_preproducer_call_argument_evidence_requires_pending_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(
+        formula_builder,
+        solver_runner,
+        debug=False,
+        enable_completed_recovery_proofs=False,
+    )
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.detail == "function1:effect_call_argument_evidence"
+    assert reason.object_target_key[0] == "call_argument_evidence"
+    assert _object_target_key_is_specific(reason.object_target_key) is True
+    assert reason.proof_obligation_id == build_proof_obligation_id(
+        reason.reason_id,
+        reason.proof_stage,
+        reason.recovery_proof_kind,
+        reason.evidence_kind,
+        reason.object_target_key,
+    )
+
+
+def test_pairwise_call_argument_evidence_requires_matching_completed_proof_by_default(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
+
+
+def test_pairwise_call_argument_evidence_rejects_metadata_only_completed_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _call_effect_summary_proof_evidence(object_target_key=reason.object_target_key),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
+
+
+def test_call_argument_proof_rejects_unrelated_proof_content_sections():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _call_effect_summary_proof_evidence(object_target_key=object_target_key)
+    evidence["proof_content"] = {
+        "object_derived": True,
+        "status": "complete",
+        "proof_rule": "call_effect_object_evidence_complete",
+        "object_target_key": object_target_key,
+        "call_effect_summary": {"status": "complete", "foo": "bar"},
+        "runtime_ref": {"status": "complete", "foo": "bar"},
+        "callsite_storage": {"status": "complete", "foo": "bar"},
+    }
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_mismatched_runtime_ref_payload():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["runtime_ref"]["runtime_ref"] = ("runtime_ref", "different-callsite")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_summary_without_target_kind_and_evidence_kind():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["call_effect_summary"]["summary_source"] = (
+        "effect_summary",
+        "different_target",
+    )
+    evidence["proof_content"]["call_effect_summary"].pop("evidence_kind")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _complete_call_effect_summary_proof_evidence(object_target_key=reason.object_target_key),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+
+
+def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(
+        formula_builder,
+        solver_runner,
+        debug=False,
+        enable_completed_recovery_proofs=False,
+    )
+    analysis1 = _analysis_with_effect_call_target_resolution_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.detail == "function1:effect_call_target_resolution_evidence"
+    assert reason.object_target_key[0] == "call_target_resolution_evidence"
+    assert _object_target_key_is_specific(reason.object_target_key) is True
+    assert reason.proof_obligation_id == build_proof_obligation_id(
+        reason.reason_id,
+        reason.proof_stage,
+        reason.recovery_proof_kind,
+        reason.evidence_kind,
+        reason.object_target_key,
+    )
+
+
+def test_pairwise_call_target_resolution_requires_matching_completed_proof_by_default(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_target_resolution_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_target_resolution_evidence"
+
+
+def test_pairwise_call_target_resolution_rejects_incomplete_completed_proof_content(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_target_resolution_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_target_resolution_evidence",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(
+        object_target_key=reason.object_target_key,
+    )
+    evidence["proof_content"].pop("runtime_ref")
+    analysis1.completed_recovery_proof_evidence = (evidence,)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_target_resolution_evidence"
+
+
+def test_call_target_resolution_proof_rejects_mismatched_callsite_storage_payload():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_target_resolution_evidence",
+        _analysis_with_effect_call_target_resolution_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["callsite_storage"]["callsite_storage"] = (
+        "callsite_storage",
+        "different-callsite",
+    )
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_target_resolution_evidence()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_target_resolution_evidence",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _complete_call_effect_summary_proof_evidence(object_target_key=reason.object_target_key),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
 
 
 def test_pairwise_self_recursive_call_effect_proof_rejects_non_self_target(monkeypatch):

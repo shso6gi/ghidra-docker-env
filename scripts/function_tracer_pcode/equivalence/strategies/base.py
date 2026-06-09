@@ -72,6 +72,10 @@ class CheckStrategy(ABC):
         "unsupported_call_effect_reasons",
         "unsupported_memory_effect_reasons",
     )
+    _CALL_EFFECT_PROOF_CONTENT_REQUIRED_OBJECT_KINDS = {
+        "call_argument_evidence",
+        "call_target_resolution_evidence",
+    }
     
     def __init__(
         self,
@@ -141,6 +145,26 @@ class CheckStrategy(ABC):
                 continue
             for reason in getter():
                 reasons.append(f"{label}:{reason}")
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                notes = tuple(getattr(analysis, "analysis_notes", ()) or ())
+                if "effect_call_argument_evidence_incomplete" not in notes:
+                    call_argument_evidence = tuple(
+                        evidence
+                        for evidence in getattr(effect_summary, "call_argument_evidence", {}).values()
+                        if evidence is not None
+                    )
+                    for index, _evidence in enumerate(call_argument_evidence):
+                        suffix = f":{index}" if len(call_argument_evidence) > 1 else ""
+                        reasons.append(f"{label}:effect_call_argument_evidence{suffix}")
+                call_target_resolution_evidence = tuple(
+                    evidence
+                    for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ()
+                    if evidence is not None
+                )
+                for index, _evidence in enumerate(call_target_resolution_evidence):
+                    suffix = f":{index}" if len(call_target_resolution_evidence) > 1 else ""
+                    reasons.append(f"{label}:effect_call_target_resolution_evidence{suffix}")
         return reasons
 
     def _collect_return_coverage_unsafety_reasons(
@@ -732,7 +756,138 @@ class CheckStrategy(ABC):
         provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
         if provided_id is None or provided_id != proof_id:
             return None
+        if cls._call_effect_summary_proof_content_is_required(object_target_key):
+            proof_content = cls._evidence_get(evidence, "proof_content")
+            if not cls._call_effect_summary_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            ):
+                return None
         return proof_id
+
+    @classmethod
+    def _call_effect_summary_proof_content_is_required(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not object_target_key:
+            return False
+        return str(object_target_key[0]) in cls._CALL_EFFECT_PROOF_CONTENT_REQUIRED_OBJECT_KINDS
+
+    @classmethod
+    def _call_effect_summary_proof_content_is_complete(
+        cls,
+        proof_content: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(proof_content, Mapping):
+            return False
+        if not cls._evidence_bool(proof_content, "object_derived"):
+            return False
+        if cls._evidence_text(proof_content, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(proof_content.get("object_target_key")) != object_target_key:
+            return False
+        if cls._evidence_has_any_recursive(proof_content, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return False
+        if not cls._evidence_text(proof_content, "proof_rule"):
+            return False
+        required_sections = (
+            "call_effect_summary",
+            "runtime_ref",
+            "callsite_storage",
+        )
+        if any(section not in proof_content for section in required_sections):
+            return False
+        if not cls._call_effect_summary_section_matches(
+            proof_content.get("call_effect_summary"),
+            object_target_key,
+        ):
+            return False
+        expected_refs = cls._expected_call_effect_proof_content_refs(object_target_key)
+        if expected_refs is None:
+            return False
+        expected_runtime_ref, expected_callsite_storage = expected_refs
+        if not cls._proof_section_payload_matches(
+            proof_content.get("runtime_ref"),
+            "runtime_ref",
+            expected_runtime_ref,
+        ):
+            return False
+        if not cls._proof_section_payload_matches(
+            proof_content.get("callsite_storage"),
+            "callsite_storage",
+            expected_callsite_storage,
+        ):
+            return False
+        return True
+
+    @classmethod
+    def _call_effect_summary_section_matches(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        target_kind = str(object_target_key[0]) if object_target_key else ""
+        if cls._normalize_nested_tuple(section.get("object_target_key")) != object_target_key:
+            return False
+        if cls._normalize_nested_tuple(section.get("summary_source")) != (
+            "effect_summary",
+            target_kind,
+        ):
+            return False
+        if cls._evidence_text(section, "evidence_kind") != "call_effect_summary":
+            return False
+        return True
+
+    @classmethod
+    def _expected_call_effect_proof_content_refs(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+        target_kind = str(object_target_key[0]) if object_target_key else ""
+        if target_kind == "call_argument_evidence":
+            if len(object_target_key) < 6:
+                return None
+            return (
+                (
+                    "runtime_ref",
+                    "call_argument",
+                    ("pcode_op_ref", object_target_key[3]),
+                    ("callee_identity", object_target_key[4]),
+                ),
+                (
+                    "callsite_storage",
+                    "call_argument",
+                    ("argument_keys", object_target_key[5]),
+                ),
+            )
+        if target_kind == "call_target_resolution_evidence":
+            if len(object_target_key) < 5:
+                return None
+            runtime_ref = cls._normalize_nested_tuple(object_target_key[3])
+            callsite_storage = cls._normalize_nested_tuple(object_target_key[4])
+            if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
+                return None
+            return runtime_ref, callsite_storage
+        return None
+
+    @classmethod
+    def _proof_section_payload_matches(
+        cls,
+        section: Any,
+        payload_key: str,
+        expected_payload: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        return cls._normalize_nested_tuple(section.get(payload_key)) == expected_payload
 
     @classmethod
     def _sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
@@ -900,10 +1055,13 @@ class CheckStrategy(ABC):
     ) -> Optional[Tuple[Any, ...]]:
         label, reason_text = self._split_blocking_reason(blocking_reason)
         reason_kind = self._blocking_reason_kind(blocking_reason)
+        reason_index = self._blocking_reason_index(reason_text)
         if reason_kind not in {
             "unsupported_call_effect_summary",
             "effect_summary_path_coverage_incomplete",
+            "effect_call_argument_evidence",
             "effect_call_argument_evidence_incomplete",
+            "effect_call_target_resolution_evidence",
             "bounded_call_refinement_argument_alignment_failed",
             "bounded_call_refinement_deferred_target_unresolved",
             "bounded_call_refinement_return_summary_unusable",
@@ -920,6 +1078,7 @@ class CheckStrategy(ABC):
         effect_summary = getattr(analysis, "effect_summary", None)
         evidence_keys = ()
         unsupported_call_site_keys = ()
+        target_resolution_keys = ()
         if effect_summary is not None:
             evidence_keys = tuple(
                 self._call_argument_evidence_object_key(
@@ -939,20 +1098,43 @@ class CheckStrategy(ABC):
                 for site in getattr(effect_summary, "unsupported_call_sites", ()) or ()
                 if site is not None
             )
+            target_resolution_keys = tuple(
+                self._call_target_resolution_evidence_object_key(
+                    evidence,
+                    analysis=analysis,
+                    side_label=label,
+                )
+                for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ()
+                if evidence is not None
+            )
         selected_deferred_keys: Tuple[Any, ...] = ()
         selected_evidence_keys: Tuple[Any, ...] = ()
         selected_unsupported_keys: Tuple[Any, ...] = ()
+        selected_target_resolution_keys: Tuple[Any, ...] = ()
 
         if reason_kind == "unsupported_call_effect_summary":
             selected_unsupported_keys = unsupported_call_site_keys
             if len(selected_unsupported_keys) == 1:
                 return selected_unsupported_keys[0]
-        elif reason_kind == "effect_call_argument_evidence_incomplete":
+        elif reason_kind in {"effect_call_argument_evidence", "effect_call_argument_evidence_incomplete"}:
             selected_evidence_keys = evidence_keys
+            if reason_index is not None and 0 <= reason_index < len(selected_evidence_keys):
+                return selected_evidence_keys[reason_index]
+            if len(selected_evidence_keys) == 1:
+                return selected_evidence_keys[0]
             if not selected_evidence_keys:
                 selected_deferred_keys = deferred_call_keys
                 if len(selected_deferred_keys) == 1:
                     return selected_deferred_keys[0]
+        elif reason_kind == "effect_call_target_resolution_evidence":
+            selected_target_resolution_keys = target_resolution_keys
+            if (
+                reason_index is not None
+                and 0 <= reason_index < len(selected_target_resolution_keys)
+            ):
+                return selected_target_resolution_keys[reason_index]
+            if len(selected_target_resolution_keys) == 1:
+                return selected_target_resolution_keys[0]
         elif reason_kind in {
             "bounded_call_refinement_argument_alignment_failed",
             "bounded_call_refinement_deferred_target_unresolved",
@@ -974,6 +1156,7 @@ class CheckStrategy(ABC):
             selected_deferred_keys,
             selected_evidence_keys,
             selected_unsupported_keys,
+            selected_target_resolution_keys,
         )
 
     def _return_coverage_object_target_key(
@@ -1464,6 +1647,16 @@ class CheckStrategy(ABC):
         _label, reason = cls._split_blocking_reason(str(blocking_reason or ""))
         return reason.split(":", 1)[0]
 
+    @classmethod
+    def _blocking_reason_index(cls, reason_text: Optional[str]) -> Optional[int]:
+        parts = str(reason_text or "").split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[1])
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _deferred_call_is_blocking(info: Any) -> bool:
         status = getattr(info, "call_argument_recovery_status", None)
@@ -1564,6 +1757,47 @@ class CheckStrategy(ABC):
             ),
             bool(getattr(evidence, "coverage_complete", False)),
             getattr(evidence, "recovery_status", None),
+        )
+        if analysis is not None:
+            return self._artifact_stable_key_for_analysis(target, analysis)
+        return target
+
+    def _call_target_resolution_evidence_object_key(
+        self,
+        evidence: Any,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        side_label: Optional[str] = None,
+    ) -> Tuple[Any, ...]:
+        pcode_key = self._stable_key_or_none(getattr(evidence, "pcode_op_ref", None))
+        target_key = self._call_target_key_for_analysis(getattr(evidence, "target_ref", None), analysis)
+        target_expr_key = self._typed_target_expression_key(getattr(evidence, "target_expr", None))
+        callee_identity_key = self._call_effect_callee_identity_key(
+            target_key,
+            target_expr_key,
+            analysis,
+        )
+        target = (
+            "call_target_resolution_evidence",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            (
+                "runtime_ref",
+                "call_target_resolution",
+                ("pcode_op_ref", pcode_key),
+                ("callee_identity", callee_identity_key),
+                ("typed_target_expression", target_expr_key),
+            ),
+            (
+                "callsite_storage",
+                ("pcode_op_ref", pcode_key),
+                ("callee_identity", callee_identity_key),
+                ("target_expression", target_expr_key),
+            ),
+            ("resolution_kind", getattr(evidence, "resolution_kind", None)),
+            ("path_conditions", tuple(getattr(evidence, "path_condition_keys", ()) or ())),
+            ("target_conditions", tuple(getattr(evidence, "target_condition_keys", ()) or ())),
+            ("effect_ordinal", int(getattr(evidence, "order_key", 0) or 0)),
         )
         if analysis is not None:
             return self._artifact_stable_key_for_analysis(target, analysis)

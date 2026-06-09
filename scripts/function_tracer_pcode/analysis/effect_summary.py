@@ -112,6 +112,80 @@ def _stable_target_expression_key(expr: Optional[Expression]) -> Optional[Tuple[
     return expression_provenance_key(expr)
 
 
+def _condition_evidence_key(condition: Condition) -> Tuple[object, ...]:
+    try:
+        structural_key = condition.structural_key()
+    except Exception:
+        structural_key = None
+    if structural_key is not None:
+        return ("condition", bool(getattr(condition, "negated", False)), structural_key)
+    expression = getattr(condition, "expression", None)
+    return (
+        "condition",
+        bool(getattr(condition, "negated", False)),
+        expression_provenance_key(expression) if expression is not None else None,
+    )
+
+
+@dataclass(frozen=True)
+class CallTargetResolutionEvidence:
+    """Object-derived evidence for recovered call target resolution."""
+
+    pcode_op_ref: Optional[PcodeOpRef]
+    target_ref: Optional[CallTargetRef]
+    target_expr: Optional[Expression]
+    resolution_kind: str
+    path_condition_keys: Tuple[Tuple[object, ...], ...]
+    target_condition_keys: Tuple[Tuple[object, ...], ...]
+    order_key: int
+
+    @classmethod
+    def from_call_op(
+        cls,
+        op,
+        *,
+        target_ref: Optional[CallTargetRef],
+        target_expr: Optional[Expression],
+        resolution_kind: str,
+        path_conditions: Sequence[Condition],
+        target_conditions: Sequence[Condition],
+        pcode_op_ref: Optional[PcodeOpRef] = None,
+    ) -> "CallTargetResolutionEvidence":
+        return cls(
+            pcode_op_ref=pcode_op_ref if pcode_op_ref is not None else PcodeOpRef.from_pcode_op(op),
+            target_ref=target_ref,
+            target_expr=target_expr,
+            resolution_kind=str(resolution_kind),
+            path_condition_keys=tuple(_condition_evidence_key(cond) for cond in path_conditions or ()),
+            target_condition_keys=tuple(_condition_evidence_key(cond) for cond in target_conditions or ()),
+            order_key=_try_get_order_key(op, default=_UNKNOWN_EFFECT_ORDER_KEY),
+        )
+
+    def stable_key(self) -> Tuple[object, ...]:
+        return (
+            "call_target_resolution_evidence",
+            self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
+            self.target_ref.stable_key() if self.target_ref is not None else None,
+            _stable_target_expression_key(self.target_expr),
+            self.resolution_kind,
+            self.path_condition_keys,
+            self.target_condition_keys,
+            int(self.order_key),
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "kind": "call_target_resolution_evidence",
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
+            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
+            "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
+            "resolution_kind": self.resolution_kind,
+            "path_condition_keys": self.path_condition_keys,
+            "target_condition_keys": self.target_condition_keys,
+            "order_key": int(self.order_key),
+        }
+
+
 @dataclass
 class EffectSummary:
     parameter_names: List[str]
@@ -122,10 +196,12 @@ class EffectSummary:
     parameter_refs: List[LocationBaseRef] = field(default_factory=list)
     call_argument_evidence: Dict[Tuple[object, ...], "CallArgumentEvidence"] = field(default_factory=dict)
     unsupported_call_sites: Tuple[UnsupportedCallEffectRef, ...] = ()
+    call_target_resolution_evidence: Tuple[CallTargetResolutionEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))
         self.unsupported_call_sites = tuple(self.unsupported_call_sites or ())
+        self.call_target_resolution_evidence = tuple(self.call_target_resolution_evidence or ())
         if self.parameter_refs:
             self.parameter_refs = [
                 coerced
@@ -804,6 +880,7 @@ def summarize_store_effects(
     incomplete_reasons: Set[str] = set()
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
+    call_target_resolution_evidence: List[CallTargetResolutionEvidence] = []
 
     def _unsupported_call_effect_ref(
         op,
@@ -934,7 +1011,18 @@ def summarize_store_effects(
                         )
                     continue
                 processed_target_for_path = False
-                for target_ref, target_conditions in resolved_targets:
+                for target_ref, target_conditions, resolution_kind in resolved_targets:
+                    if resolution_kind == "pathless_target_resolution":
+                        call_target_resolution_evidence.append(
+                            CallTargetResolutionEvidence.from_call_op(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                resolution_kind=resolution_kind,
+                                path_conditions=normalized_path_conditions,
+                                target_conditions=target_conditions,
+                            )
+                        )
                     if target_ref is None or target_ref.is_unknown():
                         has_unsupported_call = True
                         unsupported_call_sites.append(
@@ -1228,6 +1316,7 @@ def summarize_store_effects(
         parameter_refs=_parameter_refs_from_descriptors(parameters),
         call_argument_evidence=dict(call_argument_evidence),
         unsupported_call_sites=tuple(unsupported_call_sites),
+        call_target_resolution_evidence=tuple(call_target_resolution_evidence),
     )
 
 
@@ -1240,7 +1329,7 @@ def _resolve_call_targets_for_effect_summary(
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
     debug: bool = False,
-) -> List[Tuple[CallTargetRef, List[Condition]]]:
+) -> List[Tuple[CallTargetRef, List[Condition], str]]:
     path_conditions_list = list(path_conditions or ())
     try:
         resolved = resolve_call_targets(
@@ -1256,7 +1345,7 @@ def _resolve_call_targets_for_effect_summary(
         resolved = []
     if resolved:
         return [
-            (target_ref, list(target_conditions or ()))
+            (target_ref, list(target_conditions or ()), "path_sensitive")
             for target_ref, target_conditions in resolved
         ]
 
@@ -1279,13 +1368,13 @@ def _resolve_call_targets_for_effect_summary(
             resolved = []
         if resolved:
             return [
-                (target_ref, list(target_conditions or ()))
+                (target_ref, list(target_conditions or ()), "pathless_target_resolution")
                 for target_ref, target_conditions in resolved
             ]
 
     target_ref = _resolve_call_target_ref(tracer, op)
     if target_ref is not None:
-        return [(target_ref, [])]
+        return [(target_ref, [], "pcode_target_ref")]
     return []
 
 
