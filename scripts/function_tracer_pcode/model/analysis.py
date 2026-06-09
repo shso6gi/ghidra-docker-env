@@ -560,15 +560,35 @@ class FunctionReturnAnalysis:
             if binary_id:
                 return str(binary_id)
         effect_summary = self.effect_summary
-        for site in getattr(effect_summary, "unsupported_call_sites", ()) or ():
+        for site in self._iter_effect_summary_object_evidence(
+            getattr(effect_summary, "unsupported_call_sites", None)
+        ):
             binary_id = getattr(getattr(site, "pcode_op_ref", None), "binary_id", None)
             if binary_id:
                 return str(binary_id)
-        for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ():
+        for evidence in self._iter_effect_summary_object_evidence(
+            getattr(effect_summary, "call_argument_evidence", None)
+        ):
+            binary_id = getattr(getattr(evidence, "pcode_op_ref", None), "binary_id", None)
+            if binary_id:
+                return str(binary_id)
+        for evidence in self._iter_effect_summary_object_evidence(
+            getattr(effect_summary, "call_target_resolution_evidence", None)
+        ):
             binary_id = getattr(getattr(evidence, "pcode_op_ref", None), "binary_id", None)
             if binary_id:
                 return str(binary_id)
         return None
+
+    @staticmethod
+    def _iter_effect_summary_object_evidence(value: Any) -> Tuple[Any, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, dict):
+            return tuple(value.values())
+        if isinstance(value, (tuple, list, set, frozenset)):
+            return tuple(value)
+        return ()
 
     def normalize_deferred_calls(self) -> None:
         if not self.deferred_calls:
