@@ -1577,6 +1577,46 @@ def test_phase2_return_coverage_risk_preflight_extracts_json_payload_shapes(tmp_
     assert any("function2" in shape for shape in selected.object_target_shapes)
 
 
+def test_phase2_return_coverage_risk_preflight_extracts_diagnostic_line_object_target_shapes(tmp_path):
+    current = tmp_path / "current"
+    log_path = _write_log(
+        current / "fc_evidence_only",
+        "fc_evidence_only_B9_B16.log",
+        "Result: EQUIVALENT",
+        _payload("fc_evidence_only", True),
+    )
+    log_path.write_text(
+        log_path.read_text()
+        + "\ncompleted_recovery_proof_evidence: "
+        + repr(
+            [
+                {
+                    "proof_stage": "return_guard_coverage",
+                    "evidence": {
+                        "object_target_key": [
+                            "return_coverage",
+                            "function1",
+                            ["function_ref", ["function", "B9", 1053512]],
+                        ]
+                    },
+                }
+            ]
+        )
+    )
+
+    selected_infos = select_risk_pair_infos(
+        current,
+        max_evidence_only_per_stratum=1,
+        fallback_pairs=(),
+    )
+
+    assert len(selected_infos) == 1
+    selected = selected_infos[0]
+    assert selected.proof_stages == ("return_guard_coverage",)
+    assert selected.object_target_shapes != ("unknown",)
+    assert any("function1" in shape for shape in selected.object_target_shapes)
+
+
 def test_phase2_return_coverage_risk_preflight_reuses_duplicate_fallback_capacity(tmp_path):
     current = tmp_path / "current"
     for function_name in ("fc_a", "fc_b", "fc_c"):

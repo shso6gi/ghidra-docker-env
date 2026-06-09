@@ -912,8 +912,27 @@ def _unsupported_call_effect_key_is_specific(value: Tuple[Any, ...]) -> bool:
             _analysis_key_is_specific(value[2]),
             _runtime_ref_is_specific(runtime_ref),
             _callsite_storage_key_is_specific(callsite_storage),
+            _unsupported_call_effect_runtime_and_storage_match(runtime_ref, callsite_storage),
             _effect_ordinal_key_is_specific(effect_ordinal),
             value[6] is not None,
+        )
+    )
+
+
+def _unsupported_call_effect_runtime_and_storage_match(runtime_ref: Any, callsite_storage: Any) -> bool:
+    if (
+        not isinstance(runtime_ref, tuple)
+        or len(runtime_ref) < 5
+        or not isinstance(callsite_storage, tuple)
+        or len(callsite_storage) < 4
+    ):
+        return False
+    return all(
+        (
+            runtime_ref[2] == callsite_storage[1],
+            runtime_ref[3] == callsite_storage[2],
+            _tagged_payload(runtime_ref[4], "typed_target_expression")
+            == _tagged_payload(callsite_storage[3], "target_expression"),
         )
     )
 
@@ -1006,6 +1025,12 @@ def _tagged_target_expression_is_specific(value: Any) -> bool:
         and value[0] == "target_expression"
         and _typed_target_expression_is_specific(value[1])
     )
+
+
+def _tagged_payload(value: Any, expected_tag: str) -> Any:
+    if not isinstance(value, tuple) or len(value) != 2 or value[0] != expected_tag:
+        return None
+    return value[1]
 
 
 def _deferred_call_key_is_specific(value: Tuple[Any, ...]) -> bool:

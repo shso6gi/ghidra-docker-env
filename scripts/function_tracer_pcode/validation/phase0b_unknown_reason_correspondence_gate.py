@@ -69,7 +69,7 @@ def build_phase0b_unknown_reason_correspondence_gate(
     output.mkdir(parents=True, exist_ok=True)
 
     raw_manifest = _read_json(raw_dir / "artifact_manifest.json")
-    category_names = tuple(str(category) for category in categories)
+    category_names = _normalize_categories(categories)
     current_roots = _normalize_current_roots(
         raw_dir=raw_dir,
         categories=category_names,
@@ -314,15 +314,19 @@ def _materialize_phase0b_gate_from_manifest(manifest: Mapping[str, Any]) -> Opti
     raw_dir = raw_manifest_file.parent
     raw_manifest = _read_json(raw_manifest_file)
     if isinstance(baseline_log_roots, Mapping) and baseline_log_roots:
-        categories = tuple(str(category) for category in baseline_log_roots)
+        raw_categories = tuple(str(category) for category in baseline_log_roots)
     else:
-        categories = tuple(str(category) for category in current_log_roots)
-    if not categories:
+        raw_categories = tuple(str(category) for category in current_log_roots)
+    try:
+        categories = _normalize_categories(raw_categories)
+    except ValueError:
         return None
     current_roots = {
         str(category): Path(str(path))
         for category, path in current_log_roots.items()
     }
+    if set(current_roots) != set(categories):
+        return None
     expected_category_counts = {
         str(category): {str(key): int(value) for key, value in (counts or {}).items()}
         for category, counts in (expected.get("category_classification_counts") or {}).items()
@@ -410,6 +414,25 @@ def _normalize_current_roots(
         category: current.get(category, raw_dir / "logs" / category)
         for category in categories
     }
+
+
+def _normalize_categories(categories: Sequence[str]) -> Sequence[str]:
+    normalized = tuple(str(category).strip() for category in categories)
+    if not normalized:
+        raise ValueError("--category must include at least one category")
+    if any(not category for category in normalized):
+        raise ValueError("--category must not be empty")
+    duplicates = sorted({category for category in normalized if normalized.count(category) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate --category value: {', '.join(duplicates)}")
+    expected = set(EXPECTED_CATEGORIES)
+    unknown_categories = sorted(set(normalized) - expected)
+    if unknown_categories:
+        raise ValueError(
+            "unknown --category value: "
+            f"{', '.join(unknown_categories)}; expected one of {', '.join(sorted(expected))}"
+        )
+    return normalized
 
 
 def _build_category_report(log_root: Path) -> Dict[str, Any]:

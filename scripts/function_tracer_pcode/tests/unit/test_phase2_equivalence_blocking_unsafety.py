@@ -426,16 +426,66 @@ def test_phase2_call_effect_specificity_rejects_known_callee_without_concrete_ad
         + (("callee_identity", ("function", "B10", 0x401234)),)
         + full_target[3][4:]
     )
+    storage_with_function_entry = (
+        full_target[4][:2]
+        + (("callee_identity", ("function", "B10", 0x401234)),)
+        + full_target[4][3:]
+    )
     code_address_with_address = (
         full_target[4][:2]
         + (("callee_identity", ("code_address", "B10", 0x401234)),)
         + full_target[4][3:]
     )
+    runtime_with_code_address = (
+        full_target[3][:3]
+        + (("callee_identity", ("code_address", "B10", 0x401234)),)
+        + full_target[3][4:]
+    )
 
     assert _object_target_key_is_specific(full_target[:3] + (function_without_entry,) + full_target[4:]) is False
     assert _object_target_key_is_specific(full_target[:4] + (code_address_without_address,) + full_target[5:]) is False
-    assert _object_target_key_is_specific(full_target[:3] + (function_with_entry,) + full_target[4:]) is True
-    assert _object_target_key_is_specific(full_target[:4] + (code_address_with_address,) + full_target[5:]) is True
+    assert (
+        _object_target_key_is_specific(
+            full_target[:3] + (function_with_entry, storage_with_function_entry) + full_target[5:]
+        )
+        is True
+    )
+    assert (
+        _object_target_key_is_specific(
+            full_target[:3] + (runtime_with_code_address, code_address_with_address) + full_target[5:]
+        )
+        is True
+    )
+
+
+def test_phase2_call_effect_specificity_requires_runtime_and_storage_consistency():
+    full_target = _pending_reason().object_target_key
+    pcode_ref = full_target[4][1][1]
+    mismatched_pcode_ref = pcode_ref[:5] + (pcode_ref[5] + 1,) + pcode_ref[6:]
+    storage_with_different_pcode = (
+        full_target[4][:1]
+        + (("pcode_op_ref", mismatched_pcode_ref),)
+        + full_target[4][2:]
+    )
+    storage_with_different_callee = (
+        full_target[4][:2]
+        + (("callee_identity", ("function", "B10", 0x401234)),)
+        + full_target[4][3:]
+    )
+    storage_with_different_target_expression = (
+        full_target[4][:3]
+        + (("target_expression", ("typed_target_expression", ("storage", ("register", "a1", 8)))),)
+    )
+
+    assert _object_target_key_is_specific(full_target[:4] + (storage_with_different_pcode,) + full_target[5:]) is False
+    assert _object_target_key_is_specific(full_target[:4] + (storage_with_different_callee,) + full_target[5:]) is False
+    assert (
+        _object_target_key_is_specific(
+            full_target[:4] + (storage_with_different_target_expression,) + full_target[5:]
+        )
+        is False
+    )
+    assert _object_target_key_is_specific(full_target) is True
 
 
 def _old_blocking_reason():

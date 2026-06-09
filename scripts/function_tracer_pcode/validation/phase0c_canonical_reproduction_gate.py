@@ -42,7 +42,7 @@ def build_phase0c_canonical_reproduction_gate(
     output.mkdir(parents=True, exist_ok=True)
 
     raw_manifest = _read_json(raw_dir / "artifact_manifest.json")
-    category_names = tuple(str(category) for category in categories)
+    category_names = _normalize_categories(categories)
     current_roots = _normalize_current_roots(
         raw_dir=raw_dir,
         categories=category_names,
@@ -92,6 +92,7 @@ def build_phase0c_canonical_reproduction_gate(
             category: str(raw_dir / "logs" / category)
             for category in category_names
         },
+        "categories": list(category_names),
         "current_log_roots": {
             category: str(path)
             for category, path in sorted(current_roots.items())
@@ -151,7 +152,7 @@ def validate_phase0c_canonical_reproduction_gate(manifest: Mapping[str, Any]) ->
     if materialized is None:
         failures.append("materialized_context_missing")
     else:
-        for key in ("baseline_id", "baseline_git_head", "current_log_roots"):
+        for key in ("baseline_id", "baseline_git_head", "baseline_log_roots", "categories", "current_log_roots"):
             if not _strict_json_equal(manifest.get(key), materialized.get(key)):
                 failures.append(f"materialized_{key}")
         if not _strict_json_equal(manifest.get("category_comparisons"), materialized.get("category_comparisons")):
@@ -216,11 +217,40 @@ def _normalize_current_roots(
     }
 
 
+def _normalize_categories(categories: Sequence[str]) -> Sequence[str]:
+    normalized = tuple(str(category).strip() for category in categories)
+    if not normalized:
+        raise ValueError("Phase 0C canonical reproduction requires the full category set")
+    if any(not category for category in normalized):
+        raise ValueError("category must not be empty")
+    duplicates = sorted({category for category in normalized if normalized.count(category) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate category value: {', '.join(duplicates)}")
+    expected = set(DEFAULT_CATEGORIES)
+    unknown_categories = sorted(set(normalized) - expected)
+    if unknown_categories:
+        raise ValueError(
+            "unknown category value: "
+            f"{', '.join(unknown_categories)}; expected one of {', '.join(sorted(expected))}"
+        )
+    if set(normalized) != expected:
+        raise ValueError(
+            "Phase 0C canonical reproduction requires the full category set: "
+            f"{', '.join(DEFAULT_CATEGORIES)}"
+        )
+    return normalized
+
+
 def _materialize_phase0c_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     baseline_ref = manifest.get("baseline_raw_artifact_ref")
     current_log_roots = manifest.get("current_log_roots")
     baseline_log_roots = manifest.get("baseline_log_roots")
-    if not isinstance(baseline_ref, Mapping) or not isinstance(current_log_roots, Mapping):
+    if (
+        not isinstance(baseline_ref, Mapping)
+        or not isinstance(current_log_roots, Mapping)
+        or not isinstance(baseline_log_roots, Mapping)
+        or not baseline_log_roots
+    ):
         return None
     raw_manifest_path = baseline_ref.get("path")
     if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
@@ -231,15 +261,17 @@ def _materialize_phase0c_gate_from_manifest(manifest: Mapping[str, Any]) -> Opti
     raw_dir = raw_manifest_file.parent
     if not raw_manifest_file.is_file():
         return None
-    if isinstance(baseline_log_roots, Mapping) and baseline_log_roots:
-        categories = tuple(str(category) for category in baseline_log_roots)
-    else:
-        categories = DEFAULT_CATEGORIES
+    try:
+        categories = _normalize_categories(tuple(str(category) for category in baseline_log_roots))
+    except ValueError:
+        return None
     raw_manifest = _read_json(raw_manifest_file)
     current_roots = {
         str(category): Path(str(path))
         for category, path in current_log_roots.items()
     }
+    if set(current_roots) != set(categories):
+        return None
 
     checks = list(_baseline_identity_checks(raw_manifest))
     category_comparisons: Dict[str, Any] = {}
@@ -269,6 +301,11 @@ def _materialize_phase0c_gate_from_manifest(manifest: Mapping[str, Any]) -> Opti
     return {
         "baseline_id": raw_manifest.get("baseline_id"),
         "baseline_git_head": raw_manifest.get("git_head"),
+        "baseline_log_roots": {
+            category: str(raw_dir / "logs" / category)
+            for category in categories
+        },
+        "categories": list(categories),
         "current_log_roots": {
             category: str(path)
             for category, path in sorted(current_roots.items())

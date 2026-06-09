@@ -608,10 +608,16 @@ def _extend_unique(values: list, new_values: Iterable[str]) -> None:
 
 
 def _proof_stages_from_line(line: str) -> Tuple[str, ...]:
+    stages = _proof_stages_from_evidence_records(_completed_evidence_records_from_line(line))
+    if stages:
+        return stages
     return tuple(dict.fromkeys(re.findall(r'"proof_stage"\s*:\s*"([^"]+)"', line)))
 
 
 def _object_target_shapes_from_line(line: str) -> Tuple[str, ...]:
+    shapes = _object_target_shapes_from_evidence_records(_completed_evidence_records_from_line(line))
+    if shapes:
+        return shapes
     raw_keys = re.findall(r'"object_target_key"\s*:\s*"([^"]+)"', line)
     return tuple(dict.fromkeys(_object_target_shape(raw_key) for raw_key in raw_keys))
 
@@ -631,31 +637,11 @@ def _payload_facts_from_line(line: str) -> _PayloadFacts:
         return _PayloadFacts(None, False, (), (), ())
     binary_names = _payload_binary_names(payload)
     evidence_records = _completed_recovery_proof_evidence(payload)
-    proof_stages = []
-    object_target_shapes = []
-    for evidence_record in evidence_records:
-        if not isinstance(evidence_record, Mapping):
-            continue
-        evidence = evidence_record.get("evidence")
-        proof_stage = evidence_record.get("proof_stage")
-        if proof_stage is None and isinstance(evidence, Mapping):
-            proof_stage = evidence.get("proof_stage")
-        if proof_stage is not None and str(proof_stage) not in proof_stages:
-            proof_stages.append(str(proof_stage))
-        object_target_key = None
-        if isinstance(evidence, Mapping):
-            object_target_key = evidence.get("object_target_key")
-        if object_target_key is None:
-            object_target_key = evidence_record.get("object_target_key")
-        if object_target_key is not None:
-            object_target_shape = _object_target_shape(object_target_key)
-            if object_target_shape not in object_target_shapes:
-                object_target_shapes.append(object_target_shape)
     return _PayloadFacts(
         binary_names=binary_names,
         has_completed_evidence=bool(evidence_records),
-        proof_stages=tuple(proof_stages),
-        object_target_shapes=tuple(object_target_shapes),
+        proof_stages=_proof_stages_from_evidence_records(evidence_records),
+        object_target_shapes=_object_target_shapes_from_evidence_records(evidence_records),
         unknown_reason_ids=_payload_unknown_reason_ids(payload),
     )
 
@@ -684,6 +670,62 @@ def _completed_recovery_proof_evidence(payload: Mapping[str, Any]) -> Tuple[Any,
     if not isinstance(evidence, (list, tuple)):
         return ()
     return tuple(evidence)
+
+
+def _completed_evidence_records_from_line(line: str) -> Tuple[Any, ...]:
+    marker = "completed_recovery_proof_evidence:"
+    if marker not in line:
+        return ()
+    raw_value = line.partition(marker)[2].strip()
+    if not raw_value:
+        return ()
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            parsed = loader(raw_value)
+        except (SyntaxError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        return _completed_recovery_proof_evidence({"completed_recovery_proof_evidence": parsed})
+    return ()
+
+
+def _proof_stages_from_evidence_records(evidence_records: Sequence[Any]) -> Tuple[str, ...]:
+    proof_stages = []
+    for evidence_record in evidence_records:
+        proof_stage = _evidence_record_proof_stage(evidence_record)
+        if proof_stage is not None and str(proof_stage) not in proof_stages:
+            proof_stages.append(str(proof_stage))
+    return tuple(proof_stages)
+
+
+def _object_target_shapes_from_evidence_records(evidence_records: Sequence[Any]) -> Tuple[str, ...]:
+    object_target_shapes = []
+    for evidence_record in evidence_records:
+        object_target_key = _evidence_record_object_target_key(evidence_record)
+        if object_target_key is None:
+            continue
+        object_target_shape = _object_target_shape(object_target_key)
+        if object_target_shape not in object_target_shapes:
+            object_target_shapes.append(object_target_shape)
+    return tuple(object_target_shapes)
+
+
+def _evidence_record_proof_stage(evidence_record: Any) -> Optional[Any]:
+    if not isinstance(evidence_record, Mapping):
+        return None
+    evidence = evidence_record.get("evidence")
+    proof_stage = evidence_record.get("proof_stage")
+    if proof_stage is None and isinstance(evidence, Mapping):
+        proof_stage = evidence.get("proof_stage")
+    return proof_stage
+
+
+def _evidence_record_object_target_key(evidence_record: Any) -> Optional[Any]:
+    if not isinstance(evidence_record, Mapping):
+        return None
+    evidence = evidence_record.get("evidence")
+    if isinstance(evidence, Mapping) and evidence.get("object_target_key") is not None:
+        return evidence.get("object_target_key")
+    return evidence_record.get("object_target_key")
 
 
 def _payload_unknown_reason_ids(payload: Mapping[str, Any]) -> Tuple[str, ...]:

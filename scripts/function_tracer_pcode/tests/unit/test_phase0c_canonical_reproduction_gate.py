@@ -120,6 +120,17 @@ def test_phase0c_canonical_reproduction_gate_rejects_unknown_current_log_root_ca
         )
 
 
+def test_phase0c_canonical_reproduction_gate_rejects_partial_category_selection(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="requires the full category set"):
+        build_phase0c_canonical_reproduction_gate(
+            baseline_raw_dir=raw_dir,
+            output_dir=tmp_path / "gate",
+            categories=("function_call",),
+        )
+
+
 def test_phase0c_canonical_reproduction_gate_rejects_tampered_ready_comparison(tmp_path):
     raw_dir = _write_fixture(tmp_path)
 
@@ -138,6 +149,48 @@ def test_phase0c_canonical_reproduction_gate_rejects_tampered_ready_comparison(t
     gate["summary"]["failed"] = False
 
     with pytest.raises(ValueError, match="materialized_combined_comparison"):
+        validate_phase0c_canonical_reproduction_gate(gate)
+
+
+def test_phase0c_validator_rejects_tampered_baseline_log_roots(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_canonical_reproduction_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={
+            "function_call": raw_dir / "logs" / "function_call",
+            "loop": raw_dir / "logs" / "loop",
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_canonical_reproduction_ready"] is True
+
+    gate["baseline_log_roots"]["function_call"] = str(tmp_path / "wrong" / "function_call")
+
+    with pytest.raises(ValueError, match="materialized_baseline_log_roots"):
+        validate_phase0c_canonical_reproduction_gate(gate)
+
+
+def test_phase0c_validator_rejects_tampered_category_coverage(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_canonical_reproduction_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={
+            "function_call": raw_dir / "logs" / "function_call",
+            "loop": raw_dir / "logs" / "loop",
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_canonical_reproduction_ready"] is True
+
+    gate["baseline_log_roots"].pop("loop")
+    gate["current_log_roots"].pop("loop")
+    gate["categories"] = ["function_call"]
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
         validate_phase0c_canonical_reproduction_gate(gate)
 
 

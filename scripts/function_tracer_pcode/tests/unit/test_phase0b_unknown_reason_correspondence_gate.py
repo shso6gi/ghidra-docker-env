@@ -60,6 +60,28 @@ def test_phase0b_unknown_reason_correspondence_gate_derives_combined_expected_fo
     validate_phase0b_unknown_reason_correspondence_gate(gate)
 
 
+def test_phase0b_unknown_reason_correspondence_gate_rejects_unknown_selected_category(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="unknown --category value"):
+        build_phase0b_unknown_reason_correspondence_gate(
+            baseline_raw_dir=raw_dir,
+            output_dir=tmp_path / "gate",
+            categories=("functoin_call",),
+        )
+
+
+def test_phase0b_unknown_reason_correspondence_gate_rejects_duplicate_selected_category(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="duplicate --category value"):
+        build_phase0b_unknown_reason_correspondence_gate(
+            baseline_raw_dir=raw_dir,
+            output_dir=tmp_path / "gate",
+            categories=("function_call", "function_call"),
+        )
+
+
 def test_phase0b_validator_rejects_tampered_ready_summary(tmp_path):
     raw_dir = _write_fixture(tmp_path)
 
