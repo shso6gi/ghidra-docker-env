@@ -247,6 +247,161 @@ class CheckStrategy(ABC):
             existing_ids.add(proof_id)
         analysis.completed_recovery_proof_evidence = tuple(records)
 
+    def _record_completed_call_effect_summary_proof_if_safe(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        if reason_record.reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+            return
+        if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
+            return
+        proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if proof_obligation_id is None or not isinstance(object_target_key, tuple):
+            return
+
+        analysis = self._analysis_for_call_effect_object_target(
+            object_target_key,
+            analysis1,
+            analysis2,
+        )
+        if analysis is None:
+            return
+        proof_content = self._self_recursive_no_store_call_effect_proof_content(
+            object_target_key,
+            analysis,
+        )
+        if proof_content is None:
+            return
+
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        if proof_obligation_id in existing_ids:
+            return
+
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+                "recovery_proof_kind": UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+                "proof_stage": "object_evidence_collected",
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_obligation_id,
+                "proof_source": "self_recursive_no_store_call_effect_summary",
+                "proof_content": proof_content,
+            }
+        )
+        analysis.completed_recovery_proof_evidence = tuple(records)
+
+    @staticmethod
+    def _analysis_for_call_effect_object_target(
+        object_target_key: Tuple[Any, ...],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[FunctionReturnAnalysis]:
+        if len(object_target_key) < 2 or object_target_key[0] != "unsupported_call_effect":
+            return None
+        side_label = object_target_key[1]
+        if side_label == "function1":
+            return analysis1
+        if side_label == "function2":
+            return analysis2
+        return None
+
+    def _self_recursive_no_store_call_effect_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        if len(object_target_key) < 7 or object_target_key[0] != "unsupported_call_effect":
+            return None
+        if object_target_key[-1] != "callee_effect_summary_missing":
+            return None
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            return None
+        if getattr(effect_summary, "effects", None):
+            return None
+        if getattr(effect_summary, "incomplete_reasons", None):
+            return None
+        unsupported_sites = tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
+        if len(unsupported_sites) != 1:
+            return None
+        side_label = object_target_key[1]
+        site = unsupported_sites[0]
+        if getattr(site, "reason", None) != "callee_effect_summary_missing":
+            return None
+        site_key = self._normalize_nested_tuple(
+            self._unsupported_call_effect_object_key(
+                site,
+                analysis=analysis,
+                side_label=side_label,
+            )
+        )
+        if site_key != object_target_key:
+            return None
+        target_key = self._call_target_key_for_analysis(getattr(site, "target_ref", None), analysis)
+        if not self._call_target_is_analysis_entry(target_key, analysis):
+            return None
+        pcode_op_ref = self._stable_key_or_none(getattr(site, "pcode_op_ref", None))
+        if pcode_op_ref is None:
+            return None
+        return {
+            "object_derived": True,
+            "status": "complete",
+            "proof_rule": "self_recursive_no_store_effect_summary",
+            "caller_function": self._analysis_entry_key(analysis),
+            "recursive_callee": target_key,
+            "callsite_pcode_op_ref": pcode_op_ref,
+            "unsupported_call_site": object_target_key,
+            "local_store_effect_count": 0,
+            "unsupported_call_site_count": 1,
+            "recursive_call_effect": "no_memory_effects_by_induction",
+        }
+
+    @classmethod
+    def _call_target_is_analysis_entry(
+        cls,
+        target_key: Any,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if not isinstance(target_key, tuple) or len(target_key) < 3:
+            return False
+        if target_key[0] != "function":
+            return False
+        entry_key = cls._analysis_entry_key(analysis)
+        if (
+            not isinstance(entry_key, tuple)
+            or len(entry_key) != 2
+            or entry_key[0] != "function_ref"
+            or not isinstance(entry_key[1], tuple)
+            or len(entry_key[1]) < 3
+        ):
+            return False
+        entry_ref = entry_key[1]
+        try:
+            return (
+                str(target_key[1]) == str(entry_ref[1])
+                and target_key[2] is not None
+                and entry_ref[2] is not None
+                and int(target_key[2]) == int(entry_ref[2])
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _analysis_has_active_return_coverage_blockers(
         self,
         analysis: FunctionReturnAnalysis,
@@ -400,6 +555,11 @@ class CheckStrategy(ABC):
                 analysis2,
                 stage=stage,
             )
+            self._record_completed_call_effect_summary_proof_if_safe(
+                reason_record,
+                analysis1,
+                analysis2,
+            )
             if self._recovery_proof_is_complete(
                 reason_record,
                 analysis1,
@@ -424,6 +584,11 @@ class CheckStrategy(ABC):
                 analysis1,
                 analysis2,
                 stage=stage,
+            )
+            self._record_completed_call_effect_summary_proof_if_safe(
+                reason_record,
+                analysis1,
+                analysis2,
             )
             if self._recovery_proof_is_complete(
                 reason_record,

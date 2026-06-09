@@ -217,6 +217,53 @@ def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
     )
 
 
+def _analysis_with_self_recursive_unsupported_call_effect(
+    *,
+    binary_id: str = "B1",
+    entry: int = 0x1000,
+    target_entry: int = 0x1000,
+    target_name: str = "func1",
+    reason: str = "callee_effect_summary_missing",
+) -> FunctionReturnAnalysis:
+    target_ref = CallTargetRef.from_name(target_name, program_id=1, entry_offset=target_entry)
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=PcodeOpRef(
+            address_offset=entry + 0x20,
+            seq_time=7,
+            seq_order=3,
+            block_index=1,
+            mnemonic="CALL",
+            input_sizes=(8,),
+            binary_id=binary_id,
+            function_entry_space="ram",
+            function_entry_offset=entry,
+            target_space="ram",
+            target_offset=entry + 0x20,
+            opcode=7,
+            local_op_ordinal=3,
+        ),
+        target_ref=target_ref,
+        target_expr=Expression.constant(target_entry, 8),
+        reason=reason,
+        order_key=11,
+    )
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=entry),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+        binary_id=binary_id,
+    )
+
+
 def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
     object_target_key = object_target_key or (
         "unsupported_call_effect",
@@ -1914,6 +1961,95 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     assert result.unknown_reasons == []
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+
+
+def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_self_recursive_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    evidence = [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "call_effect_summary"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["proof_source"] == "self_recursive_no_store_call_effect_summary"
+    assert evidence[0]["proof_content"]["proof_rule"] == "self_recursive_no_store_effect_summary"
+
+
+def test_pairwise_self_recursive_call_effect_proof_rejects_non_self_target(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_self_recursive_unsupported_call_effect(
+        target_entry=0x2000,
+        target_name="callee",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x3000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x3000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "call_effect_summary"
+    ] == []
+
+
+def test_pairwise_unknown_indirect_call_effect_proof_is_not_auto_completed(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "call_effect_summary"
+    ] == []
 
 
 def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
