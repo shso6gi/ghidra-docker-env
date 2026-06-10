@@ -34,6 +34,8 @@ from .pairwise_normalization import try_normalization_equivalence
 from .pairwise_solver_proven_rewrite import try_solver_proven_rewrite_equivalence
 from .pairwise_query_builder import (
     build_condition_only_query,
+    build_return_width_bridge_high_bit_query,
+    build_return_width_bridge_narrow_query,
     build_single_case_condition_query,
     build_normalized_inequality_query,
     build_pair_query,
@@ -4500,6 +4502,124 @@ class PairwiseStrategy(CheckStrategy):
             param_replace_fn2,
             pair_id,
         )
+
+    def _solve_return_width_bridge_with_completed_proof(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str,
+        *,
+        object_target_key: Tuple[Any, ...],
+        blocking_detail: str,
+    ) -> Optional[QueryResult]:
+        analysis1 = base_ctx.get("analysis1")
+        analysis2 = base_ctx.get("analysis2")
+        if analysis1 is None or analysis2 is None:
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: analysis context missing"
+            )
+            return None
+        target = self._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple):
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: object target missing"
+            )
+            return None
+        narrow_width = self._return_width_bridge_target_narrow_width(target)
+        if narrow_width is None:
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: narrow width unavailable"
+            )
+            return None
+
+        reason_record = make_unknown_reason(
+            UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+            stage="S_PAIRWISE",
+            pair_or_case=pair_id,
+            evidence_refs=("return-width-mismatch", blocking_detail),
+            object_target_key=target,
+            detail=blocking_detail,
+        )
+        narrow_query = build_return_width_bridge_narrow_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+            target_bits=narrow_width,
+        )
+        proof_result = self._solve_query_internal(
+            narrow_query,
+            pair_id,
+            stage="return-width-bridge-narrow-ineq",
+            use_hard_timeout=True,
+        )
+        if proof_result.is_equivalent is not True:
+            self._debug_print(
+                "  Pair "
+                f"{pair_id} return-width bridge proof skipped: narrow query was not UNSAT"
+            )
+            return None
+        high_bit_query = build_return_width_bridge_high_bit_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+            narrow_bits=narrow_width,
+            return_size1=base_ctx.get("return_size1", narrow_width),
+            return_size2=base_ctx.get("return_size2", narrow_width),
+        )
+        if high_bit_query is None:
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: high-bit query unavailable"
+            )
+            return None
+        high_bit_result = self._solve_query_internal(
+            high_bit_query,
+            pair_id,
+            stage="return-width-bridge-high-bit-extension",
+            use_hard_timeout=True,
+        )
+        if high_bit_result.is_equivalent is not True:
+            self._debug_print(
+                "  Pair "
+                f"{pair_id} return-width bridge proof skipped: high-bit query was not UNSAT"
+            )
+            return None
+
+        if not self._record_completed_return_width_bridge_proofs(
+            reason_record,
+            analysis1,
+            analysis2,
+            query_stage="return-width-bridge-high-bit-extension",
+            narrow_width=narrow_width,
+        ):
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: completed proof not recorded"
+            )
+            return None
+        if not self._return_width_bridge_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
+        ):
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: completed proof not accepted"
+            )
+            return None
+
+        proof_result.last_query = narrow_query
+        proof_result.pair_stage = "return-width-bridge-narrow-ineq"
+        self._debug_print(
+            f"  Pair {pair_id}: return-width bridge completed by narrow-width and high-bit proofs"
+        )
+        return proof_result
 
     def _build_normalized_inequality_query(
         self,

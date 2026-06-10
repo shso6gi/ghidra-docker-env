@@ -86,6 +86,8 @@ ABI_CALLING_CONVENTION_RELATIONS = frozenset({"same_return_abi_family"})
 ABI_RETURN_STORAGE_RELATIONS = frozenset({"abi_related_return_storage"})
 HIGH_BIT_EXTENSION_RELATIONS = frozenset({"compatible_under_narrow_width"})
 HIGH_BIT_PROOF_LABELS = frozenset({"high_bits_do_not_affect_compared_return"})
+COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE = "return_width_bridge_narrow_and_high_bit_queries_unsat"
+RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE = "return-width-bridge-high-bit-extension"
 COMPLETED_PROOF_BLOCKER_FIELDS = (
     "sat_unsafety_reasons",
     "coverage_gap_reasons",
@@ -1060,6 +1062,11 @@ def _completed_evidence_matches_action(
         "proven",
     }:
         return False
+    if (
+        str(evidence_summary.get("proof_source") or evidence.get("proof_source") or MISSING_SENTINEL)
+        != COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE
+    ):
+        return False
     proof_kind = (
         evidence_summary.get("proof_kind")
         or evidence.get("recovery_proof_kind")
@@ -1129,6 +1136,10 @@ def _completed_evidence_has_required_proof_content(
     content = _completed_proof_content(evidence_summary, evidence, str(action.get("proof_kind")))
     if not isinstance(content, Mapping):
         return False
+    if content.get("object_derived") is not True or content.get("status") != "proven":
+        return False
+    if _normalize_nested_tuple(content.get("object_target_key")) != _normalize_nested_tuple(object_target_key):
+        return False
     if _nested_completed_proof_has_active_blocker(content):
         return False
     if str(action.get("proof_kind") or MISSING_SENTINEL) == "abi_relation_proof":
@@ -1190,7 +1201,7 @@ def _high_bit_proof_content_is_specific(content: Mapping[str, Any], object_targe
 
 
 def _calling_convention_evidence_is_specific(value: Any, left: tuple, right: tuple) -> bool:
-    if not isinstance(value, Mapping) or value.get("object_derived") is not True:
+    if not _completed_proof_section_is_proven(value):
         return False
     left_function = _find_tagged_entry(left, "function_ref")
     right_function = _find_tagged_entry(right, "function_ref")
@@ -1202,7 +1213,7 @@ def _calling_convention_evidence_is_specific(value: Any, left: tuple, right: tup
 
 
 def _return_storage_evidence_is_specific(value: Any, left: tuple, right: tuple) -> bool:
-    if not isinstance(value, Mapping) or value.get("object_derived") is not True:
+    if not _completed_proof_section_is_proven(value):
         return False
     left_storage = _find_tagged_entry(left, "return_storage")
     right_storage = _find_tagged_entry(right, "return_storage")
@@ -1218,6 +1229,7 @@ def _narrow_return_width_evidence_is_specific(value: Any, target: tuple) -> bool
     if not (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
+        and value.get("status") == "proven"
         and isinstance(widths, tuple)
         and len(widths) == 3
     ):
@@ -1231,6 +1243,7 @@ def _producer_width_evidence_is_specific(value: Any, target: tuple) -> bool:
     if not (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
+        and value.get("status") == "proven"
         and isinstance(widths, tuple)
         and len(widths) == 3
     ):
@@ -1242,6 +1255,7 @@ def _extension_semantics_evidence_is_specific(value: Any) -> bool:
     return (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
+        and value.get("status") == "proven"
         and _text_identity_is_specific(value.get("left_extension"))
         and _text_identity_is_specific(value.get("right_extension"))
         and value.get("relation") in HIGH_BIT_EXTENSION_RELATIONS
@@ -1253,6 +1267,7 @@ def _high_bits_evidence_is_specific(value: Any, target: tuple) -> bool:
     if not (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
+        and value.get("status") == "proven"
         and value.get("proven") is True
         and isinstance(widths, tuple)
         and len(widths) == 3
@@ -1262,6 +1277,15 @@ def _high_bits_evidence_is_specific(value: Any, target: tuple) -> bool:
         value.get("narrow_width") == min(int(widths[1]), int(widths[2]))
         and value.get("wide_width") == max(int(widths[1]), int(widths[2]))
         and value.get("proof") in HIGH_BIT_PROOF_LABELS
+        and value.get("query_stage") == RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE
+    )
+
+
+def _completed_proof_section_is_proven(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and value.get("object_derived") is True
+        and value.get("status") == "proven"
     )
 
 
@@ -1308,6 +1332,7 @@ def _completed_recovery_proof_summaries(payload: Mapping[str, Any]) -> Sequence[
                 "proof_kind": proof_kind,
                 "evidence_kind": evidence.get("evidence_kind") or MISSING_SENTINEL,
                 "status": evidence.get("status") or MISSING_SENTINEL,
+                "proof_source": evidence.get("proof_source") or MISSING_SENTINEL,
                 "object_derived": evidence.get("object_derived") is True,
                 "object_target_key": evidence.get("object_target_key"),
                 "proof_obligation_id": evidence.get("proof_obligation_id"),

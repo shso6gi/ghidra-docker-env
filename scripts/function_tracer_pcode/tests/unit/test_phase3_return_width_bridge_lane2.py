@@ -6,12 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.smt.interface import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+    build_return_width_bridge_high_bit_query,
+)
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2 import (
     build_phase3_return_width_bridge_lane2_manifest,
     build_phase3_return_width_bridge_lane2_post_fix_gate,
@@ -257,43 +265,56 @@ def _completed_proof_content(action):
     wide_width = max(widths[1], widths[2])
     if action["proof_kind"] == "abi_relation_proof":
         return {
+            "object_derived": True,
+            "status": "proven",
+            "object_target_key": target,
             "calling_convention": {
                 "object_derived": True,
+                "status": "proven",
                 "left_function_ref": left_function_ref,
                 "right_function_ref": right_function_ref,
                 "relation": "same_return_abi_family",
             },
             "return_storage": {
                 "object_derived": True,
+                "status": "proven",
                 "left_return_storage": left_return_storage,
                 "right_return_storage": right_return_storage,
                 "relation": "abi_related_return_storage",
             },
             "narrow_return_width": {
                 "object_derived": True,
+                "status": "proven",
                 "narrow_width": narrow_width,
                 "proven": True,
             },
         }
     if action["proof_kind"] == "high_bit_proof":
         return {
+            "object_derived": True,
+            "status": "proven",
+            "object_target_key": target,
             "producer_width": {
                 "object_derived": True,
+                "status": "proven",
                 "left_width": widths[1],
                 "right_width": widths[2],
             },
             "extension_semantics": {
                 "object_derived": True,
+                "status": "proven",
                 "left_extension": "narrow_return",
                 "right_extension": "abi_return_extension",
                 "relation": "compatible_under_narrow_width",
             },
             "high_bits_irrelevant_or_equal": {
                 "object_derived": True,
+                "status": "proven",
                 "narrow_width": narrow_width,
                 "wide_width": wide_width,
                 "proof": "high_bits_do_not_affect_compared_return",
                 "proven": True,
+                "query_stage": "return-width-bridge-high-bit-extension",
             },
         }
     return {}
@@ -312,6 +333,7 @@ def _completed_evidence(actions, *, include_proof_content=True):
             "object_derived": True,
             "object_target_key": action["object_target_key"],
             "proof_obligation_id": action["proof_obligation_id"],
+            "proof_source": "return_width_bridge_narrow_and_high_bit_queries_unsat",
         }
         if include_proof_content:
             evidence["proof_content"] = _completed_proof_content(action)
@@ -323,6 +345,24 @@ def _completed_evidence(actions, *, include_proof_content=True):
             }
         )
     return records
+
+
+def _constant_return_case(index: int, value: int, *, size: int, return_type: str):
+    expr = Expression.constant(value, size=size)
+    return ReturnCase(
+        index=index,
+        conditions=[],
+        value_expr=expr,
+        return_info=ReturnInfo(address=f"0x{index:x}", value=expr),
+        return_type=return_type,
+    )
+
+
+def _solve_direct(query: str):
+    pytest.importorskip("z3")
+    solver = Z3Solver(timeout=5)
+    assert solver.check_availability()[0]
+    return solver.check_equivalence_direct(query)
 
 
 def _payload(*, reasons, actions=None, is_equivalent=None, completed_evidence=None):
@@ -382,6 +422,148 @@ def _setup_logs(tmp_path: Path, *, current_payload: dict):
     _write_log(baseline_root, _payload(reasons=[_width_reason()]))
     _write_log(current_root, current_payload)
     return raw_dir, baseline_root, current_root
+
+
+def test_return_width_bridge_completed_evidence_is_accepted_by_decision_gate():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+
+    proof_ids = {
+        CheckStrategy._return_width_bridge_proof_id_from_evidence(record)
+        for record in evidence
+    }
+
+    assert proof_ids == {
+        CheckStrategy._normalize_nested_tuple(action["proof_obligation_id"])
+        for action in actions
+    }
+
+
+def test_return_width_bridge_completed_evidence_rejects_metadata_only_proof():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions, include_proof_content=False)]
+
+    assert all(
+        CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is None
+        for record in evidence
+    )
+
+
+def test_return_width_bridge_completed_evidence_rejects_missing_proof_source():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+    for record in evidence:
+        record.pop("proof_source")
+
+    assert all(
+        CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is None
+        for record in evidence
+    )
+
+
+def test_return_width_bridge_completed_evidence_rejects_narrow_only_proof_source():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+    for record in evidence:
+        record["proof_source"] = "return_width_bridge_narrow_query_unsat"
+
+    assert all(
+        CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is None
+        for record in evidence
+    )
+
+
+def test_return_width_bridge_completed_evidence_rejects_bogus_high_bit_content():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+    for record in evidence:
+        if record["proof_kind"] == "high_bit_proof":
+            record["proof_content"]["high_bits_irrelevant_or_equal"]["proof"] = "metadata_only"
+
+    accepted = [
+        record
+        for record in evidence
+        if CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is not None
+    ]
+
+    assert {record["proof_kind"] for record in accepted} == {"abi_relation_proof"}
+
+
+def test_return_width_bridge_completed_evidence_rejects_missing_high_bit_query_stage():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+    for record in evidence:
+        if record["proof_kind"] == "high_bit_proof":
+            record["proof_content"]["high_bits_irrelevant_or_equal"].pop("query_stage")
+
+    accepted = [
+        record
+        for record in evidence
+        if CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is not None
+    ]
+
+    assert {record["proof_kind"] for record in accepted} == {"abi_relation_proof"}
+
+
+def test_return_width_bridge_high_bit_query_rejects_low_bits_only_near_miss():
+    narrow_case = _constant_return_case(0, 0, size=4, return_type="unsigned int")
+    wide_case = _constant_return_case(0, 0x0000000100000000, size=8, return_type="unsigned long")
+
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        narrow_case,
+        wide_case,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is not None
+    result = _solve_direct(query)
+    assert result.status == SolverStatus.SAT
+
+
+def test_return_width_bridge_high_bit_query_proves_signed_extension():
+    narrow_case = _constant_return_case(0, 0xFFFFFED4, size=4, return_type="int")
+    wide_case = _constant_return_case(0, 0xFFFFFFFFFFFFFED4, size=8, return_type="long")
+
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        narrow_case,
+        wide_case,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is not None
+    result = _solve_direct(query)
+    assert result.status == SolverStatus.UNSAT
+
+
+def test_return_width_bridge_high_bit_query_rejects_missing_wide_bits():
+    narrow_case = _constant_return_case(0, 0, size=4, return_type="unsigned int")
+    wide_case = _constant_return_case(0, 0, size=4, return_type="unsigned long")
+
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        narrow_case,
+        wide_case,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is None
 
 
 def test_phase3_return_width_bridge_lane2_manifest_and_post_fix_gate_ready(tmp_path):
@@ -1058,9 +1240,14 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_missing_requi
 @pytest.mark.parametrize(
     "mutation",
     [
+        "missing_proof_source",
+        "narrow_only_proof_source",
         "bogus_calling_convention_relation",
+        "missing_calling_convention_status",
         "bogus_extension_relation",
+        "missing_extension_status",
         "bogus_high_bit_proof_label",
+        "missing_high_bit_query_stage",
         "nested_high_bit_active_blocker",
     ],
 )
@@ -1079,13 +1266,24 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_bogus_proof_c
     pre_fix = json.loads(pre_fix_path.read_text())
     required_actions = pre_fix["entries"][0]["required_completion_actions"]
     completed_evidence = _completed_evidence(required_actions)
-    if mutation == "bogus_calling_convention_relation":
+    if mutation == "missing_proof_source":
+        for record in completed_evidence:
+            record["evidence"].pop("proof_source")
+    elif mutation == "narrow_only_proof_source":
+        for record in completed_evidence:
+            record["evidence"]["proof_source"] = "return_width_bridge_narrow_query_unsat"
+    elif mutation == "bogus_calling_convention_relation":
         for record in completed_evidence:
             evidence = record["evidence"]
             if evidence["proof_kind"] == "abi_relation_proof":
                 evidence["proof_content"]["calling_convention"]["relation"] = (
                     "definitely_not_an_abi_proof"
                 )
+    elif mutation == "missing_calling_convention_status":
+        for record in completed_evidence:
+            evidence = record["evidence"]
+            if evidence["proof_kind"] == "abi_relation_proof":
+                evidence["proof_content"]["calling_convention"].pop("status")
     elif mutation == "bogus_high_bit_proof_label":
         for record in completed_evidence:
             evidence = record["evidence"]
@@ -1093,6 +1291,11 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_bogus_proof_c
                 evidence["proof_content"]["high_bits_irrelevant_or_equal"]["proof"] = (
                     "bogus_proof_label"
                 )
+    elif mutation == "missing_high_bit_query_stage":
+        for record in completed_evidence:
+            evidence = record["evidence"]
+            if evidence["proof_kind"] == "high_bit_proof":
+                evidence["proof_content"]["high_bits_irrelevant_or_equal"].pop("query_stage")
     elif mutation == "bogus_extension_relation":
         for record in completed_evidence:
             evidence = record["evidence"]
@@ -1100,6 +1303,11 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_bogus_proof_c
                 evidence["proof_content"]["extension_semantics"]["relation"] = (
                     "definitely_not_an_extension_proof"
                 )
+    elif mutation == "missing_extension_status":
+        for record in completed_evidence:
+            evidence = record["evidence"]
+            if evidence["proof_kind"] == "high_bit_proof":
+                evidence["proof_content"]["extension_semantics"].pop("status")
     elif mutation == "nested_high_bit_active_blocker":
         for record in completed_evidence:
             evidence = record["evidence"]

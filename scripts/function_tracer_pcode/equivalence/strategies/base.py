@@ -78,6 +78,16 @@ class CheckStrategy(ABC):
         "deferred_call",
         "unsupported_call_effect",
     }
+    _RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS = {
+        ("abi_relation_proof", "abi_relation"): (
+            "calling_convention",
+            ("calling_convention", "return_storage", "narrow_return_width"),
+        ),
+        ("high_bit_proof", "high_bit_relation"): (
+            "producer_width",
+            ("producer_width", "extension_semantics", "high_bits_irrelevant_or_equal"),
+        ),
+    }
     
     def __init__(
         self,
@@ -1335,6 +1345,10 @@ class CheckStrategy(ABC):
             reason_record,
             analysis1,
             analysis2,
+        ) or self._return_width_bridge_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
         )
 
     def _call_effect_summary_proof_is_complete(
@@ -1386,6 +1400,111 @@ class CheckStrategy(ABC):
         if proof_obligation_id is None:
             return False
         return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
+
+    def _return_width_bridge_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        if reason_record.reason_id != UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
+            return False
+        if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.ABI_RELATION_HIGH_BIT_PROOF.value:
+            return False
+        completed = set(self._completed_recovery_proof_ids(analysis1, analysis2))
+        required_ids = tuple(
+            self._normalize_nested_tuple(action.proof_obligation_id)
+            for action in build_unknown_recovery_actions([reason_record])
+        )
+        if len(required_ids) != len(self._RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS):
+            return False
+        if any(proof_id is None for proof_id in required_ids):
+            return False
+        return all(proof_id in completed for proof_id in required_ids)
+
+    def _record_completed_return_width_bridge_proofs(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        query_stage: str,
+        narrow_width: int,
+    ) -> bool:
+        if not self.enable_completed_recovery_proofs:
+            self._debug_print("  return-width bridge proof record skipped: completed proofs disabled")
+            return False
+        if reason_record.reason_id != UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
+            self._debug_print(
+                "  return-width bridge proof record skipped: reason id mismatch "
+                f"({reason_record.reason_id})"
+            )
+            return False
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if not self._return_width_bridge_target_is_specific(object_target_key):
+            self._debug_print("  return-width bridge proof record skipped: weak object target")
+            return False
+        if self._return_width_bridge_target_narrow_width(object_target_key) != int(narrow_width):
+            self._debug_print(
+                "  return-width bridge proof record skipped: narrow width mismatch "
+                f"({self._return_width_bridge_target_narrow_width(object_target_key)} vs {narrow_width})"
+            )
+            return False
+        actions = tuple(build_unknown_recovery_actions([reason_record]))
+        if len(actions) != len(self._RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS):
+            self._debug_print(
+                "  return-width bridge proof record skipped: action count mismatch "
+                f"({len(actions)})"
+            )
+            return False
+
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis1, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        changed = False
+        for action in actions:
+            proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
+            if proof_id is None or proof_id in existing_ids:
+                continue
+            proof_content = self._return_width_bridge_completed_proof_content(
+                action.proof_kind,
+                object_target_key,
+                query_stage=query_stage,
+                narrow_width=int(narrow_width),
+            )
+            if proof_content is None:
+                self._debug_print(
+                    "  return-width bridge proof record skipped: proof content unavailable "
+                    f"({action.proof_kind})"
+                )
+                return False
+            records.append(
+                {
+                    "object_derived": True,
+                    "status": "complete",
+                    "reason_id": UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+                    "proof_kind": action.proof_kind,
+                    "recovery_proof_kind": action.proof_kind,
+                    "proof_stage": action.proof_stage,
+                    "evidence_kind": action.evidence_kind,
+                    "required_evidence": tuple(action.required_evidence),
+                    "object_target_key": object_target_key,
+                    "proof_obligation_id": proof_id,
+                    "proof_source": "return_width_bridge_narrow_and_high_bit_queries_unsat",
+                    "proof_content": proof_content,
+                }
+            )
+            existing_ids.add(proof_id)
+            changed = True
+        if changed:
+            analysis1.completed_recovery_proof_evidence = tuple(records)
+        return True
 
     def _record_completed_sat_counterexample_replay_proof(
         self,
@@ -1487,6 +1606,10 @@ class CheckStrategy(ABC):
                 proof_ids.append(proof_id)
         for evidence in evidence_records:
             proof_id = cls._sat_unsafety_resolution_proof_id_from_evidence(evidence)
+            if proof_id is not None:
+                proof_ids.append(proof_id)
+        for evidence in evidence_records:
+            proof_id = cls._return_width_bridge_proof_id_from_evidence(evidence)
             if proof_id is not None:
                 proof_ids.append(proof_id)
         return tuple(proof_ids)
@@ -1965,6 +2088,340 @@ class CheckStrategy(ABC):
         if not isinstance(counterexample_symbol_keys, tuple) or not counterexample_symbol_keys:
             return None
         return proof_id
+
+    @classmethod
+    def _return_width_bridge_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._evidence_bool(evidence, "object_derived"):
+            return None
+        if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
+            return None
+        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
+            return None
+        proof_kind = cls._evidence_text(evidence, "proof_kind") or cls._evidence_text(
+            evidence,
+            "recovery_proof_kind",
+        )
+        proof_stage = cls._evidence_text(evidence, "proof_stage")
+        requirement = cls._RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS.get((proof_kind, proof_stage))
+        if requirement is None:
+            return None
+        expected_evidence_kind, expected_required = requirement
+        evidence_kind = cls._evidence_text(evidence, "evidence_kind")
+        if evidence_kind != expected_evidence_kind:
+            return None
+        required_evidence = tuple(
+            str(item)
+            for item in (cls._evidence_get(evidence, "required_evidence") or ())
+        )
+        if required_evidence != tuple(expected_required):
+            return None
+        if cls._evidence_text(evidence, "proof_source") != "return_width_bridge_narrow_and_high_bit_queries_unsat":
+            return None
+        if cls._evidence_has_any(evidence, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return None
+        object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        if not cls._return_width_bridge_target_is_specific(object_target_key):
+            return None
+        proof_id = build_proof_obligation_id(
+            UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+            proof_stage,
+            proof_kind,
+            evidence_kind,
+            object_target_key,
+        )
+        provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
+        if provided_id is None or provided_id != proof_id:
+            return None
+        proof_content = cls._evidence_get(evidence, "proof_content")
+        if not isinstance(proof_content, Mapping):
+            return None
+        if cls._evidence_has_any_recursive(proof_content, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return None
+        if proof_kind == "abi_relation_proof":
+            if not cls._return_width_bridge_abi_relation_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            ):
+                return None
+        elif proof_kind == "high_bit_proof":
+            if not cls._return_width_bridge_high_bit_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            ):
+                return None
+        else:
+            return None
+        return proof_id
+
+    @classmethod
+    def _return_width_bridge_completed_proof_content(
+        cls,
+        proof_kind: str,
+        object_target_key: Tuple[Any, ...],
+        *,
+        query_stage: str,
+        narrow_width: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not cls._return_width_bridge_target_is_specific(object_target_key):
+            return None
+        widths = cls._return_width_bridge_target_widths(object_target_key)
+        left = cls._return_width_bridge_find_side(object_target_key, "left")
+        right = cls._return_width_bridge_find_side(object_target_key, "right")
+        if widths is None or left is None or right is None:
+            return None
+        wide_width = max(widths)
+        if proof_kind == "abi_relation_proof":
+            return {
+                "object_derived": True,
+                "status": "proven",
+                "object_target_key": object_target_key,
+                "calling_convention": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "left_function_ref": cls._return_width_bridge_find_tagged_entry(left, "function_ref"),
+                    "right_function_ref": cls._return_width_bridge_find_tagged_entry(right, "function_ref"),
+                    "relation": "same_return_abi_family",
+                },
+                "return_storage": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "left_return_storage": cls._return_width_bridge_find_tagged_entry(left, "return_storage"),
+                    "right_return_storage": cls._return_width_bridge_find_tagged_entry(right, "return_storage"),
+                    "relation": "abi_related_return_storage",
+                },
+                "narrow_return_width": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "narrow_width": int(narrow_width),
+                    "proven": True,
+                },
+            }
+        if proof_kind == "high_bit_proof":
+            return {
+                "object_derived": True,
+                "status": "proven",
+                "object_target_key": object_target_key,
+                "producer_width": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "left_width": widths[0],
+                    "right_width": widths[1],
+                },
+                "extension_semantics": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "left_extension": "narrow_return",
+                    "right_extension": "abi_return_extension",
+                    "relation": "compatible_under_narrow_width",
+                },
+                "high_bits_irrelevant_or_equal": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "narrow_width": int(narrow_width),
+                    "wide_width": wide_width,
+                    "proof": "high_bits_do_not_affect_compared_return",
+                    "proven": True,
+                    "query_stage": str(query_stage),
+                },
+            }
+        return None
+
+    @classmethod
+    def _return_width_bridge_abi_relation_proof_content_is_complete(
+        cls,
+        content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not cls._return_width_bridge_common_proof_content_is_complete(content, object_target_key):
+            return False
+        left = cls._return_width_bridge_find_side(object_target_key, "left")
+        right = cls._return_width_bridge_find_side(object_target_key, "right")
+        if left is None or right is None:
+            return False
+        calling_convention = content.get("calling_convention")
+        return_storage = content.get("return_storage")
+        narrow_return_width = content.get("narrow_return_width")
+        if not (
+            isinstance(calling_convention, Mapping)
+            and calling_convention.get("object_derived") is True
+            and calling_convention.get("status") == "proven"
+            and cls._normalize_nested_tuple(calling_convention.get("left_function_ref"))
+            == cls._return_width_bridge_find_tagged_entry(left, "function_ref")
+            and cls._normalize_nested_tuple(calling_convention.get("right_function_ref"))
+            == cls._return_width_bridge_find_tagged_entry(right, "function_ref")
+            and calling_convention.get("relation") == "same_return_abi_family"
+        ):
+            return False
+        if not (
+            isinstance(return_storage, Mapping)
+            and return_storage.get("object_derived") is True
+            and return_storage.get("status") == "proven"
+            and cls._normalize_nested_tuple(return_storage.get("left_return_storage"))
+            == cls._return_width_bridge_find_tagged_entry(left, "return_storage")
+            and cls._normalize_nested_tuple(return_storage.get("right_return_storage"))
+            == cls._return_width_bridge_find_tagged_entry(right, "return_storage")
+            and return_storage.get("relation") == "abi_related_return_storage"
+        ):
+            return False
+        narrow_width = cls._return_width_bridge_target_narrow_width(object_target_key)
+        return (
+            isinstance(narrow_return_width, Mapping)
+            and narrow_return_width.get("object_derived") is True
+            and narrow_return_width.get("status") == "proven"
+            and narrow_return_width.get("proven") is True
+            and narrow_return_width.get("narrow_width") == narrow_width
+        )
+
+    @classmethod
+    def _return_width_bridge_high_bit_proof_content_is_complete(
+        cls,
+        content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not cls._return_width_bridge_common_proof_content_is_complete(content, object_target_key):
+            return False
+        widths = cls._return_width_bridge_target_widths(object_target_key)
+        if widths is None:
+            return False
+        narrow_width = min(widths)
+        wide_width = max(widths)
+        producer_width = content.get("producer_width")
+        extension_semantics = content.get("extension_semantics")
+        high_bits = content.get("high_bits_irrelevant_or_equal")
+        if not (
+            isinstance(producer_width, Mapping)
+            and producer_width.get("object_derived") is True
+            and producer_width.get("status") == "proven"
+            and producer_width.get("left_width") == widths[0]
+            and producer_width.get("right_width") == widths[1]
+        ):
+            return False
+        if not (
+            isinstance(extension_semantics, Mapping)
+            and extension_semantics.get("object_derived") is True
+            and extension_semantics.get("status") == "proven"
+            and extension_semantics.get("left_extension")
+            and extension_semantics.get("right_extension")
+            and extension_semantics.get("relation") == "compatible_under_narrow_width"
+        ):
+            return False
+        return (
+            isinstance(high_bits, Mapping)
+            and high_bits.get("object_derived") is True
+            and high_bits.get("status") == "proven"
+            and high_bits.get("proven") is True
+            and high_bits.get("narrow_width") == narrow_width
+            and high_bits.get("wide_width") == wide_width
+            and high_bits.get("proof") == "high_bits_do_not_affect_compared_return"
+            and high_bits.get("query_stage") == "return-width-bridge-high-bit-extension"
+        )
+
+    @classmethod
+    def _return_width_bridge_common_proof_content_is_complete(
+        cls,
+        content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        return (
+            isinstance(content, Mapping)
+            and content.get("object_derived") is True
+            and content.get("status") == "proven"
+            and cls._normalize_nested_tuple(content.get("object_target_key")) == object_target_key
+            and not cls._evidence_has_any_recursive(content, cls._COMPLETED_PROOF_BLOCKER_FIELDS)
+        )
+
+    @classmethod
+    def _return_width_bridge_target_is_specific(cls, object_target_key: Any) -> bool:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5 or target[0] != "return_width_bridge":
+            return False
+        widths = cls._return_width_bridge_target_widths(target)
+        if widths is None or widths[0] == widths[1]:
+            return False
+        pair = cls._return_width_bridge_find_tagged_entry(target, "pair")
+        if not isinstance(pair, tuple) or len(pair) != 2 or not isinstance(pair[1], str) or not pair[1]:
+            return False
+        left = cls._return_width_bridge_find_side(target, "left")
+        right = cls._return_width_bridge_find_side(target, "right")
+        if left is None or right is None:
+            return False
+        return (
+            cls._return_width_bridge_side_is_specific(left, widths[0])
+            and cls._return_width_bridge_side_is_specific(right, widths[1])
+        )
+
+    @classmethod
+    def _return_width_bridge_side_is_specific(cls, side: Tuple[Any, ...], expected_width: int) -> bool:
+        if len(side) < 6 or side[0] != "return_width_side":
+            return False
+        function_ref = cls._return_width_bridge_find_tagged_entry(side, "function_ref")
+        return_size = cls._return_width_bridge_find_tagged_entry(side, "return_size")
+        return_storage = cls._return_width_bridge_find_tagged_entry(side, "return_storage")
+        partition_member = cls._return_width_bridge_find_tagged_entry(
+            side,
+            "return_case_partition_member",
+        )
+        if not isinstance(function_ref, tuple) or not function_ref:
+            return False
+        if not isinstance(return_size, tuple) or len(return_size) != 2 or return_size[1] != expected_width:
+            return False
+        if not isinstance(return_storage, tuple) or len(return_storage) < 3:
+            return False
+        if not isinstance(partition_member, tuple) or len(partition_member) < 6:
+            return False
+        value_entry = cls._return_width_bridge_find_tagged_entry(partition_member, "value")
+        return isinstance(value_entry, tuple) and bool(value_entry)
+
+    @classmethod
+    def _return_width_bridge_target_widths(cls, object_target_key: Any) -> Optional[Tuple[int, int]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        widths = cls._return_width_bridge_find_tagged_entry(target, "return_widths")
+        if not isinstance(widths, tuple) or len(widths) != 3:
+            return None
+        try:
+            left_width = int(widths[1])
+            right_width = int(widths[2])
+        except (TypeError, ValueError):
+            return None
+        if left_width <= 0 or right_width <= 0:
+            return None
+        return left_width, right_width
+
+    @classmethod
+    def _return_width_bridge_target_narrow_width(cls, object_target_key: Any) -> Optional[int]:
+        widths = cls._return_width_bridge_target_widths(object_target_key)
+        if widths is None:
+            return None
+        return min(widths)
+
+    @classmethod
+    def _return_width_bridge_find_side(
+        cls,
+        object_target_key: Any,
+        side_label: str,
+    ) -> Optional[Tuple[Any, ...]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple):
+            return None
+        for item in target:
+            if (
+                isinstance(item, tuple)
+                and len(item) >= 2
+                and item[0] == "return_width_side"
+                and item[1] == side_label
+            ):
+                return item
+        return None
+
+    @classmethod
+    def _return_width_bridge_find_tagged_entry(cls, value: Any, tag: str) -> Any:
+        normalized = cls._normalize_nested_tuple(value)
+        if not isinstance(normalized, tuple):
+            return None
+        for item in normalized:
+            if isinstance(item, tuple) and item and item[0] == tag:
+                return item
+        return None
 
     @classmethod
     def _completed_proof_section_is_clean(cls, section: Any) -> bool:

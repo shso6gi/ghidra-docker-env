@@ -218,9 +218,6 @@ def solve_query_twostage(
         )
     except ReturnWidthMismatchError as exc:
         strategy._debug_print(f"  Pair {pair_id} with-ineq skipped: {exc}")
-        if getattr(strategy, "_active_normalization_stats", None) is not None:
-            strategy._active_normalization_stats["unknown_results"] += 1
-        _record_return_width_block(strategy, exc)
         result = QueryResult(is_equivalent=None)
         result.last_query = cond_query
         result.pair_stage = "return-width-mismatch"
@@ -243,6 +240,23 @@ def solve_query_twostage(
                 pair_id,
                 exc,
             )
+        bridge_solver = getattr(strategy, "_solve_return_width_bridge_with_completed_proof", None)
+        if callable(bridge_solver):
+            bridged_result = bridge_solver(
+                base_ctx,
+                case1,
+                case2,
+                param_replace_fn1,
+                param_replace_fn2,
+                pair_id,
+                object_target_key=result.object_target_key,
+                blocking_detail=result.blocking_detail,
+            )
+            if bridged_result is not None:
+                return bridged_result
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["unknown_results"] += 1
+        _record_return_width_block(strategy, exc)
         return result
 
     full_query = strategy._build_pair_query(

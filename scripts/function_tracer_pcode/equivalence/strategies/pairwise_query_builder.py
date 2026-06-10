@@ -3,7 +3,7 @@
 
 import os
 from functools import cmp_to_key
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
 from ...analysis.condition.simplifier import ConditionSimplifier
@@ -496,6 +496,133 @@ def build_pair_query(
     lines.append("")
     lines.append("(check-sat)")
     lines.append("(get-model)")
+    return "\n".join(lines)
+
+
+def build_return_width_bridge_narrow_query(
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+    *,
+    target_bits: int,
+) -> str:
+    """Build a value-inequality query at the proven narrow return width."""
+
+    target_bits = max(1, int(target_bits))
+    lines = _build_query_header(
+        f"; Return Width Bridge Narrow Query: Pair {pair_id}",
+        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
+        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+    )
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
+    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
+    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
+    lines.extend(
+        _build_value_inequality_section(
+            case1.get_value_smt(
+                param_replace_fn1,
+                target_bits=target_bits,
+                use_sign_extension=case1.should_sign_extend_value(),
+            ),
+            case2.get_value_smt(
+                param_replace_fn2,
+                target_bits=target_bits,
+                use_sign_extension=case2.should_sign_extend_value(),
+            ),
+            target_bits,
+            target_bits,
+            title="; Return width bridge narrow value inequality",
+            note_lines=[
+                "; Completed ABI/high-bit proof is required before this query can discharge a width mismatch",
+                f"; Narrow comparison width: {target_bits}",
+            ],
+        )
+    )
+    lines.append("")
+    lines.append("(check-sat)")
+    lines.append("(get-model)")
+    return "\n".join(lines)
+
+
+def build_return_width_bridge_high_bit_query(
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+    *,
+    narrow_bits: int,
+    return_size1: int,
+    return_size2: int,
+) -> Optional[str]:
+    """Build a query proving the wide return is the expected extension of its low bits."""
+
+    narrow_bits = int(narrow_bits)
+    return_size1 = int(return_size1)
+    return_size2 = int(return_size2)
+    if narrow_bits <= 0 or return_size1 <= 0 or return_size2 <= 0:
+        return None
+    if return_size1 == return_size2:
+        return None
+    if return_size1 > return_size2:
+        wide_case = case1
+        wide_replace_fn = param_replace_fn1
+        wide_label = "Case1"
+        wide_bits = return_size1
+        narrow_case = case2
+    else:
+        wide_case = case2
+        wide_replace_fn = param_replace_fn2
+        wide_label = "Case2"
+        wide_bits = return_size2
+        narrow_case = case1
+    if wide_bits <= narrow_bits:
+        return None
+
+    wide_expr_bits = int(getattr(wide_case.value_expr, "get_bit_width", lambda: 0)() or 0)
+    if wide_expr_bits < wide_bits:
+        return None
+
+    wide_value_smt = wide_case.get_value_smt(
+        wide_replace_fn,
+        target_bits=wide_bits,
+        use_sign_extension=wide_case.should_sign_extend_value(),
+    )
+    low_bits = f"((_ extract {narrow_bits - 1} 0) {wide_value_smt})"
+    extend_bits = wide_bits - narrow_bits
+    extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
+    expected_wide_smt = f"((_ {extension_op} {extend_bits}) {low_bits})"
+
+    lines = _build_query_header(
+        f"; Return Width Bridge High-Bit Query: Pair {pair_id}",
+        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
+        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+    )
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
+    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
+    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
+    lines.extend(
+        [
+            "; " + "-" * 40,
+            "; Return width bridge high-bit extension proof",
+            "; Completed high-bit proof requires this query to be UNSAT",
+            f"; Wide side: {wide_label}, wide width: {wide_bits}, narrow width: {narrow_bits}",
+            f"; Expected extension: {extension_op}",
+            "; " + "-" * 40,
+            f"(assert (not (= {wide_value_smt} {expected_wide_smt})))",
+            "",
+            "(check-sat)",
+            "(get-model)",
+        ]
+    )
     return "\n".join(lines)
 
 
