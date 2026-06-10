@@ -906,6 +906,7 @@ class UnknownReasonRecord:
     proof_stage: Optional[str] = None
     evidence_kind: Optional[str] = None
     object_target_key: Optional[Tuple[Any, ...]] = None
+    object_evidence: Optional[Any] = None
     proof_obligation_id: Optional[Tuple[Any, ...]] = None
     recovery_action: Optional[str] = None
     action_status: Optional[str] = None
@@ -913,7 +914,7 @@ class UnknownReasonRecord:
     detail: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "count_kind": self.count_kind,
             "reason_id": self.reason_id,
             "reason_class": self.reason_class,
@@ -936,6 +937,9 @@ class UnknownReasonRecord:
             "target_regression": self.target_regression,
             "detail": self.detail,
         }
+        if self.object_evidence is not None:
+            payload["object_evidence"] = self.object_evidence
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownReasonRecord":
@@ -954,6 +958,7 @@ class UnknownReasonRecord:
             proof_stage=payload.get("proof_stage"),
             evidence_kind=payload.get("evidence_kind"),
             object_target_key=payload.get("object_target_key"),
+            object_evidence=payload.get("object_evidence"),
             proof_obligation_id=payload.get("proof_obligation_id"),
             recovery_action=payload.get("recovery_action"),
             action_status=payload.get("action_status"),
@@ -978,6 +983,7 @@ def make_unknown_reason(
     proof_stage: Optional[str] = None,
     evidence_kind: Optional[str] = None,
     object_target_key: Any = None,
+    object_evidence: Any = None,
     proof_obligation_id: Any = None,
     recovery_action: Optional[str] = None,
     action_status: Any = None,
@@ -1050,6 +1056,7 @@ def make_unknown_reason(
         proof_stage=resolved_proof_stage,
         evidence_kind=resolved_evidence_kind,
         object_target_key=coerced_object_target_key,
+        object_evidence=object_evidence,
         proof_obligation_id=coerced_proof_obligation_id,
         recovery_action=recovery_action,
         action_status=normalized_action_status,

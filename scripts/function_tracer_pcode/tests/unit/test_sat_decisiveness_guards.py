@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
+    UnknownReasonRecord,
     UnknownReasonId,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
@@ -2166,7 +2167,7 @@ def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch
     assert evidence[0]["proof_content"]["proof_rule"] == "self_recursive_no_store_effect_summary"
 
 
-def test_pairwise_preproducer_complete_call_argument_evidence_remains_equivalent(monkeypatch):
+def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -2189,11 +2190,30 @@ def test_pairwise_preproducer_complete_call_argument_evidence_remains_equivalent
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.detail == "function1:effect_call_argument_evidence"
+    assert reason.object_target_key[0] == "call_argument_evidence"
+    assert reason.object_evidence is not None
+    assert reason.object_evidence["object_derived"] is True
+    assert reason.object_evidence["runtime_ref"] == (
+        "runtime_ref",
+        "call_argument",
+        ("pcode_op_ref", reason.object_target_key[3]),
+        ("callee_identity", reason.object_target_key[4]),
+    )
+    assert reason.object_evidence["argument_storage"] == reason.object_target_key[5]
+    assert reason.object_evidence["callsite_storage"] == (
+        "callsite_storage",
+        "call_argument",
+        ("argument_keys", reason.object_target_key[5]),
+    )
 
 
-def test_pairwise_complete_call_argument_evidence_remains_equivalent_by_default(monkeypatch):
+def test_pairwise_complete_call_argument_evidence_auto_proof_recovers_by_default(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -2213,15 +2233,39 @@ def test_pairwise_complete_call_argument_evidence_remains_equivalent_by_default(
 
     assert result.is_equivalent is True
     assert result.unknown_reasons == []
+    evidence = [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("proof_source") == "call_argument_evidence_complete"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["proof_content"]["proof_rule"] == "call_argument_evidence_complete"
+    assert evidence[0]["proof_content"]["runtime_ref"]["runtime_ref"][1] == "call_argument"
+    assert evidence[0]["proof_content"]["callsite_storage"]["callsite_storage"][1] == "call_argument"
 
 
-def test_pairwise_complete_call_argument_evidence_ignores_metadata_only_completed_proof(monkeypatch):
+def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_argument_evidence()
+    complete_evidence = next(iter(analysis1.effect_summary.call_argument_evidence.values()))
+    incomplete_evidence = CallArgumentEvidence(
+        pcode_op_ref=complete_evidence.pcode_op_ref,
+        target_ref=complete_evidence.target_ref,
+        callee_param_identities=complete_evidence.callee_param_identities,
+        arguments=(),
+        sources=(),
+        path_conditions=complete_evidence.path_conditions,
+        coverage_complete=False,
+        recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+        reason="argument_recovery_inconclusive",
+    )
+    analysis1.effect_summary.call_argument_evidence = {
+        complete_evidence.pcode_op_ref.stable_key(): incomplete_evidence,
+    }
     analysis2 = FunctionReturnAnalysis(
         function_name="func2",
         entry_point="0x2000",
@@ -2229,21 +2273,28 @@ def test_pairwise_complete_call_argument_evidence_ignores_metadata_only_complete
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    reason = strategy._make_blocking_unsafety_unknown_reason(
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
+    assert not [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("recovery_proof_kind") == UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
+    ]
+
+
+def test_call_argument_evidence_ignores_metadata_only_completed_proof():
+    object_target_key = _blocking_unsafety_object_target_key(
         "function1:effect_call_argument_evidence",
-        analysis1,
-        analysis2,
-        stage="S_PAIRWISE",
+        _analysis_with_effect_call_argument_evidence(),
     )
-    analysis1.completed_recovery_proof_evidence = (
-        _call_effect_summary_proof_evidence(object_target_key=reason.object_target_key),
-    )
-    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+    evidence = _call_effect_summary_proof_evidence(object_target_key=object_target_key)
 
-    result = strategy.check(analysis1, analysis2)
-
-    assert result.is_equivalent is True
-    assert result.unknown_reasons == []
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 
 
 def test_call_argument_proof_rejects_unrelated_proof_content_sections():
@@ -2360,6 +2411,25 @@ def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monk
         reason.evidence_kind,
         reason.object_target_key,
     )
+    assert reason.object_evidence == {
+        "object_derived": True,
+        "evidence_version": 1,
+        "evidence_kind": "call_effect_summary",
+        "blocker_reason": "function1:effect_call_target_resolution_evidence",
+        "blocker_reason_kind": "effect_call_target_resolution_evidence",
+        "object_target_kind": "call_target_resolution_evidence",
+        "left_function": "func1",
+        "right_function": "func2",
+        "side": "function1",
+        "analysis_key": reason.object_target_key[2],
+        "runtime_ref": reason.object_target_key[3],
+        "callsite_storage": reason.object_target_key[4],
+        "resolution_kind": reason.object_target_key[5],
+        "path_conditions": reason.object_target_key[6],
+        "target_conditions": reason.object_target_key[7],
+        "effect_ordinal": reason.object_target_key[8],
+        "call_effect_summary_status": "target_resolution_pending_proof",
+    }
 
 
 def test_pairwise_call_target_resolution_requires_matching_completed_proof_by_default(monkeypatch):
@@ -3357,6 +3427,24 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
         "call_effect_summary",
         reason.object_target_key,
     )
+    assert reason.object_evidence == {
+        "object_derived": True,
+        "evidence_version": 1,
+        "evidence_kind": "call_effect_summary",
+        "blocker_reason": "function1:unsupported_call_effect_summary",
+        "blocker_reason_kind": "unsupported_call_effect_summary",
+        "object_target_kind": "unsupported_call_effect",
+        "left_function": "func1",
+        "right_function": "func2",
+        "side": "function1",
+        "analysis_key": ("function_ref", ("function", "B10", 0x401000)),
+        "runtime_ref": reason.object_target_key[3],
+        "callsite_storage": reason.object_target_key[4],
+        "effect_ordinal": ("effect_ordinal", 9),
+        "unsupported_reason": "target_identity_unavailable",
+        "call_effect_summary_status": "target_identity_unavailable",
+    }
+    assert UnknownReasonRecord.from_dict(reason.to_dict()).object_evidence == reason.object_evidence
 
 
 def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():

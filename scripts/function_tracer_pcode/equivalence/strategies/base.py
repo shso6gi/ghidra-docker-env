@@ -147,6 +147,14 @@ class CheckStrategy(ABC):
                 reasons.append(f"{label}:{reason}")
             effect_summary = getattr(analysis, "effect_summary", None)
             if effect_summary is not None:
+                call_argument_evidence = tuple(
+                    evidence
+                    for evidence in getattr(effect_summary, "call_argument_evidence", {}).values()
+                    if evidence is not None
+                )
+                for index, _evidence in enumerate(call_argument_evidence):
+                    suffix = f":{index}" if len(call_argument_evidence) > 1 else ""
+                    reasons.append(f"{label}:effect_call_argument_evidence{suffix}")
                 call_target_resolution_evidence = tuple(
                     evidence
                     for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ()
@@ -285,9 +293,15 @@ class CheckStrategy(ABC):
         )
         if analysis is None:
             return
-        proof_content = self._self_recursive_no_store_call_effect_proof_content(
-            object_target_key,
-            analysis,
+        proof_content = (
+            self._self_recursive_no_store_call_effect_proof_content(
+                object_target_key,
+                analysis,
+            )
+            or self._call_argument_evidence_call_effect_proof_content(
+                object_target_key,
+                analysis,
+            )
         )
         if proof_content is None:
             return
@@ -304,6 +318,14 @@ class CheckStrategy(ABC):
         if proof_obligation_id in existing_ids:
             return
 
+        proof_rule = str(proof_content.get("proof_rule") or "")
+        proof_source = (
+            "self_recursive_no_store_call_effect_summary"
+            if proof_rule == "self_recursive_no_store_effect_summary"
+            else "call_argument_evidence_complete"
+            if proof_rule == "call_argument_evidence_complete"
+            else "call_effect_summary_proof"
+        )
         records.append(
             {
                 "object_derived": True,
@@ -314,7 +336,7 @@ class CheckStrategy(ABC):
                 "evidence_kind": "call_effect_summary",
                 "object_target_key": object_target_key,
                 "proof_obligation_id": proof_obligation_id,
-                "proof_source": "self_recursive_no_store_call_effect_summary",
+                "proof_source": proof_source,
                 "proof_content": proof_content,
             }
         )
@@ -326,7 +348,14 @@ class CheckStrategy(ABC):
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
     ) -> Optional[FunctionReturnAnalysis]:
-        if len(object_target_key) < 2 or object_target_key[0] != "unsupported_call_effect":
+        if len(object_target_key) < 2:
+            return None
+        if object_target_key[0] not in {
+            "unsupported_call_effect",
+            "call_argument_evidence",
+            "call_target_resolution_evidence",
+            "deferred_call",
+        }:
             return None
         side_label = object_target_key[1]
         if side_label == "function1":
@@ -334,6 +363,67 @@ class CheckStrategy(ABC):
         if side_label == "function2":
             return analysis2
         return None
+
+    def _call_argument_evidence_call_effect_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        if len(object_target_key) < 8 or object_target_key[0] != "call_argument_evidence":
+            return None
+        side_label = object_target_key[1]
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            return None
+        matching_evidence = None
+        for evidence in getattr(effect_summary, "call_argument_evidence", {}).values():
+            if evidence is None or not getattr(evidence, "is_usable", lambda: False)():
+                continue
+            evidence_key = self._normalize_nested_tuple(
+                self._call_argument_evidence_object_key(
+                    evidence,
+                    analysis=analysis,
+                    side_label=side_label,
+                )
+            )
+            if evidence_key == object_target_key:
+                matching_evidence = evidence
+                break
+        if matching_evidence is None:
+            return None
+        argument_keys = object_target_key[5]
+        return {
+            "object_derived": True,
+            "status": "complete",
+            "proof_rule": "call_argument_evidence_complete",
+            "object_target_key": object_target_key,
+            "call_effect_summary": {
+                "status": "complete",
+                "summary_source": ("effect_summary", "call_argument_evidence"),
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "coverage_complete": True,
+                "recovery_status": "complete",
+                "argument_count": len(argument_keys),
+            },
+            "runtime_ref": {
+                "status": "complete",
+                "runtime_ref": (
+                    "runtime_ref",
+                    "call_argument",
+                    ("pcode_op_ref", object_target_key[3]),
+                    ("callee_identity", object_target_key[4]),
+                ),
+            },
+            "callsite_storage": {
+                "status": "complete",
+                "callsite_storage": (
+                    "callsite_storage",
+                    "call_argument",
+                    ("argument_keys", argument_keys),
+                ),
+            },
+        }
 
     def _self_recursive_no_store_call_effect_proof_content(
         self,
@@ -456,6 +546,94 @@ class CheckStrategy(ABC):
             return UnknownReasonId.RECOVERABLE_PARTIAL
         return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
 
+    def _call_effect_blocking_object_evidence(
+        self,
+        blocking_reason: str,
+        object_target_key: Optional[Tuple[Any, ...]],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(object_target_key, tuple) or not object_target_key:
+            return None
+        target_kind = object_target_key[0]
+        evidence: Dict[str, Any] = {
+            "object_derived": True,
+            "evidence_version": 1,
+            "evidence_kind": "call_effect_summary",
+            "blocker_reason": blocking_reason,
+            "blocker_reason_kind": self._blocking_reason_kind(blocking_reason),
+            "object_target_kind": target_kind,
+            "left_function": getattr(analysis1, "function_name", None),
+            "right_function": getattr(analysis2, "function_name", None),
+        }
+        if target_kind == "unsupported_call_effect" and len(object_target_key) >= 7:
+            evidence.update(
+                {
+                    "side": object_target_key[1],
+                    "analysis_key": object_target_key[2],
+                    "runtime_ref": object_target_key[3],
+                    "callsite_storage": object_target_key[4],
+                    "effect_ordinal": object_target_key[5],
+                    "unsupported_reason": object_target_key[6],
+                    "call_effect_summary_status": object_target_key[6],
+                }
+            )
+        elif target_kind == "call_target_resolution_evidence" and len(object_target_key) >= 9:
+            evidence.update(
+                {
+                    "side": object_target_key[1],
+                    "analysis_key": object_target_key[2],
+                    "runtime_ref": object_target_key[3],
+                    "callsite_storage": object_target_key[4],
+                    "resolution_kind": object_target_key[5],
+                    "path_conditions": object_target_key[6],
+                    "target_conditions": object_target_key[7],
+                    "effect_ordinal": object_target_key[8],
+                    "call_effect_summary_status": "target_resolution_pending_proof",
+                }
+            )
+        elif target_kind == "call_argument_evidence" and len(object_target_key) >= 8:
+            runtime_ref = (
+                "runtime_ref",
+                "call_argument",
+                ("pcode_op_ref", object_target_key[3]),
+                ("callee_identity", object_target_key[4]),
+            )
+            callsite_storage = (
+                "callsite_storage",
+                "call_argument",
+                ("argument_keys", object_target_key[5]),
+            )
+            evidence.update(
+                {
+                    "side": object_target_key[1],
+                    "analysis_key": object_target_key[2],
+                    "runtime_ref": runtime_ref,
+                    "callee_identity": object_target_key[4],
+                    "argument_storage": object_target_key[5],
+                    "coverage_complete": object_target_key[6],
+                    "recovery_status": object_target_key[7],
+                    "callsite_storage": callsite_storage,
+                    "call_effect_summary_status": object_target_key[7],
+                }
+            )
+        elif target_kind == "deferred_call" and len(object_target_key) >= 9:
+            evidence.update(
+                {
+                    "side": object_target_key[1],
+                    "analysis_key": object_target_key[2],
+                    "deferred_call_site": object_target_key[3],
+                    "pcode_op_ref": object_target_key[4],
+                    "callee_identity": object_target_key[5],
+                    "target_expression": object_target_key[6],
+                    "argument_storage": object_target_key[7],
+                    "call_effect_summary_status": object_target_key[8],
+                }
+            )
+        else:
+            return None
+        return evidence
+
     def _make_blocking_unsafety_unknown_reason(
         self,
         blocking_reason: str,
@@ -518,6 +696,12 @@ class CheckStrategy(ABC):
             proof_stage="object_evidence_collected",
             evidence_kind="call_effect_summary",
             object_target_key=object_target_key,
+            object_evidence=self._call_effect_blocking_object_evidence(
+                blocking_reason,
+                object_target_key,
+                analysis1,
+                analysis2,
+            ),
             recovery_action="call_effect_summary_proof_required",
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )

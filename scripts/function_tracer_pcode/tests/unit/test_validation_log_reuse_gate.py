@@ -144,9 +144,32 @@ def _phase2_reason(object_target_key, *, evidence_kind="call_effect_summary"):
         proof_stage="object_evidence_collected",
         evidence_kind=evidence_kind,
         object_target_key=object_target_key,
+        object_evidence=_object_evidence_for_target(object_target_key),
         recovery_action="call_effect_summary_proof_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
     )
+
+
+def _object_evidence_for_target(object_target_key):
+    if not isinstance(object_target_key, tuple) or object_target_key[0] != "unsupported_call_effect":
+        return None
+    return {
+        "object_derived": True,
+        "evidence_version": 1,
+        "evidence_kind": "call_effect_summary",
+        "blocker_reason": "function1:unsupported_call_effect_summary",
+        "blocker_reason_kind": "unsupported_call_effect_summary",
+        "object_target_kind": "unsupported_call_effect",
+        "left_function": "fc_apply_indirect",
+        "right_function": "fc_apply_indirect",
+        "side": object_target_key[1],
+        "analysis_key": object_target_key[2],
+        "runtime_ref": object_target_key[3],
+        "callsite_storage": object_target_key[4],
+        "effect_ordinal": object_target_key[5],
+        "unsupported_reason": object_target_key[6],
+        "call_effect_summary_status": object_target_key[6],
+    }
 
 
 def test_log_reuse_gate_accepts_complete_log_without_phase2_key_requirement(tmp_path):
@@ -170,6 +193,17 @@ def test_log_reuse_gate_rejects_legacy_phase2_object_key(tmp_path):
     failures = validation_log_reuse_failures(path, require_phase2_object_keys=True)
 
     assert "phase2_object_target_key_missing_or_not_specific" in failures
+
+
+def test_log_reuse_gate_rejects_missing_phase2_object_evidence(tmp_path):
+    path = tmp_path / "pair.log"
+    payload = _payload(_phase2_reason(_full_object_target_key()))
+    payload["unknown_reasons"][0].pop("object_evidence", None)
+    _write_log(path, payload)
+
+    failures = validation_log_reuse_failures(path, require_phase2_object_keys=True)
+
+    assert "phase2_object_evidence_missing_or_inconsistent" in failures
 
 
 def test_log_reuse_gate_rejects_missing_phase2_evidence_kind(tmp_path):

@@ -17,6 +17,7 @@ from .phase2_equivalence_blocking_unsafety import (
     EXPECTED_RECOVERY_ACTION,
     EXPECTED_PROOF_STAGE,
     TARGET_REASON_ID,
+    _object_evidence_failures,
     _object_target_key_is_specific,
     _phase2_required_evidence_obligation_present,
 )
@@ -138,6 +139,8 @@ def _phase2_reason_failures(reason: Any) -> Iterable[str]:
         yield "phase2_recovery_proof_obligation_required_evidence_mismatch"
     if not _object_target_key_is_specific(reason.object_target_key):
         yield "phase2_object_target_key_missing_or_not_specific"
+    if _object_evidence_failures(reason.object_evidence, reason.object_target_key):
+        yield "phase2_object_evidence_missing_or_inconsistent"
 
     expected_proof_obligation_id = None
     if reason.object_target_key is not None and reason.evidence_kind is not None:

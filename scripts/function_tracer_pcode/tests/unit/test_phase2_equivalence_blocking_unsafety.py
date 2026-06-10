@@ -258,10 +258,90 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
         proof_stage="object_evidence_collected",
         evidence_kind="call_effect_summary",
         object_target_key=target,
+        object_evidence=_object_evidence_for_target(target),
         proof_obligation_id=proof_obligation_id,
         recovery_action="call_effect_summary_proof_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
     )
+
+
+def _object_evidence_for_target(target):
+    if not isinstance(target, tuple) or not target:
+        return None
+    target_kind = target[0]
+    evidence = {
+        "object_derived": True,
+        "evidence_version": 1,
+        "evidence_kind": "call_effect_summary",
+        "blocker_reason": "function1:unsupported_call_effect_summary",
+        "blocker_reason_kind": "unsupported_call_effect_summary",
+        "object_target_kind": target_kind,
+        "left_function": "func1",
+        "right_function": "func2",
+        "side": target[1] if len(target) > 1 else None,
+        "analysis_key": target[2] if len(target) > 2 else None,
+    }
+    if target_kind == "unsupported_call_effect" and len(target) >= 7:
+        evidence.update(
+            {
+                "runtime_ref": target[3],
+                "callsite_storage": target[4],
+                "effect_ordinal": target[5],
+                "unsupported_reason": target[6],
+                "call_effect_summary_status": target[6],
+            }
+        )
+        return evidence
+    if target_kind == "call_argument_evidence" and len(target) >= 8:
+        runtime_ref = (
+            "runtime_ref",
+            "call_argument",
+            ("pcode_op_ref", target[3]),
+            ("callee_identity", target[4]),
+        )
+        callsite_storage = (
+            "callsite_storage",
+            "call_argument",
+            ("argument_keys", target[5]),
+        )
+        evidence.update(
+            {
+                "runtime_ref": runtime_ref,
+                "callee_identity": target[4],
+                "argument_storage": target[5],
+                "coverage_complete": target[6],
+                "recovery_status": target[7],
+                "callsite_storage": callsite_storage,
+                "call_effect_summary_status": target[7],
+            }
+        )
+        return evidence
+    if target_kind == "call_target_resolution_evidence" and len(target) >= 9:
+        evidence.update(
+            {
+                "runtime_ref": target[3],
+                "callsite_storage": target[4],
+                "resolution_kind": target[5],
+                "path_conditions": target[6],
+                "target_conditions": target[7],
+                "effect_ordinal": target[8],
+                "call_effect_summary_status": "target_resolution_pending_proof",
+            }
+        )
+        return evidence
+    if target_kind == "deferred_call" and len(target) >= 9:
+        evidence.update(
+            {
+                "deferred_call_site": target[3],
+                "pcode_op_ref": target[4],
+                "callee_identity": target[5],
+                "target_expression": target[6],
+                "argument_storage": target[7],
+                "call_effect_summary_status": target[8],
+            }
+        )
+        return evidence
+    return None
 
 
 def _completed_call_effect_proof_evidence(reason=None):
@@ -945,6 +1025,54 @@ def test_phase2_validator_rechecks_accepted_object_target_key_specificity(tmp_pa
     manifest["phase2_ready"] = True
 
     with pytest.raises(ValueError, match="entry_accepted_reason_object_target_key_not_specific"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_expected_movement_without_object_evidence(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    reason_payload = _pending_reason().to_dict()
+    reason_payload.pop("object_evidence", None)
+    _write_all_representative_logs(
+        current_root,
+        {
+            "fc_apply_indirect": _payload(
+                "fc_apply_indirect",
+                "B10",
+                "B11",
+                None,
+                [reason_payload],
+            ),
+        },
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert "object_evidence_missing_or_inconsistent" in manifest["movement_summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="object_evidence_missing_or_inconsistent"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rechecks_accepted_object_evidence_matches_target(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["accepted_reason_records"][0]["object_evidence"]["runtime_ref"] = [
+        "runtime_ref",
+        "wrong",
+    ]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_accepted_reason_object_evidence_missing_or_inconsistent"):
         validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 

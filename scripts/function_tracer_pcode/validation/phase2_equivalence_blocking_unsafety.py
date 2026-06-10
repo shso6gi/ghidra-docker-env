@@ -628,6 +628,132 @@ def _accepted_reason_record_failures(record: Mapping[str, Any]) -> Sequence[str]
         )
     if _json_tuple(record.get("proof_obligation_id")) != expected_proof_obligation_id:
         failures.append("entry_accepted_reason_proof_obligation_id_mismatch")
+    if _object_evidence_failures(record.get("object_evidence"), object_target_key):
+        failures.append("entry_accepted_reason_object_evidence_missing_or_inconsistent")
+    return failures
+
+
+def _object_evidence_failures(
+    object_evidence: Any,
+    object_target_key: Any,
+) -> Sequence[str]:
+    object_target_key = _json_tuple(object_target_key)
+    if not _object_target_key_is_specific(object_target_key):
+        return ("object_target_key_not_specific",)
+    if not isinstance(object_evidence, Mapping):
+        return ("object_evidence_missing",)
+
+    failures = []
+    target_kind = str(object_target_key[0])
+    if object_evidence.get("object_derived") is not True:
+        failures.append("object_evidence_not_object_derived")
+    if object_evidence.get("evidence_kind") != "call_effect_summary":
+        failures.append("object_evidence_kind_mismatch")
+    if object_evidence.get("object_target_kind") != target_kind:
+        failures.append("object_evidence_target_kind_mismatch")
+    if object_evidence.get("side") != object_target_key[1]:
+        failures.append("object_evidence_side_mismatch")
+    if _json_tuple(object_evidence.get("analysis_key")) != object_target_key[2]:
+        failures.append("object_evidence_analysis_key_mismatch")
+
+    if target_kind == "unsupported_call_effect":
+        failures.extend(_unsupported_call_effect_object_evidence_failures(object_evidence, object_target_key))
+    elif target_kind == "call_target_resolution_evidence":
+        failures.extend(_call_target_resolution_object_evidence_failures(object_evidence, object_target_key))
+    elif target_kind == "call_argument_evidence":
+        failures.extend(_call_argument_object_evidence_failures(object_evidence, object_target_key))
+    elif target_kind == "deferred_call":
+        failures.extend(_deferred_call_object_evidence_failures(object_evidence, object_target_key))
+    else:
+        failures.append("object_evidence_target_kind_unsupported")
+    return tuple(sorted(set(failures)))
+
+
+def _unsupported_call_effect_object_evidence_failures(
+    object_evidence: Mapping[str, Any],
+    object_target_key: Tuple[Any, ...],
+) -> Sequence[str]:
+    failures = []
+    expected = {
+        "runtime_ref": object_target_key[3],
+        "callsite_storage": object_target_key[4],
+        "effect_ordinal": object_target_key[5],
+        "unsupported_reason": object_target_key[6],
+        "call_effect_summary_status": object_target_key[6],
+    }
+    for field, value in expected.items():
+        if _json_tuple(object_evidence.get(field)) != value:
+            failures.append(f"object_evidence_{field}_mismatch")
+    return failures
+
+
+def _call_target_resolution_object_evidence_failures(
+    object_evidence: Mapping[str, Any],
+    object_target_key: Tuple[Any, ...],
+) -> Sequence[str]:
+    failures = []
+    expected = {
+        "runtime_ref": object_target_key[3],
+        "callsite_storage": object_target_key[4],
+        "resolution_kind": object_target_key[5],
+        "path_conditions": object_target_key[6],
+        "target_conditions": object_target_key[7],
+        "effect_ordinal": object_target_key[8],
+        "call_effect_summary_status": "target_resolution_pending_proof",
+    }
+    for field, value in expected.items():
+        if _json_tuple(object_evidence.get(field)) != value:
+            failures.append(f"object_evidence_{field}_mismatch")
+    return failures
+
+
+def _call_argument_object_evidence_failures(
+    object_evidence: Mapping[str, Any],
+    object_target_key: Tuple[Any, ...],
+) -> Sequence[str]:
+    failures = []
+    runtime_ref = (
+        "runtime_ref",
+        "call_argument",
+        ("pcode_op_ref", object_target_key[3]),
+        ("callee_identity", object_target_key[4]),
+    )
+    callsite_storage = (
+        "callsite_storage",
+        "call_argument",
+        ("argument_keys", object_target_key[5]),
+    )
+    expected = {
+        "runtime_ref": runtime_ref,
+        "callee_identity": object_target_key[4],
+        "argument_storage": object_target_key[5],
+        "coverage_complete": object_target_key[6],
+        "recovery_status": object_target_key[7],
+        "callsite_storage": callsite_storage,
+        "call_effect_summary_status": object_target_key[7],
+    }
+    for field, value in expected.items():
+        if _json_tuple(object_evidence.get(field)) != value:
+            failures.append(f"object_evidence_{field}_mismatch")
+    return failures
+
+
+def _deferred_call_object_evidence_failures(
+    object_evidence: Mapping[str, Any],
+    object_target_key: Tuple[Any, ...],
+) -> Sequence[str]:
+    failures = []
+    expected = {
+        "deferred_call_site": object_target_key[3],
+        "pcode_op_ref": object_target_key[4],
+        "callee_identity": object_target_key[5],
+        "target_expression": object_target_key[6],
+        "argument_storage": object_target_key[7],
+        "call_effect_summary_status": object_target_key[8],
+    }
+    for field, value in expected.items():
+        if _json_tuple(object_evidence.get(field)) != value:
+            failures.append(f"object_evidence_{field}_mismatch")
     return failures
 
 
@@ -840,6 +966,7 @@ def _validate_representative_expected_movement(
             "evidence_kind": reason.evidence_kind,
             "recovery_action": reason.recovery_action,
             "object_target_key": reason.object_target_key,
+            "object_evidence": reason.object_evidence,
             "proof_obligation_id": reason.proof_obligation_id,
         }
         if record_failures:
@@ -877,6 +1004,8 @@ def _reason_movement_failures(reason: Any, expected: Mapping[str, Any]) -> Seque
         failures.append("recovery_proof_obligation_required_evidence_mismatch")
     if not _object_target_key_is_specific(reason.object_target_key):
         failures.append("object_target_key_missing_or_not_specific")
+    if _object_evidence_failures(reason.object_evidence, reason.object_target_key):
+        failures.append("object_evidence_missing_or_inconsistent")
     expected_proof_obligation_id = None
     if reason.object_target_key is not None and reason.evidence_kind is not None:
         expected_proof_obligation_id = build_proof_obligation_id(
