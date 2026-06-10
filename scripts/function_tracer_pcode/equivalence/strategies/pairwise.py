@@ -90,6 +90,12 @@ class _RuntimeShortcutDecision:
 
 
 @dataclass(frozen=True)
+class _UnresolvedDeferredCallLowering:
+    assertions: Tuple[str, ...]
+    evidence: Tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class _ExactReadonlyReductionProof:
     """Object proof that an exact load-sum denotes one reduction count."""
 
@@ -458,46 +464,68 @@ class PairwiseStrategy(CheckStrategy):
                         f"({loop_fallback_reason}) -> UNKNOWN"
                     )
                     continue
-                if self._case_contains_unresolved_expression(
+                case1_has_unresolved = self._case_contains_unresolved_expression(
                     case1,
                     case2.conditions,
                     own_render_fn=symbol_replace_fn1,
                     extra_render_fn=symbol_replace_fn2,
                     base_ctx=base_ctx,
                     query_label=f"{pair_id}:case1",
-                ) or self._case_contains_unresolved_expression(
+                )
+                case2_has_unresolved = self._case_contains_unresolved_expression(
                     case2,
                     case1.conditions,
                     own_render_fn=symbol_replace_fn2,
                     extra_render_fn=symbol_replace_fn1,
                     base_ctx=base_ctx,
                     query_label=f"{pair_id}:case2",
-                ):
-                    unknown_count += 1
-                    object_target_key = self._unresolved_expression_object_target_key(
+                )
+                if case1_has_unresolved or case2_has_unresolved:
+                    lowering = self._try_build_unresolved_deferred_call_lowering(
                         base_ctx=base_ctx,
                         case1=case1,
                         case2=case2,
                         pair_id=pair_id,
                     )
-                    unknown_reasons.append(
-                        make_unknown_reason(
-                            UnknownReasonId.UNRESOLVED_EXPRESSION,
-                            stage="S_PAIRWISE",
-                            pair_or_case=pair_id,
-                            evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
-                            recovery_proof_obligations=(
-                                self._unresolved_expression_recovery_proof_obligations(object_target_key)
-                            ),
-                            evidence_kind="unresolved_expression_safety",
-                            object_target_key=object_target_key,
-                            detail="pairwise case contains solver-unresolved expression evidence",
+                    if lowering is not None:
+                        self._register_pairwise_extra_assertions(
+                            base_ctx,
+                            pair_id,
+                            lowering.assertions,
                         )
-                    )
-                    self._debug_print(
-                        f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
-                    )
-                    continue
+                        self._debug_print(
+                            f"  Pair {pair_id}: unresolved deferred-call value "
+                            "lowered with object-derived equality assumption"
+                        )
+                    else:
+                        self._clear_pairwise_extra_assertions(base_ctx, pair_id)
+                        unknown_count += 1
+                        object_target_key = self._unresolved_expression_object_target_key(
+                            base_ctx=base_ctx,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                        )
+                        unknown_reasons.append(
+                            make_unknown_reason(
+                                UnknownReasonId.UNRESOLVED_EXPRESSION,
+                                stage="S_PAIRWISE",
+                                pair_or_case=pair_id,
+                                evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
+                                recovery_proof_obligations=(
+                                    self._unresolved_expression_recovery_proof_obligations(object_target_key)
+                                ),
+                                evidence_kind="unresolved_expression_safety",
+                                object_target_key=object_target_key,
+                                detail="pairwise case contains solver-unresolved expression evidence",
+                            )
+                        )
+                        self._debug_print(
+                            f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
+                        )
+                        continue
+                else:
+                    self._clear_pairwise_extra_assertions(base_ctx, pair_id)
 
                 result = self._solve_query_twostage(
                     base_ctx,
@@ -4544,6 +4572,273 @@ class PairwiseStrategy(CheckStrategy):
             pair_id,
         )
 
+    def _register_pairwise_extra_assertions(
+        self,
+        base_ctx: Dict[str, Any],
+        pair_id: str,
+        assertions: Sequence[str],
+    ) -> None:
+        if not assertions:
+            self._clear_pairwise_extra_assertions(base_ctx, pair_id)
+            return
+        by_pair = base_ctx.setdefault("pairwise_extra_assertions_by_pair", {})
+        by_pair[pair_id] = tuple(str(item) for item in assertions if str(item).strip())
+
+    def _clear_pairwise_extra_assertions(
+        self,
+        base_ctx: Dict[str, Any],
+        pair_id: str,
+    ) -> None:
+        by_pair = base_ctx.get("pairwise_extra_assertions_by_pair")
+        if isinstance(by_pair, dict):
+            by_pair.pop(pair_id, None)
+        evidence_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowering_evidence_by_pair")
+        if isinstance(evidence_by_pair, dict):
+            evidence_by_pair.pop(pair_id, None)
+        lowered_keys_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowered_unknown_keys_by_pair")
+        if isinstance(lowered_keys_by_pair, dict):
+            lowered_keys_by_pair.pop(pair_id, None)
+
+    def _try_build_unresolved_deferred_call_lowering(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Optional[_UnresolvedDeferredCallLowering]:
+        analysis1 = base_ctx.get("analysis1")
+        analysis2 = base_ctx.get("analysis2")
+        if analysis1 is None or analysis2 is None:
+            return None
+        if self._case_conditions_contain_unresolved(case1) or self._case_conditions_contain_unresolved(case2):
+            return None
+        value1 = getattr(case1, "value_expr", None)
+        value2 = getattr(case2, "value_expr", None)
+        if self._expression_has_unsupported_smt_op_excluding_unknowns(value1):
+            return None
+        if self._expression_has_unsupported_smt_op_excluding_unknowns(value2):
+            return None
+        value_bits1 = int(expression_smt_bit_width(value1) or 0)
+        value_bits2 = int(expression_smt_bit_width(value2) or 0)
+        if value_bits1 <= 0 or value_bits2 <= 0 or value_bits1 != value_bits2:
+            return None
+
+        left_unknowns = self._collect_unknown_expression_nodes(value1)
+        right_unknowns = self._collect_unknown_expression_nodes(value2)
+        if not left_unknowns or not right_unknowns or len(left_unknowns) != len(right_unknowns):
+            return None
+
+        left_items = []
+        right_items = []
+        for expr in left_unknowns:
+            item = self._deferred_call_unknown_lowering_item(
+                analysis1,
+                expr,
+                side_label="function1",
+            )
+            if item is None:
+                return None
+            left_items.append(item)
+        for expr in right_unknowns:
+            item = self._deferred_call_unknown_lowering_item(
+                analysis2,
+                expr,
+                side_label="function2",
+            )
+            if item is None:
+                return None
+            right_items.append(item)
+
+        unmatched_right = list(right_items)
+        assertions: List[str] = [
+            f"; unresolved_expression deferred-call equality lowering for pair {pair_id}",
+            "; object evidence: matched_deferred_call_argument_evidence",
+        ]
+        evidence: List[Tuple[Any, ...]] = []
+        lowered_left_unknown_keys: List[Any] = []
+        lowered_right_unknown_keys: List[Any] = []
+        for left_expr, left_info, left_key in left_items:
+            proof_content = self._matched_deferred_call_argument_proof_content(
+                left_key,
+                analysis1,
+                analysis1,
+                analysis2,
+            )
+            if proof_content is None:
+                return None
+            expected_peer_key = self._normalize_nested_tuple(
+                proof_content.get("peer_object_target_key")
+            )
+            candidates = [
+                item
+                for item in unmatched_right
+                if self._normalize_nested_tuple(item[2]) == expected_peer_key
+            ]
+            if len(candidates) != 1:
+                return None
+            right_expr, right_info, right_key = candidates[0]
+            left_bits = int(expression_smt_bit_width(left_expr) or 0)
+            right_bits = int(expression_smt_bit_width(right_expr) or 0)
+            if left_bits <= 0 or right_bits <= 0 or left_bits != right_bits:
+                return None
+            unmatched_right.remove(candidates[0])
+            assertions.append(
+                f"(assert (= {left_expr.to_smt()} {right_expr.to_smt()}))"
+            )
+            lowered_left_unknown_keys.append(self._expression_runtime_object_key(left_expr))
+            lowered_right_unknown_keys.append(self._expression_runtime_object_key(right_expr))
+            evidence.append(
+                (
+                    "matched_deferred_call_runtime_unknown",
+                    ("left_unknown", self._expression_runtime_object_key(left_expr)),
+                    ("right_unknown", self._expression_runtime_object_key(right_expr)),
+                    ("left_deferred_call", left_key),
+                    ("right_deferred_call", right_key),
+                    ("bit_width", left_bits),
+                    (
+                        "left_recovery_status",
+                        getattr(left_info, "call_argument_recovery_status", None),
+                    ),
+                    (
+                        "right_recovery_status",
+                        getattr(right_info, "call_argument_recovery_status", None),
+                    ),
+                )
+            )
+        if unmatched_right:
+            return None
+
+        evidence_by_pair = base_ctx.setdefault(
+            "pairwise_unresolved_deferred_call_lowering_evidence_by_pair",
+            {},
+        )
+        evidence_by_pair[pair_id] = tuple(evidence)
+        lowered_keys_by_pair = base_ctx.setdefault(
+            "pairwise_unresolved_deferred_call_lowered_unknown_keys_by_pair",
+            {},
+        )
+        lowered_keys_by_pair[pair_id] = {
+            "left": tuple(lowered_left_unknown_keys),
+            "right": tuple(lowered_right_unknown_keys),
+        }
+        return _UnresolvedDeferredCallLowering(
+            assertions=tuple(assertions),
+            evidence=tuple(evidence),
+        )
+
+    def _case_conditions_contain_unresolved(self, case: ReturnCase) -> bool:
+        for condition in getattr(case, "conditions", None) or ():
+            expression = getattr(condition, "expression", None)
+            if self._expression_contains_unresolved(expression):
+                return True
+        return False
+
+    def _collect_unknown_expression_nodes(self, expr: Any) -> Tuple[Any, ...]:
+        result: List[Any] = []
+        self._collect_unknown_expression_nodes_into(expr, result)
+        return tuple(result)
+
+    def _collect_unknown_expression_nodes_into(self, expr: Any, result: List[Any]) -> None:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            result.append(expr)
+            return
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for condition, value in expr.value:
+                if condition is not None:
+                    self._collect_unknown_expression_nodes_into(condition.expression, result)
+                self._collect_unknown_expression_nodes_into(value, result)
+            return
+        for operand in getattr(expr, "operands", []) or []:
+            self._collect_unknown_expression_nodes_into(operand, result)
+
+    def _expression_has_unsupported_smt_op_excluding_unknowns(self, expr: Any) -> bool:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return True
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            return False
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for condition, value in expr.value:
+                if condition is not None and self._expression_contains_unresolved(condition.expression):
+                    return True
+                if self._expression_has_unsupported_smt_op_excluding_unknowns(value):
+                    return True
+            return False
+        if self._expression_node_is_unsupported_smt_op(expr):
+            return True
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_has_unsupported_smt_op_excluding_unknowns(operand):
+                return True
+        return False
+
+    def _expression_node_is_unsupported_smt_op(self, expr: Any) -> bool:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return True
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            return False
+        try:
+            node_only = expr.clone_with(operands=[])
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return bool(expression_contains_unsupported_smt_ops(node_only))
+
+    def _deferred_call_unknown_lowering_item(
+        self,
+        analysis: FunctionReturnAnalysis,
+        expr: Any,
+        *,
+        side_label: str,
+    ) -> Optional[Tuple[Any, Any, Tuple[Any, ...]]]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        deferred_ref = getattr(runtime_ref, "deferred_call_ref", None)
+        if deferred_ref is None:
+            return None
+        info = self._deferred_call_info_for_ref(analysis, deferred_ref)
+        if info is None:
+            return None
+        object_target_key = self._deferred_call_object_target_key(
+            info,
+            analysis=analysis,
+            side_label=side_label,
+        )
+        if not self._call_effect_target_expression_key_is_present(
+            self._cross_binary_call_effect_component_key(
+                self._deferred_call_target_expression_key(object_target_key)
+            )
+        ):
+            return None
+        if not self._call_effect_argument_keys_are_present(
+            self._cross_binary_call_effect_component_key(
+                self._deferred_call_argument_keys(object_target_key)
+            )
+        ):
+            return None
+        return expr, info, object_target_key
+
+    def _deferred_call_info_for_ref(
+        self,
+        analysis: FunctionReturnAnalysis,
+        deferred_ref: Any,
+    ) -> Optional[Any]:
+        try:
+            ref_key = deferred_ref.stable_key()
+        except (AttributeError, TypeError, ValueError):
+            return None
+        deferred_calls = getattr(analysis, "deferred_calls", None) or {}
+        direct = deferred_calls.get(ref_key) if hasattr(deferred_calls, "get") else None
+        if direct is not None:
+            return direct
+        for info in getattr(deferred_calls, "values", lambda: ())():
+            candidate_ref = getattr(info, "deferred_call_ref", None)
+            try:
+                if candidate_ref is not None and candidate_ref.stable_key() == ref_key:
+                    return info
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return None
+
     def _solve_return_width_bridge_with_completed_proof(
         self,
         base_ctx: Dict[str, Any],
@@ -4754,13 +5049,63 @@ class PairwiseStrategy(CheckStrategy):
         base_ctx: Optional[Dict[str, Any]] = None,
         query_label: str = "value",
     ) -> bool:
-        return self._get_expression_safety_checker(base_ctx).value_contains_unresolved(
+        contains_unresolved = self._get_expression_safety_checker(base_ctx).value_contains_unresolved(
             case,
             own_render_fn=own_render_fn,
             extra_conditions=extra_conditions,
             extra_render_fn=extra_render_fn,
             query_label=query_label,
         )
+        if not contains_unresolved:
+            return False
+        if self._case_value_unresolved_is_pairwise_lowered(
+            case,
+            base_ctx=base_ctx,
+            query_label=query_label,
+        ):
+            return False
+        return True
+
+    def _case_value_unresolved_is_pairwise_lowered(
+        self,
+        case: ReturnCase,
+        *,
+        base_ctx: Optional[Dict[str, Any]],
+        query_label: str,
+    ) -> bool:
+        if base_ctx is None:
+            return False
+        pair_id, side = self._pair_id_and_side_from_value_query_label(query_label)
+        if pair_id is None or side is None:
+            return False
+        lowered_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowered_unknown_keys_by_pair") or {}
+        lowered = lowered_by_pair.get(pair_id) or {}
+        lowered_keys = set(lowered.get(side) or ())
+        if not lowered_keys:
+            return False
+        value_expr = getattr(case, "value_expr", None)
+        if self._expression_has_unsupported_smt_op_excluding_unknowns(value_expr):
+            return False
+        unknown_keys = tuple(
+            self._expression_runtime_object_key(expr)
+            for expr in self._collect_unknown_expression_nodes(value_expr)
+        )
+        if not unknown_keys:
+            return False
+        return all(key in lowered_keys for key in unknown_keys)
+
+    @staticmethod
+    def _pair_id_and_side_from_value_query_label(
+        query_label: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if not isinstance(query_label, str) or ":" not in query_label:
+            return None, None
+        pair_id, suffix = query_label.rsplit(":", 1)
+        if suffix == "value1":
+            return pair_id, "left"
+        if suffix == "value2":
+            return pair_id, "right"
+        return None, None
 
     def _get_expression_safety_checker(
         self,

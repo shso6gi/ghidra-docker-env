@@ -475,6 +475,7 @@ def build_pair_query(
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
     lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
     lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
+    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
     lines.extend(
         _build_value_inequality_section(
             case1.get_value_smt(
@@ -497,6 +498,24 @@ def build_pair_query(
     lines.append("(check-sat)")
     lines.append("(get-model)")
     return "\n".join(lines)
+
+
+def _build_pairwise_extra_assertions(
+    base_ctx: Dict[str, Any],
+    pair_id: str,
+) -> List[str]:
+    assertions_by_pair = base_ctx.get("pairwise_extra_assertions_by_pair") or {}
+    raw_assertions = assertions_by_pair.get(pair_id) or ()
+    assertions = [str(item) for item in raw_assertions if str(item).strip()]
+    if not assertions:
+        return []
+    return [
+        "",
+        "; " + "-" * 40,
+        "; Pair-local object-derived assumptions",
+        "; " + "-" * 40,
+        *assertions,
+    ]
 
 
 def build_return_width_bridge_narrow_query(

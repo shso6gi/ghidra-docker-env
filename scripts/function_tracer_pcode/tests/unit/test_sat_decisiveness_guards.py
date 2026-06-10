@@ -150,6 +150,32 @@ def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis
     strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
 
 
+def _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2):
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+
+
 def _return_coverage_gap_analyses():
     x = Expression.parameter("x", 0, size=4)
     analysis1 = FunctionReturnAnalysis(
@@ -298,6 +324,9 @@ def _analysis_with_deferred_call_argument_blocker(
     argument_indices=(1, 2),
     target_expr_missing: bool = False,
     duplicate: bool = False,
+    return_deferred_unknown: bool = False,
+    unknown_size: int = 4,
+    call_argument_recovery_status: str = CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
 ) -> FunctionReturnAnalysis:
     parameters = [
         _param("fp", index=0, size=8),
@@ -348,7 +377,7 @@ def _analysis_with_deferred_call_argument_blocker(
                 target_ref=CallTargetRef.unknown(),
                 sequence=sequence,
             ),
-            call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+            call_argument_recovery_status=call_argument_recovery_status,
             call_argument_recovery_reason="argument_recovery_inconclusive",
         )
 
@@ -357,13 +386,19 @@ def _analysis_with_deferred_call_argument_blocker(
     if duplicate:
         other = _deferred(2, 0x40)
         deferred_calls[other.deferred_call_ref.stable_key()] = other
+    return_value = _const(1)
+    if return_deferred_unknown:
+        return_value = Expression.unknown(
+            deferred.placeholder_name,
+            runtime_ref=deferred.unknown_ref,
+        ).clone_with(size=unknown_size)
     return FunctionReturnAnalysis(
         function_name=function_name,
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
         binary_id=binary_id,
         parameters=parameters,
-        returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
+        returns=[ReturnInfo(address=hex(entry), value=return_value, conditions=[])],
         return_type="int",
         effect_summary=EffectSummary(
             parameter_names=[param["name"] for param in parameters],
@@ -3054,6 +3089,131 @@ def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
         assert content["call_effect_summary"]["matching_peer_deferred_call_count"] == 1
 
 
+def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_evidence(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        return_deferred_unknown=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        return_deferred_unknown=True,
+    )
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    solver_runner.run_sequential = Mock(
+        side_effect=[
+            ParallelResult(
+                results=[
+                    SolverResult(
+                        solver_name="z3",
+                        status=SolverStatus.SAT,
+                        elapsed_time=0.001,
+                    )
+                ]
+            ),
+            ParallelResult(
+                results=[
+                    SolverResult(
+                        solver_name="z3",
+                        status=SolverStatus.UNSAT,
+                        elapsed_time=0.001,
+                    )
+                ]
+            ),
+        ]
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert solver_runner.run_sequential.call_count == 2
+    assertions = base_ctx["pairwise_extra_assertions_by_pair"]["(0,0)"]
+    assert assertions[0].startswith("; unresolved_expression deferred-call equality")
+    assert any(line.startswith("(assert (= rtunk_") for line in assertions)
+    query = solver_runner.run_sequential.call_args_list[1].args[0]
+    assert "; Pair-local object-derived assumptions" in query
+    assert any(line in query for line in assertions if line.startswith("(assert (= rtunk_"))
+    evidence = base_ctx["pairwise_unresolved_deferred_call_lowering_evidence_by_pair"]["(0,0)"]
+    assert len(evidence) == 1
+    assert evidence[0][0] == "matched_deferred_call_runtime_unknown"
+
+
+def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        return_deferred_unknown=True,
+        unknown_size=4,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        return_deferred_unknown=True,
+        unknown_size=8,
+    )
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("opaque").clone_with(size=4), conditions=[])],
+        return_type="int",
+        binary_id="B1",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.unknown("opaque").clone_with(size=4), conditions=[])],
+        return_type="int",
+        binary_id="B14",
+    )
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    strategy._solve_query_twostage.assert_not_called()
+
+
 def test_pairwise_deferred_call_missing_target_expr_does_not_auto_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
@@ -3158,6 +3318,107 @@ def test_pairwise_deferred_call_empty_arguments_does_not_auto_proof(monkeypatch)
         for item in analysis.completed_recovery_proof_evidence
         if item.get("proof_source") == "matched_deferred_call_argument_evidence"
     ]
+
+
+def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        argument_indices=(),
+        return_deferred_unknown=True,
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        argument_indices=(),
+        return_deferred_unknown=True,
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        return_deferred_unknown=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        return_deferred_unknown=True,
+    )
+    analysis1.effect_summary.effects = [
+        StoreEffect(
+            location=CanonicalLocation("fp", 0, 4),
+            value=_const(1),
+            conditions=[],
+            order_key=1,
+        )
+    ]
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_unresolved_deferred_call_incomplete_summary_stays_unknown(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        return_deferred_unknown=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        return_deferred_unknown=True,
+    )
+    analysis2.effect_summary.incomplete_reasons = ("effect_summary_path_coverage_incomplete",)
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    strategy._solve_query_twostage.assert_not_called()
 
 
 def test_pairwise_deferred_call_duplicate_candidate_does_not_auto_proof(monkeypatch):
