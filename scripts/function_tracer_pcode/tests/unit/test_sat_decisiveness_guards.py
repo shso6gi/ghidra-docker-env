@@ -220,6 +220,75 @@ def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
     )
 
 
+def _analysis_with_unknown_indirect_call_effect(
+    *,
+    function_name: str,
+    binary_id: str,
+    entry: int,
+    target_param_index: int = 0,
+    argument_indices=(1, 2),
+    target_expr_missing: bool = False,
+) -> FunctionReturnAnalysis:
+    parameters = [
+        _param("fp", index=0, size=8),
+        _param("a", index=1, size=4),
+        _param("b", index=2, size=4),
+    ]
+    target_expr = None
+    if not target_expr_missing:
+        target_expr = Expression.parameter(
+            parameters[target_param_index]["name"],
+            target_param_index,
+            size=parameters[target_param_index]["size"],
+        )
+    arguments = tuple(
+        Expression.parameter(
+            parameters[index]["name"],
+            index,
+            size=parameters[index]["size"],
+        )
+        for index in argument_indices
+    )
+    pcode_ref = PcodeOpRef(
+        address_offset=entry + 0x20,
+        seq_time=4,
+        seq_order=1,
+        block_index=0,
+        mnemonic="CALLIND",
+        input_sizes=(8, 4, 4),
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=entry,
+        target_space="ram",
+        target_offset=entry + 0x20,
+        opcode=8,
+        local_op_ordinal=0,
+    )
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=pcode_ref,
+        target_ref=None,
+        target_expr=target_expr,
+        arguments=arguments,
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    return FunctionReturnAnalysis(
+        function_name=function_name,
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
+        binary_id=binary_id,
+        parameters=parameters,
+        returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=[param["name"] for param in parameters],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+
+
 def _analysis_with_self_recursive_unsupported_call_effect(
     *,
     binary_id: str = "B1",
@@ -359,14 +428,38 @@ def _analysis_with_effect_call_target_resolution_evidence() -> FunctionReturnAna
 
 
 def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
+    target_expr_key = ("typed_target_expression", ("runtime_ref", ("param", "fp", 0)))
+    callee_identity = ("unknown", "B1", ("target_expression", target_expr_key))
+    pcode_key = (
+        "pcode_op",
+        "B1",
+        ("function_entry", "ram", 0x1000),
+        ("seq_target", "ram", 0x3020),
+        4,
+        1,
+        "CALLIND",
+        0,
+    )
     object_target_key = object_target_key or (
         "unsupported_call_effect",
         "function1",
-        ("function_ref", ("function", 1, 0x1000)),
-        ("pcode_op", 0x3020, 4, 1, "CALLIND"),
-        None,
-        ("typed_target_expression", ("runtime_ref", ("param", "fp", 0))),
-        9,
+        ("function_ref", ("function", "B1", 0x1000)),
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("pcode_op_ref", pcode_key),
+            ("callee_identity", callee_identity),
+            ("typed_target_expression", target_expr_key),
+            ("argument_keys", ()),
+        ),
+        (
+            "callsite_storage",
+            ("pcode_op_ref", pcode_key),
+            ("callee_identity", callee_identity),
+            ("target_expression", target_expr_key),
+            ("argument_keys", ()),
+        ),
+        ("effect_ordinal", 9),
         "target_identity_unavailable",
     )
     evidence = {
@@ -387,6 +480,7 @@ def _call_effect_summary_proof_content(object_target_key):
     kind = object_target_key[0] if object_target_key else None
     runtime_ref = ("runtime_ref", "unsupported_call_effect", object_target_key)
     callsite_storage = ("callsite_storage", "unsupported_call_effect", object_target_key)
+    peer_object_target_key = object_target_key
     if kind == "call_argument_evidence":
         runtime_ref = (
             "runtime_ref",
@@ -402,24 +496,64 @@ def _call_effect_summary_proof_content(object_target_key):
     elif kind == "call_target_resolution_evidence":
         runtime_ref = object_target_key[3]
         callsite_storage = object_target_key[4]
+    elif kind == "unsupported_call_effect":
+        runtime_ref = object_target_key[3]
+        callsite_storage = object_target_key[4]
+        peer_object_target_key = (
+            object_target_key[0],
+            "function2" if object_target_key[1] == "function1" else "function1",
+            *object_target_key[2:],
+        )
     return {
         "object_derived": True,
         "status": "complete",
-        "proof_rule": "call_effect_object_evidence_complete",
+        "proof_rule": (
+            "matched_unknown_indirect_no_store_call_effect"
+            if kind == "unsupported_call_effect"
+            else "call_effect_object_evidence_complete"
+        ),
         "object_target_key": object_target_key,
+        "peer_object_target_key": peer_object_target_key,
         "call_effect_summary": {
             "status": "complete",
             "summary_source": ("effect_summary", kind),
             "evidence_kind": "call_effect_summary",
             "object_target_key": object_target_key,
+            "peer_object_target_key": peer_object_target_key,
+            "unsupported_reason": "target_identity_unavailable",
+            "local_store_effect_count": 0,
+            "matching_local_unsupported_call_site_count": (
+                1 if kind == "unsupported_call_effect" else None
+            ),
+            "matching_peer_unsupported_call_site_count": (
+                1 if kind == "unsupported_call_effect" else None
+            ),
         },
         "runtime_ref": {
             "status": "complete",
             "runtime_ref": runtime_ref,
+            "peer_runtime_ref": peer_object_target_key[3] if kind == "unsupported_call_effect" else runtime_ref,
+            "matched_target_expression_key": (
+                PairwiseStrategy._cross_binary_call_effect_component_key(
+                    PairwiseStrategy._unsupported_call_effect_target_expression_key(object_target_key)
+                )
+                if kind == "unsupported_call_effect"
+                else None
+            ),
         },
         "callsite_storage": {
             "status": "complete",
             "callsite_storage": callsite_storage,
+            "peer_callsite_storage": (
+                peer_object_target_key[4] if kind == "unsupported_call_effect" else callsite_storage
+            ),
+            "matched_argument_keys": (
+                PairwiseStrategy._cross_binary_call_effect_component_key(
+                    PairwiseStrategy._unsupported_call_effect_argument_keys(object_target_key)
+                )
+                if kind == "unsupported_call_effect"
+                else None
+            ),
         },
     }
 
@@ -2484,8 +2618,8 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
         stage="S_PAIRWISE",
     )
     analysis1.completed_recovery_proof_evidence = (
-        _call_effect_summary_proof_evidence(
-            object_target_key=completed_reason.object_target_key,
+        _complete_call_effect_summary_proof_evidence(
+            completed_reason.object_target_key,
             proof_obligation_id=completed_reason.proof_obligation_id,
         ),
     )
@@ -2606,6 +2740,197 @@ def test_pairwise_complete_call_argument_evidence_auto_proof_recovers_by_default
     assert evidence[0]["proof_content"]["proof_rule"] == "call_argument_evidence_complete"
     assert evidence[0]["proof_content"]["runtime_ref"]["runtime_ref"][1] == "call_argument"
     assert evidence[0]["proof_content"]["callsite_storage"]["callsite_storage"][1] == "call_argument"
+
+
+def test_pairwise_matched_unknown_indirect_no_store_call_effect_recovers(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    for analysis in (analysis1, analysis2):
+        evidence = [
+            item
+            for item in analysis.completed_recovery_proof_evidence
+            if item.get("proof_source") == "matched_unknown_indirect_no_store_call_effect"
+        ]
+        assert len(evidence) == 1
+        content = evidence[0]["proof_content"]
+        assert content["proof_rule"] == "matched_unknown_indirect_no_store_call_effect"
+        assert (
+            content["call_effect_summary"]["matching_local_unsupported_call_site_count"]
+            == 1
+        )
+        assert (
+            content["call_effect_summary"]["matching_peer_unsupported_call_site_count"]
+            == 1
+        )
+        assert content["runtime_ref"]["matched_target_expression_key"]
+        assert content["callsite_storage"]["matched_argument_keys"]
+
+
+def test_pairwise_unknown_indirect_duplicate_call_effect_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+    )
+    original = analysis1.effect_summary.unsupported_call_sites[0]
+    duplicate = UnsupportedCallEffectRef(
+        pcode_op_ref=PcodeOpRef(
+            address_offset=0x1040,
+            seq_time=5,
+            seq_order=2,
+            block_index=0,
+            mnemonic="CALLIND",
+            input_sizes=(8, 4, 4),
+            binary_id="B10",
+            function_entry_space="ram",
+            function_entry_offset=0x1000,
+            target_space="ram",
+            target_offset=0x1040,
+            opcode=8,
+            local_op_ordinal=1,
+        ),
+        target_ref=original.target_ref,
+        target_expr=original.target_expr,
+        arguments=original.arguments,
+        reason=original.reason,
+        order_key=10,
+    )
+    analysis1.effect_summary.unsupported_call_sites = (original, duplicate)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_unknown_indirect_no_store_call_effect"
+    ]
+
+
+def test_pairwise_unknown_indirect_missing_target_expr_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        target_expr_missing=True,
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        target_expr_missing=True,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert {
+        reason.detail for reason in result.unknown_reasons
+    } == {
+        "function1:unsupported_call_effect_summary",
+        "function2:unsupported_call_effect_summary",
+    }
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_unknown_indirect_no_store_call_effect"
+    ]
+
+
+def test_pairwise_unknown_indirect_target_mismatch_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        target_param_index=0,
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        target_param_index=1,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert {
+        reason.detail for reason in result.unknown_reasons
+    } == {
+        "function1:unsupported_call_effect_summary",
+        "function2:unsupported_call_effect_summary",
+    }
+
+
+def test_pairwise_unknown_indirect_argument_mismatch_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        argument_indices=(1, 2),
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        argument_indices=(2, 1),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert len(result.unknown_reasons) == 2
 
 
 def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypatch):
@@ -2956,12 +3281,53 @@ def test_pairwise_unknown_indirect_call_effect_proof_is_not_auto_completed(monke
 
 
 def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
-    evidence = _call_effect_summary_proof_evidence()
-    analysis = _analysis_with_call_effect_summary_proof_evidence()
+    bare = _call_effect_summary_proof_evidence()
+    evidence = _complete_call_effect_summary_proof_evidence(
+        bare["object_target_key"],
+        proof_obligation_id=bare["proof_obligation_id"],
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        completed_recovery_proof_evidence=(evidence,),
+    )
 
     proof_ids = PairwiseStrategy._completed_recovery_proof_ids(analysis)
 
     assert proof_ids == (_expected_call_effect_summary_proof_id(evidence),)
+
+
+def test_call_effect_summary_producer_rejects_missing_unknown_indirect_target_expression():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        target_expr_missing=True,
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        target_expr_missing=True,
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(
+        reason.object_target_key,
+        proof_obligation_id=reason.proof_obligation_id,
+    )
+    analysis1.completed_recovery_proof_evidence = (evidence,)
+
+    assert PairwiseStrategy._completed_call_effect_summary_proof_ids(analysis1, analysis2) == ()
+    assert strategy._call_effect_summary_proof_is_complete(reason, analysis1, analysis2) is False
 
 
 def test_call_effect_summary_producer_rejects_missing_full_proof_id():
@@ -3013,6 +3379,27 @@ def test_call_effect_summary_producer_rejects_active_safety_blockers():
     assert PairwiseStrategy._completed_recovery_proof_ids(coverage_blocked) == ()
     assert PairwiseStrategy._completed_recovery_proof_ids(sat_blocked) == ()
     assert PairwiseStrategy._completed_recovery_proof_ids(unsupported_blocked) == ()
+
+
+def test_call_effect_summary_reason_accepts_targeted_clean_proof_with_analysis_blocker():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = _analysis_with_unsupported_call_effect()
+    analysis1.analysis_notes.append("indirect_control_flow_unresolved")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(
+        reason.object_target_key,
+        proof_obligation_id=reason.proof_obligation_id,
+    )
+    analysis1.completed_recovery_proof_evidence = (evidence,)
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1, analysis2) == ()
+    assert strategy._call_effect_summary_proof_is_complete(reason, analysis1, analysis2) is True
 
 
 def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap():
@@ -3372,8 +3759,8 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
         stage="S_MONOLITHIC_FALLBACK",
     )
     analysis1.completed_recovery_proof_evidence = (
-        _call_effect_summary_proof_evidence(
-            object_target_key=completed_reason.object_target_key,
+        _complete_call_effect_summary_proof_evidence(
+            completed_reason.object_target_key,
             proof_obligation_id=completed_reason.proof_obligation_id,
         ),
     )
@@ -3804,6 +4191,7 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
         "analysis_key": ("function_ref", ("function", "B10", 0x401000)),
         "runtime_ref": reason.object_target_key[3],
         "callsite_storage": reason.object_target_key[4],
+        "argument_storage": (),
         "effect_ordinal": ("effect_ordinal", 9),
         "unsupported_reason": "target_identity_unavailable",
         "call_effect_summary_status": "target_identity_unavailable",

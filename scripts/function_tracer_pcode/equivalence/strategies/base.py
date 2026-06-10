@@ -75,6 +75,7 @@ class CheckStrategy(ABC):
     _CALL_EFFECT_PROOF_CONTENT_REQUIRED_OBJECT_KINDS = {
         "call_argument_evidence",
         "call_target_resolution_evidence",
+        "unsupported_call_effect",
     }
     
     def __init__(
@@ -310,6 +311,12 @@ class CheckStrategy(ABC):
                 object_target_key,
                 analysis,
             )
+            or self._matched_unknown_indirect_call_effect_proof_content(
+                object_target_key,
+                analysis,
+                analysis1,
+                analysis2,
+            )
             or self._call_argument_evidence_call_effect_proof_content(
                 object_target_key,
                 analysis,
@@ -336,6 +343,8 @@ class CheckStrategy(ABC):
             if proof_rule == "self_recursive_no_store_effect_summary"
             else "call_argument_evidence_complete"
             if proof_rule == "call_argument_evidence_complete"
+            else "matched_unknown_indirect_no_store_call_effect"
+            if proof_rule == "matched_unknown_indirect_no_store_call_effect"
             else "call_effect_summary_proof"
         )
         records.append(
@@ -479,6 +488,7 @@ class CheckStrategy(ABC):
             "object_derived": True,
             "status": "complete",
             "proof_rule": "self_recursive_no_store_effect_summary",
+            "object_target_key": object_target_key,
             "caller_function": self._analysis_entry_key(analysis),
             "recursive_callee": target_key,
             "callsite_pcode_op_ref": pcode_op_ref,
@@ -486,7 +496,279 @@ class CheckStrategy(ABC):
             "local_store_effect_count": 0,
             "unsupported_call_site_count": 1,
             "recursive_call_effect": "no_memory_effects_by_induction",
+            "call_effect_summary": {
+                "status": "complete",
+                "summary_source": ("effect_summary", "unsupported_call_effect"),
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "unsupported_reason": "callee_effect_summary_missing",
+                "local_store_effect_count": 0,
+                "unsupported_call_site_count": 1,
+            },
+            "runtime_ref": {
+                "status": "complete",
+                "runtime_ref": object_target_key[3],
+            },
+            "callsite_storage": {
+                "status": "complete",
+                "callsite_storage": object_target_key[4],
+            },
         }
+
+    def _matched_unknown_indirect_call_effect_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        def reject(reason: str) -> Optional[Dict[str, Any]]:
+            self._debug_print(
+                "matched unknown-indirect call-effect proof unavailable: "
+                f"{reason}"
+            )
+            return None
+
+        if len(object_target_key) < 7 or object_target_key[0] != "unsupported_call_effect":
+            return None
+        if object_target_key[-1] != "target_identity_unavailable":
+            return None
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            return reject("missing local effect summary")
+        if getattr(effect_summary, "effects", None):
+            return reject("local store effects are present")
+        if getattr(effect_summary, "incomplete_reasons", None):
+            return reject(
+                "local effect summary is incomplete: "
+                f"{tuple(getattr(effect_summary, 'incomplete_reasons', ()) or ())}"
+            )
+        peer_analysis = analysis2 if analysis is analysis1 else analysis1 if analysis is analysis2 else None
+        if peer_analysis is None:
+            return reject("object target side did not map to either analysis")
+        peer_summary = getattr(peer_analysis, "effect_summary", None)
+        if peer_summary is None:
+            return reject("missing peer effect summary")
+        if getattr(peer_summary, "effects", None):
+            return reject("peer store effects are present")
+        if getattr(peer_summary, "incomplete_reasons", None):
+            return reject(
+                "peer effect summary is incomplete: "
+                f"{tuple(getattr(peer_summary, 'incomplete_reasons', ()) or ())}"
+            )
+        local_label = "function1" if analysis is analysis1 else "function2"
+        local_matches = [
+            self._unsupported_call_effect_object_key(
+                local_site,
+                analysis=analysis,
+                side_label=local_label,
+            )
+            for local_site in getattr(effect_summary, "unsupported_call_sites", ()) or ()
+            if self._unsupported_call_effects_semantically_match(
+                object_target_key,
+                self._unsupported_call_effect_object_key(
+                    local_site,
+                    analysis=analysis,
+                    side_label=local_label,
+                ),
+            )
+        ]
+        if len(local_matches) != 1:
+            return reject(
+                "local unsupported call effect match count is "
+                f"{len(local_matches)}"
+            )
+        peer_label = "function2" if analysis is analysis1 else "function1"
+        matches = [
+            self._unsupported_call_effect_object_key(
+                peer_site,
+                analysis=peer_analysis,
+                side_label=peer_label,
+            )
+            for peer_site in getattr(peer_summary, "unsupported_call_sites", ()) or ()
+            if self._unsupported_call_effects_semantically_match(
+                object_target_key,
+                self._unsupported_call_effect_object_key(
+                    peer_site,
+                    analysis=peer_analysis,
+                    side_label=peer_label,
+                ),
+            )
+        ]
+        if len(matches) != 1:
+            return reject(
+                "peer unsupported call effect match count is "
+                f"{len(matches)}"
+            )
+        peer_object_target_key = self._normalize_nested_tuple(matches[0])
+        target_expression_key = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_target_expression_key(object_target_key)
+        )
+        if not self._call_effect_target_expression_key_is_present(target_expression_key):
+            return reject("missing local target expression key")
+        argument_keys = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_argument_keys(object_target_key)
+        )
+        return {
+            "object_derived": True,
+            "status": "complete",
+            "proof_rule": "matched_unknown_indirect_no_store_call_effect",
+            "object_target_key": object_target_key,
+            "peer_object_target_key": peer_object_target_key,
+            "call_effect_summary": {
+                "status": "complete",
+                "summary_source": ("effect_summary", "unsupported_call_effect"),
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "peer_object_target_key": peer_object_target_key,
+                "unsupported_reason": "target_identity_unavailable",
+                "local_store_effect_count": 0,
+                "unsupported_call_site_count": len(
+                    tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
+                ),
+                "peer_unsupported_call_site_count": len(
+                    tuple(getattr(peer_summary, "unsupported_call_sites", ()) or ())
+                ),
+                "matching_local_unsupported_call_site_count": len(local_matches),
+                "matching_peer_unsupported_call_site_count": len(matches),
+            },
+            "runtime_ref": {
+                "status": "complete",
+                "runtime_ref": object_target_key[3],
+                "peer_runtime_ref": peer_object_target_key[3],
+                "matched_target_expression_key": target_expression_key,
+            },
+            "callsite_storage": {
+                "status": "complete",
+                "callsite_storage": object_target_key[4],
+                "peer_callsite_storage": peer_object_target_key[4],
+                "matched_argument_keys": argument_keys,
+            },
+        }
+
+    def _unsupported_call_effects_semantically_match(
+        self,
+        object_target_key: Any,
+        peer_object_target_key: Any,
+    ) -> bool:
+        left = self._normalize_nested_tuple(object_target_key)
+        right = self._normalize_nested_tuple(peer_object_target_key)
+        if not (
+            isinstance(left, tuple)
+            and isinstance(right, tuple)
+            and len(left) >= 7
+            and len(right) >= 7
+            and left[0] == right[0] == "unsupported_call_effect"
+            and left[-1] == right[-1] == "target_identity_unavailable"
+        ):
+            return False
+        left_target = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_target_expression_key(left)
+        )
+        right_target = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_target_expression_key(right)
+        )
+        if not (
+            self._call_effect_target_expression_key_is_present(left_target)
+            and self._call_effect_target_expression_key_is_present(right_target)
+        ):
+            return False
+        return (
+            left_target == right_target
+            and self._cross_binary_call_effect_component_key(
+                self._unsupported_call_effect_argument_keys(left)
+            )
+            == self._cross_binary_call_effect_component_key(
+                self._unsupported_call_effect_argument_keys(right)
+            )
+        )
+
+    @classmethod
+    def _unsupported_call_effect_target_expression_key(cls, object_target_key: Any) -> Any:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5:
+            return None
+        callsite_storage = target[4]
+        if isinstance(callsite_storage, tuple):
+            for item in callsite_storage:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "target_expression":
+                    return item[1]
+        runtime_ref = target[3]
+        if isinstance(runtime_ref, tuple):
+            for item in runtime_ref:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "typed_target_expression":
+                    return item[1]
+        return None
+
+    @classmethod
+    def _call_effect_target_expression_key_is_present(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if normalized is None:
+            return False
+        if normalized == ():
+            return False
+        if isinstance(normalized, str):
+            return normalized not in {"", "<missing>", "missing", "none", "None"}
+        if isinstance(normalized, tuple):
+            if not normalized:
+                return False
+            first = normalized[0]
+            if cls._atom_str_is(first, "<missing>") or cls._atom_str_is(first, "missing"):
+                return False
+            return True
+        return True
+
+    @classmethod
+    def _unsupported_call_effect_argument_keys(cls, object_target_key: Any) -> Tuple[Any, ...]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5:
+            return ()
+        callsite_storage = target[4]
+        if isinstance(callsite_storage, tuple):
+            for item in callsite_storage:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "argument_keys":
+                    value = cls._normalize_nested_tuple(item[1])
+                    return value if isinstance(value, tuple) else ()
+        runtime_ref = target[3]
+        if isinstance(runtime_ref, tuple):
+            for item in runtime_ref:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "argument_keys":
+                    value = cls._normalize_nested_tuple(item[1])
+                    return value if isinstance(value, tuple) else ()
+        return ()
+
+    @classmethod
+    def _cross_binary_call_effect_component_key(cls, value: Any) -> Any:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if normalized and normalized[0] == "parameter" and len(normalized) >= 4:
+                if (
+                    isinstance(normalized[2], tuple)
+                    and len(normalized[2]) == 2
+                    and normalized[2][0] == "int"
+                ):
+                    return ("parameter", normalized[2][1])
+                return ("parameter", normalized[-1])
+            if (
+                len(normalized) == 2
+                and normalized[0] == "tuple"
+                and isinstance(normalized[1], tuple)
+                and normalized[1]
+                and cls._atom_str_is(normalized[1][0], "parameter")
+                and len(normalized[1]) >= 4
+            ):
+                return ("tuple", (normalized[1][0], normalized[1][-1]))
+            if (
+                len(normalized) == 2
+                and normalized[0] == "tuple"
+                and isinstance(normalized[1], tuple)
+                and normalized[1]
+                and cls._atom_str_is(normalized[1][0], "unknown")
+                and len(normalized[1]) >= 2
+            ):
+                return ("tuple", (normalized[1][0], *normalized[1][2:]))
+            return tuple(cls._cross_binary_call_effect_component_key(item) for item in normalized)
+        return normalized
 
     @classmethod
     def _call_target_is_analysis_entry(
@@ -585,6 +867,9 @@ class CheckStrategy(ABC):
                     "analysis_key": object_target_key[2],
                     "runtime_ref": object_target_key[3],
                     "callsite_storage": object_target_key[4],
+                    "argument_storage": (
+                        self._unsupported_call_effect_argument_keys(object_target_key)
+                    ),
                     "effect_ordinal": object_target_key[5],
                     "unsupported_reason": object_target_key[6],
                     "call_effect_summary_status": object_target_key[6],
@@ -844,7 +1129,10 @@ class CheckStrategy(ABC):
         proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
         if proof_obligation_id is None:
             return False
-        return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
+        return proof_obligation_id in self._completed_call_effect_summary_proof_ids(
+            analysis1,
+            analysis2,
+        )
 
     def _return_coverage_proof_is_complete(
         self,
@@ -983,6 +1271,20 @@ class CheckStrategy(ABC):
         return tuple(proof_ids)
 
     @classmethod
+    def _completed_call_effect_summary_proof_ids(
+        cls,
+        *analyses: FunctionReturnAnalysis,
+    ) -> Tuple[Tuple[Any, ...], ...]:
+        proof_ids: List[Tuple[Any, ...]] = []
+        for analysis in analyses:
+            evidence_records = getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            for evidence in evidence_records:
+                proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
+                if proof_id is not None:
+                    proof_ids.append(proof_id)
+        return tuple(proof_ids)
+
+    @classmethod
     def _call_effect_summary_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
         if not cls._evidence_bool(evidence, "object_derived"):
             return None
@@ -1078,6 +1380,14 @@ class CheckStrategy(ABC):
             expected_callsite_storage,
         ):
             return False
+        if (
+            str(object_target_key[0]) == "unsupported_call_effect"
+            and not cls._unsupported_call_effect_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            )
+        ):
+            return False
         return True
 
     @classmethod
@@ -1132,7 +1442,101 @@ class CheckStrategy(ABC):
             if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
                 return None
             return runtime_ref, callsite_storage
+        if target_kind == "unsupported_call_effect":
+            if len(object_target_key) < 5:
+                return None
+            runtime_ref = cls._normalize_nested_tuple(object_target_key[3])
+            callsite_storage = cls._normalize_nested_tuple(object_target_key[4])
+            if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
+                return None
+            return runtime_ref, callsite_storage
         return None
+
+    @classmethod
+    def _unsupported_call_effect_proof_content_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        proof_rule = cls._evidence_text(proof_content, "proof_rule")
+        if proof_rule == "self_recursive_no_store_effect_summary":
+            call_effect_summary = proof_content.get("call_effect_summary")
+            if not isinstance(call_effect_summary, Mapping):
+                return False
+            if call_effect_summary.get("unsupported_reason") != "callee_effect_summary_missing":
+                return False
+            if call_effect_summary.get("local_store_effect_count") != 0:
+                return False
+            if proof_content.get("local_store_effect_count") != 0:
+                return False
+            if proof_content.get("recursive_call_effect") != "no_memory_effects_by_induction":
+                return False
+            return True
+        if proof_rule != "matched_unknown_indirect_no_store_call_effect":
+            return False
+        peer_object_target_key = cls._normalize_nested_tuple(
+            proof_content.get("peer_object_target_key")
+        )
+        if not (
+            isinstance(peer_object_target_key, tuple)
+            and len(peer_object_target_key) >= 7
+            and peer_object_target_key[0] == "unsupported_call_effect"
+            and peer_object_target_key[-1] == "target_identity_unavailable"
+        ):
+            return False
+        call_effect_summary = proof_content.get("call_effect_summary")
+        if not isinstance(call_effect_summary, Mapping):
+            return False
+        if cls._normalize_nested_tuple(
+            call_effect_summary.get("peer_object_target_key")
+        ) != peer_object_target_key:
+            return False
+        if call_effect_summary.get("unsupported_reason") != "target_identity_unavailable":
+            return False
+        if call_effect_summary.get("local_store_effect_count") != 0:
+            return False
+        if call_effect_summary.get("matching_local_unsupported_call_site_count") != 1:
+            return False
+        if call_effect_summary.get("matching_peer_unsupported_call_site_count") != 1:
+            return False
+        runtime_ref = proof_content.get("runtime_ref")
+        callsite_storage = proof_content.get("callsite_storage")
+        if not isinstance(runtime_ref, Mapping) or not isinstance(callsite_storage, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(runtime_ref):
+            return False
+        if not cls._completed_proof_section_is_clean(callsite_storage):
+            return False
+        if cls._normalize_nested_tuple(runtime_ref.get("peer_runtime_ref")) != peer_object_target_key[3]:
+            return False
+        if cls._normalize_nested_tuple(callsite_storage.get("peer_callsite_storage")) != peer_object_target_key[4]:
+            return False
+        target_expression_key = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_target_expression_key(object_target_key)
+        )
+        peer_target_expression_key = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_target_expression_key(peer_object_target_key)
+        )
+        if not (
+            cls._call_effect_target_expression_key_is_present(target_expression_key)
+            and cls._call_effect_target_expression_key_is_present(peer_target_expression_key)
+        ):
+            return False
+        argument_keys = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_argument_keys(object_target_key)
+        )
+        peer_argument_keys = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_argument_keys(peer_object_target_key)
+        )
+        if target_expression_key != peer_target_expression_key:
+            return False
+        if argument_keys != peer_argument_keys:
+            return False
+        if cls._normalize_nested_tuple(runtime_ref.get("matched_target_expression_key")) != target_expression_key:
+            return False
+        if cls._normalize_nested_tuple(callsite_storage.get("matched_argument_keys")) != argument_keys:
+            return False
+        return True
 
     @classmethod
     def _proof_section_payload_matches(
@@ -2204,6 +2608,14 @@ class CheckStrategy(ABC):
         pcode_key = self._stable_key_or_none(getattr(site, "pcode_op_ref", None))
         target_key = self._call_target_key_for_analysis(getattr(site, "target_ref", None), analysis)
         target_expr_key = self._typed_target_expression_key(getattr(site, "target_expr", None))
+        argument_keys = tuple(
+            (
+                "argument",
+                index,
+                self._expression_runtime_object_key(argument),
+            )
+            for index, argument in enumerate(getattr(site, "arguments", ()) or ())
+        )
         callee_identity_key = self._call_effect_callee_identity_key(
             target_key,
             target_expr_key,
@@ -2220,12 +2632,14 @@ class CheckStrategy(ABC):
                 ("pcode_op_ref", pcode_key),
                 ("callee_identity", callee_identity_key),
                 ("typed_target_expression", target_expr_key),
+                ("argument_keys", argument_keys),
             ),
             (
                 "callsite_storage",
                 ("pcode_op_ref", pcode_key),
                 ("callee_identity", callee_identity_key),
                 ("target_expression", target_expr_key),
+                ("argument_keys", argument_keys),
             ),
             ("effect_ordinal", effect_ordinal),
             getattr(site, "reason", None),

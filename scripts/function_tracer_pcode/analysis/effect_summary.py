@@ -65,6 +65,7 @@ class UnsupportedCallEffectRef:
     reason: str
     order_key: int
     target_expr: Optional[Expression] = None
+    arguments: Tuple[Expression, ...] = ()
 
     @classmethod
     def from_call_op(
@@ -73,6 +74,7 @@ class UnsupportedCallEffectRef:
         *,
         target_ref: Optional[CallTargetRef],
         target_expr: Optional[Expression] = None,
+        arguments: Sequence[Expression] = (),
         reason: str,
         pcode_op_ref: Optional[PcodeOpRef] = None,
     ) -> "UnsupportedCallEffectRef":
@@ -80,6 +82,7 @@ class UnsupportedCallEffectRef:
             pcode_op_ref=pcode_op_ref if pcode_op_ref is not None else PcodeOpRef.from_pcode_op(op),
             target_ref=target_ref,
             target_expr=target_expr,
+            arguments=tuple(arguments or ()),
             reason=str(reason),
             order_key=_try_get_order_key(op, default=_UNKNOWN_EFFECT_ORDER_KEY),
         )
@@ -92,6 +95,14 @@ class UnsupportedCallEffectRef:
             self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
             target_key,
             target_expr_key,
+            tuple(
+                (
+                    "argument",
+                    index,
+                    expression_provenance_key(argument),
+                )
+                for index, argument in enumerate(self.arguments or ())
+            ),
             int(self.order_key),
         )
 
@@ -101,6 +112,7 @@ class UnsupportedCallEffectRef:
             "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
             "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
             "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
+            "arguments": [argument.to_dict() for argument in self.arguments or ()],
             "reason": self.reason,
             "order_key": int(self.order_key),
         }
@@ -887,6 +899,7 @@ def summarize_store_effects(
         *,
         target_ref: Optional[CallTargetRef],
         target_expr: Optional[Expression],
+        arguments: Sequence[Expression] = (),
         reason: str,
     ) -> UnsupportedCallEffectRef:
         pcode_op_ref = None
@@ -900,6 +913,7 @@ def summarize_store_effects(
             op,
             target_ref=target_ref,
             target_expr=target_expr,
+            arguments=arguments,
             reason=reason,
             pcode_op_ref=pcode_op_ref,
         )
@@ -1001,6 +1015,7 @@ def summarize_store_effects(
                             op,
                             target_ref=None,
                             target_expr=target_expr,
+                            arguments=explicit_args,
                             reason="target_identity_unavailable",
                         )
                     )
@@ -1030,6 +1045,7 @@ def summarize_store_effects(
                                 op,
                                 target_ref=target_ref,
                                 target_expr=target_expr,
+                                arguments=explicit_args,
                                 reason="target_identity_unavailable",
                             )
                         )
@@ -1132,6 +1148,7 @@ def summarize_store_effects(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,
+                                    arguments=variant_args,
                                     reason="callee_effect_summary_missing",
                                 )
                             )
@@ -1152,6 +1169,7 @@ def summarize_store_effects(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,
+                                    arguments=variant_args,
                                     reason="call_argument_width_unsafe_for_effect_summary",
                                 )
                             )
@@ -1169,6 +1187,7 @@ def summarize_store_effects(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,
+                                    arguments=variant_args,
                                     reason="callee_effect_summary_incomplete",
                                 )
                             )
@@ -1191,6 +1210,7 @@ def summarize_store_effects(
                                             op,
                                             target_ref=target_ref,
                                             target_expr=target_expr,
+                                            arguments=variant_args,
                                             reason="callee_unsupported_call_may_expose_parameter_memory",
                                         )
                                     )
@@ -1213,6 +1233,7 @@ def summarize_store_effects(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,
+                                    arguments=variant_args,
                                     reason="callee_effect_summary_not_allowed",
                                 )
                             )
@@ -1238,6 +1259,7 @@ def summarize_store_effects(
                                         op,
                                         target_ref=target_ref,
                                         target_expr=target_expr,
+                                        arguments=variant_args,
                                         reason="substituted_effect_location_unavailable",
                                     )
                                 )
@@ -1297,6 +1319,7 @@ def summarize_store_effects(
                             op,
                             target_ref=None,
                             target_expr=target_expr,
+                            arguments=explicit_args,
                             reason="target_identity_unavailable",
                         )
                     )
