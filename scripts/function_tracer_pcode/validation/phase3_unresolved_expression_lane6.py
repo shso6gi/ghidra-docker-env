@@ -1007,19 +1007,70 @@ def _unresolved_location_is_specific(value: Any) -> bool:
         return False
     if location[1] == "return_value":
         return (
-            len(location) == 4
+            len(location) in {4, 5}
             and _unresolved_location_classification_is_specific(location[2], "return_value")
             and _expression_provenance_is_specific(location[3])
+            and (
+                len(location) == 4
+                or _typed_lowering_evidence_is_specific(location[4], "return_value")
+            )
         )
     if location[1] == "guard_condition":
         return (
-            len(location) == 6
+            len(location) in {6, 7}
             and _nonnegative_int_like(location[2])
             and isinstance(location[3], bool)
             and _unresolved_location_classification_is_specific(location[4], "guard_condition")
             and _return_guard_like_key_is_specific(location[5])
+            and (
+                len(location) == 6
+                or _typed_lowering_evidence_is_specific(location[6], "guard_condition")
+            )
         )
     return False
+
+
+def _typed_lowering_evidence_is_specific(value: Any, expected_scope: str) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or len(evidence) != 7:
+        return False
+    if evidence[0] != "typed_lowering_evidence":
+        return False
+    scope = evidence[1]
+    expression_kind = evidence[2]
+    expression_bits = evidence[3]
+    typed_expression_key = evidence[4]
+    unsupported = evidence[5]
+    lowering_status = evidence[6]
+    return (
+        isinstance(scope, tuple)
+        and len(scope) == 2
+        and scope == ("location_scope", expected_scope)
+        and isinstance(expression_kind, tuple)
+        and len(expression_kind) == 2
+        and expression_kind[0] == "expression_kind"
+        and _text_identity_is_specific(expression_kind[1])
+        and isinstance(expression_bits, tuple)
+        and len(expression_bits) == 2
+        and expression_bits[0] == "expression_bits"
+        and _nonnegative_int_like(expression_bits[1])
+        and isinstance(typed_expression_key, tuple)
+        and len(typed_expression_key) == 2
+        and typed_expression_key[0] == "typed_expression_key"
+        and _expression_provenance_is_specific(typed_expression_key[1])
+        and isinstance(unsupported, tuple)
+        and len(unsupported) == 2
+        and unsupported[0] == "contains_unsupported_smt_ops"
+        and unsupported[1] in {True, False}
+        and isinstance(lowering_status, tuple)
+        and len(lowering_status) == 2
+        and lowering_status[0] == "lowering_status"
+        and lowering_status[1] in {
+            "blocked_unknown_expression",
+            "blocked_unsupported_smt_op",
+            "blocked_nested_unresolved_expression",
+        }
+    )
 
 
 def _unresolved_location_classification_is_specific(value: Any, expected_scope: str) -> bool:

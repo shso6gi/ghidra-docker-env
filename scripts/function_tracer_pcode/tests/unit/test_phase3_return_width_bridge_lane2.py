@@ -85,6 +85,31 @@ def _return_case_partition_member(
     ]
 
 
+def _return_value_width(*, return_width: int, producer_width: int = None, signed: bool = False):
+    if producer_width is None:
+        producer_width = return_width
+    if producer_width < return_width:
+        relation = "producer_narrower_than_return_width"
+        policy = "sign_extend" if signed else "zero_extend"
+    elif producer_width > return_width:
+        relation = "producer_wider_than_return_width"
+        policy = "truncate"
+    else:
+        relation = "producer_matches_return_width"
+        policy = "none"
+    return [
+        "return_value_width",
+        producer_width,
+        return_width,
+        signed,
+        ["value", ["expression", ["const", ["int", 1], producer_width // 8]]],
+        relation,
+        policy,
+        ["expression_bits", producer_width],
+        ["return_pcode_value_input_bits", producer_width],
+    ]
+
+
 def _sha256_path(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -119,6 +144,7 @@ def _target(label: str = "case0"):
                 address="00100fe4",
                 return_width=32,
             ),
+            _return_value_width(return_width=32, signed=True),
         ],
         [
             "return_width_side",
@@ -133,6 +159,7 @@ def _target(label: str = "case0"):
                 address="120001fc8",
                 return_width=64,
             ),
+            _return_value_width(return_width=64, producer_width=64, signed=True),
         ],
     ]
 
@@ -168,6 +195,13 @@ def _weak_target_with_return_case_only(label: str = "case0"):
 def _target_with_return_size_mismatch(label: str = "case0"):
     target = json.loads(json.dumps(_target(label)))
     target[3][3] = ["return_size", 64]
+    return target
+
+
+def _target_without_return_value_width(label: str = "case0"):
+    target = json.loads(json.dumps(_target(label)))
+    target[3] = target[3][:-1]
+    target[4] = target[4][:-1]
     return target
 
 
@@ -290,6 +324,7 @@ def _completed_proof_content(action):
             },
         }
     if action["proof_kind"] == "high_bit_proof":
+        value_width_evidence = ["return_value_width_evidence", left[-1], right[-1]]
         return {
             "object_derived": True,
             "status": "proven",
@@ -299,12 +334,13 @@ def _completed_proof_content(action):
                 "status": "proven",
                 "left_width": widths[1],
                 "right_width": widths[2],
+                "value_width_evidence": value_width_evidence,
             },
             "extension_semantics": {
                 "object_derived": True,
                 "status": "proven",
-                "left_extension": "narrow_return",
-                "right_extension": "abi_return_extension",
+                "left_extension": left[-1][6],
+                "right_extension": right[-1][6],
                 "relation": "compatible_under_narrow_width",
             },
             "high_bits_irrelevant_or_equal": {
@@ -495,6 +531,22 @@ def test_return_width_bridge_completed_evidence_rejects_missing_high_bit_query_s
     for record in evidence:
         if record["proof_kind"] == "high_bit_proof":
             record["proof_content"]["high_bits_irrelevant_or_equal"].pop("query_stage")
+
+    accepted = [
+        record
+        for record in evidence
+        if CheckStrategy._return_width_bridge_proof_id_from_evidence(record) is not None
+    ]
+
+    assert {record["proof_kind"] for record in accepted} == {"abi_relation_proof"}
+
+
+def test_return_width_bridge_completed_evidence_rejects_missing_value_width_evidence():
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([_width_reason(_target())])]
+    evidence = [record["evidence"] for record in _completed_evidence(actions)]
+    for record in evidence:
+        if record["proof_kind"] == "high_bit_proof":
+            record["proof_content"]["producer_width"].pop("value_width_evidence")
 
     accepted = [
         record
@@ -777,6 +829,24 @@ def test_phase3_return_width_bridge_lane2_manifest_rejects_side_return_size_mism
     manifest = json.loads(pre_fix_path.read_text())
     assert manifest["phase3_lane2_ready"] is False
     assert "return_width_bridge_current_targets_present" in manifest["readiness"]["failure_kinds"]
+
+
+def test_phase3_return_width_bridge_lane2_manifest_accepts_legacy_target_without_return_value_width(tmp_path):
+    reason = _width_reason(_target_without_return_value_width())
+    raw_dir, baseline_root, current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[reason]),
+    )
+
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    manifest = json.loads(pre_fix_path.read_text())
+    assert manifest["phase3_lane2_ready"] is True
+    assert "return_width_bridge_current_targets_present" not in manifest["readiness"]["failure_kinds"]
 
 
 @pytest.mark.parametrize(
@@ -1246,6 +1316,8 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_missing_requi
         "missing_calling_convention_status",
         "bogus_extension_relation",
         "missing_extension_status",
+        "wrong_extension_policy",
+        "missing_value_width_evidence",
         "bogus_high_bit_proof_label",
         "missing_high_bit_query_stage",
         "nested_high_bit_active_blocker",
@@ -1308,6 +1380,18 @@ def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_bogus_proof_c
             evidence = record["evidence"]
             if evidence["proof_kind"] == "high_bit_proof":
                 evidence["proof_content"]["extension_semantics"].pop("status")
+    elif mutation == "wrong_extension_policy":
+        for record in completed_evidence:
+            evidence = record["evidence"]
+            if evidence["proof_kind"] == "high_bit_proof":
+                evidence["proof_content"]["extension_semantics"]["right_extension"] = (
+                    "sign_extend"
+                )
+    elif mutation == "missing_value_width_evidence":
+        for record in completed_evidence:
+            evidence = record["evidence"]
+            if evidence["proof_kind"] == "high_bit_proof":
+                evidence["proof_content"]["producer_width"].pop("value_width_evidence")
     elif mutation == "nested_high_bit_active_blocker":
         for record in completed_evidence:
             evidence = record["evidence"]

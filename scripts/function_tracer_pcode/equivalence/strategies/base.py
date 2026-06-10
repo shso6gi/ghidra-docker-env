@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ...model import Condition, Expression, FunctionReturnAnalysis, expression_provenance_key
 from ...model import ExpressionType
-from ...model.render_smt import expression_contains_unsupported_smt_ops
+from ...model.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from ...smt import ParallelResult
 from ..unknown_reason import (
     UnknownRecoveryActionStatus,
@@ -2170,6 +2170,9 @@ class CheckStrategy(ABC):
         if widths is None or left is None or right is None:
             return None
         wide_width = max(widths)
+        value_width_evidence = cls._return_width_bridge_value_width_evidence(object_target_key)
+        left_extension_policy = cls._return_width_bridge_extension_policy_for_side(left)
+        right_extension_policy = cls._return_width_bridge_extension_policy_for_side(right)
         if proof_kind == "abi_relation_proof":
             return {
                 "object_derived": True,
@@ -2197,6 +2200,8 @@ class CheckStrategy(ABC):
                 },
             }
         if proof_kind == "high_bit_proof":
+            if value_width_evidence is None or left_extension_policy is None or right_extension_policy is None:
+                return None
             return {
                 "object_derived": True,
                 "status": "proven",
@@ -2206,12 +2211,13 @@ class CheckStrategy(ABC):
                     "status": "proven",
                     "left_width": widths[0],
                     "right_width": widths[1],
+                    "value_width_evidence": value_width_evidence,
                 },
                 "extension_semantics": {
                     "object_derived": True,
                     "status": "proven",
-                    "left_extension": "narrow_return",
-                    "right_extension": "abi_return_extension",
+                    "left_extension": left_extension_policy,
+                    "right_extension": right_extension_policy,
                     "relation": "compatible_under_narrow_width",
                 },
                 "high_bits_irrelevant_or_equal": {
@@ -2288,20 +2294,33 @@ class CheckStrategy(ABC):
         producer_width = content.get("producer_width")
         extension_semantics = content.get("extension_semantics")
         high_bits = content.get("high_bits_irrelevant_or_equal")
+        value_width_evidence = cls._return_width_bridge_value_width_evidence(object_target_key)
+        if value_width_evidence is None:
+            return False
+        left_policy = cls._return_width_bridge_extension_policy_for_side(
+            cls._return_width_bridge_find_side(object_target_key, "left")
+        )
+        right_policy = cls._return_width_bridge_extension_policy_for_side(
+            cls._return_width_bridge_find_side(object_target_key, "right")
+        )
+        if left_policy is None or right_policy is None:
+            return False
         if not (
             isinstance(producer_width, Mapping)
             and producer_width.get("object_derived") is True
             and producer_width.get("status") == "proven"
             and producer_width.get("left_width") == widths[0]
             and producer_width.get("right_width") == widths[1]
+            and cls._normalize_nested_tuple(producer_width.get("value_width_evidence"))
+            == value_width_evidence
         ):
             return False
         if not (
             isinstance(extension_semantics, Mapping)
             and extension_semantics.get("object_derived") is True
             and extension_semantics.get("status") == "proven"
-            and extension_semantics.get("left_extension")
-            and extension_semantics.get("right_extension")
+            and extension_semantics.get("left_extension") == left_policy
+            and extension_semantics.get("right_extension") == right_policy
             and extension_semantics.get("relation") == "compatible_under_narrow_width"
         ):
             return False
@@ -2370,7 +2389,104 @@ class CheckStrategy(ABC):
         if not isinstance(partition_member, tuple) or len(partition_member) < 6:
             return False
         value_entry = cls._return_width_bridge_find_tagged_entry(partition_member, "value")
-        return isinstance(value_entry, tuple) and bool(value_entry)
+        value_width = cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        return (
+            isinstance(value_entry, tuple)
+            and bool(value_entry)
+            and cls._return_width_bridge_return_value_width_entry_is_specific(
+                value_width,
+                expected_return_width=expected_width,
+            )
+        )
+
+    @classmethod
+    def _return_width_bridge_return_value_width_entry_is_specific(
+        cls,
+        entry: Any,
+        *,
+        expected_return_width: int,
+    ) -> bool:
+        width_entry = cls._normalize_nested_tuple(entry)
+        if not isinstance(width_entry, tuple) or len(width_entry) < 6:
+            return False
+        if width_entry[0] != "return_value_width":
+            return False
+        if not cls._positive_int_like(width_entry[1]):
+            return False
+        if not cls._positive_int_like(width_entry[2]):
+            return False
+        if int(width_entry[2]) != int(expected_return_width):
+            return False
+        if width_entry[3] not in {True, False}:
+            return False
+        if not isinstance(width_entry[4], tuple) or not width_entry[4]:
+            return False
+        if width_entry[5] not in {
+            "producer_matches_return_width",
+            "producer_narrower_than_return_width",
+            "producer_wider_than_return_width",
+        }:
+            return False
+        if len(width_entry) >= 7 and width_entry[6] not in {
+            "none",
+            "sign_extend",
+            "zero_extend",
+            "truncate",
+        }:
+            return False
+        return True
+
+    @staticmethod
+    def _positive_int_like(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            return int(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _return_width_bridge_value_width_evidence(
+        cls,
+        object_target_key: Any,
+    ) -> Optional[Tuple[Any, ...]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        left = cls._return_width_bridge_find_side(target, "left")
+        right = cls._return_width_bridge_find_side(target, "right")
+        if left is None or right is None:
+            return None
+        left_width = cls._return_width_bridge_find_tagged_entry(left, "return_value_width")
+        right_width = cls._return_width_bridge_find_tagged_entry(right, "return_value_width")
+        left_return_size = cls._return_width_bridge_find_tagged_entry(left, "return_size")
+        right_return_size = cls._return_width_bridge_find_tagged_entry(right, "return_size")
+        if (
+            not isinstance(left_return_size, tuple)
+            or len(left_return_size) != 2
+            or not isinstance(right_return_size, tuple)
+            or len(right_return_size) != 2
+        ):
+            return None
+        if not (
+            cls._return_width_bridge_return_value_width_entry_is_specific(
+                left_width,
+                expected_return_width=left_return_size[1],
+            )
+            and cls._return_width_bridge_return_value_width_entry_is_specific(
+                right_width,
+                expected_return_width=right_return_size[1],
+            )
+        ):
+            return None
+        return ("return_value_width_evidence", left_width, right_width)
+
+    @classmethod
+    def _return_width_bridge_extension_policy_for_side(cls, side: Any) -> Optional[str]:
+        width_entry = cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        normalized = cls._normalize_nested_tuple(width_entry)
+        if not isinstance(normalized, tuple) or len(normalized) < 7:
+            return None
+        policy = normalized[6]
+        return str(policy) if policy in {"none", "sign_extend", "zero_extend", "truncate"} else None
 
     @classmethod
     def _return_width_bridge_target_widths(cls, object_target_key: Any) -> Optional[Tuple[int, int]]:
@@ -2998,7 +3114,80 @@ class CheckStrategy(ABC):
             ("return_size", return_size),
             self._return_storage_object_key(analysis) if analysis is not None else None,
             self._return_case_partition_member_object_key(case, return_info),
+            self._return_width_bridge_return_value_width_object_key(
+                case,
+                return_info,
+                return_size,
+            ),
         )
+
+    def _return_width_bridge_return_value_width_object_key(
+        self,
+        case: Any,
+        return_info: Any,
+        return_size: Optional[int],
+    ) -> Tuple[Any, ...]:
+        value_expr = getattr(case, "value_expr", None)
+        expression_bits = self._expression_smt_bit_width_for_object_key(value_expr)
+        pcode_op_ref = getattr(return_info, "pcode_op_ref", None)
+        pcode_input_bits = self._return_pcode_value_input_width_bits(pcode_op_ref)
+        producer_bits = self._coerce_return_width(expression_bits, pcode_input_bits)
+        return_bits = self._coerce_return_width(return_size)
+        use_sign_extension = bool(
+            getattr(case, "should_sign_extend_value", lambda: False)()
+        )
+        relation = "producer_matches_return_width"
+        policy = "none"
+        if producer_bits is not None and return_bits is not None:
+            if producer_bits < return_bits:
+                relation = "producer_narrower_than_return_width"
+                policy = "sign_extend" if use_sign_extension else "zero_extend"
+            elif producer_bits > return_bits:
+                relation = "producer_wider_than_return_width"
+                policy = "truncate"
+        return (
+            "return_value_width",
+            producer_bits,
+            return_bits,
+            use_sign_extension,
+            ("value", self._expression_runtime_object_key(value_expr)),
+            relation,
+            policy,
+            ("expression_bits", expression_bits),
+            ("return_pcode_value_input_bits", pcode_input_bits),
+        )
+
+    @staticmethod
+    def _expression_smt_bit_width_for_object_key(expr: Any) -> Optional[int]:
+        if expr is None:
+            return None
+        try:
+            bits = int(expression_smt_bit_width(expr) or 0)
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            bits = 0
+        if bits <= 0:
+            try:
+                bits = int(getattr(expr, "get_bit_width", lambda: 0)() or 0)
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                bits = 0
+        return bits if bits > 0 else None
+
+    @staticmethod
+    def _return_pcode_value_input_width_bits(pcode_op_ref: Any) -> Optional[int]:
+        input_sizes = getattr(pcode_op_ref, "input_sizes", None) or ()
+        if not input_sizes:
+            return None
+        candidates = []
+        for size in input_sizes:
+            try:
+                int_size = int(size)
+            except (TypeError, ValueError):
+                continue
+            if int_size > 0:
+                candidates.append(int_size)
+        if not candidates:
+            return None
+        return max(1, candidates[-1]) * 8
 
     def _solver_timeout_object_target_key(
         self,

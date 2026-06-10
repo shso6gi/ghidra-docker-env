@@ -1192,7 +1192,7 @@ def _high_bit_proof_content_is_specific(content: Mapping[str, Any], object_targe
     target = _normalize_nested_tuple(object_target_key)
     return (
         _producer_width_evidence_is_specific(content.get("producer_width"), target)
-        and _extension_semantics_evidence_is_specific(content.get("extension_semantics"))
+        and _extension_semantics_evidence_is_specific(content.get("extension_semantics"), target)
         and _high_bits_evidence_is_specific(
             content.get("high_bits_irrelevant_or_equal"),
             target,
@@ -1240,26 +1240,76 @@ def _narrow_return_width_evidence_is_specific(value: Any, target: tuple) -> bool
 
 def _producer_width_evidence_is_specific(value: Any, target: tuple) -> bool:
     widths = _find_tagged_entry(target, "return_widths")
+    value_width_evidence = _return_width_bridge_value_width_evidence(target)
     if not (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
         and value.get("status") == "proven"
         and isinstance(widths, tuple)
         and len(widths) == 3
+        and value_width_evidence is not None
     ):
         return False
-    return value.get("left_width") == widths[1] and value.get("right_width") == widths[2]
+    return (
+        value.get("left_width") == widths[1]
+        and value.get("right_width") == widths[2]
+        and _normalize_nested_tuple(value.get("value_width_evidence")) == value_width_evidence
+    )
 
 
-def _extension_semantics_evidence_is_specific(value: Any) -> bool:
+def _extension_semantics_evidence_is_specific(value: Any, target: tuple) -> bool:
+    left_policy = _return_width_bridge_extension_policy_for_side(
+        _find_width_side(target, "left")
+    )
+    right_policy = _return_width_bridge_extension_policy_for_side(
+        _find_width_side(target, "right")
+    )
     return (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
         and value.get("status") == "proven"
-        and _text_identity_is_specific(value.get("left_extension"))
-        and _text_identity_is_specific(value.get("right_extension"))
+        and left_policy is not None
+        and right_policy is not None
+        and value.get("left_extension") == left_policy
+        and value.get("right_extension") == right_policy
         and value.get("relation") in HIGH_BIT_EXTENSION_RELATIONS
     )
+
+
+def _return_width_bridge_value_width_evidence(target: tuple) -> Optional[tuple]:
+    left = _find_width_side(target, "left")
+    right = _find_width_side(target, "right")
+    if not isinstance(left, tuple) or not isinstance(right, tuple):
+        return None
+    left_return_size = _find_tagged_entry(left, "return_size")
+    right_return_size = _find_tagged_entry(right, "return_size")
+    left_width = _find_tagged_entry(left, "return_value_width")
+    right_width = _find_tagged_entry(right, "return_value_width")
+    if not (
+        isinstance(left_return_size, tuple)
+        and len(left_return_size) == 2
+        and isinstance(right_return_size, tuple)
+        and len(right_return_size) == 2
+        and _return_value_width_is_specific(left_width, left_return_size[1])
+        and _return_value_width_is_specific(right_width, right_return_size[1])
+    ):
+        return None
+    return ("return_value_width_evidence", left_width, right_width)
+
+
+def _return_width_bridge_extension_policy_for_side(side: Any) -> Optional[str]:
+    if not isinstance(side, tuple):
+        return None
+    width = _find_tagged_entry(side, "return_value_width")
+    return_size = _find_tagged_entry(side, "return_size")
+    if not (
+        isinstance(return_size, tuple)
+        and len(return_size) == 2
+        and _return_value_width_is_specific(width, return_size[1])
+    ):
+        return None
+    policy = _normalize_nested_tuple(width)[6]
+    return str(policy) if policy in {"none", "sign_extend", "zero_extend", "truncate"} else None
 
 
 def _high_bits_evidence_is_specific(value: Any, target: tuple) -> bool:
@@ -1435,6 +1485,7 @@ def _width_side_is_specific(value: Any, expected_return_size: int) -> bool:
     return_size = _find_tagged_entry(value, "return_size")
     return_storage = _find_tagged_entry(value, "return_storage")
     return_case = _find_tagged_entry(value, "return_case_partition_member")
+    return_value_width = _find_tagged_entry(value, "return_value_width")
     return (
         isinstance(function_ref, tuple)
         and len(function_ref) >= 2
@@ -1447,7 +1498,34 @@ def _width_side_is_specific(value: Any, expected_return_size: int) -> bool:
         and return_storage[1] not in {None, "", MISSING_SENTINEL}
         and return_storage[2] == expected_return_size
         and _return_case_partition_member_is_specific(return_case, expected_return_size)
+        and (
+            return_value_width is None
+            or _return_value_width_is_specific(return_value_width, expected_return_size)
+        )
     )
+
+
+def _return_value_width_is_specific(value: Any, expected_return_size: int) -> bool:
+    width = _normalize_nested_tuple(value)
+    if not isinstance(width, tuple) or len(width) < 7 or width[0] != "return_value_width":
+        return False
+    if not (_is_positive_int(width[1]) and _is_positive_int(width[2])):
+        return False
+    if width[2] != expected_return_size:
+        return False
+    if width[3] not in {True, False}:
+        return False
+    if not isinstance(width[4], tuple) or not width[4]:
+        return False
+    if width[5] not in {
+        "producer_matches_return_width",
+        "producer_narrower_than_return_width",
+        "producer_wider_than_return_width",
+    }:
+        return False
+    if width[6] not in {"none", "sign_extend", "zero_extend", "truncate"}:
+        return False
+    return True
 
 
 def _return_case_partition_member_is_specific(value: Any, expected_return_size: int) -> bool:

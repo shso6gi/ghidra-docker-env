@@ -184,6 +184,8 @@ def test_unresolved_expression_target_is_object_specific():
     assert _nested_contains(target, "opaque_unknown")
     assert _nested_contains(target, "unknown_expression")
     assert _nested_contains(target, "unresolved_call_value")
+    assert _nested_contains(target, "typed_lowering_evidence")
+    assert _nested_contains(target, "blocked_unknown_expression")
     assert not _nested_contains(target, ("reason", "unresolved_expression"))
 
 
@@ -309,6 +311,21 @@ def test_unresolved_expression_target_rejects_empty_location_classification():
         ("unknown_refs", ()),
         ("unsupported_ops", ()),
     )
+    locations[1] = (tuple(first_location),)
+    left[5] = tuple(locations)
+    target[2] = tuple(left)
+
+    assert not _object_target_key_is_specific_unresolved_expression(tuple(target))
+
+
+def test_unresolved_expression_target_rejects_malformed_typed_lowering_evidence():
+    target = list(_unresolved_target())
+    left = list(target[2])
+    locations = list(left[5])
+    first_location = list(locations[1][0])
+    typed_evidence = list(first_location[4])
+    typed_evidence[3] = ("expression_bits", "<missing>")
+    first_location[4] = tuple(typed_evidence)
     locations[1] = (tuple(first_location),)
     left[5] = tuple(locations)
     target[2] = tuple(left)

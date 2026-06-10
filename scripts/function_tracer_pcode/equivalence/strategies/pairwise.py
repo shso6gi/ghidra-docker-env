@@ -1805,6 +1805,10 @@ class PairwiseStrategy(CheckStrategy):
                         "return_value",
                     ),
                     self._expression_runtime_object_key(value_expr),
+                    self._unresolved_expression_typed_lowering_evidence(
+                        value_expr,
+                        "return_value",
+                    ),
                 )
             )
         for index, condition in enumerate(getattr(case, "conditions", None) or ()):
@@ -1822,9 +1826,46 @@ class PairwiseStrategy(CheckStrategy):
                         "guard_condition",
                     ),
                     self._return_condition_object_key(condition),
+                    self._unresolved_expression_typed_lowering_evidence(
+                        expression,
+                        "guard_condition",
+                    ),
                 )
             )
         return tuple(locations)
+
+    def _unresolved_expression_typed_lowering_evidence(
+        self,
+        expr: Any,
+        location_scope: str,
+    ) -> Tuple[Any, ...]:
+        expr_type = getattr(expr, "expr_type", None)
+        expr_kind = getattr(expr_type, "name", None)
+        try:
+            bits = int(expression_smt_bit_width(expr) or 0)
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            bits = 0
+        if bits <= 0:
+            try:
+                bits = int(getattr(expr, "get_bit_width", lambda: 0)() or 0)
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                bits = 0
+        unsupported = bool(expression_contains_unsupported_smt_ops(expr))
+        if expr_type == ExpressionType.UNKNOWN:
+            status = "blocked_unknown_expression"
+        elif unsupported:
+            status = "blocked_unsupported_smt_op"
+        else:
+            status = "blocked_nested_unresolved_expression"
+        return (
+            "typed_lowering_evidence",
+            ("location_scope", str(location_scope)),
+            ("expression_kind", str(expr_kind or "missing")),
+            ("expression_bits", bits if bits > 0 else None),
+            ("typed_expression_key", self._expression_runtime_object_key(expr)),
+            ("contains_unsupported_smt_ops", unsupported),
+            ("lowering_status", status),
+        )
 
     def _unresolved_expression_location_classification(
         self,
