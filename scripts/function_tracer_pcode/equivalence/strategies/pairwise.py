@@ -41,6 +41,7 @@ from .pairwise_query_builder import (
     save_unknown_query,
 )
 from .pairwise_query_executor import (
+    count_counterexample_model_assertions,
     solve_query_internal,
     solve_query_twostage,
     validate_counterexample_across_cases,
@@ -559,6 +560,45 @@ class PairwiseStrategy(CheckStrategy):
                             f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
                         )
                         continue
+
+                    same_function_replay_reasons = self._same_function_counterexample_replay_reasons(
+                        analysis1,
+                        analysis2,
+                    )
+                    if same_function_replay_reasons:
+                        sat_replay_reason = self._make_sat_unsafety_unknown_reason(
+                            same_function_replay_reasons,
+                            analysis1,
+                            analysis2,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                            stage="S_PAIRWISE",
+                        )
+                        self._record_completed_sat_counterexample_replay_proof(
+                            sat_replay_reason,
+                            analysis1,
+                            analysis2,
+                            counterexample_raw=result.counterexample_raw,
+                            fixed_model_assertion_count=count_counterexample_model_assertions(
+                                base_ctx,
+                                result.counterexample_raw,
+                            ),
+                            replay_source="pairwise_case_split_counterexample_validation",
+                        )
+                        if not self._sat_unsafety_resolution_proof_is_complete(
+                            sat_replay_reason,
+                            analysis1,
+                            analysis2,
+                        ):
+                            unknown_count += 1
+                            unknown_reasons.append(sat_replay_reason)
+                            self._debug_print(
+                                "  Pair "
+                                f"{pair_id}: SAT downgraded to UNKNOWN until same-function "
+                                "counterexample replay is completed"
+                            )
+                            continue
 
                     sat_count += 1
                     sat_pair_info = {

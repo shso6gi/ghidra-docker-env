@@ -132,6 +132,18 @@ class CheckStrategy(ABC):
                 reasons.append(f"{label}:{reason}")
         return reasons
 
+    def _same_function_counterexample_replay_reasons(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Tuple[str, ...]:
+        """Require replay evidence before accepting same-function SAT as NOT_EQ."""
+        function1 = str(getattr(analysis1, "function_name", "") or "")
+        function2 = str(getattr(analysis2, "function_name", "") or "")
+        if not function1 or function1 != function2:
+            return ()
+        return ("counterexample_replay_missing",)
+
     def _collect_equivalence_blocking_unsafety_reasons(
         self,
         analysis1: FunctionReturnAnalysis,
@@ -866,6 +878,78 @@ class CheckStrategy(ABC):
             return False
         return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
 
+    def _record_completed_sat_counterexample_replay_proof(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        counterexample_raw: Optional[Mapping[str, Any]] = None,
+        fixed_model_assertion_count: int = 0,
+        replay_source: str,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        if reason_record.reason_id != UnknownReasonId.SAT_UNSAFETY.value:
+            return
+        if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
+            return
+        proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if proof_obligation_id is None or not isinstance(object_target_key, tuple):
+            return
+        if not counterexample_raw:
+            return
+        if fixed_model_assertion_count <= 0:
+            return
+
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis1, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        if proof_obligation_id in existing_ids:
+            return
+
+        counterexample_keys = tuple(sorted(str(key) for key in (counterexample_raw or {}).keys()))
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": UnknownReasonId.SAT_UNSAFETY.value,
+                "recovery_proof_kind": UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
+                "proof_stage": "sat_counterexample_safety",
+                "evidence_kind": "active_unsafety_summary",
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_obligation_id,
+                "proof_source": replay_source,
+                "proof_content": {
+                    "object_derived": True,
+                    "object_target_key": object_target_key,
+                    "counterexample_replay": {
+                        "status": "replayed",
+                        "replay_source": replay_source,
+                        "fixed_model_assertion_count": fixed_model_assertion_count,
+                        "counterexample_symbol_keys": counterexample_keys,
+                    },
+                    "active_unsafety_discharge": {
+                        "status": "discharged",
+                        "discharged_reason_refs": tuple(reason_record.evidence_refs),
+                    },
+                    "coverage_effect_safety": {
+                        "status": "proven",
+                        "coverage_status": "covered_by_counterexample_replay",
+                        "effect_status": "no_active_effect_unsafety_for_replay_gate",
+                    },
+                },
+            }
+        )
+        analysis1.completed_recovery_proof_evidence = tuple(records)
+
     @classmethod
     def _completed_recovery_proof_ids(
         cls,
@@ -1114,6 +1198,21 @@ class CheckStrategy(ABC):
         for section in required_sections:
             if not cls._completed_proof_section_is_clean(proof_content.get(section)):
                 return None
+        counterexample_replay = proof_content.get("counterexample_replay")
+        if not isinstance(counterexample_replay, Mapping):
+            return None
+        fixed_model_assertion_count = counterexample_replay.get("fixed_model_assertion_count")
+        if (
+            isinstance(fixed_model_assertion_count, bool)
+            or not isinstance(fixed_model_assertion_count, int)
+            or fixed_model_assertion_count <= 0
+        ):
+            return None
+        counterexample_symbol_keys = cls._normalize_nested_tuple(
+            counterexample_replay.get("counterexample_symbol_keys")
+        )
+        if not isinstance(counterexample_symbol_keys, tuple) or not counterexample_symbol_keys:
+            return None
         return proof_id
 
     @classmethod
@@ -1400,9 +1499,116 @@ class CheckStrategy(ABC):
             proof_stage="sat_counterexample_safety",
             evidence_kind="active_unsafety_summary",
             object_target_key=object_target_key,
+            object_evidence=self._sat_unsafety_object_evidence(
+                sat_unsafety_reasons,
+                object_target_key,
+                analysis1,
+                analysis2,
+                case1=case1,
+                case2=case2,
+            ),
             recovery_action="sat_unsafety_resolution_required",
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )
+
+    def _sat_unsafety_object_evidence(
+        self,
+        sat_unsafety_reasons: Sequence[str],
+        object_target_key: Tuple[Any, ...],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        case1: Any,
+        case2: Any,
+    ) -> Dict[str, Any]:
+        return {
+            "object_derived": True,
+            "evidence_version": 1,
+            "evidence_kind": "active_unsafety_summary",
+            "object_target_kind": object_target_key[0] if object_target_key else None,
+            "object_target_key": object_target_key,
+            "left": self._sat_unsafety_side_object_evidence("left", analysis1, case1),
+            "right": self._sat_unsafety_side_object_evidence("right", analysis2, case2),
+            "active_unsafety": tuple(
+                self._sat_unsafety_reason_object_evidence(
+                    reason,
+                    analysis1,
+                    analysis2,
+                )
+                for reason in sat_unsafety_reasons
+            ),
+        }
+
+    def _sat_unsafety_side_object_evidence(
+        self,
+        side_label: str,
+        analysis: FunctionReturnAnalysis,
+        case: Any,
+    ) -> Dict[str, Any]:
+        return {
+            "side": side_label,
+            "function": getattr(analysis, "function_name", None),
+            "analysis_key": self._analysis_entry_key(analysis),
+            "return_storage": self._return_storage_object_key(analysis),
+            "return_case": self._return_case_partition_member_object_key(
+                case,
+                getattr(case, "return_info", None),
+            ),
+            "unknown_event_count": int(getattr(analysis, "unknown_event_count", 0) or 0),
+            "analysis_notes": tuple(getattr(analysis, "analysis_notes", ()) or ()),
+        }
+
+    def _sat_unsafety_reason_object_evidence(
+        self,
+        reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Dict[str, Any]:
+        label, _reason_text = self._split_blocking_reason(reason)
+        reason_kind = self._blocking_reason_kind(reason)
+        analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+        canonical_reason = f"{label}:{reason_kind}" if label else reason_kind
+        target = self._sat_unsafety_reason_object_target_key(
+            reason,
+            analysis1,
+            analysis2,
+        )
+        evidence: Dict[str, Any] = {
+            "reason": str(reason),
+            "side": label,
+            "reason_kind": reason_kind,
+            "object_target_key": target,
+        }
+        if analysis is not None and reason_kind in self._CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS:
+            call_effect_target = self._call_effect_blocking_object_target_key(
+                canonical_reason,
+                analysis1,
+                analysis2,
+            )
+            evidence["call_effect"] = self._call_effect_blocking_object_evidence(
+                canonical_reason,
+                call_effect_target,
+                analysis1,
+                analysis2,
+            )
+        elif analysis is not None and reason_kind in {"return_coverage_gap", "return_coverage_inconclusive"}:
+            evidence["return_coverage"] = {
+                "object_target_key": self._return_coverage_object_target_key(
+                    canonical_reason,
+                    analysis1,
+                    analysis2,
+                ),
+                "return_partition": self._return_partition_object_key(analysis),
+                "guard_disjunction": self._return_guard_disjunction_object_key(analysis),
+            }
+        elif analysis is not None:
+            evidence["analysis"] = {
+                "analysis_key": self._analysis_entry_key(analysis),
+                "return_storage": self._return_storage_object_key(analysis),
+                "return_partition": self._return_partition_object_key(analysis),
+                "guard_disjunction": self._return_guard_disjunction_object_key(analysis),
+            }
+        return evidence
 
     def _sat_unsafety_object_target_key(
         self,

@@ -521,6 +521,8 @@ def _sat_unsafety_resolution_evidence(action, **overrides):
             "counterexample_replay": {
                 "status": "replayed",
                 "model_ref": ("query_model", "pair", action.pair_or_case),
+                "fixed_model_assertion_count": 2,
+                "counterexample_symbol_keys": ("x_1", "x_2"),
             },
             "active_unsafety_discharge": {
                 "status": "discharged",
@@ -1024,6 +1026,130 @@ def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown(
 
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
+
+
+def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch):
+    class _SatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(
+                results=[
+                    SolverResult(
+                        "fake",
+                        SolverStatus.SAT,
+                        elapsed_time=0.01,
+                        model={"x_1": 0, "x_2": 0},
+                    )
+                ]
+            )
+
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    strategy = MonolithicStrategy(formula_builder, _SatSolverRunner(), debug=False)
+    monkeypatch.setattr(strategy, "_collect_monolithic_return_coverage_unsafety_reasons", lambda *_args: [])
+
+    def _validated_replay(*_args):
+        strategy._last_counterexample_replay_fixed_model_assertion_count = 2
+        return True
+
+    monkeypatch.setattr(strategy, "_counterexample_is_decisive_across_case_split", _validated_replay)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is False
+    assert result.counterexample_raw == {"x_1": 0, "x_2": 0}
+    assert result.unknown_reasons == []
+    proof_evidence = tuple(
+        evidence
+        for evidence in analysis1.completed_recovery_proof_evidence
+        if evidence.get("proof_source") == "monolithic_global_counterexample_validation"
+    )
+    assert proof_evidence
+    assert (
+        proof_evidence[0]["proof_content"]["counterexample_replay"][
+            "fixed_model_assertion_count"
+        ]
+        == 2
+    )
+
+
+def test_monolithic_same_function_sat_with_unfixed_model_is_unknown():
+    class _ReturnOnlySatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(
+                results=[
+                    SolverResult(
+                        "fake",
+                        SolverStatus.SAT,
+                        elapsed_time=0.01,
+                        model={"return_1": 1, "return_2": 2},
+                    )
+                ]
+            )
+
+        def run_sequential(self, _query: str, timeout=None):
+            raise AssertionError("unfixed model should be rejected before replay queries")
+
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    strategy = MonolithicStrategy(formula_builder, _ReturnOnlySatSolverRunner(), debug=False)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    assert analysis1.completed_recovery_proof_evidence == ()
 
 
 def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(monkeypatch):
@@ -1776,6 +1902,15 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.recovery_action == "sat_unsafety_resolution_required"
     assert reason.object_target_key[0] == "sat_unsafety"
+    assert reason.object_evidence is not None
+    assert reason.object_evidence["object_derived"] is True
+    assert reason.object_evidence["evidence_kind"] == "active_unsafety_summary"
+    assert reason.object_evidence["object_target_key"] == reason.object_target_key
+    active_unsafety = reason.object_evidence["active_unsafety"]
+    assert len(active_unsafety) == 1
+    assert active_unsafety[0]["reason_kind"] == "unsupported_call_effect_summary"
+    assert active_unsafety[0]["call_effect"]["object_derived"] is True
+    assert active_unsafety[0]["call_effect"]["object_target_kind"] == "unsupported_call_effect"
     assert reason.proof_obligation_id == build_proof_obligation_id(
         UnknownReasonId.SAT_UNSAFETY,
         "sat_counterexample_safety",
@@ -1894,6 +2029,209 @@ def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
     assert result.unknown_reasons == []
 
 
+def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis is analysis1 else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_args, **_kwargs: True,
+    )
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is False
+    assert result.sat_pairs == 1
+    assert result.unknown_pairs == 0
+    assert result.unknown_reasons == []
+    assert any(
+        evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
+        for evidence in analysis1.completed_recovery_proof_evidence
+    )
+
+
+def test_pairwise_same_function_sat_without_model_still_requires_counterexample_replay(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis is analysis1 else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_args, **_kwargs: True,
+    )
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw=None,
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.evidence_refs == ("counterexample_replay_missing",)
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.proof_obligation_id is not None
+
+
+def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexample_replay(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis is analysis1 else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_args, **_kwargs: True,
+    )
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"return_1": 1, "return_2": 2},
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.evidence_refs == ("counterexample_replay_missing",)
+    assert not any(
+        evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
+        for evidence in analysis1.completed_recovery_proof_evidence
+    )
+
+
 def test_sat_unsafety_completed_proof_rejects_active_blocker_fields_on_evidence():
     action = _sat_unsafety_resolution_action()
     blocker_fields = (
@@ -1929,6 +2267,32 @@ def test_sat_unsafety_completed_proof_requires_object_derived_proof_content():
     evidence["proof_content"].pop("object_derived", None)
 
     assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
+
+
+def test_sat_unsafety_completed_proof_requires_fixed_counterexample_replay_model():
+    action = _sat_unsafety_resolution_action()
+
+    missing_count = deepcopy(_sat_unsafety_resolution_evidence(action))
+    missing_count["proof_content"]["counterexample_replay"].pop(
+        "fixed_model_assertion_count",
+        None,
+    )
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(missing_count) is None
+
+    zero_count = deepcopy(_sat_unsafety_resolution_evidence(action))
+    zero_count["proof_content"]["counterexample_replay"]["fixed_model_assertion_count"] = 0
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(zero_count) is None
+
+    missing_keys = deepcopy(_sat_unsafety_resolution_evidence(action))
+    missing_keys["proof_content"]["counterexample_replay"].pop(
+        "counterexample_symbol_keys",
+        None,
+    )
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(missing_keys) is None
+
+    empty_keys = deepcopy(_sat_unsafety_resolution_evidence(action))
+    empty_keys["proof_content"]["counterexample_replay"]["counterexample_symbol_keys"] = ()
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(empty_keys) is None
 
 
 def test_sat_unsafety_completed_proof_rejects_nested_blocker_fields_inside_proof_content():

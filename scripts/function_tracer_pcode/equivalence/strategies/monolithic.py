@@ -15,7 +15,10 @@ from ..semantic_width import align_return_value_extension_surfaces, normalize_an
 from ..unknown_reason import UnknownReasonId, make_unknown_reason
 from .base import CheckStrategy, StrategyResult
 from .pairwise_query_builder import extract_return_cases
-from .pairwise_query_executor import validate_counterexample_globally
+from .pairwise_query_executor import (
+    count_counterexample_model_assertions,
+    validate_counterexample_globally,
+)
 
 
 class MonolithicStrategy(CheckStrategy):
@@ -43,11 +46,15 @@ class MonolithicStrategy(CheckStrategy):
         analysis2: FunctionReturnAnalysis,
         counterexample_raw: Optional[Dict[str, Any]],
     ) -> bool:
+        self._last_counterexample_replay_fixed_model_assertion_count = 0
         if not counterexample_raw:
             return True
 
         normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
         base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        self._last_counterexample_replay_fixed_model_assertion_count = (
+            count_counterexample_model_assertions(base_ctx, counterexample_raw)
+        )
         render_analysis1 = normalize_analysis_semantic_width(
             normalized1,
             infer_parameter_semantics(normalized1),
@@ -252,21 +259,28 @@ class MonolithicStrategy(CheckStrategy):
                         f"({', '.join(equivalence_blocking_reasons)})"
                     )
             if final_is_equivalent is False and sat_unsafety_reasons:
-                unknown_reasons.append(
-                    make_unknown_reason(
-                        UnknownReasonId.SAT_UNSAFETY,
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=tuple(sat_unsafety_reasons),
-                        detail=", ".join(sat_unsafety_reasons),
+                sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
+                    sat_unsafety_reasons,
+                    analysis1,
+                    analysis2,
+                    case1=None,
+                    case2=None,
+                    pair_id="monolithic",
+                    stage="S_MONOLITHIC_FALLBACK",
+                )
+                if not self._sat_unsafety_resolution_proof_is_complete(
+                    sat_unsafety_reason,
+                    analysis1,
+                    analysis2,
+                ):
+                    unknown_reasons.append(sat_unsafety_reason)
+                    self._debug_print(
+                        "Monolithic SAT downgraded to UNKNOWN due to unsafe analysis summary "
+                        f"({', '.join(sat_unsafety_reasons)})"
                     )
-                )
-                self._debug_print(
-                    "Monolithic SAT downgraded to UNKNOWN due to unsafe analysis summary "
-                    f"({', '.join(sat_unsafety_reasons)})"
-                )
-                final_is_equivalent = None
-                counterexample_raw = None
-            elif final_is_equivalent is False and not self._counterexample_is_decisive_across_case_split(
+                    final_is_equivalent = None
+                    counterexample_raw = None
+            if final_is_equivalent is False and not self._counterexample_is_decisive_across_case_split(
                 analysis1,
                 analysis2,
                 counterexample_raw,
@@ -282,7 +296,47 @@ class MonolithicStrategy(CheckStrategy):
                 )
                 final_is_equivalent = None
                 counterexample_raw = None
-            elif final_is_equivalent is None and not unknown_reasons:
+            same_function_replay_reasons = ()
+            if final_is_equivalent is False:
+                same_function_replay_reasons = self._same_function_counterexample_replay_reasons(
+                    analysis1,
+                    analysis2,
+                )
+            if final_is_equivalent is False and same_function_replay_reasons:
+                sat_replay_reason = self._make_sat_unsafety_unknown_reason(
+                    same_function_replay_reasons,
+                    analysis1,
+                    analysis2,
+                    case1=None,
+                    case2=None,
+                    pair_id="monolithic",
+                    stage="S_MONOLITHIC_FALLBACK",
+                )
+                self._record_completed_sat_counterexample_replay_proof(
+                    sat_replay_reason,
+                    analysis1,
+                    analysis2,
+                    counterexample_raw=counterexample_raw,
+                    fixed_model_assertion_count=getattr(
+                        self,
+                        "_last_counterexample_replay_fixed_model_assertion_count",
+                        0,
+                    ),
+                    replay_source="monolithic_global_counterexample_validation",
+                )
+                if not self._sat_unsafety_resolution_proof_is_complete(
+                    sat_replay_reason,
+                    analysis1,
+                    analysis2,
+                ):
+                    unknown_reasons.append(sat_replay_reason)
+                    self._debug_print(
+                        "Monolithic SAT downgraded to UNKNOWN until same-function "
+                        "counterexample replay is completed"
+                    )
+                    final_is_equivalent = None
+                    counterexample_raw = None
+            if final_is_equivalent is None and not unknown_reasons:
                 timeout_budget = getattr(self.solver_runner, "timeout", None)
                 timeout_target = self._solver_timeout_object_target_key(
                     analysis1=analysis1,

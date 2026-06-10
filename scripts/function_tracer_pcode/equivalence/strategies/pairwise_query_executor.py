@@ -396,6 +396,15 @@ def validate_counterexample_globally(
     )
 
 
+def count_counterexample_model_assertions(
+    base_ctx: Dict[str, Any],
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> int:
+    if not counterexample_raw:
+        return 0
+    return len(_build_model_assertions(base_ctx, counterexample_raw))
+
+
 def _validate_counterexample_model(
     strategy,
     base_ctx: Dict[str, Any],
@@ -411,7 +420,58 @@ def _validate_counterexample_model(
 
     model_assertions = _build_model_assertions(base_ctx, counterexample_raw)
     if not model_assertions:
-        return True
+        strategy._debug_print(
+            "  Counterexample rejected: model contains no replay-target declarations"
+        )
+        return False
+
+    feasible_cases1 = _collect_feasible_cases_under_model(
+        strategy,
+        base_ctx,
+        cases1,
+        param_replace_fn1,
+        model_assertions,
+        side_label="function1",
+    )
+    if feasible_cases1 is None:
+        return False
+    feasible_cases2 = _collect_feasible_cases_under_model(
+        strategy,
+        base_ctx,
+        cases2,
+        param_replace_fn2,
+        model_assertions,
+        side_label="function2",
+    )
+    if feasible_cases2 is None:
+        return False
+
+    side1_consistent = _feasible_case_values_are_consistent_under_model(
+        strategy,
+        base_ctx,
+        feasible_cases1,
+        param_replace_fn1,
+        model_assertions,
+        return_size=base_ctx.get("return_size1", 32),
+        side_label="function1",
+    )
+    if side1_consistent is None:
+        return False
+    if not side1_consistent:
+        return False
+    side2_consistent = _feasible_case_values_are_consistent_under_model(
+        strategy,
+        base_ctx,
+        feasible_cases2,
+        param_replace_fn2,
+        model_assertions,
+        return_size=base_ctx.get("return_size2", 32),
+        side_label="function2",
+    )
+    if side2_consistent is None:
+        return False
+    if not side2_consistent:
+        return False
 
     decisive_pair_set = set(decisive_pairs or [])
     decisive_pair_feasible = False
@@ -477,6 +537,93 @@ def _validate_counterexample_model(
     return True
 
 
+def _collect_feasible_cases_under_model(
+    strategy,
+    base_ctx: Dict[str, Any],
+    cases: Sequence,
+    param_replace_fn,
+    model_assertions: Sequence[str],
+    side_label: str,
+) -> Optional[List[Tuple[int, Any]]]:
+    feasible_cases: List[Tuple[int, Any]] = []
+    for index, case in enumerate(cases):
+        feasible = _check_case_feasibility_under_model(
+            strategy,
+            base_ctx,
+            case,
+            param_replace_fn,
+            model_assertions,
+            case_id=f"{side_label}[{index}]",
+        )
+        if feasible is None:
+            strategy._debug_print(
+                f"  Counterexample validation for {side_label} case {index} was inconclusive"
+            )
+            return None
+        if feasible:
+            feasible_cases.append((index, case))
+    return feasible_cases
+
+
+def _feasible_case_values_are_consistent_under_model(
+    strategy,
+    base_ctx: Dict[str, Any],
+    feasible_cases: Sequence[Tuple[int, Any]],
+    param_replace_fn,
+    model_assertions: Sequence[str],
+    return_size: int,
+    side_label: str,
+) -> Optional[bool]:
+    if len(feasible_cases) < 2:
+        return True
+    for left_pos, (left_index, left_case) in enumerate(feasible_cases):
+        for right_index, right_case in feasible_cases[left_pos + 1 :]:
+            equal = _check_same_side_case_equality_under_model(
+                strategy,
+                base_ctx,
+                left_case,
+                right_case,
+                param_replace_fn,
+                model_assertions,
+                return_size=return_size,
+                pair_id=f"{side_label}[{left_index},{right_index}]",
+            )
+            if equal is None:
+                strategy._debug_print(
+                    "  Counterexample validation for "
+                    f"{side_label} cases {left_index} and {right_index} was inconclusive"
+                )
+                return None
+            if not equal:
+                strategy._debug_print(
+                    "  Counterexample is ambiguous: model matches multiple "
+                    f"{side_label} return cases with different values "
+                    f"({left_index}, {right_index})"
+                )
+                return False
+    return True
+
+
+def _check_case_feasibility_under_model(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case,
+    param_replace_fn,
+    model_assertions: Sequence[str],
+    case_id: str,
+) -> Optional[bool]:
+    query = _build_single_case_model_validation_query(
+        base_ctx,
+        case,
+        param_replace_fn,
+        model_assertions,
+    )
+    result = _run_validation_query(strategy, query, f"{case_id}:feasible")
+    if result is None:
+        return None
+    return result
+
+
 def _check_pair_feasibility_under_model(
     strategy,
     base_ctx: Dict[str, Any],
@@ -531,6 +678,34 @@ def _check_pair_equality_under_model(
     return result
 
 
+def _check_same_side_case_equality_under_model(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    param_replace_fn,
+    model_assertions: Sequence[str],
+    return_size: int,
+    pair_id: str,
+) -> Optional[bool]:
+    try:
+        query = _build_same_side_case_equality_validation_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn,
+            model_assertions,
+            return_size=return_size,
+        )
+    except ReturnWidthMismatchError as exc:
+        strategy._debug_print(f"  Same-side equality re-check for {pair_id} blocked: {exc}")
+        return None
+    result = _run_validation_query(strategy, query, f"{pair_id}:same-side-equal")
+    if result is None:
+        return None
+    return result
+
+
 def _run_validation_query(strategy, query: str, label: str) -> Optional[bool]:
     timeout = min(getattr(strategy, "per_query_timeout", 5), 5)
     parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
@@ -543,6 +718,23 @@ def _run_validation_query(strategy, query: str, label: str) -> Optional[bool]:
 
     strategy._debug_print(f"  Validation query {label} returned UNKNOWN/TIMEOUT")
     return None
+
+
+def _build_single_case_model_validation_query(
+    base_ctx: Dict[str, Any],
+    case,
+    param_replace_fn,
+    model_assertions: Sequence[str],
+) -> str:
+    lines: List[str] = [
+        "(set-logic QF_BV)",
+        "",
+    ]
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(model_assertions)
+    lines.extend(_build_case_assertions(case, param_replace_fn))
+    lines.append("(check-sat)")
+    return "\n".join(lines)
 
 
 def _run_query_with_timeout(solver_runner, query: str, timeout: int):
@@ -575,6 +767,45 @@ def _run_query_with_timeout(solver_runner, query: str, timeout: int):
             raise
 
     return run_sequential(query)
+
+
+def _build_same_side_case_equality_validation_query(
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    param_replace_fn,
+    model_assertions: Sequence[str],
+    return_size: int,
+) -> str:
+    value1_smt = case1.get_value_smt(
+        param_replace_fn,
+        target_bits=return_size,
+        use_sign_extension=case1.should_sign_extend_value(),
+    )
+    value2_smt = case2.get_value_smt(
+        param_replace_fn,
+        target_bits=return_size,
+        use_sign_extension=case2.should_sign_extend_value(),
+    )
+
+    lines: List[str] = [
+        "(set-logic QF_BV)",
+        "",
+    ]
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(model_assertions)
+    lines.extend(_build_case_assertions(case1, param_replace_fn))
+    lines.extend(_build_case_assertions(case2, param_replace_fn))
+    lines.extend(
+        _build_value_equality_assertions(
+            value1_smt,
+            value2_smt,
+            return_size,
+            return_size,
+        )
+    )
+    lines.append("(check-sat)")
+    return "\n".join(lines)
 
 
 def _build_model_validation_query(

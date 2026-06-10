@@ -5620,6 +5620,100 @@ def test_counterexample_validation_rejects_ambiguous_sat_model():
     assert any("ambiguous" in message for message in strategy.messages)
 
 
+def test_counterexample_validation_rejects_overlapping_same_side_return_cases():
+    class _Strategy:
+        def __init__(self):
+            self.solver_runner = _FakeSolverRunner()
+            self.per_query_timeout = 5
+            self.messages = []
+
+        def _debug_print(self, msg: str):
+            self.messages.append(msg)
+
+    class _FakeSolverRunner:
+        def run_sequential(self, query: str, timeout=None):
+            if "(assert (= (_ bv7 32) (_ bv9 32)))" in query:
+                return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+            return ParallelResult(
+                results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 5, "x_2": 5})]
+            )
+
+    strategy = _Strategy()
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    replace1 = build_symbol_replacer(params1, [])
+    replace2 = build_symbol_replacer(params2, [])
+    x1 = _param_expr("x", 0, size=4)
+    x2 = _param_expr("x", 0, size=4)
+    x1_is_5 = _cond_eq(x1, Expression.constant(5, 4))
+    x2_is_5 = _cond_eq(x2, Expression.constant(5, 4))
+
+    cases1 = [
+        ReturnCase(
+            index=0,
+            conditions=[x1_is_5],
+            value_expr=Expression.constant(7, 4),
+            return_info=ReturnInfo(
+                address="0x1",
+                value=Expression.constant(7, 4),
+                conditions=[x1_is_5],
+            ),
+            return_type="int",
+        ),
+        ReturnCase(
+            index=1,
+            conditions=[x1_is_5],
+            value_expr=Expression.constant(9, 4),
+            return_info=ReturnInfo(
+                address="0x2",
+                value=Expression.constant(9, 4),
+                conditions=[x1_is_5],
+            ),
+            return_type="int",
+        ),
+    ]
+    cases2 = [
+        ReturnCase(
+            index=0,
+            conditions=[x2_is_5],
+            value_expr=Expression.constant(0, 4),
+            return_info=ReturnInfo(
+                address="0x3",
+                value=Expression.constant(0, 4),
+                conditions=[x2_is_5],
+            ),
+            return_type="int",
+        )
+    ]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+            "(assert (= x_1 x_2))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    is_decisive = validate_counterexample_across_cases(
+        strategy,
+        base_ctx,
+        cases1,
+        cases2,
+        replace1,
+        replace2,
+        sat_case_indices=(0, 0),
+        counterexample_raw={"x_1": 5, "x_2": 5},
+    )
+
+    assert not is_decisive
+    assert any("multiple function1 return cases" in message for message in strategy.messages)
+
+
 def test_model_validation_query_keeps_raw_width_mismatch_compare():
     class _FakeCase:
         def get_conditions_smt(self, _param_replace_fn):
@@ -5779,11 +5873,11 @@ def test_validate_counterexample_globally_reports_inconclusive_for_raw_width_mis
 
     assert not is_decisive
     assert any(
-        "Counterexample validation for pair (0,0) was inconclusive" in message
+        "Counterexample validation for function1 case 0 was inconclusive" in message
         for message in strategy.messages
     )
     assert any(
-        "Validation query (0,0):feasible returned UNKNOWN/TIMEOUT" in message
+        "Validation query function1[0]:feasible returned UNKNOWN/TIMEOUT" in message
         for message in strategy.messages
     )
     assert any(
@@ -5798,6 +5892,64 @@ def test_validate_counterexample_globally_reports_inconclusive_for_raw_width_mis
         "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in q
         for q in strategy.solver_runner.queries
     )
+
+
+def test_validate_counterexample_globally_rejects_model_without_replay_target_symbols():
+    class _Solver:
+        def __init__(self):
+            self.queries = []
+
+        def run_sequential(self, query, timeout=None):
+            self.queries.append(query)
+            raise AssertionError("unfixed model should be rejected before replay queries")
+
+    class _Strategy:
+        def __init__(self):
+            self.solver_runner = _Solver()
+            self.per_query_timeout = 5
+            self.messages = []
+
+        def _debug_print(self, message: str):
+            self.messages.append(message)
+
+    class _FakeCase:
+        def get_conditions_smt(self, _param_replace_fn):
+            return []
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return "(_ bv1 32)"
+
+    strategy = _Strategy()
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+            "(assert (= x_1 x_2))",
+        ],
+        "params1": [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)],
+        "params2": [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    is_decisive = validate_counterexample_globally(
+        strategy,
+        base_ctx,
+        [_FakeCase()],
+        [_FakeCase()],
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        counterexample_raw={"return_1": 1, "return_2": 2},
+    )
+
+    assert not is_decisive
+    assert strategy.solver_runner.queries == []
+    assert any("no replay-target declarations" in message for message in strategy.messages)
 
 
 def test_validate_counterexample_globally_rejects_return_width_overlap_equality():
