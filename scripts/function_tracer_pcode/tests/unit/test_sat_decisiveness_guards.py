@@ -289,6 +289,90 @@ def _analysis_with_unknown_indirect_call_effect(
     )
 
 
+def _analysis_with_deferred_call_argument_blocker(
+    *,
+    function_name: str,
+    binary_id: str,
+    entry: int,
+    target_param_index: int = 0,
+    argument_indices=(1, 2),
+    target_expr_missing: bool = False,
+    duplicate: bool = False,
+) -> FunctionReturnAnalysis:
+    parameters = [
+        _param("fp", index=0, size=8),
+        _param("a", index=1, size=4),
+        _param("b", index=2, size=4),
+    ]
+    target_expr = None
+    if not target_expr_missing:
+        target_expr = Expression.parameter(
+            parameters[target_param_index]["name"],
+            target_param_index,
+            size=parameters[target_param_index]["size"],
+        )
+    arguments = [
+        Expression.parameter(
+            parameters[index]["name"],
+            index,
+            size=parameters[index]["size"],
+        )
+        for index in argument_indices
+    ]
+
+    def _deferred(sequence: int, address_delta: int) -> DeferredCallInfo:
+        pcode_ref = PcodeOpRef(
+            address_offset=entry + address_delta,
+            seq_time=4 + sequence,
+            seq_order=1,
+            block_index=0,
+            mnemonic="CALLIND",
+            input_sizes=(8, 4, 4),
+            binary_id=binary_id,
+            function_entry_space="ram",
+            function_entry_offset=entry,
+            target_space="ram",
+            target_offset=entry + address_delta,
+            opcode=8,
+            local_op_ordinal=sequence,
+        )
+        return DeferredCallInfo(
+            placeholder_name=f"call_out_of_scope:{function_name}#{sequence}",
+            target_ref=CallTargetRef.unknown(),
+            arguments=arguments,
+            call_target_expr=target_expr,
+            deferred_call_ref=DeferredCallRef(
+                caller_program_id=entry,
+                caller_entry_offset=entry,
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.unknown(),
+                sequence=sequence,
+            ),
+            call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+            call_argument_recovery_reason="argument_recovery_inconclusive",
+        )
+
+    deferred = _deferred(1, 0x20)
+    deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    if duplicate:
+        other = _deferred(2, 0x40)
+        deferred_calls[other.deferred_call_ref.stable_key()] = other
+    return FunctionReturnAnalysis(
+        function_name=function_name,
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
+        binary_id=binary_id,
+        parameters=parameters,
+        returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=[param["name"] for param in parameters],
+            effects=[],
+        ),
+        deferred_calls=deferred_calls,
+    )
+
+
 def _analysis_with_self_recursive_unsupported_call_effect(
     *,
     binary_id: str = "B1",
@@ -2931,6 +3015,324 @@ def test_pairwise_unknown_indirect_argument_mismatch_does_not_auto_proof(monkeyp
 
     assert result.is_equivalent is None
     assert len(result.unknown_reasons) == 2
+
+
+def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    for analysis in (analysis1, analysis2):
+        evidence = [
+            item
+            for item in analysis.completed_recovery_proof_evidence
+            if item.get("proof_source") == "matched_deferred_call_argument_evidence"
+        ]
+        assert len(evidence) == 1
+        content = evidence[0]["proof_content"]
+        assert content["proof_rule"] == "matched_deferred_call_argument_evidence"
+        assert content["runtime_ref"]["matched_target_expression_key"]
+        assert content["callsite_storage"]["matched_argument_keys"]
+        assert content["call_effect_summary"]["matching_local_deferred_call_count"] == 1
+        assert content["call_effect_summary"]["matching_peer_deferred_call_count"] == 1
+
+
+def test_pairwise_deferred_call_missing_target_expr_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        target_expr_missing=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        target_expr_missing=True,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert {
+        reason.detail for reason in result.unknown_reasons
+    } == {
+        "function1:effect_call_argument_evidence_incomplete",
+        "function2:effect_call_argument_evidence_incomplete",
+    }
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_deferred_call_argument_evidence"
+    ]
+
+
+def test_pairwise_deferred_call_argument_mismatch_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        argument_indices=(1, 2),
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        argument_indices=(2, 1),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert len(result.unknown_reasons) == 2
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_deferred_call_argument_evidence"
+    ]
+
+
+def test_pairwise_deferred_call_empty_arguments_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        argument_indices=(),
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        argument_indices=(),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert {
+        reason.detail for reason in result.unknown_reasons
+    } == {
+        "function1:effect_call_argument_evidence_incomplete",
+        "function2:effect_call_argument_evidence_incomplete",
+    }
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_deferred_call_argument_evidence"
+    ]
+
+
+def test_pairwise_deferred_call_duplicate_candidate_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        duplicate=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert not [
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_deferred_call_argument_evidence"
+    ]
+
+
+def test_pairwise_deferred_call_weak_completed_evidence_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _call_effect_summary_proof_evidence(
+            object_target_key=reason.object_target_key,
+            proof_obligation_id=reason.proof_obligation_id,
+            proof_source="matched_deferred_call_argument_evidence",
+            proof_content={
+                "object_derived": True,
+                "status": "complete",
+                "proof_rule": "matched_deferred_call_argument_evidence",
+                "object_target_key": reason.object_target_key,
+                "call_effect_summary": {
+                    "status": "complete",
+                    "summary_source": ("effect_summary", "deferred_call"),
+                    "evidence_kind": "call_effect_summary",
+                    "object_target_key": reason.object_target_key,
+                },
+                "runtime_ref": {
+                    "status": "complete",
+                    "runtime_ref": PairwiseStrategy._expected_deferred_call_proof_content_refs(
+                        reason.object_target_key
+                    )[0],
+                },
+                "callsite_storage": {
+                    "status": "complete",
+                    "callsite_storage": PairwiseStrategy._expected_deferred_call_proof_content_refs(
+                        reason.object_target_key
+                    )[1],
+                },
+            },
+        ),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+
+
+def test_pairwise_deferred_call_empty_argument_completed_evidence_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        argument_indices=(),
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        argument_indices=(),
+    )
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    peer_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function2:effect_call_argument_evidence_incomplete",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    runtime_ref, callsite_storage = PairwiseStrategy._expected_deferred_call_proof_content_refs(
+        reason.object_target_key
+    )
+    peer_runtime_ref, peer_callsite_storage = PairwiseStrategy._expected_deferred_call_proof_content_refs(
+        peer_reason.object_target_key
+    )
+    target_key = PairwiseStrategy._cross_binary_call_effect_component_key(
+        PairwiseStrategy._deferred_call_target_expression_key(reason.object_target_key)
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _call_effect_summary_proof_evidence(
+            object_target_key=reason.object_target_key,
+            proof_obligation_id=reason.proof_obligation_id,
+            proof_source="matched_deferred_call_argument_evidence",
+            proof_content={
+                "object_derived": True,
+                "status": "complete",
+                "proof_rule": "matched_deferred_call_argument_evidence",
+                "object_target_key": reason.object_target_key,
+                "peer_object_target_key": peer_reason.object_target_key,
+                "call_effect_summary": {
+                    "status": "complete",
+                    "summary_source": ("effect_summary", "deferred_call"),
+                    "evidence_kind": "call_effect_summary",
+                    "object_target_key": reason.object_target_key,
+                    "peer_object_target_key": peer_reason.object_target_key,
+                    "local_store_effect_count": 0,
+                    "matching_local_deferred_call_count": 1,
+                    "matching_peer_deferred_call_count": 1,
+                },
+                "runtime_ref": {
+                    "status": "complete",
+                    "runtime_ref": runtime_ref,
+                    "peer_runtime_ref": peer_runtime_ref,
+                    "matched_target_expression_key": target_key,
+                },
+                "callsite_storage": {
+                    "status": "complete",
+                    "callsite_storage": callsite_storage,
+                    "peer_callsite_storage": peer_callsite_storage,
+                    "matched_argument_keys": (),
+                },
+            },
+        ),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
 
 
 def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypatch):

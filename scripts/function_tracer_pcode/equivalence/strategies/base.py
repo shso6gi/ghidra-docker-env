@@ -75,6 +75,7 @@ class CheckStrategy(ABC):
     _CALL_EFFECT_PROOF_CONTENT_REQUIRED_OBJECT_KINDS = {
         "call_argument_evidence",
         "call_target_resolution_evidence",
+        "deferred_call",
         "unsupported_call_effect",
     }
     
@@ -317,6 +318,12 @@ class CheckStrategy(ABC):
                 analysis1,
                 analysis2,
             )
+            or self._matched_deferred_call_argument_proof_content(
+                object_target_key,
+                analysis,
+                analysis1,
+                analysis2,
+            )
             or self._call_argument_evidence_call_effect_proof_content(
                 object_target_key,
                 analysis,
@@ -343,6 +350,8 @@ class CheckStrategy(ABC):
             if proof_rule == "self_recursive_no_store_effect_summary"
             else "call_argument_evidence_complete"
             if proof_rule == "call_argument_evidence_complete"
+            else "matched_deferred_call_argument_evidence"
+            if proof_rule == "matched_deferred_call_argument_evidence"
             else "matched_unknown_indirect_no_store_call_effect"
             if proof_rule == "matched_unknown_indirect_no_store_call_effect"
             else "call_effect_summary_proof"
@@ -646,6 +655,143 @@ class CheckStrategy(ABC):
             },
         }
 
+    def _matched_deferred_call_argument_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        def reject(reason: str) -> Optional[Dict[str, Any]]:
+            self._debug_print(
+                "matched deferred-call argument proof unavailable: "
+                f"{reason}"
+            )
+            return None
+
+        if len(object_target_key) < 9 or object_target_key[0] != "deferred_call":
+            return None
+        if object_target_key[-1] == "complete":
+            return None
+        peer_analysis = analysis2 if analysis is analysis1 else analysis1 if analysis is analysis2 else None
+        if peer_analysis is None:
+            return reject("object target side did not map to either analysis")
+        local_summary = getattr(analysis, "effect_summary", None)
+        peer_summary = getattr(peer_analysis, "effect_summary", None)
+        if local_summary is None or peer_summary is None:
+            return reject("missing effect summary")
+        if getattr(local_summary, "effects", None):
+            return reject("local store effects are present")
+        if getattr(peer_summary, "effects", None):
+            return reject("peer store effects are present")
+        if getattr(local_summary, "incomplete_reasons", None):
+            return reject(
+                "local effect summary is incomplete: "
+                f"{tuple(getattr(local_summary, 'incomplete_reasons', ()) or ())}"
+            )
+        if getattr(peer_summary, "incomplete_reasons", None):
+            return reject(
+                "peer effect summary is incomplete: "
+                f"{tuple(getattr(peer_summary, 'incomplete_reasons', ()) or ())}"
+            )
+
+        local_label = "function1" if analysis is analysis1 else "function2"
+        local_matches = [
+            self._deferred_call_object_target_key(
+                local_info,
+                analysis=analysis,
+                side_label=local_label,
+            )
+            for local_info in getattr(analysis, "deferred_calls", {}).values()
+            if local_info is not None
+            and self._deferred_calls_semantically_match(
+                object_target_key,
+                self._deferred_call_object_target_key(
+                    local_info,
+                    analysis=analysis,
+                    side_label=local_label,
+                ),
+            )
+        ]
+        if len(local_matches) != 1:
+            return reject(f"local deferred-call match count is {len(local_matches)}")
+
+        peer_label = "function2" if analysis is analysis1 else "function1"
+        peer_matches = [
+            self._deferred_call_object_target_key(
+                peer_info,
+                analysis=peer_analysis,
+                side_label=peer_label,
+            )
+            for peer_info in getattr(peer_analysis, "deferred_calls", {}).values()
+            if peer_info is not None
+            and self._deferred_calls_semantically_match(
+                object_target_key,
+                self._deferred_call_object_target_key(
+                    peer_info,
+                    analysis=peer_analysis,
+                    side_label=peer_label,
+                ),
+            )
+        ]
+        if len(peer_matches) != 1:
+            return reject(f"peer deferred-call match count is {len(peer_matches)}")
+
+        peer_object_target_key = self._normalize_nested_tuple(peer_matches[0])
+        target_expression_key = self._cross_binary_call_effect_component_key(
+            self._deferred_call_target_expression_key(object_target_key)
+        )
+        if not self._call_effect_target_expression_key_is_present(target_expression_key):
+            return reject("missing local target expression key")
+        argument_keys = self._cross_binary_call_effect_component_key(
+            self._deferred_call_argument_keys(object_target_key)
+        )
+        if not self._call_effect_argument_keys_are_present(argument_keys):
+            return reject("missing local argument keys")
+        expected_refs = self._expected_deferred_call_proof_content_refs(object_target_key)
+        peer_refs = self._expected_deferred_call_proof_content_refs(peer_object_target_key)
+        if expected_refs is None or peer_refs is None:
+            return reject("missing deferred-call proof refs")
+        runtime_ref, callsite_storage = expected_refs
+        peer_runtime_ref, peer_callsite_storage = peer_refs
+        return {
+            "object_derived": True,
+            "status": "complete",
+            "proof_rule": "matched_deferred_call_argument_evidence",
+            "object_target_key": object_target_key,
+            "peer_object_target_key": peer_object_target_key,
+            "call_effect_summary": {
+                "status": "complete",
+                "summary_source": ("effect_summary", "deferred_call"),
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "peer_object_target_key": peer_object_target_key,
+                "local_store_effect_count": 0,
+                "matching_local_deferred_call_count": len(local_matches),
+                "matching_peer_deferred_call_count": len(peer_matches),
+                "local_deferred_call_count": len(
+                    tuple(getattr(analysis, "deferred_calls", {}).values())
+                ),
+                "peer_deferred_call_count": len(
+                    tuple(getattr(peer_analysis, "deferred_calls", {}).values())
+                ),
+                "local_call_argument_recovery_status": object_target_key[-1],
+                "peer_call_argument_recovery_status": peer_object_target_key[-1],
+            },
+            "runtime_ref": {
+                "status": "complete",
+                "runtime_ref": runtime_ref,
+                "peer_runtime_ref": peer_runtime_ref,
+                "matched_target_expression_key": target_expression_key,
+            },
+            "callsite_storage": {
+                "status": "complete",
+                "callsite_storage": callsite_storage,
+                "peer_callsite_storage": peer_callsite_storage,
+                "matched_argument_keys": argument_keys,
+            },
+        }
+
     def _unsupported_call_effects_semantically_match(
         self,
         object_target_key: Any,
@@ -681,6 +827,50 @@ class CheckStrategy(ABC):
             == self._cross_binary_call_effect_component_key(
                 self._unsupported_call_effect_argument_keys(right)
             )
+        )
+
+    def _deferred_calls_semantically_match(
+        self,
+        object_target_key: Any,
+        peer_object_target_key: Any,
+    ) -> bool:
+        left = self._normalize_nested_tuple(object_target_key)
+        right = self._normalize_nested_tuple(peer_object_target_key)
+        if not (
+            isinstance(left, tuple)
+            and isinstance(right, tuple)
+            and len(left) >= 9
+            and len(right) >= 9
+            and left[0] == right[0] == "deferred_call"
+            and left[-1] != "complete"
+            and right[-1] != "complete"
+        ):
+            return False
+        left_target = self._cross_binary_call_effect_component_key(
+            self._deferred_call_target_expression_key(left)
+        )
+        right_target = self._cross_binary_call_effect_component_key(
+            self._deferred_call_target_expression_key(right)
+        )
+        if not (
+            self._call_effect_target_expression_key_is_present(left_target)
+            and self._call_effect_target_expression_key_is_present(right_target)
+        ):
+            return False
+        left_argument_keys = self._cross_binary_call_effect_component_key(
+            self._deferred_call_argument_keys(left)
+        )
+        right_argument_keys = self._cross_binary_call_effect_component_key(
+            self._deferred_call_argument_keys(right)
+        )
+        if not (
+            self._call_effect_argument_keys_are_present(left_argument_keys)
+            and self._call_effect_argument_keys_are_present(right_argument_keys)
+        ):
+            return False
+        return (
+            left_target == right_target
+            and left_argument_keys == right_argument_keys
         )
 
     @classmethod
@@ -736,6 +926,37 @@ class CheckStrategy(ABC):
                     value = cls._normalize_nested_tuple(item[1])
                     return value if isinstance(value, tuple) else ()
         return ()
+
+    @classmethod
+    def _call_effect_argument_keys_are_present(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if not isinstance(normalized, tuple) or not normalized:
+            return False
+        for item in normalized:
+            if not (
+                isinstance(item, tuple)
+                and len(item) >= 3
+                and item[0] == "argument"
+            ):
+                return False
+            if not cls._call_effect_target_expression_key_is_present(item[2]):
+                return False
+        return True
+
+    @classmethod
+    def _deferred_call_target_expression_key(cls, object_target_key: Any) -> Any:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 7:
+            return None
+        return target[6]
+
+    @classmethod
+    def _deferred_call_argument_keys(cls, object_target_key: Any) -> Tuple[Any, ...]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 8:
+            return ()
+        value = cls._normalize_nested_tuple(target[7])
+        return value if isinstance(value, tuple) else ()
 
     @classmethod
     def _cross_binary_call_effect_component_key(cls, value: Any) -> Any:
@@ -1388,6 +1609,14 @@ class CheckStrategy(ABC):
             )
         ):
             return False
+        if (
+            str(object_target_key[0]) == "deferred_call"
+            and not cls._deferred_call_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            )
+        ):
+            return False
         return True
 
     @classmethod
@@ -1450,7 +1679,46 @@ class CheckStrategy(ABC):
             if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
                 return None
             return runtime_ref, callsite_storage
+        if target_kind == "deferred_call":
+            return cls._expected_deferred_call_proof_content_refs(object_target_key)
         return None
+
+    @classmethod
+    def _expected_deferred_call_proof_content_refs(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+        if len(object_target_key) < 8:
+            return None
+        deferred_call_site = cls._normalize_nested_tuple(object_target_key[3])
+        pcode_op_ref = cls._normalize_nested_tuple(object_target_key[4])
+        callee_identity = cls._normalize_nested_tuple(object_target_key[5])
+        target_expression = cls._normalize_nested_tuple(object_target_key[6])
+        argument_keys = cls._normalize_nested_tuple(object_target_key[7])
+        if not isinstance(deferred_call_site, tuple):
+            return None
+        if not isinstance(argument_keys, tuple):
+            return None
+        return (
+            (
+                "runtime_ref",
+                "deferred_call",
+                ("deferred_call_site", deferred_call_site),
+                ("pcode_op_ref", pcode_op_ref),
+                ("callee_identity", callee_identity),
+                ("typed_target_expression", target_expression),
+                ("argument_keys", argument_keys),
+            ),
+            (
+                "callsite_storage",
+                "deferred_call",
+                ("deferred_call_site", deferred_call_site),
+                ("pcode_op_ref", pcode_op_ref),
+                ("callee_identity", callee_identity),
+                ("target_expression", target_expression),
+                ("argument_keys", argument_keys),
+            ),
+        )
 
     @classmethod
     def _unsupported_call_effect_proof_content_is_complete(
@@ -1528,6 +1796,85 @@ class CheckStrategy(ABC):
         peer_argument_keys = cls._cross_binary_call_effect_component_key(
             cls._unsupported_call_effect_argument_keys(peer_object_target_key)
         )
+        if target_expression_key != peer_target_expression_key:
+            return False
+        if argument_keys != peer_argument_keys:
+            return False
+        if cls._normalize_nested_tuple(runtime_ref.get("matched_target_expression_key")) != target_expression_key:
+            return False
+        if cls._normalize_nested_tuple(callsite_storage.get("matched_argument_keys")) != argument_keys:
+            return False
+        return True
+
+    @classmethod
+    def _deferred_call_proof_content_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if cls._evidence_text(proof_content, "proof_rule") != "matched_deferred_call_argument_evidence":
+            return False
+        peer_object_target_key = cls._normalize_nested_tuple(
+            proof_content.get("peer_object_target_key")
+        )
+        if not (
+            isinstance(peer_object_target_key, tuple)
+            and len(peer_object_target_key) >= 9
+            and peer_object_target_key[0] == "deferred_call"
+            and peer_object_target_key[-1] != "complete"
+        ):
+            return False
+        call_effect_summary = proof_content.get("call_effect_summary")
+        if not isinstance(call_effect_summary, Mapping):
+            return False
+        if cls._normalize_nested_tuple(
+            call_effect_summary.get("peer_object_target_key")
+        ) != peer_object_target_key:
+            return False
+        if call_effect_summary.get("local_store_effect_count") != 0:
+            return False
+        if call_effect_summary.get("matching_local_deferred_call_count") != 1:
+            return False
+        if call_effect_summary.get("matching_peer_deferred_call_count") != 1:
+            return False
+        runtime_ref = proof_content.get("runtime_ref")
+        callsite_storage = proof_content.get("callsite_storage")
+        if not isinstance(runtime_ref, Mapping) or not isinstance(callsite_storage, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(runtime_ref):
+            return False
+        if not cls._completed_proof_section_is_clean(callsite_storage):
+            return False
+        peer_refs = cls._expected_deferred_call_proof_content_refs(peer_object_target_key)
+        if peer_refs is None:
+            return False
+        peer_runtime_ref, peer_callsite_storage = peer_refs
+        if cls._normalize_nested_tuple(runtime_ref.get("peer_runtime_ref")) != peer_runtime_ref:
+            return False
+        if cls._normalize_nested_tuple(callsite_storage.get("peer_callsite_storage")) != peer_callsite_storage:
+            return False
+        target_expression_key = cls._cross_binary_call_effect_component_key(
+            cls._deferred_call_target_expression_key(object_target_key)
+        )
+        peer_target_expression_key = cls._cross_binary_call_effect_component_key(
+            cls._deferred_call_target_expression_key(peer_object_target_key)
+        )
+        if not (
+            cls._call_effect_target_expression_key_is_present(target_expression_key)
+            and cls._call_effect_target_expression_key_is_present(peer_target_expression_key)
+        ):
+            return False
+        argument_keys = cls._cross_binary_call_effect_component_key(
+            cls._deferred_call_argument_keys(object_target_key)
+        )
+        peer_argument_keys = cls._cross_binary_call_effect_component_key(
+            cls._deferred_call_argument_keys(peer_object_target_key)
+        )
+        if not (
+            cls._call_effect_argument_keys_are_present(argument_keys)
+            and cls._call_effect_argument_keys_are_present(peer_argument_keys)
+        ):
+            return False
         if target_expression_key != peer_target_expression_key:
             return False
         if argument_keys != peer_argument_keys:
