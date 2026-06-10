@@ -571,6 +571,89 @@ def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_wit
     assert failures == ()
 
 
+def test_unresolved_expression_post_fix_status_accepts_target_cleared_under_other_unknown():
+    target = _unresolved_target()
+    blocker = make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind="call_effect_summary",
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "observed_reason_ids": ["equivalence_blocking_unsafety"],
+            "reason_records": [blocker.to_dict()],
+            "proof_actions": [],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "resolved_under_other_conservative_unknown"
+    assert failures == ()
+
+
+def test_unresolved_expression_post_fix_status_rejects_target_cleared_without_reason():
+    target = _unresolved_target()
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "observed_reason_ids": [],
+            "reason_records": [],
+            "proof_actions": [],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+
+
+def test_unresolved_expression_post_fix_status_rejects_target_cleared_with_stale_unresolved_action():
+    target = _unresolved_target()
+    blocker = make_unknown_reason(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("function1:return_coverage_gap",),
+    )
+    unresolved = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([unresolved])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "observed_reason_ids": ["return_coverage_gap"],
+            "reason_records": [blocker.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+
+
 def test_extra_current_unresolved_expression_observations_exclude_manifest_entries():
     target = _unresolved_target()
     unresolved = make_unknown_reason(

@@ -3926,6 +3926,65 @@ def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_
     assert not _nested_contains(reason.object_target_key, deferred_pcode.stable_key())
 
 
+def test_bounded_deferred_target_blocker_uses_concrete_callsite_fallback():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    unsupported_pcode = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    deferred_pcode = PcodeOpRef(address_offset=0x4000, seq_time=7, seq_order=2, mnemonic="CALL")
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=unsupported_pcode,
+        target_ref=None,
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+        arguments=[Expression.parameter("x", 0, size=4)],
+        deferred_call_ref=DeferredCallRef(
+            caller_program_id=1,
+            caller_entry_offset=0x1000,
+            pcode_op_ref=deferred_pcode,
+            target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+            sequence=0,
+        ),
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:bounded_call_refinement_deferred_target_unresolved",
+        analysis,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    assert reason.object_target_key[0] == "deferred_call"
+    assert _nested_contains(reason.object_target_key, deferred_pcode.stable_key())
+    assert not _nested_contains(reason.object_target_key, unsupported_pcode.stable_key())
+    assert not _nested_contains(reason.object_target_key, "call_effect_blocker")
+
+
 def test_deferred_call_object_key_distinguishes_unknown_target_expression_provenance():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")

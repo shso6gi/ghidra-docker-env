@@ -348,11 +348,17 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         ready_key="phase3_lane6_post_fix_ready",
         validator=validate_phase3_unresolved_expression_lane6_post_fix_gate,
         expected_entry_count=1,
-        allowed_post_fix_statuses=("pending_object_evidence", "pending_proof"),
-        expected_post_fix_status_counts={"pending_proof": 1},
+        allowed_post_fix_statuses=(
+            "pending_object_evidence",
+            "pending_proof",
+            "resolved_under_other_conservative_unknown",
+        ),
+        expected_post_fix_status_counts={
+            "resolved_under_other_conservative_unknown": 1,
+        },
         expected_post_fix_obligation_counts={
-            "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 6,
+            "pending_proof_entry_count": 0,
+            "pending_proof_obligation_count": 0,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -368,17 +374,17 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "function": "fc_is_even",
                 "binary_pair": "B11_B12",
-                "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 6,
+                "post_fix_status": "resolved_under_other_conservative_unknown",
+                "pending_proof_obligation_count": 0,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 6,
+                "required_completion_action_count": 0,
             },
         ),
         expected_required_completion_action_hashes=(
             {
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "required_completion_actions_sha256": (
-                    "81a246c6b0db6a6732a0dc1d725b83459af08945dcf1161451087e0855af8f5a"
+                    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
                 ),
             },
         ),

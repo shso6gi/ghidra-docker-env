@@ -1343,6 +1343,11 @@ class CheckStrategy(ABC):
         analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
         if analysis is None:
             return None
+        all_deferred_call_keys = tuple(
+            self._deferred_call_object_target_key(info, analysis=analysis, side_label=label)
+            for info in getattr(analysis, "deferred_calls", {}).values()
+            if info is not None
+        )
         deferred_call_keys = tuple(
             self._deferred_call_object_target_key(info, analysis=analysis, side_label=label)
             for info in getattr(analysis, "deferred_calls", {}).values()
@@ -1413,9 +1418,15 @@ class CheckStrategy(ABC):
             "bounded_call_refinement_deferred_target_unresolved",
             "bounded_call_refinement_return_summary_unusable",
         }:
-            selected_deferred_keys = deferred_call_keys
+            selected_deferred_keys = deferred_call_keys or all_deferred_call_keys
             if len(selected_deferred_keys) == 1:
                 return selected_deferred_keys[0]
+            selected_unsupported_keys = unsupported_call_site_keys
+            if len(selected_unsupported_keys) == 1:
+                return selected_unsupported_keys[0]
+            selected_target_resolution_keys = target_resolution_keys
+            if len(selected_target_resolution_keys) == 1:
+                return selected_target_resolution_keys[0]
         elif reason_kind == "effect_summary_path_coverage_incomplete":
             selected_evidence_keys = evidence_keys
             selected_unsupported_keys = unsupported_call_site_keys

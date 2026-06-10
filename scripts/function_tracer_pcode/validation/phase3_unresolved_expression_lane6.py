@@ -496,6 +496,14 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         return "failed", failures
     frozen_targets = _canonical_targets(entry.get("target_object_keys"))
     current_targets = _canonical_targets(_current_targets(entry))
+    if (
+        _unresolved_expression_targets_cleared_under_other_unknown(
+            entry,
+            frozen_targets=frozen_targets,
+            current_targets=current_targets,
+        )
+    ):
+        return "resolved_under_other_conservative_unknown", ()
     if not frozen_targets or current_targets != frozen_targets:
         failures.append(
             _failed(
@@ -590,6 +598,14 @@ def _post_fix_checks(
                     **_entry_details(entry),
                 )
             )
+        elif entry.get("post_fix_status") == "resolved_under_other_conservative_unknown":
+            checks.append(
+                _ok(
+                    "unresolved_expression_post_fix_expected_movement",
+                    post_fix_status=entry.get("post_fix_status"),
+                    **_entry_details(entry),
+                )
+            )
         else:
             checks.append(
                 _failed(
@@ -599,6 +615,30 @@ def _post_fix_checks(
                 )
             )
     return checks
+
+
+def _unresolved_expression_targets_cleared_under_other_unknown(
+    entry: Mapping[str, Any],
+    *,
+    frozen_targets: Sequence[Any],
+    current_targets: Sequence[Any],
+) -> bool:
+    if not frozen_targets or current_targets:
+        return False
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    observed_reason_ids = tuple(current.get("observed_reason_ids") or ())
+    if not observed_reason_ids or "unresolved_expression" in observed_reason_ids:
+        return False
+    reason_records = tuple(record for record in current.get("reason_records") or () if isinstance(record, Mapping))
+    if not reason_records:
+        return False
+    for record in reason_records:
+        if record.get("reason_id") == "unresolved_expression":
+            return False
+    for action in current.get("proof_actions") or ():
+        if isinstance(action, Mapping) and action.get("reason_id") == "unresolved_expression":
+            return False
+    return True
 
 
 def _implementation_manifest(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
