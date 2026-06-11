@@ -734,6 +734,10 @@ def _materialize_post_fix_entry(
     status, failures = _post_fix_status(entry)
     entry["post_fix_status"] = status
     entry["post_fix_failures"] = failures
+    if status == "pending_proof":
+        entry["required_completion_actions"] = _canonical_actions(_current_width_actions(entry))
+    elif status == "completed_recovery":
+        entry["required_completion_actions"] = []
     entry["pending_proof_obligations"] = (
         _pending_proof_obligations(entry) if status == "pending_proof" else []
     )
@@ -762,25 +766,48 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
             )
         )
         return "failed", failures
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
     frozen_targets = _canonical_targets(entry.get("target_object_keys"))
     current_targets = _canonical_targets(_current_targets(entry))
-    if not frozen_targets or current_targets != frozen_targets:
+    frozen_target_keys = {_width_bridge_target_identity_key(target) for target in frozen_targets}
+    unexpected_current_targets = tuple(
+        target
+        for target in current_targets
+        if _width_bridge_target_identity_key(target) not in frozen_target_keys
+    )
+    missing_completed_targets = _frozen_targets_without_completed_evidence(
+        entry,
+        completed,
+        current_targets=current_targets,
+    )
+    if (
+        not frozen_targets
+        or not current_targets
+        or unexpected_current_targets
+        or missing_completed_targets
+    ):
         failures.append(
             _failed(
                 "return_width_bridge_target_set_changed",
                 expected=frozen_targets,
                 actual=current_targets,
+                unexpected_current_targets=unexpected_current_targets,
+                missing_completed_targets=missing_completed_targets,
                 **details,
             )
         )
     frozen_actions = _canonical_actions(entry.get("required_completion_actions"))
     current_actions = _canonical_actions(_current_width_actions(entry))
-    if not frozen_actions or current_actions != frozen_actions:
+    expected_action_keys = _expected_pending_width_action_keys(entry, current_targets)
+    current_action_keys = _width_action_keys(current_actions)
+    if not frozen_actions or not current_actions or current_action_keys != expected_action_keys:
         failures.append(
             _failed(
                 "return_width_bridge_required_actions_changed",
                 expected=frozen_actions,
                 actual=current_actions,
+                expected_action_keys=expected_action_keys,
+                actual_action_keys=current_action_keys,
                 **details,
             )
         )
@@ -943,6 +970,10 @@ def _current_width_actions(entry: Any) -> Sequence[Mapping[str, Any]]:
 
 def _missing_width_bridge_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
     current_targets = _canonical_targets(_current_targets(entry))
+    frozen_target_keys = {
+        _width_bridge_target_identity_key(target)
+        for target in _canonical_targets(entry.get("target_object_keys"))
+    }
     actions = _current_width_actions(entry)
     action_keys = {
         (
@@ -954,6 +985,8 @@ def _missing_width_bridge_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str
     }
     missing = []
     for target in current_targets:
+        if _width_bridge_target_identity_key(target) not in frozen_target_keys:
+            continue
         target_json = _canonical_json(target)
         for proof_kind, proof_stage in (
             ("abi_relation_proof", "abi_relation"),
@@ -968,6 +1001,42 @@ def _missing_width_bridge_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str
                     }
                 )
     return missing
+
+
+def _expected_pending_width_action_keys(
+    entry: Mapping[str, Any],
+    current_targets: Sequence[Any],
+) -> Sequence[str]:
+    current_target_keys = {
+        _width_bridge_target_identity_key(target)
+        for target in _canonical_targets(current_targets)
+    }
+    action_keys = [
+        _width_bridge_action_identity_key(action)
+        for action in _canonical_actions(entry.get("required_completion_actions"))
+        if _width_bridge_target_identity_key(action.get("object_target_key")) in current_target_keys
+    ]
+    return tuple(sorted(action_keys))
+
+
+def _width_action_keys(actions: Sequence[Mapping[str, Any]]) -> Sequence[str]:
+    return tuple(sorted(_width_bridge_action_identity_key(action) for action in actions))
+
+
+def _width_bridge_action_identity_key(action: Mapping[str, Any]) -> str:
+    return _canonical_json(
+        {
+            "reason_id": action.get("reason_id") or MISSING_SENTINEL,
+            "proof_kind": action.get("proof_kind") or MISSING_SENTINEL,
+            "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+            "status": action.get("status") or MISSING_SENTINEL,
+            "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+            "required_evidence": list(action.get("required_evidence") or ()),
+            "object_target_identity": _width_bridge_target_identity_key(
+                action.get("object_target_key")
+            ),
+        }
+    )
 
 
 def _completed_recovery_failures(
@@ -1024,8 +1093,11 @@ def _completed_recovery_failures(
 def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
     current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
     completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    actions = _canonical_actions(_current_width_actions(entry)) or _canonical_actions(
+        entry.get("required_completion_actions")
+    )
     obligations = []
-    for action in _canonical_actions(entry.get("required_completion_actions")):
+    for action in actions:
         has_completed_evidence = any(
             _completed_evidence_matches_action(evidence, action)
             for evidence in completed
@@ -1043,6 +1115,88 @@ def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, A
             }
         )
     return obligations
+
+
+def _frozen_targets_without_completed_evidence(
+    entry: Mapping[str, Any],
+    completed: Sequence[Mapping[str, Any]],
+    *,
+    current_targets: Sequence[Any] = (),
+) -> Sequence[Any]:
+    missing = []
+    current_target_keys = {_width_bridge_target_identity_key(target) for target in current_targets}
+    for target in _canonical_targets(entry.get("target_object_keys")):
+        target_key = _width_bridge_target_identity_key(target)
+        if target_key in current_target_keys:
+            continue
+        required_actions = [
+            action
+            for action in _canonical_actions(entry.get("required_completion_actions"))
+            if _width_bridge_target_identity_key(action.get("object_target_key")) == target_key
+        ]
+        if not required_actions or not all(
+            any(
+                _completed_evidence_matches_compatible_action(evidence, action)
+                for evidence in completed
+            )
+            for action in required_actions
+        ):
+            missing.append(target)
+    return tuple(missing)
+
+
+def _completed_evidence_matches_compatible_action(
+    evidence_summary: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> bool:
+    if not isinstance(evidence_summary, Mapping):
+        return False
+    evidence = evidence_summary.get("evidence")
+    if not isinstance(evidence, Mapping):
+        evidence = evidence_summary
+    evidence_target = _normalize_nested_tuple(
+        evidence_summary.get("object_target_key") or evidence.get("object_target_key")
+    )
+    if not _object_target_key_is_specific_width_bridge(evidence_target):
+        return False
+    if (
+        _width_bridge_target_identity_key(evidence_target)
+        != _width_bridge_target_identity_key(action.get("object_target_key"))
+    ):
+        return False
+    enriched_action = dict(action)
+    enriched_action["object_target_key"] = _jsonable(evidence_target)
+    enriched_action["proof_obligation_id"] = _jsonable(
+        _expected_proof_obligation_id(enriched_action, object_target_key=evidence_target)
+    )
+    return _completed_evidence_matches_action(evidence_summary, enriched_action)
+
+
+def _width_bridge_target_identity_key(value: Any) -> str:
+    target = _jsonable(value)
+    if not (
+        isinstance(target, list)
+        and target
+        and target[0] == "return_width_bridge"
+    ):
+        return _canonical_json(target)
+    identity = []
+    for entry in target:
+        if isinstance(entry, list) and entry and entry[0] == "return_width_side":
+            identity.append(
+                [
+                    item
+                    for item in entry
+                    if not (
+                        isinstance(item, list)
+                        and item
+                        and item[0] == "return_value_width"
+                    )
+                ]
+            )
+        else:
+            identity.append(entry)
+    return _canonical_json(identity)
 
 
 def _completed_evidence_matches_action(

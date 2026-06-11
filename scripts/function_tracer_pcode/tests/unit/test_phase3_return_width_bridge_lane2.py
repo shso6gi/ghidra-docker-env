@@ -703,6 +703,181 @@ def test_phase3_return_width_bridge_lane2_manifest_and_post_fix_gate_ready(tmp_p
         validate_phase3_return_width_bridge_lane2_post_fix_gate(tampered_pre_fix_gate)
 
 
+def test_phase3_return_width_bridge_lane2_post_fix_accepts_partial_target_progress(tmp_path):
+    original_target = _target_without_return_value_width("case0")
+    remaining_target = _target_without_return_value_width("case1")
+    current_payload = _payload(
+        reasons=[
+            _width_reason(original_target),
+            _width_reason(remaining_target),
+        ]
+    )
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    original_completed_actions = [
+        _action_payload(action)
+        for action in build_unknown_recovery_actions([_width_reason(_target("case0"))])
+    ]
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[_width_reason(_target("case1"))],
+            completed_evidence=_completed_evidence(original_completed_actions),
+        ),
+    )
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+
+    assert gate["phase3_lane2_post_fix_ready"] is True
+    entry = gate["entries"][0]
+    assert entry["post_fix_status"] == "pending_proof"
+    assert entry["post_fix_failures"] == []
+    obligations = entry["pending_proof_obligations"]
+    required_actions = entry["required_completion_actions"]
+    assert len(required_actions) == 2
+    assert {action["proof_stage"] for action in required_actions} == {
+        "abi_relation",
+        "high_bit_relation",
+    }
+    assert all(action["proof_obligation_id"][-1][1] == ["pair", "case1"] for action in required_actions)
+    assert {obligation["proof_stage"] for obligation in obligations} == {
+        "abi_relation",
+        "high_bit_relation",
+    }
+    assert all(
+        obligation["completed_evidence_present"] is False
+        and obligation["proof_obligation_id"][-1][1] == ["pair", "case1"]
+        for obligation in obligations
+    )
+    validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
+def test_phase3_return_width_bridge_lane2_post_fix_rejects_target_change_without_completed_proof(
+    tmp_path,
+):
+    current_payload = _payload(reasons=[_width_reason(_target_without_return_value_width("case0"))])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    _write_log(current_root, _payload(reasons=[_width_reason(_target("case1"))]))
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+
+    assert gate["phase3_lane2_post_fix_ready"] is False
+    assert gate["entries"][0]["post_fix_status"] == "failed"
+    assert any(
+        failure["kind"] == "return_width_bridge_target_set_changed"
+        for failure in gate["entries"][0]["post_fix_failures"]
+    )
+    with pytest.raises(ValueError, match="return_width_bridge_post_fix_expected_movement"):
+        validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
+def test_phase3_return_width_bridge_lane2_post_fix_rejects_added_current_target(tmp_path):
+    raw_dir, baseline_root, current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[_width_reason(_target("case0"))]),
+    )
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[
+                _width_reason(_target("case0")),
+                _width_reason(_target("case1")),
+            ],
+        ),
+    )
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+
+    assert gate["phase3_lane2_post_fix_ready"] is False
+    failures = gate["entries"][0]["post_fix_failures"]
+    assert any(
+        failure["kind"] == "return_width_bridge_target_set_changed"
+        and failure["unexpected_current_targets"]
+        for failure in failures
+    )
+    with pytest.raises(ValueError, match="return_width_bridge_post_fix_expected_movement"):
+        validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
+def test_phase3_return_width_bridge_lane2_post_fix_rejects_current_action_set_drift(tmp_path):
+    reason = _width_reason(_target("case0"))
+    raw_dir, baseline_root, current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[reason]),
+    )
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    actions = [_action_payload(action) for action in build_unknown_recovery_actions([reason])]
+    high_bit_action = next(action for action in actions if action["proof_stage"] == "high_bit_relation")
+    actions[0] = json.loads(json.dumps(high_bit_action))
+    _write_log(current_root, _payload(reasons=[reason], actions=actions))
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+
+    assert gate["phase3_lane2_post_fix_ready"] is False
+    failures = gate["entries"][0]["post_fix_failures"]
+    assert any(
+        failure["kind"] == "return_width_bridge_required_actions_changed"
+        and failure["expected_action_keys"] != failure["actual_action_keys"]
+        for failure in failures
+    )
+    with pytest.raises(ValueError, match="return_width_bridge_post_fix_expected_movement"):
+        validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
 def test_phase3_return_width_bridge_lane2_manifest_rejects_missing_high_bit_action(tmp_path):
     reason = _width_reason(_target())
     actions = [

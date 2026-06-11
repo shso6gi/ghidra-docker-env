@@ -33,12 +33,14 @@ PARALLEL_JOBS="${PARALLEL_JOBS:-32}"
 VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-0}"
 VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-0}"
 RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL="${RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL:-0}"
+RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES="${RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES:-1}"
 
 export PYTHON_BIN
 export PARALLEL_JOBS
 export VALIDATION_SKIP_COMPLETED
 export VALIDATION_AUTO_BEFORE_SNAPSHOT
 export RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL
+export RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES
 
 EXPECTED_LANE1_SHA256="eec876a6473ac4ac344d846bdffb93d7bbcf23d55559d0c6d58ee890304e6f5a"
 LANE1_MANIFEST="artifacts/baselines/observed-v0@0a53352/audit/phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json"
@@ -90,6 +92,7 @@ echo "Parallel jobs: $PARALLEL_JOBS"
 echo "Validation skip completed: $VALIDATION_SKIP_COMPLETED"
 echo "Validation auto before snapshot: $VALIDATION_AUTO_BEFORE_SNAPSHOT"
 echo "Skip normal full matrix: $RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL"
+echo "Precheck representatives before full matrix: $RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES"
 
 echo ""
 echo "Phase 3 audit manifests:"
@@ -128,6 +131,14 @@ run_and_log phase1_concrete_manifest_gate_stdout.log \
 
 run_and_log phase1_5_regression_gates_stdout.log \
     ./phase15_validate_regression_gates.sh
+
+if [[ "$RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES" == "1" ]]; then
+    run_and_log pre_full_representative_refresh_stdout.log \
+        ./validate_pre_full_gates_with_representative_refresh.sh
+else
+    echo ""
+    echo "Skipping pre-full representative refresh because RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES=0."
+fi
 
 if [[ "$RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" == "1" ]]; then
     echo ""

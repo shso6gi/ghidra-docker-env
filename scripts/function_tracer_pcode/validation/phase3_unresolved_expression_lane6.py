@@ -496,6 +496,8 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         return "failed", failures
     frozen_targets = _canonical_targets(entry.get("target_object_keys"))
     current_targets = _canonical_targets(_current_targets(entry))
+    frozen_target_keys = {_unresolved_expression_target_identity_key(target) for target in frozen_targets}
+    current_target_keys = {_unresolved_expression_target_identity_key(target) for target in current_targets}
     if (
         _unresolved_expression_targets_cleared_under_other_unknown(
             entry,
@@ -504,7 +506,7 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         )
     ):
         return "resolved_under_other_conservative_unknown", ()
-    if not frozen_targets or current_targets != frozen_targets:
+    if not frozen_targets or current_target_keys != frozen_target_keys:
         failures.append(
             _failed(
                 "unresolved_expression_target_set_changed",
@@ -667,7 +669,7 @@ def _unresolved_expression_proof_actions_complete(
     entry: Mapping[str, Any],
     current_targets: Sequence[Any],
 ) -> bool:
-    target_keys = {_canonical_json(target) for target in current_targets}
+    target_keys = {_unresolved_expression_target_identity_key(target) for target in current_targets}
     if not target_keys:
         return False
     stages_by_target: Dict[str, set[str]] = {target_key: set() for target_key in target_keys}
@@ -692,14 +694,19 @@ def _unresolved_expression_proof_actions_complete(
         target = action.get("object_target_key")
         if not _object_target_key_is_specific_unresolved_expression(target):
             continue
-        target_key = _canonical_json(target)
+        target_key = _unresolved_expression_target_identity_key(target)
         if target_key not in stages_by_target:
             continue
         stages_by_target[target_key].add(str(stage))
     return all(
         stages == set(_required_unresolved_proof_stages_for_target(target))
         for target in current_targets
-        for target_key, stages in ((_canonical_json(target), stages_by_target[_canonical_json(target)]),)
+        for target_key, stages in (
+            (
+                _unresolved_expression_target_identity_key(target),
+                stages_by_target[_unresolved_expression_target_identity_key(target)],
+            ),
+        )
     )
 
 
@@ -731,10 +738,13 @@ def _target_contains_originated_phi_circular(value: Any) -> bool:
 
 
 def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
-    target_keys = {_canonical_json(target) for target in _canonical_targets(entry.get("target_object_keys"))}
+    target_keys = {
+        _unresolved_expression_target_identity_key(target)
+        for target in _canonical_targets(entry.get("target_object_keys"))
+    }
     obligations = []
     for action in _current_unresolved_expression_actions(entry):
-        target_key = _canonical_json(action.get("object_target_key"))
+        target_key = _unresolved_expression_target_identity_key(action.get("object_target_key"))
         if target_key not in target_keys:
             continue
         obligations.append(
@@ -750,6 +760,39 @@ def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, A
             }
         )
     return tuple(sorted(obligations, key=_canonical_json))
+
+
+def _unresolved_expression_target_identity_key(value: Any) -> str:
+    return _canonical_json(_strip_typed_lowering_evidence(_jsonable(value)))
+
+
+def _strip_typed_lowering_evidence(value: Any) -> Any:
+    if isinstance(value, list):
+        if value and value[0] == "typed_lowering_evidence":
+            return None
+        stripped = []
+        for item in value:
+            child = _strip_typed_lowering_evidence(item)
+            if child is not None:
+                stripped.append(child)
+        return stripped
+    if isinstance(value, tuple):
+        if value and value[0] == "typed_lowering_evidence":
+            return None
+        stripped = []
+        for item in value:
+            child = _strip_typed_lowering_evidence(item)
+            if child is not None:
+                stripped.append(child)
+        return tuple(stripped)
+    if isinstance(value, Mapping):
+        return {
+            str(key): child
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            for child in (_strip_typed_lowering_evidence(item),)
+            if child is not None
+        }
+    return value
 
 
 def _required_completion_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:

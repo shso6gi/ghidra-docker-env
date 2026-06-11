@@ -1141,6 +1141,7 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 
     assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
+    assert 'RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES="${RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES:-1}"' in script
     phase0a_gate = script.index("./phase0a_validate_observed_baseline_integrity_gate.sh")
     phase0b_gate = script.index("./phase0b_validate_unknown_reason_correspondence_gate.sh")
     phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
@@ -1148,6 +1149,7 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     phase0d_gate = script.index("./phase0d_validate_not_eq_audit_gate.sh")
     phase1_gate = script.index("./phase1_validate_concrete_manifest_gate.sh")
     phase15_gate = script.index("./phase15_validate_regression_gates.sh")
+    pre_full_representatives = script.index("./validate_pre_full_gates_with_representative_refresh.sh")
     normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
     producer_full_matrix = script.index(
         "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
@@ -1159,7 +1161,8 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     assert phase0c_reproduction_gate < phase0d_gate
     assert phase0d_gate < phase1_gate
     assert phase1_gate < phase15_gate
-    assert phase15_gate < normal_full_matrix
+    assert phase15_gate < pre_full_representatives
+    assert pre_full_representatives < normal_full_matrix
     assert "phase0a_observed_baseline_integrity_gate_stdout.log" in script
     assert "phase0b_unknown_reason_correspondence_gate_stdout.log" in script
     assert "phase0c_observed_baseline_census_gate_stdout.log" in script
@@ -1167,6 +1170,7 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     assert "phase0d_not_eq_audit_gate_stdout.log" in script
     assert "phase1_concrete_manifest_gate_stdout.log" in script
     assert "phase1_5_regression_gates_stdout.log" in script
+    assert "pre_full_representative_refresh_stdout.log" in script
     assert normal_full_matrix < producer_full_matrix
     assert "./phase2_run_function_call_pre_producer_final_result_preflight.sh" not in script
     assert "./phase2_run_function_call_pre_producer_preflight.sh" not in script

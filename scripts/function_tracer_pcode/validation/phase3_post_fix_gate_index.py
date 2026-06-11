@@ -167,7 +167,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         expected_post_fix_status_counts={"pending_proof": 1},
         expected_post_fix_obligation_counts={
             "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 4,
+            "pending_proof_obligation_count": 2,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -184,16 +184,16 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "function": "fc_apply_indirect",
                 "binary_pair": "B10_B13",
                 "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 4,
+                "pending_proof_obligation_count": 2,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 4,
+                "required_completion_action_count": 2,
             },
         ),
         expected_required_completion_action_hashes=(
             {
                 "id": "representative-return-width-bridge-apply-indirect-width-high-bit-near-miss",
                 "required_completion_actions_sha256": (
-                    "f36a67f5930e1a0667e154a7b1d1a7dcbf5322e26fe71146e29e2e76f50c512f"
+                    "3e6f3c9a8d6c4f096542a134f4a96a7a262d6a983d8b47a5c5422fb1a3d22379"
                 ),
             },
         ),
@@ -353,12 +353,10 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             "pending_proof",
             "resolved_under_other_conservative_unknown",
         ),
-        expected_post_fix_status_counts={
-            "resolved_under_other_conservative_unknown": 1,
-        },
+        expected_post_fix_status_counts={"pending_proof": 1},
         expected_post_fix_obligation_counts={
-            "pending_proof_entry_count": 0,
-            "pending_proof_obligation_count": 0,
+            "pending_proof_entry_count": 1,
+            "pending_proof_obligation_count": 6,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -374,17 +372,17 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "function": "fc_is_even",
                 "binary_pair": "B11_B12",
-                "post_fix_status": "resolved_under_other_conservative_unknown",
-                "pending_proof_obligation_count": 0,
+                "post_fix_status": "pending_proof",
+                "pending_proof_obligation_count": 6,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 0,
+                "required_completion_action_count": 6,
             },
         ),
         expected_required_completion_action_hashes=(
             {
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "required_completion_actions_sha256": (
-                    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                    "7a220d862edd7485c4e57e187b0aa1511d7efc0738351c37806f2dfea2036e1a"
                 ),
             },
         ),

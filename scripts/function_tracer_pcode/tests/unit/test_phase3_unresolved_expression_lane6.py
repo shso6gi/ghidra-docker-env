@@ -165,6 +165,33 @@ def _originated_phi_target():
     return tuple(target)
 
 
+def _with_typed_lowering_evidence(target):
+    def visit(value):
+        if isinstance(value, tuple):
+            if value and value[0] == "unresolved_location":
+                if value and isinstance(value[-1], tuple) and value[-1][0] == "typed_lowering_evidence":
+                    return tuple(visit(item) for item in value)
+                scope = value[1]
+                evidence = (
+                    "typed_lowering_evidence",
+                    ("location_scope", scope),
+                    ("expression_kind", "BINARY_OP"),
+                    ("expression_bits", 1),
+                    ("typed_expression_key", ("expression", ("const", ("int", 1), 1))),
+                    ("contains_unsupported_smt_ops", False),
+                    ("lowering_status", "blocked_nested_unresolved_expression"),
+                )
+                return tuple(visit(item) for item in value) + (evidence,)
+            return tuple(visit(item) for item in value)
+        if isinstance(value, list):
+            return [visit(item) for item in value]
+        if isinstance(value, dict):
+            return {key: visit(item) for key, item in value.items()}
+        return value
+
+    return visit(target)
+
+
 def _nested_contains(value, needle) -> bool:
     if value == needle:
         return True
@@ -542,6 +569,42 @@ def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actio
         for obligation in obligations
     }
     assert all(action["required_evidence"] for action in required_actions)
+
+
+def test_unresolved_expression_post_fix_accepts_typed_lowering_detail_added_to_target():
+    frozen_target = _originated_phi_target()
+    current_target = _with_typed_lowering_evidence(frozen_target)
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=current_target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(current_target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [frozen_target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    obligations = _pending_proof_obligations(entry)
+    assert {obligation["proof_stage"] for obligation in obligations} == set(
+        UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+    )
+    assert all(obligation["proof_obligation_id"] for obligation in obligations)
 
 
 def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages():
