@@ -541,12 +541,32 @@ def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
         except Exception:
             identity = None
         if identity is not None:
+            stable_origin = _unknown_runtime_stable_origin_key(runtime_ref)
+            if stable_origin is not None:
+                return ("runtime_ref_with_origin", identity, stable_origin)
             return ("runtime_ref", identity)
     return (
         "expression_unknown_instance",
         id(expr),
         int(expression_smt_bit_width(expr) or 1),
     )
+
+
+def _unknown_runtime_stable_origin_key(runtime_ref) -> Optional[Tuple[Any, ...]]:
+    origin_kind = getattr(runtime_ref, "origin_kind", None)
+    origin_ref = getattr(runtime_ref, "origin_ref", None)
+    if origin_kind is None or origin_ref is None:
+        return None
+    stable_key = getattr(origin_ref, "stable_key", None)
+    if not callable(stable_key):
+        return None
+    try:
+        origin_key = stable_key()
+    except Exception:
+        return None
+    if origin_key is None:
+        return None
+    return (origin_kind, origin_key)
 
 
 def _unknown_smt_symbol_name(expr) -> str:

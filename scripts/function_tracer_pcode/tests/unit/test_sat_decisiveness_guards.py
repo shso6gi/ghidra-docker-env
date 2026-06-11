@@ -41,6 +41,7 @@ from scripts.function_tracer_pcode.model import (
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
+from scripts.function_tracer_pcode.model.runtime_refs import UnknownValueRef
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety import (
     _object_target_key_is_specific,
@@ -3138,7 +3139,7 @@ def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_e
     assert result.unknown_reasons == []
     assert solver_runner.run_sequential.call_count == 2
     assertions = base_ctx["pairwise_extra_assertions_by_pair"]["(0,0)"]
-    assert assertions[0].startswith("; unresolved_expression deferred-call equality")
+    assert assertions[0].startswith("; unresolved_expression runtime-unknown equality")
     assert any(line.startswith("(assert (= rtunk_") for line in assertions)
     query = solver_runner.run_sequential.call_args_list[1].args[0]
     assert "; Pair-local object-derived assumptions" in query
@@ -3146,6 +3147,7 @@ def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_e
     evidence = base_ctx["pairwise_unresolved_deferred_call_lowering_evidence_by_pair"]["(0,0)"]
     assert len(evidence) == 1
     assert evidence[0][0] == "matched_deferred_call_runtime_unknown"
+    assert ("lowering_kind", "deferred_call") in evidence[0]
 
 
 def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypatch):
@@ -3387,6 +3389,182 @@ def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatc
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def _phi_circular_unknown(binary_id: str, entry: int, *, seq_time: int = 98) -> Expression:
+    pcode_ref = PcodeOpRef(
+        address_offset=entry + 0x1c,
+        seq_time=seq_time,
+        seq_order=0,
+        block_index=0,
+        mnemonic="MULTIEQUAL",
+        input_sizes=(4, 4),
+        output_size=4,
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=entry,
+        target_space="ram",
+        target_offset=entry + 0x1c,
+        opcode=60,
+        local_op_ordinal=0,
+    )
+    return Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.phi_circular(pcode_op_ref=pcode_ref),
+    ).clone_with(size=4)
+
+
+def _analysis_with_phi_circular_guard(
+    *,
+    function_name: str,
+    binary_id: str,
+    entry: int,
+    seq_time: int = 98,
+    guard_negated: bool = False,
+) -> FunctionReturnAnalysis:
+    param = Expression.parameter("x", 0, size=4)
+    phi_unknown = _phi_circular_unknown(binary_id, entry, seq_time=seq_time)
+    guard = Condition(
+        Expression.binary_op(
+            "INT_SLESS",
+            Expression.unary_op("INT_2COMP", phi_unknown),
+            _const(0),
+        ),
+        guard_negated,
+    )
+    return FunctionReturnAnalysis(
+        function_name=function_name,
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
+        binary_id=binary_id,
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address=hex(entry), value=param, conditions=[guard])],
+        return_type="int",
+        effect_summary=EffectSummary(parameter_names=["x"], effects=[]),
+    )
+
+
+def _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2):
+    def cases_for(analysis):
+        return [
+            ReturnCase(
+                index=index,
+                conditions=list(ret.conditions or []),
+                value_expr=ret.value,
+                return_info=ret,
+                return_type=analysis.return_type or "int",
+                parameters=analysis.parameters,
+            )
+            for index, ret in enumerate(analysis.returns or [])
+        ]
+
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: cases_for(analysis1) if analysis.function_name == analysis1.function_name else cases_for(analysis2),
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_unresolved_return_coverage_unknown_reasons", lambda *_args, **_kwargs: [])
+
+
+def test_pairwise_phi_circular_guard_same_origin_stays_unknown_without_completed_proof(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    reason = result.unknown_reasons[0]
+    assert {obligation.proof_stage for obligation in reason.recovery_proof_obligations} == {
+        "phi_circular_guard_condition_lowering",
+        "recursive_summary_guard_equivalence",
+    }
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+        guard_negated=False,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+        guard_negated=True,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+        seq_time=98,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+        seq_time=99,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     strategy._solve_query_twostage.assert_not_called()
 

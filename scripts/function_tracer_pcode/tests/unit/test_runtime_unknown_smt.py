@@ -72,6 +72,59 @@ def test_loop_variable_identity_uses_stable_key_for_unknown_smt_symbol():
     assert expr_left.to_smt() == expr_right.to_smt()
 
 
+def test_unknown_smt_symbol_ignores_nonstable_diagnostic_origin_repr():
+    class NonStableOrigin:
+        pass
+
+    left = Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.opaque(
+            reason="phi_circular",
+            origin_kind="multiequal_pcode_op",
+            origin_ref=NonStableOrigin(),
+        ),
+    )
+    right = Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.opaque(
+            reason="phi_circular",
+            origin_kind="multiequal_pcode_op",
+            origin_ref=NonStableOrigin(),
+        ),
+    )
+
+    assert repr(left.runtime_ref.diagnostic_key()) != repr(right.runtime_ref.diagnostic_key())
+    assert left.to_smt() == right.to_smt()
+
+
+def test_unknown_smt_symbol_uses_stable_diagnostic_origin_key_when_available():
+    class StableOrigin:
+        def __init__(self, key):
+            self.key = key
+
+        def stable_key(self):
+            return ("stable_origin", self.key)
+
+    left = Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.opaque(
+            reason="phi_circular",
+            origin_kind="multiequal_pcode_op",
+            origin_ref=StableOrigin("left"),
+        ),
+    )
+    right = Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.opaque(
+            reason="phi_circular",
+            origin_kind="multiequal_pcode_op",
+            origin_ref=StableOrigin("right"),
+        ),
+    )
+
+    assert left.to_smt() != right.to_smt()
+
+
 def test_unresolved_parameter_runtime_unknowns_do_not_share_smt_identity():
     left = Expression.unknown(
         "unresolved_parameter_value",

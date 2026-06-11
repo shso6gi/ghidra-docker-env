@@ -494,7 +494,7 @@ class PairwiseStrategy(CheckStrategy):
                             lowering.assertions,
                         )
                         self._debug_print(
-                            f"  Pair {pair_id}: unresolved deferred-call value "
+                            f"  Pair {pair_id}: unresolved runtime unknown "
                             "lowered with object-derived equality assumption"
                         )
                     else:
@@ -4611,21 +4611,23 @@ class PairwiseStrategy(CheckStrategy):
         analysis2 = base_ctx.get("analysis2")
         if analysis1 is None or analysis2 is None:
             return None
-        if self._case_conditions_contain_unresolved(case1) or self._case_conditions_contain_unresolved(case2):
-            return None
         value1 = getattr(case1, "value_expr", None)
         value2 = getattr(case2, "value_expr", None)
         if self._expression_has_unsupported_smt_op_excluding_unknowns(value1):
             return None
         if self._expression_has_unsupported_smt_op_excluding_unknowns(value2):
             return None
+        if self._case_conditions_have_unsupported_smt_op_excluding_unknowns(case1):
+            return None
+        if self._case_conditions_have_unsupported_smt_op_excluding_unknowns(case2):
+            return None
         value_bits1 = int(expression_smt_bit_width(value1) or 0)
         value_bits2 = int(expression_smt_bit_width(value2) or 0)
         if value_bits1 <= 0 or value_bits2 <= 0 or value_bits1 != value_bits2:
             return None
 
-        left_unknowns = self._collect_unknown_expression_nodes(value1)
-        right_unknowns = self._collect_unknown_expression_nodes(value2)
+        left_unknowns = self._collect_case_unknown_expression_nodes(case1)
+        right_unknowns = self._collect_case_unknown_expression_nodes(case2)
         if not left_unknowns or not right_unknowns or len(left_unknowns) != len(right_unknowns):
             return None
 
@@ -4652,13 +4654,15 @@ class PairwiseStrategy(CheckStrategy):
 
         unmatched_right = list(right_items)
         assertions: List[str] = [
-            f"; unresolved_expression deferred-call equality lowering for pair {pair_id}",
-            "; object evidence: matched_deferred_call_argument_evidence",
+            f"; unresolved_expression runtime-unknown equality lowering for pair {pair_id}",
+            "; object evidence: pairwise_runtime_unknown_lowering",
         ]
         evidence: List[Tuple[Any, ...]] = []
         lowered_left_unknown_keys: List[Any] = []
         lowered_right_unknown_keys: List[Any] = []
-        for left_expr, left_info, left_key in left_items:
+        for left_expr, left_info, left_key, left_kind, left_match_key in left_items:
+            if left_kind != "deferred_call":
+                return None
             proof_content = self._matched_deferred_call_argument_proof_content(
                 left_key,
                 analysis1,
@@ -4673,11 +4677,14 @@ class PairwiseStrategy(CheckStrategy):
             candidates = [
                 item
                 for item in unmatched_right
-                if self._normalize_nested_tuple(item[2]) == expected_peer_key
+                if (
+                    item[3] == left_kind
+                    and self._normalize_nested_tuple(item[2]) == expected_peer_key
+                )
             ]
             if len(candidates) != 1:
                 return None
-            right_expr, right_info, right_key = candidates[0]
+            right_expr, right_info, right_key, right_kind, right_match_key = candidates[0]
             left_bits = int(expression_smt_bit_width(left_expr) or 0)
             right_bits = int(expression_smt_bit_width(right_expr) or 0)
             if left_bits <= 0 or right_bits <= 0 or left_bits != right_bits:
@@ -4693,8 +4700,10 @@ class PairwiseStrategy(CheckStrategy):
                     "matched_deferred_call_runtime_unknown",
                     ("left_unknown", self._expression_runtime_object_key(left_expr)),
                     ("right_unknown", self._expression_runtime_object_key(right_expr)),
-                    ("left_deferred_call", left_key),
-                    ("right_deferred_call", right_key),
+                    ("left_object_target", left_key),
+                    ("right_object_target", right_key),
+                    ("lowering_kind", left_kind),
+                    ("match_key", left_match_key),
                     ("bit_width", left_bits),
                     (
                         "left_recovery_status",
@@ -4727,12 +4736,36 @@ class PairwiseStrategy(CheckStrategy):
             evidence=tuple(evidence),
         )
 
+    def _case_conditions_have_unsupported_smt_op_excluding_unknowns(self, case: ReturnCase) -> bool:
+        for condition in getattr(case, "conditions", None) or ():
+            expression = getattr(condition, "expression", None)
+            if self._expression_has_unsupported_smt_op_excluding_unknowns(expression):
+                return True
+        return False
+
     def _case_conditions_contain_unresolved(self, case: ReturnCase) -> bool:
         for condition in getattr(case, "conditions", None) or ():
             expression = getattr(condition, "expression", None)
             if self._expression_contains_unresolved(expression):
                 return True
         return False
+
+    def _collect_case_unknown_expression_nodes(self, case: ReturnCase) -> Tuple[Any, ...]:
+        result: List[Any] = []
+        seen = set()
+
+        def add_from(expr: Any) -> None:
+            for unknown in self._collect_unknown_expression_nodes(expr):
+                key = self._expression_runtime_object_key(unknown)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(unknown)
+
+        add_from(getattr(case, "value_expr", None))
+        for condition in getattr(case, "conditions", None) or ():
+            add_from(getattr(condition, "expression", None))
+        return tuple(result)
 
     def _collect_unknown_expression_nodes(self, expr: Any) -> Tuple[Any, ...]:
         result: List[Any] = []
@@ -4790,32 +4823,32 @@ class PairwiseStrategy(CheckStrategy):
         expr: Any,
         *,
         side_label: str,
-    ) -> Optional[Tuple[Any, Any, Tuple[Any, ...]]]:
+    ) -> Optional[Tuple[Any, Any, Tuple[Any, ...], str, Tuple[Any, ...]]]:
         runtime_ref = getattr(expr, "runtime_ref", None)
         deferred_ref = getattr(runtime_ref, "deferred_call_ref", None)
-        if deferred_ref is None:
-            return None
-        info = self._deferred_call_info_for_ref(analysis, deferred_ref)
-        if info is None:
-            return None
-        object_target_key = self._deferred_call_object_target_key(
-            info,
-            analysis=analysis,
-            side_label=side_label,
-        )
-        if not self._call_effect_target_expression_key_is_present(
-            self._cross_binary_call_effect_component_key(
-                self._deferred_call_target_expression_key(object_target_key)
+        if deferred_ref is not None:
+            info = self._deferred_call_info_for_ref(analysis, deferred_ref)
+            if info is None:
+                return None
+            object_target_key = self._deferred_call_object_target_key(
+                info,
+                analysis=analysis,
+                side_label=side_label,
             )
-        ):
-            return None
-        if not self._call_effect_argument_keys_are_present(
-            self._cross_binary_call_effect_component_key(
-                self._deferred_call_argument_keys(object_target_key)
-            )
-        ):
-            return None
-        return expr, info, object_target_key
+            if not self._call_effect_target_expression_key_is_present(
+                self._cross_binary_call_effect_component_key(
+                    self._deferred_call_target_expression_key(object_target_key)
+                )
+            ):
+                return None
+            if not self._call_effect_argument_keys_are_present(
+                self._cross_binary_call_effect_component_key(
+                    self._deferred_call_argument_keys(object_target_key)
+                )
+            ):
+                return None
+            return expr, info, object_target_key, "deferred_call", ()
+        return None
 
     def _deferred_call_info_for_ref(
         self,
