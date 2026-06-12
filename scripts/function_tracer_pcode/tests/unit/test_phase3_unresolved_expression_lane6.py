@@ -423,7 +423,14 @@ def _tuple_fields(value):
     }
 
 
-def _completed_semantic_recurrence_evidence_from_diagnostic(strategy, target):
+def _completed_semantic_recurrence_evidence_from_diagnostic(
+    strategy,
+    target,
+    *,
+    proof_source="semantic_recurrence_solver_replay",
+    proof_rule="phi_circular_semantic_recurrence_proof",
+    include_solver_hashes=False,
+):
     diagnostic_evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
         target
     )
@@ -433,47 +440,79 @@ def _completed_semantic_recurrence_evidence_from_diagnostic(strategy, target):
         "recursive_summary_guard_equivalence",
     )
     proof_queries = []
+    solver_hashes_by_stage = []
+    solver_hash_index = 1
     for stage_evidence in fields["stage_evidence"]:
         stage_fields = _tuple_fields(stage_evidence)
         query_plans = _find_tuples(stage_fields["proof_query_plan"], "semantic_recurrence_query")
         assert len(query_plans) == 1
         query_fields = _tuple_fields(query_plans[0])
         object_content = query_fields["object_content"]
+        solver_hash = f"{solver_hash_index:064x}"
+        solver_hash_index += 1
+        solver_hashes_by_stage.append((query_fields["query_stage"], solver_hash))
+        query_items = [
+            "semantic_recurrence_query",
+            ("query_id", query_fields["query_id"]),
+            ("query_stage", query_fields["query_stage"]),
+            ("solver_result", "unsat"),
+            ("query_status", "proven"),
+            ("proof_source", proof_source),
+            ("expected_solver_result", query_fields["expected_solver_result"]),
+            ("assertion_kind", query_fields["assertion_kind"]),
+            ("query_hash", query_fields["query_hash"]),
+        ]
+        if include_solver_hashes:
+            query_items.append(("solver_query_sha256", solver_hash))
+        query_items.extend((("object_content", object_content), *object_content))
         proof_queries.append(
-            (
-                "semantic_recurrence_query",
-                ("query_id", query_fields["query_id"]),
-                ("query_stage", query_fields["query_stage"]),
-                ("solver_result", "unsat"),
-                ("query_status", "proven"),
-                ("proof_source", "semantic_recurrence_solver_replay"),
-                ("expected_solver_result", query_fields["expected_solver_result"]),
-                ("assertion_kind", query_fields["assertion_kind"]),
-                ("query_hash", query_fields["query_hash"]),
-                ("object_content", object_content),
-                *object_content,
-            )
+            tuple(query_items)
         )
-    semantic_proof = (
+    semantic_proof_items = [
         "semantic_recurrence_proof",
-        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
+        ("proof_rule", proof_rule),
         ("status", "complete"),
         ("completed_stages", completed_stages),
         ("object_target_key", target),
         ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
         ("proof_queries", tuple(proof_queries)),
-    )
+    ]
+    if include_solver_hashes:
+        semantic_proof_items.append(
+            ("solver_query_sha256_by_stage", tuple(solver_hashes_by_stage))
+        )
+    semantic_proof = tuple(semantic_proof_items)
     return (
         "completed_unresolved_expression_proof",
         ("object_derived", True),
         ("status", "complete"),
-        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
+        ("proof_rule", proof_rule),
         ("completed_stages", completed_stages),
         ("object_target_key", target),
         ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
         ("stage_evidence", fields["stage_evidence"]),
         ("semantic_recurrence_proof", semantic_proof),
     )
+
+
+def _replace_return_storage_type(value, type_name):
+    replaced, changed = _replace_first_tuple(
+        value,
+        "return_storage",
+        lambda item: item[:4] + (type_name,),
+    )
+    assert changed
+    return replaced
+
+
+def _replace_return_storage_width(value, width):
+    replaced, changed = _replace_first_tuple(
+        value,
+        "return_storage",
+        lambda item: item[:2] + (width,) + item[3:],
+    )
+    assert changed
+    return replaced
 
 
 def _with_typed_lowering_evidence(target):
@@ -1615,7 +1654,7 @@ def test_phi_circular_full_shape_match_rejects_stale_completed_proof_evidence():
     ]
 
 
-def test_phi_circular_semantic_recurrence_completed_proof_gate_accepts_query_evidence():
+def test_phi_circular_semantic_recurrence_solver_replay_completed_proof_gate_rejects_query_evidence():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
     right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
@@ -1654,11 +1693,13 @@ def test_phi_circular_semantic_recurrence_completed_proof_gate_accepts_query_evi
 
     status, failures = _post_fix_status(entry)
 
-    assert status == "proof_complete"
-    assert failures == ()
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
 
 
-def test_phi_circular_semantic_recurrence_completed_proof_rejects_query_hash_mismatch():
+def test_phi_circular_independent_semantic_recurrence_completed_proof_gate_accepts_hashed_query_evidence():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
     right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
@@ -1671,6 +1712,329 @@ def test_phi_circular_semantic_recurrence_completed_proof_rejects_query_hash_mis
     completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
         strategy,
         target,
+        proof_source="independent_semantic_recurrence_solver_replay",
+        proof_rule="phi_circular_independent_semantic_recurrence_proof",
+        include_solver_hashes=True,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=completed_evidence,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "proof_complete"
+    assert failures == ()
+
+
+def test_phi_circular_semantic_recurrence_solver_replay_completed_recovery_rejects_eq_payload_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "reason_id": "unresolved_expression",
+                    "proof_source": "semantic_recurrence_solver_replay",
+                    "proof_rule": "phi_circular_semantic_recurrence_proof",
+                    "object_target_key": target,
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "semantic_recurrence_solver_replay",
+                        "proof_rule": "phi_circular_semantic_recurrence_proof",
+                        "object_target_key": target,
+                        "object_evidence": completed_evidence,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_semantic_recurrence_solver_replay_completed_recovery_rejects_return_type_label_drift():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    evidence_target = _replace_return_storage_type(target, "undefined4")
+    completed_evidence = _replace_return_storage_type(
+        _completed_semantic_recurrence_evidence_from_diagnostic(
+            strategy,
+            target,
+        ),
+        "undefined4",
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "semantic_recurrence_solver_replay",
+                        "proof_rule": "phi_circular_semantic_recurrence_proof",
+                        "object_derived": True,
+                        "status": "complete",
+                        "object_target_key": evidence_target,
+                        "object_evidence": completed_evidence,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_semantic_recurrence_completed_recovery_rejects_return_width_drift():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    evidence_target = _replace_return_storage_width(target, 64)
+    completed_evidence = _replace_return_storage_width(
+        _completed_semantic_recurrence_evidence_from_diagnostic(
+            strategy,
+            target,
+        ),
+        64,
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "semantic_recurrence_solver_replay",
+                        "proof_rule": "phi_circular_semantic_recurrence_proof",
+                        "object_derived": True,
+                        "status": "complete",
+                        "object_target_key": evidence_target,
+                        "object_evidence": completed_evidence,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_guard_overlap_completed_recovery_rejects_without_semantic_proof():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "reason_id": "unresolved_expression",
+                    "proof_source": "phi_circular_guard_overlap_solver_replay",
+                    "proof_rule": "phi_circular_guard_overlap_unsat",
+                    "object_derived": True,
+                    "status": "complete",
+                    "solver_result": "unsat",
+                    "query_status": "proven",
+                    "object_target_key": target,
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "phi_circular_guard_overlap_solver_replay",
+                        "proof_rule": "phi_circular_guard_overlap_unsat",
+                        "object_derived": True,
+                        "status": "complete",
+                        "solver_result": "unsat",
+                        "query_status": "proven",
+                        "object_target_key": target,
+                        "solver_query_sha256": "a" * 64,
+                        "phi_equality_assertion_count": 1,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_guard_overlap_completed_recovery_rejects_missing_solver_hash():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "phi_circular_guard_overlap_solver_replay",
+                        "proof_rule": "phi_circular_guard_overlap_unsat",
+                        "object_derived": True,
+                        "status": "complete",
+                        "solver_result": "unsat",
+                        "query_status": "proven",
+                        "object_target_key": target,
+                        "phi_equality_assertion_count": 1,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_semantic_recurrence_completed_recovery_rejects_eq_without_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "EQ",
+            "completed_recovery_proof_evidence": [],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_recovery_missing_evidence"
+    ]
+
+
+def test_phi_circular_independent_semantic_recurrence_completed_proof_rejects_query_hash_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
+        proof_source="independent_semantic_recurrence_solver_replay",
+        proof_rule="phi_circular_independent_semantic_recurrence_proof",
+        include_solver_hashes=True,
     )
 
     def corrupt_first_query_hash_in_completed_evidence(evidence):
@@ -1729,6 +2093,134 @@ def test_phi_circular_semantic_recurrence_completed_proof_rejects_query_hash_mis
     status, failures = _post_fix_status(entry)
 
     assert changed is True
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
+
+
+def test_phi_circular_independent_semantic_recurrence_completed_proof_rejects_solver_hash_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
+        proof_source="independent_semantic_recurrence_solver_replay",
+        proof_rule="phi_circular_independent_semantic_recurrence_proof",
+        include_solver_hashes=True,
+    )
+
+    def corrupt_first_solver_hash_in_completed_evidence(evidence):
+        evidence_fields = _tuple_fields(evidence)
+        semantic_proof = evidence_fields["semantic_recurrence_proof"]
+        fields = _tuple_fields(semantic_proof)
+        proof_queries = list(fields["proof_queries"])
+        first_query = proof_queries[0]
+        proof_queries[0] = tuple(
+            ("solver_query_sha256", "f" * 64)
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "solver_query_sha256"
+            else item
+            for item in first_query
+        )
+        corrupted_semantic_proof = tuple(
+            ("proof_queries", tuple(proof_queries))
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "proof_queries"
+            else item
+            for item in semantic_proof
+        )
+        return tuple(
+            ("semantic_recurrence_proof", corrupted_semantic_proof)
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "semantic_recurrence_proof"
+            else item
+            for item in evidence
+        )
+
+    corrupted_evidence, changed = _replace_first_tuple(
+        completed_evidence,
+        "completed_unresolved_expression_proof",
+        corrupt_first_solver_hash_in_completed_evidence,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=corrupted_evidence,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert changed is True
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
+
+
+def test_phi_circular_independent_semantic_recurrence_completed_proof_rejects_missing_solver_hash_map():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
+        proof_source="independent_semantic_recurrence_solver_replay",
+        proof_rule="phi_circular_independent_semantic_recurrence_proof",
+        include_solver_hashes=False,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=completed_evidence,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
     assert status == "failed"
     assert [failure["kind"] for failure in failures] == [
         "unresolved_expression_completed_proof_evidence_invalid"
@@ -2082,7 +2574,9 @@ def test_unresolved_expression_post_fix_status_rejects_target_cleared_without_re
     status, failures = _post_fix_status(entry)
 
     assert status == "failed"
-    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_cleared_target_missing_evidence"
+    ]
 
 
 def test_unresolved_expression_post_fix_status_rejects_unexplained_target_subset():
@@ -2113,7 +2607,65 @@ def test_unresolved_expression_post_fix_status_rejects_unexplained_target_subset
     status, failures = _post_fix_status(entry)
 
     assert status == "failed"
-    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_cleared_target_missing_evidence"
+    ]
+
+
+def test_unresolved_expression_post_fix_status_rejects_cleared_target_with_circular_solver_replay_proof():
+    current_target = _unresolved_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    cleared_target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        cleared_target,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=current_target,
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [current_target, cleared_target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [],
+            "completed_recovery_proof_evidence": [
+                {
+                    "side": "function1",
+                    "evidence": {
+                        "reason_id": "unresolved_expression",
+                        "proof_source": "semantic_recurrence_solver_replay",
+                        "proof_rule": "phi_circular_semantic_recurrence_proof",
+                        "object_derived": True,
+                        "status": "complete",
+                        "object_target_key": cleared_target,
+                        "object_evidence": completed_evidence,
+                    },
+                }
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_cleared_target_missing_evidence"
+    ]
 
 
 def test_unresolved_expression_post_fix_status_rejects_target_cleared_with_stale_unresolved_action():
@@ -2148,7 +2700,9 @@ def test_unresolved_expression_post_fix_status_rejects_target_cleared_with_stale
     status, failures = _post_fix_status(entry)
 
     assert status == "failed"
-    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_cleared_target_missing_evidence"
+    ]
 
 
 def test_extra_current_unresolved_expression_observations_exclude_manifest_entries():

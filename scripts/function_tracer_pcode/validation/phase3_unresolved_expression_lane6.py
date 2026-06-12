@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload
+from .result_summary import STATUS_EQ, STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload
 from .unknown_reason_summary import _extract_final_unknown_reasons, _global_reason_tuple_from_record
 from .phase3_return_width_bridge_lane2 import (
     _canonical_json,
     _canonical_movements,
     _canonical_targets,
     _call_callee_key_is_specific,
+    _completed_recovery_proof_summaries,
     _entry_details,
     _entry_key,
     _failed,
@@ -59,6 +60,9 @@ UNRESOLVED_GENERIC_PROOF_STAGES = (
 UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES = (
     "phi_circular_guard_condition_lowering",
     "recursive_summary_guard_equivalence",
+)
+UNRESOLVED_INDEPENDENT_SEMANTIC_RECURRENCE_PROOF_SOURCE = (
+    "independent_semantic_recurrence_solver_replay"
 )
 UNRESOLVED_DEFERRED_CALL_PROOF_STAGES = (
     "deferred_call_return_resolution",
@@ -535,6 +539,7 @@ def _observation(
         ],
         "reason_records": reason_records,
         "proof_actions": proof_actions,
+        "completed_recovery_proof_evidence": _completed_recovery_proof_summaries(payload),
         "proof_action_object_evidence_status_counts": (
             _proof_action_object_evidence_status_counts(proof_actions)
         ),
@@ -887,6 +892,11 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
     if result == STATUS_TIMEOUT:
         failures.append(_failed("unresolved_expression_timeout_regression", **details))
         return "failed", failures
+    if result == STATUS_EQ:
+        failures.extend(_completed_unresolved_expression_recovery_failures(entry, current))
+        if failures:
+            return "failed", failures
+        return "completed_recovery", ()
     if result != STATUS_UNKNOWN:
         failures.append(
             _failed(
@@ -908,7 +918,15 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         )
     ):
         return "resolved_under_other_conservative_unknown", ()
-    if not frozen_targets or current_target_keys != frozen_target_keys:
+    if not frozen_targets:
+        failures.append(
+            _failed(
+                "unresolved_expression_missing_frozen_targets",
+                **details,
+            )
+        )
+    extra_current_keys = current_target_keys - frozen_target_keys
+    if extra_current_keys:
         failures.append(
             _failed(
                 "unresolved_expression_target_set_changed",
@@ -917,6 +935,12 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
                 **details,
             )
         )
+    cleared_failures = _unresolved_expression_cleared_target_failures(
+        entry,
+        frozen_targets=frozen_targets,
+        current_targets=current_targets,
+    )
+    failures.extend(cleared_failures)
     if failures:
         return "failed", failures
     invalid_completed = _invalid_unresolved_expression_completed_actions(entry, current_targets)
@@ -934,6 +958,148 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
     if _unresolved_expression_proof_actions_complete(entry, current_targets):
         return "pending_proof", ()
     return "pending_object_evidence", ()
+
+
+def _unresolved_expression_cleared_target_failures(
+    entry: Mapping[str, Any],
+    *,
+    frozen_targets: Sequence[Any],
+    current_targets: Sequence[Any],
+) -> Sequence[Dict[str, Any]]:
+    current_target_keys = {
+        _unresolved_expression_target_identity_key(target)
+        for target in current_targets
+    }
+    cleared_targets = [
+        target
+        for target in frozen_targets
+        if _unresolved_expression_target_identity_key(target) not in current_target_keys
+    ]
+    if not cleared_targets:
+        return ()
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    missing = [
+        target
+        for target in cleared_targets
+        if not _completed_unresolved_expression_evidence_matches_target(completed, target)
+    ]
+    if not missing:
+        return ()
+    return (
+        _failed(
+            "unresolved_expression_cleared_target_missing_evidence",
+            missing_targets=_jsonable(missing),
+            completed_count=len(completed),
+            **_entry_details(entry),
+        ),
+    )
+
+
+def _completed_unresolved_expression_recovery_failures(
+    entry: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    frozen_targets = _canonical_targets(entry.get("target_object_keys"))
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    details = _entry_details(entry)
+    failures: list[Dict[str, Any]] = []
+    if not frozen_targets:
+        failures.append(_failed("unresolved_expression_completed_recovery_missing_frozen_targets", **details))
+        return tuple(failures)
+    missing = [
+        target
+        for target in frozen_targets
+        if not _completed_unresolved_expression_evidence_matches_target(completed, target)
+    ]
+    if missing:
+        failures.append(
+            _failed(
+                "unresolved_expression_completed_recovery_missing_evidence",
+                missing_targets=_jsonable(missing),
+                completed_count=len(completed),
+                **details,
+            )
+        )
+    return tuple(failures)
+
+
+def _completed_unresolved_expression_evidence_matches_target(
+    completed: Sequence[Any],
+    target: Any,
+) -> bool:
+    for item in completed:
+        if not isinstance(item, Mapping):
+            continue
+        evidence = item.get("evidence")
+        if not isinstance(evidence, Mapping):
+            continue
+        if evidence.get("reason_id") != "unresolved_expression":
+            continue
+        evidence_target = evidence.get("object_target_key")
+        if not _object_target_key_is_specific_unresolved_expression(evidence_target):
+            continue
+        if (
+            _unresolved_expression_completed_recovery_target_identity_key(evidence_target)
+            != _unresolved_expression_completed_recovery_target_identity_key(target)
+        ):
+            continue
+        if _completed_unresolved_expression_semantic_recurrence_matches_target(
+            evidence,
+            target=target,
+            evidence_target=evidence_target,
+        ):
+            return True
+    return False
+
+
+def _completed_unresolved_expression_semantic_recurrence_matches_target(
+    evidence: Mapping[str, Any],
+    *,
+    target: Any,
+    evidence_target: Any,
+) -> bool:
+    if evidence.get("proof_source") == "semantic_recurrence_solver_replay":
+        return False
+    if evidence.get("proof_rule") != "phi_circular_independent_semantic_recurrence_proof":
+        return False
+    object_evidence = evidence.get("object_evidence")
+    if str(evidence.get("status") or MISSING_SENTINEL) not in {"complete", "completed", "proven"} and not (
+        isinstance(object_evidence, (tuple, list))
+        and _nested_contains_value(object_evidence, ("status", "complete"))
+    ):
+        return False
+    if evidence.get("object_derived") is not True:
+        if not (
+            isinstance(object_evidence, (tuple, list))
+            and _nested_contains_value(object_evidence, ("object_derived", True))
+        ):
+            return False
+    action = {
+        "object_evidence": evidence.get("object_evidence"),
+        "object_target_key": evidence_target,
+    }
+    return all(
+        _unresolved_expression_completed_action_evidence_is_specific(
+            action,
+            stage=stage,
+            target=target,
+        )
+        for stage in _required_unresolved_proof_stages_for_target(target)
+    )
+
+
+def _nested_contains_value(value: Any, needle: Any) -> bool:
+    if value == needle:
+        return True
+    if isinstance(value, Mapping):
+        return any(
+            _nested_contains_value(key, needle) or _nested_contains_value(item, needle)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return any(_nested_contains_value(item, needle) for item in value)
+    return False
 
 
 def _post_fix_checks(
@@ -1006,7 +1172,12 @@ def _post_fix_checks(
     for entry in entries:
         for failure in entry.get("post_fix_failures") or ():
             checks.append(failure)
-        if entry.get("post_fix_status") in {"pending_object_evidence", "pending_proof", "proof_complete"}:
+        if entry.get("post_fix_status") in {
+            "pending_object_evidence",
+            "pending_proof",
+            "proof_complete",
+            "completed_recovery",
+        }:
             checks.append(
                 _ok(
                     "unresolved_expression_post_fix_expected_movement",
@@ -1198,7 +1369,9 @@ def _unresolved_expression_completed_action_evidence_is_specific(
         return False
     if fields.get("proof_rule") == "phi_circular_full_shape_match":
         return False
-    if fields.get("proof_rule") != "phi_circular_semantic_recurrence_proof":
+    if fields.get("proof_rule") == "phi_circular_semantic_recurrence_proof":
+        return False
+    if fields.get("proof_rule") != "phi_circular_independent_semantic_recurrence_proof":
         return False
     completed_stages = fields.get("completed_stages")
     if not isinstance(completed_stages, tuple) or stage not in completed_stages:
@@ -1206,7 +1379,10 @@ def _unresolved_expression_completed_action_evidence_is_specific(
     evidence_target = fields.get("object_target_key")
     if not _object_target_key_is_specific_unresolved_expression(evidence_target):
         return False
-    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+    if (
+        _unresolved_expression_completed_recovery_target_identity_key(evidence_target)
+        != _unresolved_expression_completed_recovery_target_identity_key(target)
+    ):
         return False
     diagnostic = fields.get("pair_lowering_diagnostic")
     if not _pair_lowering_diagnostic_is_specific(diagnostic):
@@ -1237,6 +1413,7 @@ def _unresolved_expression_completed_action_evidence_is_specific(
                 stage=stage,
                 target=target,
                 diagnostic=diagnostic,
+                completed_recovery=True,
             )
         ]
         if len(matching_stage_evidence) != 1:
@@ -1247,6 +1424,7 @@ def _unresolved_expression_completed_action_evidence_is_specific(
             target=target,
             diagnostic=diagnostic,
             stage_evidence=stage_evidence,
+            completed_recovery=True,
         ):
             return False
     else:
@@ -1430,6 +1608,14 @@ def _unresolved_expression_target_identity_key(value: Any) -> str:
     return _canonical_json(_strip_diagnostic_target_evidence(_jsonable(value)))
 
 
+def _unresolved_expression_completed_recovery_target_identity_key(value: Any) -> str:
+    return _canonical_json(
+        _strip_completed_recovery_target_evidence(
+            _strip_diagnostic_target_evidence(_jsonable(value))
+        )
+    )
+
+
 def _strip_diagnostic_target_evidence(value: Any) -> Any:
     if isinstance(value, list):
         if (
@@ -1463,6 +1649,27 @@ def _strip_diagnostic_target_evidence(value: Any) -> Any:
             for key, item in sorted(value.items(), key=lambda item: str(item[0]))
             for child in (_strip_diagnostic_target_evidence(item),)
             if child is not None
+        }
+    return value
+
+
+def _strip_completed_recovery_target_evidence(value: Any) -> Any:
+    if isinstance(value, list):
+        if len(value) >= 5 and value[0] == "return_storage" and value[1] == "return_value":
+            return value[:4]
+        if len(value) == 4 and value[0] == "return_storage" and value[1] == "return_value":
+            return value[:3]
+        return [_strip_completed_recovery_target_evidence(item) for item in value]
+    if isinstance(value, tuple):
+        if len(value) >= 5 and value[0] == "return_storage" and value[1] == "return_value":
+            return value[:4]
+        if len(value) == 4 and value[0] == "return_storage" and value[1] == "return_value":
+            return value[:3]
+        return tuple(_strip_completed_recovery_target_evidence(item) for item in value)
+    if isinstance(value, Mapping):
+        return {
+            key: _strip_completed_recovery_target_evidence(item)
+            for key, item in value.items()
         }
     return value
 
@@ -1560,6 +1767,7 @@ def _pending_stage_evidence_matches(
     stage: str,
     target: Any,
     diagnostic: Any,
+    completed_recovery: bool = False,
 ) -> bool:
     evidence = _normalize_nested_tuple(value)
     if not isinstance(evidence, tuple) or evidence[0] != "unresolved_expression_stage_evidence":
@@ -1570,7 +1778,12 @@ def _pending_stage_evidence_matches(
     if fields.get("status") != "object_evidence_collected":
         return False
     evidence_target = fields.get("object_target_key")
-    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+    identity_key = (
+        _unresolved_expression_completed_recovery_target_identity_key
+        if completed_recovery
+        else _unresolved_expression_target_identity_key
+    )
+    if identity_key(evidence_target) != identity_key(target):
         return False
     if _canonical_json(fields.get("pair_lowering_diagnostic")) != _canonical_json(diagnostic):
         return False
@@ -1609,20 +1822,36 @@ def _semantic_recurrence_proof_is_specific(
     target: Any,
     diagnostic: Any,
     stage_evidence: Any,
+    completed_recovery: bool = False,
 ) -> bool:
     proof = _normalize_nested_tuple(value)
     if not isinstance(proof, tuple) or proof[0] != "semantic_recurrence_proof":
         return False
     fields = _tuple_fields(proof)
-    if fields.get("proof_rule") != "phi_circular_semantic_recurrence_proof":
+    if fields.get("proof_rule") != "phi_circular_independent_semantic_recurrence_proof":
         return False
     if fields.get("status") != "complete":
         return False
     completed_stages = fields.get("completed_stages")
     if not isinstance(completed_stages, tuple) or stage not in completed_stages:
         return False
+    completed_stage_set = {str(item) for item in completed_stages}
+    if not completed_stage_set or not completed_stage_set.issubset(
+        set(UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES)
+    ):
+        return False
+    solver_hashes_by_stage = _semantic_recurrence_solver_hashes_by_stage(
+        fields.get("solver_query_sha256_by_stage")
+    )
+    if set(solver_hashes_by_stage) != completed_stage_set:
+        return False
     evidence_target = fields.get("object_target_key")
-    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+    identity_key = (
+        _unresolved_expression_completed_recovery_target_identity_key
+        if completed_recovery
+        else _unresolved_expression_target_identity_key
+    )
+    if identity_key(evidence_target) != identity_key(target):
         return False
     if _canonical_json(fields.get("pair_lowering_diagnostic")) != _canonical_json(diagnostic):
         return False
@@ -1653,7 +1882,12 @@ def _semantic_recurrence_proof_is_specific(
             return False
         if query_fields.get("object_content") != planned_fields.get("object_content"):
             return False
-        if query_fields.get("proof_source") != "semantic_recurrence_solver_replay":
+        if (
+            query_fields.get("proof_source")
+            != UNRESOLVED_INDEPENDENT_SEMANTIC_RECURRENCE_PROOF_SOURCE
+        ):
+            return False
+        if query_fields.get("solver_query_sha256") != solver_hashes_by_stage.get(str(query_stage)):
             return False
         if query_fields.get("solver_result") != "unsat":
             return False
@@ -1663,6 +1897,30 @@ def _semantic_recurrence_proof_is_specific(
             return False
         stages.add(str(query_stage))
     return set(completed_stages).issubset(stages)
+
+
+def _semantic_recurrence_solver_hashes_by_stage(value: Any) -> Dict[str, str]:
+    hashes = _normalize_nested_tuple(value)
+    if isinstance(hashes, Mapping):
+        items = tuple(hashes.items())
+    elif isinstance(hashes, tuple):
+        items = hashes
+    else:
+        return {}
+    result: Dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, tuple) or len(item) != 2:
+            return {}
+        stage, digest = item
+        if stage not in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES:
+            return {}
+        if not _sha256_hex_is_specific(digest):
+            return {}
+        stage = str(stage)
+        if stage in result:
+            return {}
+        result[stage] = str(digest)
+    return result
 
 
 def _semantic_recurrence_query_plan_fields_by_stage(value: Any) -> Dict[str, Dict[str, Any]]:
@@ -1707,9 +1965,12 @@ def _semantic_recurrence_query_fields(value: Any) -> Dict[str, Any]:
         "expected_solver_result",
         "assertion_kind",
         "query_hash",
+        "solver_query_sha256",
     ):
         if not _text_identity_is_specific(fields.get(key)):
             return {}
+    if not _sha256_hex_is_specific(fields.get("solver_query_sha256")):
+        return {}
     return fields
 
 

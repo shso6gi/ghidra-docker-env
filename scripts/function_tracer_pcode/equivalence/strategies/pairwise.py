@@ -499,6 +499,7 @@ class PairwiseStrategy(CheckStrategy):
                             case2=case2,
                             pair_id=pair_id,
                         )
+                    if lowering is None and object_target_key is not None:
                         completed_proof_evidence = (
                             self._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
                                 object_target_key

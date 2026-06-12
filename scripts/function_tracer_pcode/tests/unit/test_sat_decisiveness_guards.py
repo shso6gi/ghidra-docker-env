@@ -3489,6 +3489,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
     strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=None))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -3522,6 +3523,86 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
         if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
     } == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
     strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_internal.assert_not_called()
+
+
+def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed_unknown_equality(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_internal = Mock(
+        side_effect=[
+            QueryResult(is_equivalent=True),
+            QueryResult(is_equivalent=True),
+        ]
+    )
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    assert "pairwise_unresolved_phi_circular_lowering_evidence_by_pair" not in base_ctx
+    assert not _nested_contains(result.unknown_reasons[0].object_evidence, "completed_unresolved_expression_proof")
+    assert _nested_contains(result.unknown_reasons[0].object_evidence, "object_derived_query_plan")
+    assert analysis1.completed_recovery_proof_evidence == ()
+    strategy._solve_query_internal.assert_not_called()
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_internal = Mock(
+        side_effect=[
+            QueryResult(is_equivalent=True),
+            QueryResult(is_equivalent=False),
+        ]
+    )
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    assert analysis1.completed_recovery_proof_evidence == ()
+    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_internal.assert_not_called()
 
 
 def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch):
@@ -3545,6 +3626,7 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
     strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=None))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -3553,6 +3635,40 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    strategy._solve_query_twostage.assert_not_called()
+
+
+def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_proof(monkeypatch):
+    base_ctx = _base_context_for_single_int_param()
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = base_ctx
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_phi_circular_guard(
+        function_name="func1",
+        binary_id="B11",
+        entry=0x1000,
+        guard_negated=False,
+    )
+    analysis2 = _analysis_with_phi_circular_guard(
+        function_name="func2",
+        binary_id="B12",
+        entry=0x1000,
+        guard_negated=True,
+    )
+    _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=False))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    ]
+    assert strategy._solve_query_internal.call_count == 0
+    assert analysis1.completed_recovery_proof_evidence == ()
     strategy._solve_query_twostage.assert_not_called()
 
 
