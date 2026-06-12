@@ -1397,6 +1397,73 @@ def test_phase3_return_width_bridge_lane2_post_fix_accepts_eq_with_completed_pro
     validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
 
 
+def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_changed_return_value_width(
+    tmp_path,
+):
+    current_payload = _payload(reasons=[_width_reason(_target())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    pre_fix = json.loads(pre_fix_path.read_text())
+    required_actions = pre_fix["entries"][0]["required_completion_actions"]
+    completed_evidence = _completed_evidence(required_actions)
+
+    for record in completed_evidence:
+        evidence = record["evidence"]
+        if evidence.get("reason_id") != UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
+            continue
+        changed_target = json.loads(json.dumps(evidence["object_target_key"]))
+        changed_target[4][-1] = _return_value_width(
+            return_width=64,
+            producer_width=32,
+            signed=False,
+        )
+        proof_kind = evidence["proof_kind"]
+        evidence["object_target_key"] = changed_target
+        evidence["proof_obligation_id"] = build_proof_obligation_id(
+            evidence["reason_id"],
+            evidence["proof_stage"],
+            proof_kind,
+            evidence["evidence_kind"],
+            changed_target,
+        )
+        evidence["proof_content"] = CheckStrategy._return_width_bridge_completed_proof_content(
+            proof_kind,
+            CheckStrategy._normalize_nested_tuple(changed_target),
+            query_stage="return-width-bridge-high-bit-extension",
+            narrow_width=32,
+        )
+
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=completed_evidence,
+        ),
+    )
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane2_post_fix_ready"] is False
+    assert gate["entries"][0]["post_fix_status"] == "failed"
+    assert {
+        failure["kind"] for failure in gate["entries"][0]["post_fix_failures"]
+    } == {"return_width_bridge_completed_proof_required"}
+
+
 def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_metadata_only_completed_proof(
     tmp_path,
 ):

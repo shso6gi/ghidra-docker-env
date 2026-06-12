@@ -1077,7 +1077,7 @@ def _completed_recovery_failures(
         failures.append(_failed("return_width_bridge_completed_proof_required", **details))
         return failures
     for action in required_actions:
-        if not any(_completed_evidence_matches_action(evidence, action) for evidence in completed):
+        if not any(_completed_evidence_matches_compatible_action(evidence, action) for evidence in completed):
             failures.append(
                 _failed(
                     "return_width_bridge_completed_proof_required",
@@ -1164,12 +1164,34 @@ def _completed_evidence_matches_compatible_action(
         != _width_bridge_target_identity_key(action.get("object_target_key"))
     ):
         return False
+    if not _return_width_bridge_value_width_evidence_matches_action_target(
+        action.get("object_target_key"),
+        evidence_target,
+    ):
+        return False
     enriched_action = dict(action)
     enriched_action["object_target_key"] = _jsonable(evidence_target)
     enriched_action["proof_obligation_id"] = _jsonable(
         _expected_proof_obligation_id(enriched_action, object_target_key=evidence_target)
     )
     return _completed_evidence_matches_action(evidence_summary, enriched_action)
+
+
+def _return_width_bridge_value_width_evidence_matches_action_target(
+    action_target: Any,
+    evidence_target: Any,
+) -> bool:
+    action_key = _normalize_nested_tuple(action_target)
+    evidence_key = _normalize_nested_tuple(evidence_target)
+    if not _object_target_key_is_specific_width_bridge(action_key):
+        return False
+    if not _object_target_key_is_specific_width_bridge(evidence_key):
+        return False
+    action_widths = _return_width_bridge_value_width_evidence(action_key)
+    evidence_widths = _return_width_bridge_value_width_evidence(evidence_key)
+    if action_widths is None:
+        return True
+    return action_widths == evidence_widths
 
 
 def _width_bridge_target_identity_key(value: Any) -> str:
