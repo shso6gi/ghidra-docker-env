@@ -2123,6 +2123,125 @@ def test_phase3_post_fix_gate_index_accepts_expected_obligation_counts(tmp_path)
     validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
 
 
+def test_phase3_post_fix_gate_index_accepts_pending_proof_to_proof_complete_progress(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    pending_action = {
+        "reason_id": "reason_one",
+        "proof_kind": "proof_kind_one",
+        "proof_stage": "proof_stage_one",
+        "evidence_kind": "evidence_kind_one",
+        "required_evidence": ["evidence_kind_one"],
+        "proof_obligation_id": ["proof", "lane_one", "proof_stage_one"],
+    }
+    spec = Phase3PostFixGateSpec(
+        lane_number=1,
+        lane_id="lane_one",
+        gate_relpath="logs/lane_one/gate.json",
+        manifest_kind="lane_one_post_fix_gate",
+        ready_key="ready",
+        validator=_validator,
+        expected_entry_count=1,
+        allowed_post_fix_statuses=("pending_proof", "proof_complete"),
+        expected_post_fix_status_counts={"pending_proof": 1},
+        expected_post_fix_obligation_counts={
+            "pending_proof_entry_count": 1,
+            "pending_proof_obligation_count": 1,
+            "pending_retry_entry_count": 0,
+            "pending_retry_obligation_count": 0,
+        },
+        expected_post_fix_entry_states=(
+            {
+                "id": "lane_one-entry",
+                "function": "function_one",
+                "binary_pair": "B1_B2",
+                "post_fix_status": "pending_proof",
+                "pending_proof_obligation_count": 1,
+                "pending_retry_obligation_count": 0,
+                "required_completion_action_count": 1,
+            },
+        ),
+        expected_required_completion_action_hashes=(
+            {
+                "id": "lane_one-entry",
+                "required_completion_actions_sha256": _actions_sha256([pending_action]),
+            },
+        ),
+    )
+    _write_gate(repo, spec, post_fix_status="proof_complete")
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_post_fix_gates_ready"] is True
+    assert manifest["expected_post_fix_status_counts"] == {"pending_proof": 1}
+    assert manifest["post_fix_status_counts"] == {"proof_complete": 1}
+    assert manifest["post_fix_obligation_counts"] == {
+        "pending_proof_entry_count": 0,
+        "pending_proof_obligation_count": 0,
+        "pending_retry_entry_count": 0,
+        "pending_retry_obligation_count": 0,
+    }
+    assert manifest["gates"][0]["post_fix_entry_states"] == [
+        {
+            "id": "lane_one-entry",
+            "function": "function_one",
+            "binary_pair": "B1_B2",
+            "post_fix_status": "proof_complete",
+            "pending_proof_obligation_count": 0,
+            "pending_retry_obligation_count": 0,
+            "required_completion_action_count": 0,
+        }
+    ]
+    validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
+
+
+def test_phase3_post_fix_gate_index_rejects_proof_complete_without_allowed_progress(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    spec = Phase3PostFixGateSpec(
+        lane_number=1,
+        lane_id="lane_one",
+        gate_relpath="logs/lane_one/gate.json",
+        manifest_kind="lane_one_post_fix_gate",
+        ready_key="ready",
+        validator=_validator,
+        expected_entry_count=1,
+        allowed_post_fix_statuses=("pending_proof",),
+        expected_post_fix_status_counts={"pending_proof": 1},
+        expected_post_fix_entry_states=(
+            {
+                "id": "lane_one-entry",
+                "function": "function_one",
+                "binary_pair": "B1_B2",
+                "post_fix_status": "pending_proof",
+                "pending_proof_obligation_count": 1,
+                "pending_retry_obligation_count": 0,
+                "required_completion_action_count": 1,
+            },
+        ),
+    )
+    _write_gate(repo, spec, post_fix_status="proof_complete")
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_post_fix_gates_ready"] is False
+    assert "phase3_post_fix_gate_status_allowed" in manifest["summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="phase3_post_fix_gate_status_allowed"):
+        validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
+
+
 def test_phase3_post_fix_gate_index_rejects_obligation_count_drift(tmp_path):
     repo = tmp_path / "repo"
     spec = Phase3PostFixGateSpec(

@@ -836,6 +836,18 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         )
     if failures:
         return "failed", failures
+    invalid_completed = _invalid_unresolved_expression_completed_actions(entry, current_targets)
+    if invalid_completed:
+        failures.append(
+            _failed(
+                "unresolved_expression_completed_proof_evidence_invalid",
+                invalid_actions=invalid_completed,
+                **details,
+            )
+        )
+        return "failed", failures
+    if _unresolved_expression_proof_actions_complete(entry, current_targets, require_completed=True):
+        return "proof_complete", ()
     if _unresolved_expression_proof_actions_complete(entry, current_targets):
         return "pending_proof", ()
     return "pending_object_evidence", ()
@@ -911,7 +923,7 @@ def _post_fix_checks(
     for entry in entries:
         for failure in entry.get("post_fix_failures") or ():
             checks.append(failure)
-        if entry.get("post_fix_status") in {"pending_object_evidence", "pending_proof"}:
+        if entry.get("post_fix_status") in {"pending_object_evidence", "pending_proof", "proof_complete"}:
             checks.append(
                 _ok(
                     "unresolved_expression_post_fix_expected_movement",
@@ -987,6 +999,8 @@ def _implementation_manifest(entries: Sequence[Mapping[str, Any]]) -> Dict[str, 
 def _unresolved_expression_proof_actions_complete(
     entry: Mapping[str, Any],
     current_targets: Sequence[Any],
+    *,
+    require_completed: bool = False,
 ) -> bool:
     target_keys = {_unresolved_expression_target_identity_key(target) for target in current_targets}
     if not target_keys:
@@ -1003,9 +1017,15 @@ def _unresolved_expression_proof_actions_complete(
         stage = action.get("proof_stage")
         if stage not in UNRESOLVED_PROOF_STAGES:
             continue
-        if action.get("status") not in {"planned", "pending_proof"}:
+        if require_completed:
+            if action.get("status") != "proof_complete":
+                continue
+        elif action.get("status") not in {"planned", "pending_proof", "proof_complete"}:
             continue
-        if not action.get("required_evidence"):
+        if not _unresolved_expression_action_required_evidence_is_specific(
+            action,
+            stage=str(stage),
+        ):
             continue
         proof_obligation_id = action.get("proof_obligation_id")
         if proof_obligation_id is None or _nested_contains_missing_sentinel(proof_obligation_id):
@@ -1016,6 +1036,12 @@ def _unresolved_expression_proof_actions_complete(
         if (
             stage in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
             and not _target_has_specific_phi_circular_relation_evidence(target)
+        ):
+            continue
+        if require_completed and not _unresolved_expression_completed_action_evidence_is_specific(
+            action,
+            stage=str(stage),
+            target=target,
         ):
             continue
         target_key = _unresolved_expression_target_identity_key(target)
@@ -1032,6 +1058,123 @@ def _unresolved_expression_proof_actions_complete(
             ),
         )
     )
+
+
+def _unresolved_expression_action_required_evidence_is_specific(
+    action: Mapping[str, Any],
+    *,
+    stage: str,
+) -> bool:
+    required_evidence = action.get("required_evidence")
+    if not isinstance(required_evidence, list) or not required_evidence:
+        return False
+    evidence = {str(item) for item in required_evidence if isinstance(item, str)}
+    if len(evidence) != len(required_evidence):
+        return False
+    if stage == "phi_circular_guard_condition_lowering":
+        return {
+            "object_target_key",
+            "multiequal_pcode_op_ref",
+            "guard_condition_key",
+            "guard_condition_literals",
+            "pair_lowering_diagnostic",
+            "unknown_count_relation",
+            "typed_lowering_rule",
+        }.issubset(evidence)
+    if stage == "recursive_summary_guard_equivalence":
+        return {
+            "left_phi_origin",
+            "right_phi_origin",
+            "guard_condition_pair",
+            "pair_lowering_diagnostic",
+            "summary_parameter_binding",
+            "value_shape_relation",
+        }.issubset(evidence)
+    return True
+
+
+def _unresolved_expression_completed_action_evidence_is_specific(
+    action: Mapping[str, Any],
+    *,
+    stage: str,
+    target: Any,
+) -> bool:
+    evidence = _normalize_nested_tuple(action.get("object_evidence"))
+    if not isinstance(evidence, tuple) or len(evidence) != 7:
+        return False
+    if evidence[0] != "completed_unresolved_expression_proof":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in evidence[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if fields.get("object_derived") is not True:
+        return False
+    if fields.get("status") != "complete":
+        return False
+    if fields.get("proof_rule") != "phi_circular_full_shape_match":
+        return False
+    completed_stages = fields.get("completed_stages")
+    if not isinstance(completed_stages, tuple) or stage not in completed_stages:
+        return False
+    evidence_target = fields.get("object_target_key")
+    if not _object_target_key_is_specific_unresolved_expression(evidence_target):
+        return False
+    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+        return False
+    diagnostic = fields.get("pair_lowering_diagnostic")
+    if not _pair_lowering_diagnostic_is_specific(diagnostic):
+        return False
+    diagnostic_fields = {
+        item[0]: item[1]
+        for item in _normalize_nested_tuple(diagnostic)[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if diagnostic_fields.get("status") != "full_shape_match":
+        return False
+    if diagnostic_fields.get("left_guard_literals") != diagnostic_fields.get("right_guard_literals"):
+        return False
+    if diagnostic_fields.get("left_value_shape") != diagnostic_fields.get("right_value_shape"):
+        return False
+    if diagnostic_fields.get("opposing_guard_literals"):
+        return False
+    return True
+
+
+def _invalid_unresolved_expression_completed_actions(
+    entry: Mapping[str, Any],
+    current_targets: Sequence[Any],
+) -> Sequence[Dict[str, Any]]:
+    target_keys = {_unresolved_expression_target_identity_key(target) for target in current_targets}
+    if not target_keys:
+        return ()
+    invalid: list[Dict[str, Any]] = []
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    for action in current.get("proof_actions") or ():
+        if not isinstance(action, Mapping):
+            continue
+        if action.get("reason_id") != "unresolved_expression":
+            continue
+        if action.get("status") != "proof_complete":
+            continue
+        stage = str(action.get("proof_stage") or MISSING_SENTINEL)
+        target = action.get("object_target_key")
+        target_key = _unresolved_expression_target_identity_key(target)
+        if target_key not in target_keys:
+            continue
+        if not _unresolved_expression_completed_action_evidence_is_specific(
+            action,
+            stage=stage,
+            target=target,
+        ):
+            invalid.append(
+                {
+                    "proof_stage": stage,
+                    "proof_obligation_id": _jsonable(action.get("proof_obligation_id")),
+                }
+            )
+    return tuple(invalid)
 
 
 def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]:
@@ -1308,7 +1451,7 @@ def _object_target_key_is_specific_unresolved_expression(value: Any) -> bool:
 
 def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
     diagnostic = _normalize_nested_tuple(value)
-    if not isinstance(diagnostic, tuple) or len(diagnostic) != 11:
+    if not isinstance(diagnostic, tuple) or len(diagnostic) not in {11, 13}:
         return False
     if diagnostic[0] != "pair_lowering_diagnostic":
         return False
@@ -1331,9 +1474,19 @@ def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
         return False
     if not _nonnegative_int_like(fields.get("right_unknown_count")):
         return False
+    if "unknown_count_relation" in fields and not _unknown_count_relation_is_specific(
+        fields.get("unknown_count_relation"),
+        fields.get("left_unknown_count"),
+        fields.get("right_unknown_count"),
+    ):
+        return False
     for key in ("left_value_shape", "right_value_shape"):
         if fields.get(key) is not None and not _expression_shape_is_specific(fields.get(key)):
             return False
+    if "value_shape_relation" in fields and not _value_shape_relation_is_specific(
+        fields.get("value_shape_relation"),
+    ):
+        return False
     for key in ("left_guard_literals", "right_guard_literals"):
         literals = fields.get(key)
         if not isinstance(literals, tuple):
@@ -1349,6 +1502,67 @@ def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
         "guard_condition_pair",
         "summary_parameter_binding",
     )
+
+
+def _unknown_count_relation_is_specific(
+    value: Any,
+    left_count: Any,
+    right_count: Any,
+) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) != 4:
+        return False
+    if relation[0] != "unknown_count_relation":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in relation[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if fields.get("relation") not in {"equal", "count_mismatch"}:
+        return False
+    if not _nonnegative_int_like(fields.get("left_count")):
+        return False
+    if not _nonnegative_int_like(fields.get("right_count")):
+        return False
+    if int(fields["left_count"]) != int(left_count) or int(fields["right_count"]) != int(right_count):
+        return False
+    expected = "equal" if int(left_count) == int(right_count) else "count_mismatch"
+    return fields.get("relation") == expected
+
+
+def _value_shape_relation_is_specific(value: Any) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) != 8:
+        return False
+    if relation[0] != "value_shape_relation":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in relation[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if fields.get("relation") not in {
+        "exact_match",
+        "summary_parameter_shift",
+        "left_summary_parameter_right_constant",
+        "left_constant_right_summary_parameter",
+        "shape_mismatch",
+        "shape_unavailable",
+    }:
+        return False
+    for key in ("left_kind", "right_kind"):
+        if fields.get(key) not in {"parameter", "const", "unknown", "unary", "binary", "intrinsic", "literal", "unavailable"}:
+            return False
+    for key in ("left_summary_parameter_index", "right_summary_parameter_index"):
+        value = fields.get(key)
+        if value is not None and not _nonnegative_int_like(value):
+            return False
+    for key in ("left_constant_value", "right_constant_value"):
+        value = fields.get(key)
+        if value is not None and not isinstance(value, int):
+            return False
+    return True
 
 
 def _unresolved_expression_side_is_specific(value: Any, expected_side: str) -> bool:

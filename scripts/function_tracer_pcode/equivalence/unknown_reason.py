@@ -229,13 +229,14 @@ class UnknownRecoveryAction:
     evidence_refs: Tuple[str, ...] = ()
     evidence_kind: Optional[str] = None
     object_target_key: Optional[Tuple[Any, ...]] = None
+    object_evidence: Optional[Any] = None
     proof_obligation_id: Optional[Tuple[Any, ...]] = None
     recovery_action: Optional[str] = None
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "count_kind": self.count_kind,
             "reason_id": self.reason_id,
             "decision_effect": self.decision_effect,
@@ -255,6 +256,9 @@ class UnknownRecoveryAction:
             "target_regression": self.target_regression,
             "detail": self.detail,
         }
+        if self.object_evidence is not None:
+            payload["object_evidence"] = self.object_evidence
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
@@ -297,6 +301,7 @@ class UnknownRecoveryAction:
             evidence_refs=_coerce_evidence_refs(payload.get("evidence_refs") or ()),
             evidence_kind=payload.get("evidence_kind"),
             object_target_key=_coerce_optional_tuple(payload.get("object_target_key")),
+            object_evidence=payload.get("object_evidence"),
             proof_obligation_id=_coerce_optional_tuple(payload.get("proof_obligation_id")),
             recovery_action=payload.get("recovery_action"),
             target_regression=(
@@ -1131,6 +1136,7 @@ def build_unknown_recovery_actions(
                     evidence_refs=record.evidence_refs,
                     evidence_kind=record.evidence_kind,
                     object_target_key=record.object_target_key,
+                    object_evidence=record.object_evidence,
                     proof_obligation_id=record.proof_obligation_id,
                     recovery_action=record.recovery_action,
                     target_regression=record.target_regression,
@@ -1183,6 +1189,7 @@ def build_unknown_recovery_actions(
                     evidence_refs=record.evidence_refs,
                     evidence_kind=evidence_kind,
                     object_target_key=record.object_target_key,
+                    object_evidence=record.object_evidence,
                     proof_obligation_id=proof_obligation_id,
                     recovery_action=record.recovery_action,
                     target_regression=record.target_regression,

@@ -8,6 +8,7 @@ import pytest
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownRecoveryActionStatus,
     UnknownReasonId,
     build_unknown_recovery_actions,
     make_unknown_reason,
@@ -37,6 +38,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     _post_fix_checks,
     _post_fix_status,
     _required_completion_actions,
+    _unresolved_expression_proof_actions_complete,
     validate_phase3_unresolved_expression_lane6_manifest,
     validate_phase3_unresolved_expression_lane6_post_fix_gate,
     validate_phase3_unresolved_expression_timeout_transition_audit,
@@ -1009,6 +1011,28 @@ def test_phi_circular_target_records_guard_literals_and_pair_diagnostic():
     diagnostic = diagnostics[0]
     assert ("candidate_kind", "phi_circular_guard_summary_relation") in diagnostic
     assert ("status", "value_shape_mismatch") in diagnostic
+    assert (
+        "unknown_count_relation",
+        (
+            "unknown_count_relation",
+            ("relation", "equal"),
+            ("left_count", 1),
+            ("right_count", 1),
+        ),
+    ) in diagnostic
+    assert (
+        "value_shape_relation",
+        (
+            "value_shape_relation",
+            ("relation", "summary_parameter_shift"),
+            ("left_kind", "parameter"),
+            ("right_kind", "parameter"),
+            ("left_summary_parameter_index", 10000),
+            ("right_summary_parameter_index", 10001),
+            ("left_constant_value", None),
+            ("right_constant_value", None),
+        ),
+    ) in diagnostic
     assert any(item[0] == "left_guard_literals" and item[1] for item in diagnostic)
     assert any(item[0] == "right_guard_literals" and item[1] for item in diagnostic)
 
@@ -1038,6 +1062,23 @@ def test_phi_circular_guard_literal_preserves_parameter_index_zero():
         and ("parameter", "param_1", 0, 32) in _find_tuples(literal[2], "parameter")
         for literal in literals
     )
+
+
+def test_phi_circular_pair_diagnostic_rejects_malformed_value_shape_relation():
+    target = _actual_phi_guard_target()
+
+    def break_relation(diagnostic):
+        return tuple(
+            ("value_shape_relation", ("value_shape_relation", ("relation", "raw-diagnostic")))
+            if isinstance(item, tuple) and item and item[0] == "value_shape_relation"
+            else item
+            for item in diagnostic
+        )
+
+    tampered, changed = _replace_first_tuple(target, "pair_lowering_diagnostic", break_relation)
+
+    assert changed
+    assert not _object_target_key_is_specific_unresolved_expression(tampered)
 
 
 def test_phi_circular_pair_diagnostic_does_not_change_target_identity():
@@ -1075,6 +1116,89 @@ def test_phi_circular_pair_diagnostic_does_not_change_target_identity():
     assert failures == ()
 
 
+def test_phi_circular_full_shape_match_completed_proof_gate_passes_without_eq_recovery():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    evidence = strategy._unresolved_expression_completed_phi_circular_full_shape_evidence(target)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=evidence,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    assert evidence is not None
+    assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PROOF_COMPLETE.value}
+    assert all(action.object_evidence == evidence for action in actions)
+    status, failures = _post_fix_status(entry)
+
+    assert status == "proof_complete"
+    assert failures == ()
+
+
+def test_phi_circular_full_shape_match_rejects_completed_action_without_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
+
+
 def test_unresolved_expression_post_fix_accepts_phi_circular_pending_proof_actions_with_relation_evidence():
     target = _actual_phi_guard_target()
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
@@ -1106,6 +1230,42 @@ def test_unresolved_expression_post_fix_accepts_phi_circular_pending_proof_actio
     assert {action["proof_stage"] for action in _required_completion_actions(entry)} == set(
         UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
     )
+
+
+def test_unresolved_expression_post_fix_rejects_phi_circular_actions_missing_value_relation():
+    target = _actual_phi_guard_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    action_dicts = [action.to_dict() for action in build_unknown_recovery_actions([reason])]
+    for action in action_dicts:
+        if action.get("proof_stage") == "recursive_summary_guard_equivalence":
+            action["required_evidence"] = [
+                item for item in action.get("required_evidence", ()) if item != "value_shape_relation"
+            ]
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": action_dicts,
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_object_evidence"
+    assert failures == ()
+    assert not _unresolved_expression_proof_actions_complete(entry, [target])
 
 
 def test_unresolved_expression_post_fix_rejects_phi_circular_actions_without_relation_evidence():

@@ -75,6 +75,7 @@ from ..semantic_width import (
 )
 from ..debug_trace import NormalizationRuleApplication
 from ..unknown_reason import (
+    UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
     UnknownReasonId,
@@ -506,6 +507,11 @@ class PairwiseStrategy(CheckStrategy):
                             case2=case2,
                             pair_id=pair_id,
                         )
+                        completed_proof_evidence = (
+                            self._unresolved_expression_completed_phi_circular_full_shape_evidence(
+                                object_target_key
+                            )
+                        )
                         unknown_reasons.append(
                             make_unknown_reason(
                                 UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -517,6 +523,12 @@ class PairwiseStrategy(CheckStrategy):
                                 ),
                                 evidence_kind="unresolved_expression_safety",
                                 object_target_key=object_target_key,
+                                object_evidence=completed_proof_evidence,
+                                action_status=(
+                                    UnknownRecoveryActionStatus.PROOF_COMPLETE
+                                    if completed_proof_evidence is not None
+                                    else None
+                                ),
                                 detail="pairwise case contains solver-unresolved expression evidence",
                             )
                         )
@@ -1969,6 +1981,8 @@ class PairwiseStrategy(CheckStrategy):
         right_value = self._phi_circular_case_value_shape(right_shape)
         left_literals = self._phi_circular_case_condition_literals(case1)
         right_literals = self._phi_circular_case_condition_literals(case2)
+        left_unknown_count = len(left_unknowns)
+        right_unknown_count = len(right_unknowns)
         contradictions = self._phi_circular_opposing_condition_literals(
             left_literals,
             right_literals,
@@ -1988,15 +2002,92 @@ class PairwiseStrategy(CheckStrategy):
             "pair_lowering_diagnostic",
             ("candidate_kind", "phi_circular_guard_summary_relation"),
             ("status", status),
-            ("left_unknown_count", len(left_unknowns)),
-            ("right_unknown_count", len(right_unknowns)),
+            ("left_unknown_count", left_unknown_count),
+            ("right_unknown_count", right_unknown_count),
+            (
+                "unknown_count_relation",
+                self._phi_circular_unknown_count_relation(
+                    left_unknown_count,
+                    right_unknown_count,
+                ),
+            ),
             ("left_value_shape", left_value),
             ("right_value_shape", right_value),
+            (
+                "value_shape_relation",
+                self._phi_circular_value_shape_relation(left_value, right_value),
+            ),
             ("left_guard_literals", left_literals),
             ("right_guard_literals", right_literals),
             ("opposing_guard_literals", contradictions),
             ("required_evidence", ("guard_condition_pair", "summary_parameter_binding")),
         )
+
+    def _unresolved_expression_completed_phi_circular_full_shape_evidence(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        diagnostic = self._find_pair_lowering_diagnostic(object_target_key)
+        if diagnostic is None:
+            return None
+        fields = {
+            item[0]: item[1]
+            for item in diagnostic[1:]
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+        }
+        if fields.get("candidate_kind") != "phi_circular_guard_summary_relation":
+            return None
+        if fields.get("status") != "full_shape_match":
+            return None
+        if int(fields.get("left_unknown_count") or 0) <= 0:
+            return None
+        if int(fields.get("right_unknown_count") or 0) <= 0:
+            return None
+        if int(fields.get("left_unknown_count") or 0) != int(fields.get("right_unknown_count") or 0):
+            return None
+        if fields.get("left_value_shape") != fields.get("right_value_shape"):
+            return None
+        if fields.get("left_guard_literals") != fields.get("right_guard_literals"):
+            return None
+        if fields.get("opposing_guard_literals"):
+            return None
+        return (
+            "completed_unresolved_expression_proof",
+            ("object_derived", True),
+            ("status", "complete"),
+            ("proof_rule", "phi_circular_full_shape_match"),
+            (
+                "completed_stages",
+                (
+                    "phi_circular_guard_condition_lowering",
+                    "recursive_summary_guard_equivalence",
+                ),
+            ),
+            ("object_target_key", object_target_key),
+            ("pair_lowering_diagnostic", diagnostic),
+        )
+
+    @classmethod
+    def _find_pair_lowering_diagnostic(cls, value: Any) -> Optional[Tuple[Any, ...]]:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if normalized and normalized[0] == "pair_lowering_diagnostic":
+                return normalized
+            for item in normalized:
+                found = cls._find_pair_lowering_diagnostic(item)
+                if found is not None:
+                    return found
+        if isinstance(normalized, list):
+            for item in normalized:
+                found = cls._find_pair_lowering_diagnostic(item)
+                if found is not None:
+                    return found
+        if isinstance(normalized, dict):
+            for item in normalized.values():
+                found = cls._find_pair_lowering_diagnostic(item)
+                if found is not None:
+                    return found
+        return None
 
     @staticmethod
     def _phi_circular_case_value_shape(
@@ -2008,6 +2099,80 @@ class PairwiseStrategy(CheckStrategy):
         if isinstance(value_item, tuple) and len(value_item) == 2 and value_item[0] == "value":
             return value_item[1]
         return None
+
+    @staticmethod
+    def _phi_circular_unknown_count_relation(
+        left_count: int,
+        right_count: int,
+    ) -> Tuple[Any, ...]:
+        relation = "equal" if int(left_count) == int(right_count) else "count_mismatch"
+        return (
+            "unknown_count_relation",
+            ("relation", relation),
+            ("left_count", int(left_count)),
+            ("right_count", int(right_count)),
+        )
+
+    @classmethod
+    def _phi_circular_value_shape_relation(
+        cls,
+        left_value: Optional[Any],
+        right_value: Optional[Any],
+    ) -> Tuple[Any, ...]:
+        left_summary_index = cls._phi_circular_summary_parameter_index(left_value)
+        right_summary_index = cls._phi_circular_summary_parameter_index(right_value)
+        left_constant = cls._phi_circular_constant_value(left_value)
+        right_constant = cls._phi_circular_constant_value(right_value)
+        if left_value is None or right_value is None:
+            relation = "shape_unavailable"
+        elif left_value == right_value:
+            relation = "exact_match"
+        elif left_summary_index is not None and right_summary_index is not None:
+            relation = "summary_parameter_shift"
+        elif left_summary_index is not None and right_constant is not None:
+            relation = "left_summary_parameter_right_constant"
+        elif left_constant is not None and right_summary_index is not None:
+            relation = "left_constant_right_summary_parameter"
+        else:
+            relation = "shape_mismatch"
+        return (
+            "value_shape_relation",
+            ("relation", relation),
+            ("left_kind", cls._phi_circular_shape_kind(left_value)),
+            ("right_kind", cls._phi_circular_shape_kind(right_value)),
+            ("left_summary_parameter_index", left_summary_index),
+            ("right_summary_parameter_index", right_summary_index),
+            ("left_constant_value", left_constant),
+            ("right_constant_value", right_constant),
+        )
+
+    @staticmethod
+    def _phi_circular_shape_kind(value: Optional[Any]) -> str:
+        if isinstance(value, tuple) and value:
+            return str(value[0])
+        return "unavailable"
+
+    @staticmethod
+    def _phi_circular_summary_parameter_index(value: Optional[Any]) -> Optional[int]:
+        if not (isinstance(value, tuple) and len(value) == 4 and value[0] == "parameter"):
+            return None
+        name = str(value[1] or "")
+        if not name.startswith("summary_rec_"):
+            return None
+        try:
+            index = int(value[2])
+        except (TypeError, ValueError):
+            return None
+        return index if index >= 0 else None
+
+    @staticmethod
+    def _phi_circular_constant_value(value: Optional[Any]) -> Optional[int]:
+        if not (isinstance(value, tuple) and len(value) == 3 and value[0] == "const"):
+            return None
+        try:
+            return int(value[1])
+        except (TypeError, ValueError):
+            return None
 
     def _phi_circular_case_condition_literals(
         self,
@@ -2305,6 +2470,7 @@ class PairwiseStrategy(CheckStrategy):
                         "guard_condition_key",
                         "guard_condition_literals",
                         "pair_lowering_diagnostic",
+                        "unknown_count_relation",
                         "typed_lowering_rule",
                     ),
                     description=(
@@ -2321,6 +2487,7 @@ class PairwiseStrategy(CheckStrategy):
                         "guard_condition_pair",
                         "pair_lowering_diagnostic",
                         "summary_parameter_binding",
+                        "value_shape_relation",
                     ),
                     description=(
                         "Prove the recursive-summary guard relation before allowing "

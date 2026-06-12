@@ -351,6 +351,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         allowed_post_fix_statuses=(
             "pending_object_evidence",
             "pending_proof",
+            "proof_complete",
             "resolved_under_other_conservative_unknown",
         ),
         expected_post_fix_status_counts={"pending_proof": 1},
@@ -1463,6 +1464,256 @@ def _strict_json_equal(left: Any, right: Any) -> bool:
         return False
 
 
+def _post_fix_status_counts_match_expected_or_progress(
+    spec: Optional[Phase3PostFixGateSpec],
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    actual_counts = dict(sorted(actual.items())) if isinstance(actual, Mapping) else {}
+    expected_counts = dict(sorted(expected.items())) if isinstance(expected, Mapping) else {}
+    if _strict_json_equal(actual_counts, expected_counts):
+        return True
+    if spec is None or not _proof_complete_progress_allowed(spec):
+        return False
+    return _status_counts_match_pending_to_complete_progress(actual_counts, expected_counts)
+
+
+def _post_fix_global_status_counts_match_expected_or_progress(
+    specs: Sequence[Phase3PostFixGateSpec],
+    gates: Sequence[Any],
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    actual_counts = dict(sorted(actual.items())) if isinstance(actual, Mapping) else {}
+    expected_counts = dict(sorted(expected.items())) if isinstance(expected, Mapping) else {}
+    if _strict_json_equal(actual_counts, expected_counts):
+        return True
+    if not _status_counts_match_pending_to_complete_progress(actual_counts, expected_counts):
+        return False
+    spec_by_lane = {spec.lane_id: spec for spec in specs}
+    for gate in gates:
+        if not isinstance(gate, Mapping):
+            continue
+        lane_id = str(gate.get("lane_id") or MISSING_SENTINEL)
+        spec = spec_by_lane.get(lane_id)
+        expected_gate_counts = _normalized_expected_status_counts(spec) if spec is not None else {}
+        actual_gate_counts = (
+            gate.get("post_fix_status_counts")
+            if isinstance(gate.get("post_fix_status_counts"), Mapping)
+            else {}
+        )
+        if not _post_fix_status_counts_match_expected_or_progress(
+            spec,
+            actual_gate_counts,
+            expected_gate_counts,
+        ):
+            return False
+    return True
+
+
+def _status_counts_match_pending_to_complete_progress(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    if not all(_is_non_negative_int_count(value) for value in actual.values()):
+        return False
+    if not all(_is_non_negative_int_count(value) for value in expected.values()):
+        return False
+    expected_pending = int(expected.get("pending_proof", 0))
+    actual_pending = int(actual.get("pending_proof", 0))
+    expected_complete = int(expected.get("proof_complete", 0))
+    actual_complete = int(actual.get("proof_complete", 0))
+    completed_delta = actual_complete - expected_complete
+    if completed_delta <= 0:
+        return False
+    if expected_pending - actual_pending != completed_delta:
+        return False
+    keys = set(actual) | set(expected)
+    for key in keys - {"pending_proof", "proof_complete"}:
+        if int(actual.get(key, 0)) != int(expected.get(key, 0)):
+            return False
+    return sum(int(value) for value in actual.values()) == sum(
+        int(value) for value in expected.values()
+    )
+
+
+def _post_fix_obligation_counts_match_expected_or_progress(
+    spec: Optional[Phase3PostFixGateSpec],
+    status_counts: Any,
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    actual_counts = dict(sorted(actual.items())) if isinstance(actual, Mapping) else {}
+    expected_counts = dict(sorted(expected.items())) if isinstance(expected, Mapping) else {}
+    if _strict_json_equal(actual_counts, expected_counts):
+        return True
+    if spec is None or not _proof_complete_progress_allowed(spec):
+        return False
+    if not _status_counts_match_pending_to_complete_progress(
+        status_counts if isinstance(status_counts, Mapping) else {},
+        _normalized_expected_status_counts(spec),
+    ):
+        return False
+    return _obligation_counts_match_pending_to_complete_progress(
+        actual_counts,
+        expected_counts,
+    )
+
+
+def _post_fix_global_obligation_counts_match_expected_or_progress(
+    specs: Sequence[Phase3PostFixGateSpec],
+    gates: Sequence[Any],
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    actual_counts = dict(sorted(actual.items())) if isinstance(actual, Mapping) else {}
+    expected_counts = dict(sorted(expected.items())) if isinstance(expected, Mapping) else {}
+    if _strict_json_equal(actual_counts, expected_counts):
+        return True
+    spec_by_lane = {spec.lane_id: spec for spec in specs}
+    for gate in gates:
+        if not isinstance(gate, Mapping):
+            continue
+        lane_id = str(gate.get("lane_id") or MISSING_SENTINEL)
+        spec = spec_by_lane.get(lane_id)
+        obligation_summary = (
+            gate.get("post_fix_obligation_summary")
+            if isinstance(gate.get("post_fix_obligation_summary"), Mapping)
+            else {}
+        )
+        if not _post_fix_obligation_counts_match_expected_or_progress(
+            spec,
+            gate.get("post_fix_status_counts"),
+            _post_fix_obligation_counts_from_summary(obligation_summary),
+            _normalized_expected_obligation_counts(spec) if spec is not None else {},
+        ):
+            return False
+    return _obligation_counts_match_pending_to_complete_progress(
+        actual_counts,
+        expected_counts,
+    )
+
+
+def _obligation_counts_match_pending_to_complete_progress(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    for key in ("pending_retry_entry_count", "pending_retry_obligation_count"):
+        if int(actual.get(key, 0)) != int(expected.get(key, 0)):
+            return False
+    if int(actual.get("pending_proof_entry_count", 0)) > int(
+        expected.get("pending_proof_entry_count", 0)
+    ):
+        return False
+    if int(actual.get("pending_proof_obligation_count", 0)) > int(
+        expected.get("pending_proof_obligation_count", 0)
+    ):
+        return False
+    return any(
+        int(actual.get(key, 0)) < int(expected.get(key, 0))
+        for key in ("pending_proof_entry_count", "pending_proof_obligation_count")
+    )
+
+
+def _post_fix_entry_states_match_expected_or_progress(
+    spec: Optional[Phase3PostFixGateSpec],
+    actual: Any,
+    expected: Sequence[Mapping[str, Any]],
+) -> bool:
+    if _strict_json_equal(actual, expected):
+        return True
+    if spec is None or not _proof_complete_progress_allowed(spec):
+        return False
+    if not isinstance(actual, (list, tuple)):
+        return False
+    actual_by_id = {
+        item.get("id"): item
+        for item in actual
+        if isinstance(item, Mapping) and _specific_text(item.get("id"))
+    }
+    if len(actual_by_id) != len(actual):
+        return False
+    for expected_state in expected:
+        if not isinstance(expected_state, Mapping):
+            return False
+        actual_state = actual_by_id.get(expected_state.get("id"))
+        if actual_state is None:
+            return False
+        if _strict_json_equal(actual_state, expected_state):
+            continue
+        if not _entry_state_is_pending_to_complete_progress(actual_state, expected_state):
+            return False
+    return len(actual_by_id) == len(expected)
+
+
+def _entry_state_is_pending_to_complete_progress(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    for key in ("id", "function", "binary_pair"):
+        if actual.get(key) != expected.get(key):
+            return False
+    if expected.get("post_fix_status") != "pending_proof":
+        return False
+    if actual.get("post_fix_status") != "proof_complete":
+        return False
+    return (
+        int(actual.get("pending_proof_obligation_count", 0)) == 0
+        and int(actual.get("pending_retry_obligation_count", 0)) == 0
+        and int(actual.get("required_completion_action_count", 0)) == 0
+        and int(expected.get("pending_proof_obligation_count", 0)) > 0
+    )
+
+
+def _post_fix_action_hashes_match_expected_or_progress(
+    spec: Optional[Phase3PostFixGateSpec],
+    actual_states: Any,
+    actual_hashes: Any,
+    expected_hashes: Sequence[Mapping[str, str]],
+) -> bool:
+    if _strict_json_equal(actual_hashes, expected_hashes):
+        return True
+    if spec is None or not _proof_complete_progress_allowed(spec):
+        return False
+    if not isinstance(actual_hashes, (list, tuple)):
+        return False
+    actual_hash_by_id = {
+        item.get("id"): item.get("required_completion_actions_sha256")
+        for item in actual_hashes
+        if isinstance(item, Mapping) and _specific_text(item.get("id"))
+    }
+    state_by_id = (
+        {
+            item.get("id"): item
+            for item in actual_states
+            if isinstance(item, Mapping) and _specific_text(item.get("id"))
+        }
+        if isinstance(actual_states, (list, tuple))
+        else {}
+    )
+    empty_hash = _required_completion_actions_sha256([])
+    for expected_hash in expected_hashes:
+        entry_id = expected_hash.get("id") if isinstance(expected_hash, Mapping) else None
+        if entry_id not in actual_hash_by_id:
+            return False
+        if actual_hash_by_id[entry_id] == expected_hash.get("required_completion_actions_sha256"):
+            continue
+        state = state_by_id.get(entry_id)
+        if not (
+            isinstance(state, Mapping)
+            and state.get("post_fix_status") == "proof_complete"
+            and actual_hash_by_id[entry_id] == empty_hash
+        ):
+            return False
+    return len(actual_hash_by_id) == len(expected_hashes)
+
+
+def _proof_complete_progress_allowed(spec: Phase3PostFixGateSpec) -> bool:
+    allowed = set(_normalized_allowed_post_fix_statuses(spec))
+    expected = _normalized_expected_status_counts(spec)
+    return "proof_complete" in allowed and int(expected.get("pending_proof", 0)) > 0
+
+
 def _pending_required_action_is_valid(action: Any) -> bool:
     if not isinstance(action, Mapping):
         return False
@@ -1918,7 +2169,12 @@ def _post_fix_index_checks(
     if expected_global_status_counts:
         checks.append(
             _ok("phase3_post_fix_gate_status_counts_global_expected")
-            if _strict_json_equal(actual_global_status_counts, expected_global_status_counts)
+            if _post_fix_global_status_counts_match_expected_or_progress(
+                specs,
+                gates,
+                actual_global_status_counts,
+                expected_global_status_counts,
+            )
             else _failed(
                 "phase3_post_fix_gate_status_counts_global_expected",
                 expected=expected_global_status_counts,
@@ -1930,7 +2186,12 @@ def _post_fix_index_checks(
     if expected_global_obligation_counts:
         checks.append(
             _ok("phase3_post_fix_gate_obligation_counts_global_expected")
-            if _strict_json_equal(actual_global_obligation_counts, expected_global_obligation_counts)
+            if _post_fix_global_obligation_counts_match_expected_or_progress(
+                specs,
+                gates,
+                actual_global_obligation_counts,
+                expected_global_obligation_counts,
+            )
             else _failed(
                 "phase3_post_fix_gate_obligation_counts_global_expected",
                 expected=expected_global_obligation_counts,
@@ -2064,7 +2325,11 @@ def _post_fix_index_checks(
         if expected_entry_states:
             checks.append(
                 _ok("phase3_post_fix_gate_entry_states_expected", **details)
-                if _strict_json_equal(actual_entry_states, expected_entry_states)
+                if _post_fix_entry_states_match_expected_or_progress(
+                    spec,
+                    actual_entry_states,
+                    expected_entry_states,
+                )
                 else _failed(
                     "phase3_post_fix_gate_entry_states_expected",
                     expected=expected_entry_states,
@@ -2081,7 +2346,12 @@ def _post_fix_index_checks(
         if expected_action_hashes:
             checks.append(
                 _ok("phase3_post_fix_gate_required_action_hashes_expected", **details)
-                if _strict_json_equal(actual_action_hashes, expected_action_hashes)
+                if _post_fix_action_hashes_match_expected_or_progress(
+                    spec,
+                    gate.get("post_fix_entry_states"),
+                    actual_action_hashes,
+                    expected_action_hashes,
+                )
                 else _failed(
                     "phase3_post_fix_gate_required_action_hashes_expected",
                     expected=expected_action_hashes,
@@ -2196,7 +2466,11 @@ def _post_fix_index_checks(
         if expected_status_counts:
             checks.append(
                 _ok("phase3_post_fix_gate_status_counts_expected", **details)
-                if _strict_json_equal(actual_status_counts, expected_status_counts)
+                if _post_fix_status_counts_match_expected_or_progress(
+                    spec,
+                    actual_status_counts,
+                    expected_status_counts,
+                )
                 else _failed(
                     "phase3_post_fix_gate_status_counts_expected",
                     expected=expected_status_counts,
@@ -2219,7 +2493,12 @@ def _post_fix_index_checks(
         if expected_obligation_counts:
             checks.append(
                 _ok("phase3_post_fix_gate_obligation_counts_expected", **details)
-                if _strict_json_equal(actual_obligation_counts, expected_obligation_counts)
+                if _post_fix_obligation_counts_match_expected_or_progress(
+                    spec,
+                    gate.get("post_fix_status_counts"),
+                    actual_obligation_counts,
+                    expected_obligation_counts,
+                )
                 else _failed(
                     "phase3_post_fix_gate_obligation_counts_expected",
                     expected=expected_obligation_counts,
