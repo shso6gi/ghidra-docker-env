@@ -262,6 +262,9 @@ class BoundedCallRefiner:
                         pcode_order=ret.pcode_order,
                         pcode_time=ret.pcode_time,
                         pcode_op_ref=getattr(ret, "pcode_op_ref", None),
+                        return_value_pcode_op_refs=tuple(
+                            getattr(ret, "return_value_pcode_op_refs", ()) or ()
+                        ),
                     )
                 )
                 if len(results) >= self.max_cases:

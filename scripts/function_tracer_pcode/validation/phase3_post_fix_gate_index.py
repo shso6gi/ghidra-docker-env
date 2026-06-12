@@ -193,7 +193,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-return-width-bridge-apply-indirect-width-high-bit-near-miss",
                 "required_completion_actions_sha256": (
-                    "3e6f3c9a8d6c4f096542a134f4a96a7a262d6a983d8b47a5c5422fb1a3d22379"
+                    "69022f3ea60e716db3340dee477f1f46695b3b041d239bb091409be641e57b36"
                 ),
             },
         ),

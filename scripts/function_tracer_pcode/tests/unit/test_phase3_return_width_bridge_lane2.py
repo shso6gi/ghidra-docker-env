@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.model.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
@@ -35,6 +37,11 @@ from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
 
 LEFT_BINARY_NAME = "function_call_test-mips64-clang-O1"
 RIGHT_BINARY_NAME = "function_call_test-mips64-gcc-O0"
+
+
+class _DummyStrategy(CheckStrategy):
+    def check(self, analysis1, analysis2, save_formula: bool = False):
+        raise NotImplementedError
 
 
 def _pcode_ref(binary_id: str, function_entry: int, seq_target: int, *, seq_time: int = 40):
@@ -85,7 +92,33 @@ def _return_case_partition_member(
     ]
 
 
-def _return_value_width(*, return_width: int, producer_width: int = None, signed: bool = False):
+def _extension_op(
+    *,
+    binary_id: str = "B13",
+    function_entry: int = 4831846228,
+    seq_target: int = 4831846336,
+    mnemonic: str = "INT_SEXT",
+    input_bits: int = 32,
+    output_bits: int = 64,
+):
+    policy = "sign_extend" if mnemonic == "INT_SEXT" else "zero_extend"
+    return [
+        "extension_op",
+        mnemonic,
+        ["op_ref", _pcode_ref(binary_id, function_entry, seq_target, seq_time=38)],
+        ["input_bits", input_bits],
+        ["output_bits", output_bits],
+        ["policy", policy],
+    ]
+
+
+def _return_value_width(
+    *,
+    return_width: int,
+    producer_width: int = None,
+    signed: bool = False,
+    extension_ops=None,
+):
     if producer_width is None:
         producer_width = return_width
     if producer_width < return_width:
@@ -97,7 +130,7 @@ def _return_value_width(*, return_width: int, producer_width: int = None, signed
     else:
         relation = "producer_matches_return_width"
         policy = "none"
-    return [
+    result = [
         "return_value_width",
         producer_width,
         return_width,
@@ -108,6 +141,9 @@ def _return_value_width(*, return_width: int, producer_width: int = None, signed
         ["expression_bits", producer_width],
         ["return_pcode_value_input_bits", producer_width],
     ]
+    if extension_ops is not None:
+        result.append(["return_value_extension_ops", list(extension_ops)])
+    return result
 
 
 def _sha256_path(path: Path) -> str:
@@ -202,6 +238,17 @@ def _target_without_return_value_width(label: str = "case0"):
     target = json.loads(json.dumps(_target(label)))
     target[3] = target[3][:-1]
     target[4] = target[4][:-1]
+    return target
+
+
+def _target_with_right_narrow_extension(label: str = "case0"):
+    target = json.loads(json.dumps(_target(label)))
+    target[4][-1] = _return_value_width(
+        return_width=64,
+        producer_width=32,
+        signed=True,
+        extension_ops=[_extension_op()],
+    )
     return target
 
 
@@ -341,6 +388,8 @@ def _completed_proof_content(action):
                 "status": "proven",
                 "left_extension": left[-1][6],
                 "right_extension": right[-1][6],
+                "left_extension_ops": [],
+                "right_extension_ops": [],
                 "relation": "compatible_under_narrow_width",
             },
             "high_bits_irrelevant_or_equal": {
@@ -473,6 +522,138 @@ def test_return_width_bridge_completed_evidence_is_accepted_by_decision_gate():
         CheckStrategy._normalize_nested_tuple(action["proof_obligation_id"])
         for action in actions
     }
+
+
+def test_return_width_bridge_high_bit_completed_content_requires_narrow_extension_op():
+    target = _target()
+    target[4][-1] = _return_value_width(return_width=64, producer_width=32, signed=True)
+
+    assert (
+        CheckStrategy._return_width_bridge_completed_proof_content(
+            "high_bit_proof",
+            target,
+            query_stage="return-width-bridge-high-bit-extension",
+            narrow_width=32,
+        )
+        is None
+    )
+
+
+def test_return_width_bridge_high_bit_completed_content_accepts_object_extension_op():
+    target = _target_with_right_narrow_extension()
+    content = CheckStrategy._return_width_bridge_completed_proof_content(
+        "high_bit_proof",
+        target,
+        query_stage="return-width-bridge-high-bit-extension",
+        narrow_width=32,
+    )
+
+    assert content is not None
+    right_ops = content["extension_semantics"]["right_extension_ops"]
+    assert right_ops[0][1] == "INT_SEXT"
+    assert CheckStrategy._return_width_bridge_high_bit_proof_content_is_complete(
+        content,
+        CheckStrategy._normalize_nested_tuple(target),
+    )
+
+
+def test_return_width_bridge_object_key_records_return_value_extension_ops():
+    expr = Expression.constant(1, size=4)
+    ref = PcodeOpRef(
+        binary_id="B13",
+        function_entry_space="ram",
+        function_entry_offset=4831846228,
+        target_space="ram",
+        target_offset=4831846336,
+        seq_time=38,
+        seq_order=1,
+        opcode=17,
+        local_op_ordinal=1,
+        mnemonic="INT_SEXT",
+        input_sizes=(4,),
+        output_size=8,
+    )
+    return_info = ReturnInfo(
+        address="120001fc8",
+        value=expr,
+        return_value_pcode_op_refs=(ref,),
+    )
+    case = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=expr,
+        return_info=return_info,
+        return_type="long",
+    )
+
+    width_key = _DummyStrategy(None, None)._return_width_bridge_return_value_width_object_key(
+        case,
+        return_info,
+        64,
+    )
+
+    extension_ops = width_key[-1]
+    assert extension_ops[0] == "return_value_extension_ops"
+    assert extension_ops[1][0][1] == "INT_SEXT"
+    assert ("input_bits", 32) in extension_ops[1][0]
+    assert ("output_bits", 64) in extension_ops[1][0]
+
+
+def test_return_value_pcode_op_refs_do_not_recurse_through_phi_inputs():
+    class FakeVarnode:
+        def __init__(self, size, defining_op=None):
+            self._size = size
+            self._defining_op = defining_op
+
+        def getDef(self):
+            return self._defining_op
+
+        def getSize(self):
+            return self._size
+
+    class FakePcodeOp:
+        def __init__(self, mnemonic, opcode, inputs, output):
+            self._mnemonic = mnemonic
+            self._opcode = opcode
+            self._inputs = tuple(inputs)
+            self._output = output
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOpcode(self):
+            return self._opcode
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return None
+
+        def getParent(self):
+            return None
+
+    narrow = FakeVarnode(4)
+    widened = FakeVarnode(8)
+    ext_op = FakePcodeOp("INT_SEXT", 17, [narrow], widened)
+    widened._defining_op = ext_op
+    other = FakeVarnode(8)
+    phi_output = FakeVarnode(8)
+    phi_op = FakePcodeOp("MULTIEQUAL", 56, [widened, other], phi_output)
+    phi_output._defining_op = phi_op
+
+    refs = ReturnAnalyzer(None, binary_id="B-test")._return_value_pcode_op_refs_from_varnode(
+        phi_output
+    )
+
+    assert [ref.mnemonic for ref in refs] == ["MULTIEQUAL"]
+    assert all(ref.mnemonic != "INT_SEXT" for ref in refs)
 
 
 def test_return_width_bridge_completed_evidence_rejects_metadata_only_proof():

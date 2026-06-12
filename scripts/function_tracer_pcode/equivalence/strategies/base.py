@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 import hashlib
-from typing import Optional, Dict, Any, List, Mapping, Sequence, Tuple
+from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
 from dataclasses import dataclass, field
 
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
@@ -2202,6 +2202,10 @@ class CheckStrategy(ABC):
         if proof_kind == "high_bit_proof":
             if value_width_evidence is None or left_extension_policy is None or right_extension_policy is None:
                 return None
+            left_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(left)
+            right_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(right)
+            if left_extension_ops is None or right_extension_ops is None:
+                return None
             return {
                 "object_derived": True,
                 "status": "proven",
@@ -2218,6 +2222,8 @@ class CheckStrategy(ABC):
                     "status": "proven",
                     "left_extension": left_extension_policy,
                     "right_extension": right_extension_policy,
+                    "left_extension_ops": left_extension_ops,
+                    "right_extension_ops": right_extension_ops,
                     "relation": "compatible_under_narrow_width",
                 },
                 "high_bits_irrelevant_or_equal": {
@@ -2305,6 +2311,14 @@ class CheckStrategy(ABC):
         )
         if left_policy is None or right_policy is None:
             return False
+        left = cls._return_width_bridge_find_side(object_target_key, "left")
+        right = cls._return_width_bridge_find_side(object_target_key, "right")
+        if left is None or right is None:
+            return False
+        left_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(left)
+        right_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(right)
+        if left_extension_ops is None or right_extension_ops is None:
+            return False
         if not (
             isinstance(producer_width, Mapping)
             and producer_width.get("object_derived") is True
@@ -2321,6 +2335,10 @@ class CheckStrategy(ABC):
             and extension_semantics.get("status") == "proven"
             and extension_semantics.get("left_extension") == left_policy
             and extension_semantics.get("right_extension") == right_policy
+            and cls._normalize_nested_tuple(extension_semantics.get("left_extension_ops"))
+            == left_extension_ops
+            and cls._normalize_nested_tuple(extension_semantics.get("right_extension_ops"))
+            == right_extension_ops
             and extension_semantics.get("relation") == "compatible_under_narrow_width"
         ):
             return False
@@ -2487,6 +2505,106 @@ class CheckStrategy(ABC):
             return None
         policy = normalized[6]
         return str(policy) if policy in {"none", "sign_extend", "zero_extend", "truncate"} else None
+
+    @classmethod
+    def _return_width_bridge_required_extension_mnemonic_for_side(
+        cls,
+        side: Any,
+    ) -> Optional[str]:
+        width_entry = cls._normalize_nested_tuple(
+            cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        )
+        if not isinstance(width_entry, tuple) or len(width_entry) < 7:
+            return None
+        relation = width_entry[5]
+        policy = width_entry[6]
+        if relation != "producer_narrower_than_return_width":
+            return None
+        if policy == "sign_extend":
+            return "INT_SEXT"
+        if policy == "zero_extend":
+            return "INT_ZEXT"
+        return None
+
+    @classmethod
+    def _return_width_bridge_extension_ops_for_side(cls, side: Any) -> Tuple[Any, ...]:
+        width_entry = cls._normalize_nested_tuple(
+            cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        )
+        if not isinstance(width_entry, tuple):
+            return ()
+        tagged = cls._return_width_bridge_find_tagged_entry(
+            width_entry,
+            "return_value_extension_ops",
+        )
+        if not isinstance(tagged, tuple) or len(tagged) != 2:
+            return ()
+        profiles = cls._normalize_nested_tuple(tagged[1])
+        return profiles if isinstance(profiles, tuple) else ()
+
+    @classmethod
+    def _return_width_bridge_matching_extension_ops_for_side(
+        cls,
+        side: Any,
+    ) -> Optional[Tuple[Any, ...]]:
+        mnemonic = cls._return_width_bridge_required_extension_mnemonic_for_side(side)
+        if mnemonic is None:
+            return ()
+        width_entry = cls._normalize_nested_tuple(
+            cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        )
+        if not isinstance(width_entry, tuple) or len(width_entry) < 3:
+            return None
+        producer_bits = width_entry[1]
+        return_bits = width_entry[2]
+        matches = []
+        for profile in cls._return_width_bridge_extension_ops_for_side(side):
+            if not cls._return_width_bridge_extension_op_profile_matches(
+                profile,
+                mnemonic=mnemonic,
+                producer_bits=producer_bits,
+                return_bits=return_bits,
+            ):
+                continue
+            matches.append(profile)
+        return tuple(matches) if matches else None
+
+    @classmethod
+    def _return_width_bridge_extension_op_profile_matches(
+        cls,
+        profile: Any,
+        *,
+        mnemonic: str,
+        producer_bits: Any,
+        return_bits: Any,
+    ) -> bool:
+        normalized = cls._normalize_nested_tuple(profile)
+        if not isinstance(normalized, tuple) or len(normalized) < 6:
+            return False
+        if normalized[0] != "extension_op" or normalized[1] != mnemonic:
+            return False
+        op_ref = cls._return_width_bridge_find_tagged_entry(normalized, "op_ref")
+        input_bits = cls._return_width_bridge_find_tagged_entry(normalized, "input_bits")
+        output_bits = cls._return_width_bridge_find_tagged_entry(normalized, "output_bits")
+        policy = cls._return_width_bridge_find_tagged_entry(normalized, "policy")
+        expected_policy = "sign_extend" if mnemonic == "INT_SEXT" else "zero_extend"
+        try:
+            input_bits_int = int(input_bits[1] if isinstance(input_bits, tuple) and len(input_bits) == 2 else input_bits)
+            output_bits_int = int(output_bits[1] if isinstance(output_bits, tuple) and len(output_bits) == 2 else output_bits)
+            producer_bits_int = int(producer_bits)
+            return_bits_int = int(return_bits)
+        except (TypeError, ValueError):
+            return False
+        return (
+            isinstance(op_ref, tuple)
+            and len(op_ref) == 2
+            and op_ref[1] is not None
+            and input_bits_int == producer_bits_int
+            and output_bits_int >= return_bits_int
+            and isinstance(policy, tuple)
+            and len(policy) == 2
+            and policy[1] == expected_policy
+        )
 
     @classmethod
     def _return_width_bridge_target_widths(cls, object_target_key: Any) -> Optional[Tuple[int, int]]:
@@ -3155,7 +3273,38 @@ class CheckStrategy(ABC):
             policy,
             ("expression_bits", expression_bits),
             ("return_pcode_value_input_bits", pcode_input_bits),
+            self._return_value_extension_ops_object_key(return_info),
         )
+
+    def _return_value_extension_ops_object_key(self, return_info: Any) -> Tuple[Any, ...]:
+        profiles: List[Tuple[Any, ...]] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        for ref in (getattr(return_info, "return_value_pcode_op_refs", None) or ()):
+            mnemonic = getattr(ref, "mnemonic", None)
+            if mnemonic not in {"INT_SEXT", "INT_ZEXT"}:
+                continue
+            input_size = None
+            try:
+                input_size = ref.input_size(0)
+            except Exception:
+                input_size = None
+            output_size = getattr(ref, "output_size", None)
+            input_bits = int(input_size) * 8 if input_size else None
+            output_bits = int(output_size) * 8 if output_size else None
+            policy = "sign_extend" if mnemonic == "INT_SEXT" else "zero_extend"
+            profile = (
+                "extension_op",
+                mnemonic,
+                ("op_ref", self._stable_key_or_none(ref)),
+                ("input_bits", input_bits),
+                ("output_bits", output_bits),
+                ("policy", policy),
+            )
+            if profile in seen:
+                continue
+            seen.add(profile)
+            profiles.append(profile)
+        return ("return_value_extension_ops", tuple(profiles))
 
     @staticmethod
     def _expression_smt_bit_width_for_object_key(expr: Any) -> Optional[int]:

@@ -1434,20 +1434,24 @@ def _producer_width_evidence_is_specific(value: Any, target: tuple) -> bool:
 
 
 def _extension_semantics_evidence_is_specific(value: Any, target: tuple) -> bool:
-    left_policy = _return_width_bridge_extension_policy_for_side(
-        _find_width_side(target, "left")
-    )
-    right_policy = _return_width_bridge_extension_policy_for_side(
-        _find_width_side(target, "right")
-    )
+    left = _find_width_side(target, "left")
+    right = _find_width_side(target, "right")
+    left_policy = _return_width_bridge_extension_policy_for_side(left)
+    right_policy = _return_width_bridge_extension_policy_for_side(right)
+    left_extension_ops = _return_width_bridge_matching_extension_ops_for_side(left)
+    right_extension_ops = _return_width_bridge_matching_extension_ops_for_side(right)
     return (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
         and value.get("status") == "proven"
         and left_policy is not None
         and right_policy is not None
+        and left_extension_ops is not None
+        and right_extension_ops is not None
         and value.get("left_extension") == left_policy
         and value.get("right_extension") == right_policy
+        and _normalize_nested_tuple(value.get("left_extension_ops")) == left_extension_ops
+        and _normalize_nested_tuple(value.get("right_extension_ops")) == right_extension_ops
         and value.get("relation") in HIGH_BIT_EXTENSION_RELATIONS
     )
 
@@ -1486,6 +1490,96 @@ def _return_width_bridge_extension_policy_for_side(side: Any) -> Optional[str]:
         return None
     policy = _normalize_nested_tuple(width)[6]
     return str(policy) if policy in {"none", "sign_extend", "zero_extend", "truncate"} else None
+
+
+def _return_width_bridge_required_extension_mnemonic_for_side(side: Any) -> Optional[str]:
+    if not isinstance(side, tuple):
+        return None
+    return_size = _find_tagged_entry(side, "return_size")
+    width = _find_tagged_entry(side, "return_value_width")
+    if not (
+        isinstance(return_size, tuple)
+        and len(return_size) == 2
+        and _return_value_width_is_specific(width, return_size[1])
+    ):
+        return None
+    normalized = _normalize_nested_tuple(width)
+    if normalized[5] != "producer_narrower_than_return_width":
+        return None
+    if normalized[6] == "sign_extend":
+        return "INT_SEXT"
+    if normalized[6] == "zero_extend":
+        return "INT_ZEXT"
+    return None
+
+
+def _return_width_bridge_extension_ops_for_side(side: Any) -> Tuple[Any, ...]:
+    if not isinstance(side, tuple):
+        return ()
+    width = _normalize_nested_tuple(_find_tagged_entry(side, "return_value_width"))
+    if not isinstance(width, tuple):
+        return ()
+    tagged = _find_tagged_entry(width, "return_value_extension_ops")
+    if not isinstance(tagged, tuple) or len(tagged) != 2:
+        return ()
+    profiles = _normalize_nested_tuple(tagged[1])
+    return profiles if isinstance(profiles, tuple) else ()
+
+
+def _return_width_bridge_matching_extension_ops_for_side(side: Any) -> Optional[Tuple[Any, ...]]:
+    mnemonic = _return_width_bridge_required_extension_mnemonic_for_side(side)
+    if mnemonic is None:
+        return ()
+    width = _normalize_nested_tuple(_find_tagged_entry(side, "return_value_width"))
+    if not isinstance(width, tuple) or len(width) < 3:
+        return None
+    matches = [
+        profile
+        for profile in _return_width_bridge_extension_ops_for_side(side)
+        if _return_width_bridge_extension_op_profile_matches(
+            profile,
+            mnemonic=mnemonic,
+            producer_bits=width[1],
+            return_bits=width[2],
+        )
+    ]
+    return tuple(matches) if matches else None
+
+
+def _return_width_bridge_extension_op_profile_matches(
+    profile: Any,
+    *,
+    mnemonic: str,
+    producer_bits: Any,
+    return_bits: Any,
+) -> bool:
+    normalized = _normalize_nested_tuple(profile)
+    if not isinstance(normalized, tuple) or len(normalized) < 6:
+        return False
+    if normalized[0] != "extension_op" or normalized[1] != mnemonic:
+        return False
+    op_ref = _find_tagged_entry(normalized, "op_ref")
+    input_bits = _find_tagged_entry(normalized, "input_bits")
+    output_bits = _find_tagged_entry(normalized, "output_bits")
+    policy = _find_tagged_entry(normalized, "policy")
+    expected_policy = "sign_extend" if mnemonic == "INT_SEXT" else "zero_extend"
+    try:
+        input_bits_int = int(input_bits[1] if isinstance(input_bits, tuple) and len(input_bits) == 2 else input_bits)
+        output_bits_int = int(output_bits[1] if isinstance(output_bits, tuple) and len(output_bits) == 2 else output_bits)
+        producer_bits_int = int(producer_bits)
+        return_bits_int = int(return_bits)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(op_ref, tuple)
+        and len(op_ref) == 2
+        and op_ref[1] is not None
+        and input_bits_int == producer_bits_int
+        and output_bits_int >= return_bits_int
+        and isinstance(policy, tuple)
+        and len(policy) == 2
+        and policy[1] == expected_policy
+    )
 
 
 def _high_bits_evidence_is_specific(value: Any, target: tuple) -> bool:

@@ -956,6 +956,9 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=loop_case.pcode_order,
                 pcode_time=loop_case.pcode_time,
                 pcode_op_ref=getattr(loop_case, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(loop_case, "return_value_pcode_op_refs", ()) or ()
+                ),
             )
         effective_loop_value = summarized[-1].value
         effective_start_expr = start_expr
@@ -5544,6 +5547,9 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=base_ret.pcode_order,
                 pcode_time=base_ret.pcode_time,
                 pcode_op_ref=getattr(base_ret, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(base_ret, "return_value_pcode_op_refs", ()) or ()
+                ),
             ),
             ReturnInfo(
                 address=recursive_ret.address,
@@ -5554,6 +5560,9 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=recursive_ret.pcode_order,
                 pcode_time=recursive_ret.pcode_time,
                 pcode_op_ref=getattr(recursive_ret, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(recursive_ret, "return_value_pcode_op_refs", ()) or ()
+                ),
             ),
         ]
 
@@ -5885,6 +5894,9 @@ class StructuralRecurrenceSummarizer:
             pcode_order=positive_anchor.pcode_order,
             pcode_time=positive_anchor.pcode_time,
             pcode_op_ref=getattr(positive_anchor, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(
+                getattr(positive_anchor, "return_value_pcode_op_refs", ()) or ()
+            ),
         )
         summarized_returns: List[ReturnInfo] = []
         inserted_summary = False
@@ -6143,6 +6155,9 @@ class StructuralRecurrenceSummarizer:
                     pcode_order=getattr(site_anchor, "pcode_order", None) if site_anchor is not None else None,
                     pcode_time=getattr(site_anchor, "pcode_time", None) if site_anchor is not None else None,
                     pcode_op_ref=getattr(site_anchor, "pcode_op_ref", None) if site_anchor is not None else None,
+                    return_value_pcode_op_refs=tuple(
+                        getattr(site_anchor, "return_value_pcode_op_refs", ()) or ()
+                    ) if site_anchor is not None else (),
                 )
             )
             self._debug(
@@ -6367,6 +6382,9 @@ class StructuralRecurrenceSummarizer:
                     pcode_order=anchor.pcode_order,
                     pcode_time=anchor.pcode_time,
                     pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+                    return_value_pcode_op_refs=tuple(
+                        getattr(anchor, "return_value_pcode_op_refs", ()) or ()
+                    ),
                 )
                 if bounded_region_anchors:
                     insert_at = self._bounded_prefix_exact_insert_index(
@@ -14212,6 +14230,9 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=base_case.pcode_order,
                 pcode_time=base_case.pcode_time,
                 pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(base_case, "return_value_pcode_op_refs", ()) or ()
+                ),
             )
         )
         summarized.append(
@@ -14224,6 +14245,9 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=base_case.pcode_order,
                 pcode_time=base_case.pcode_time,
                 pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(base_case, "return_value_pcode_op_refs", ()) or ()
+                ),
             )
         )
         self._debug(
@@ -14463,6 +14487,9 @@ class StructuralRecurrenceSummarizer:
                     pcode_order=base_case.pcode_order,
                     pcode_time=base_case.pcode_time,
                     pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
+                    return_value_pcode_op_refs=tuple(
+                        getattr(base_case, "return_value_pcode_op_refs", ()) or ()
+                    ),
                 )
             )
         return synthesized

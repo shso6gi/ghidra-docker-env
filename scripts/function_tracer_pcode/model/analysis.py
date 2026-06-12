@@ -44,6 +44,7 @@ class ReturnInfo:
     pcode_order: Optional[int] = None
     pcode_time: Optional[int] = None
     pcode_op_ref: Optional[PcodeOpRef] = None
+    return_value_pcode_op_refs: Tuple[PcodeOpRef, ...] = field(default_factory=tuple)
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""
@@ -64,6 +65,10 @@ class ReturnInfo:
             result["pcode_time"] = self.pcode_time
         if self.pcode_op_ref is not None:
             result["pcode_op_ref"] = self.pcode_op_ref.to_dict()
+        if self.return_value_pcode_op_refs:
+            result["return_value_pcode_op_refs"] = [
+                ref.to_dict() for ref in self.return_value_pcode_op_refs
+            ]
         return result
 
 

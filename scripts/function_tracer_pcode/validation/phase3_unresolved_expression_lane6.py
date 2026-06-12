@@ -605,7 +605,7 @@ def _proof_action_object_evidence_status_counts(actions: Sequence[Mapping[str, A
             continue
         if action.get("proof_stage") not in UNRESOLVED_PROOF_STAGES:
             continue
-        if action.get("status") not in {"planned", "pending_proof"}:
+        if action.get("status") not in {"planned", "pending_proof", "proof_complete"}:
             continue
         status = _pending_action_object_evidence_status(action)
         counts[status] = counts.get(status, 0) + 1

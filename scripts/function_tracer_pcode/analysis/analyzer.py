@@ -366,7 +366,62 @@ class ReturnAnalyzer:
             "pcode_order": info.pcode_order,
             "pcode_time": info.pcode_time,
             "pcode_op_ref": info.pcode_op_ref,
+            "return_value_pcode_op_refs": tuple(
+                getattr(info, "return_value_pcode_op_refs", ()) or ()
+            ),
         }
+
+    def _return_value_pcode_op_refs_from_varnode(
+        self,
+        varnode,
+    ) -> Tuple[PcodeOpRef, ...]:
+        if varnode is None:
+            return ()
+        get_def = getattr(varnode, "getDef", None)
+        pcode_op = get_def() if callable(get_def) else None
+        if pcode_op is None:
+            return ()
+        ref = PcodeOpRef.from_pcode_op(
+            pcode_op,
+            binary_id=self._binary_id,
+            program_uid=self._program_identity(),
+            function_entry=self._current_function_entry_address(),
+        )
+        return (ref,) if ref is not None else ()
+
+    def _site_metadata_with_return_value_pcode_op_refs(
+        self,
+        site_metadata: Optional[Dict[str, Optional[object]]],
+        *,
+        return_varnode=None,
+        producer_op=None,
+    ) -> Dict[str, Optional[object]]:
+        metadata: Dict[str, Optional[object]] = dict(site_metadata or {})
+        refs: List[PcodeOpRef] = [
+            ref
+            for ref in (metadata.get("return_value_pcode_op_refs") or ())
+            if isinstance(ref, PcodeOpRef)
+        ]
+        if producer_op is not None:
+            producer_ref = PcodeOpRef.from_pcode_op(
+                producer_op,
+                binary_id=self._binary_id,
+                program_uid=self._program_identity(),
+                function_entry=self._current_function_entry_address(),
+            )
+            if producer_ref is not None:
+                refs.append(producer_ref)
+        refs.extend(self._return_value_pcode_op_refs_from_varnode(return_varnode))
+        deduped: List[PcodeOpRef] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        for ref in refs:
+            key = ref.stable_key()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(ref)
+        metadata["return_value_pcode_op_refs"] = tuple(deduped)
+        return metadata
 
     def _make_return_info(
         self,
@@ -387,6 +442,11 @@ class ReturnAnalyzer:
             pcode_order=self._coerce_optional_int(site_metadata.get("pcode_order")),
             pcode_time=self._coerce_optional_int(site_metadata.get("pcode_time")),
             pcode_op_ref=cast(Optional[PcodeOpRef], site_metadata.get("pcode_op_ref")),
+            return_value_pcode_op_refs=tuple(
+                ref
+                for ref in (site_metadata.get("return_value_pcode_op_refs") or ())
+                if isinstance(ref, PcodeOpRef)
+            ),
         )
 
     def _expression_contains_equivalent_subexpr(
@@ -2260,13 +2320,17 @@ class ReturnAnalyzer:
             return None
 
         if not self._expression_contains_phi(candidate_value):
+            value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
+                site_metadata,
+                return_varnode=return_source,
+            )
             return [
                 self._make_return_info(
                     address=address,
                     value=candidate_value,
                     conditions=normalized_conditions,
                     branch_index=return_index_base,
-                    site_metadata=site_metadata,
+                    site_metadata=value_site_metadata,
                 )
             ]
 
@@ -2285,13 +2349,17 @@ class ReturnAnalyzer:
         ):
             return None
         if not self._expression_contains_phi(candidate_value):
+            value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
+                site_metadata,
+                return_varnode=return_source,
+            )
             return [
                 self._make_return_info(
                     address=address,
                     value=candidate_value,
                     conditions=normalized_conditions,
                     branch_index=return_index_base,
-                    site_metadata=site_metadata,
+                    site_metadata=value_site_metadata,
                 )
             ]
 
@@ -2300,6 +2368,10 @@ class ReturnAnalyzer:
             normalized_conditions,
         )
         results: List[ReturnInfo] = []
+        value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
+            site_metadata,
+            return_varnode=return_source,
+        )
         for split_index, (split_value, split_conditions) in enumerate(split_cases or []):
             normalized_value = self._fold_constant_expression(
                 split_value,
@@ -2321,7 +2393,7 @@ class ReturnAnalyzer:
                         if len(split_cases) == 1
                         else return_index_base * 10 + split_index
                     ),
-                    site_metadata=site_metadata,
+                    site_metadata=value_site_metadata,
                 )
             )
 
@@ -5823,6 +5895,9 @@ class ReturnAnalyzer:
                     pcode_order=ret.pcode_order,
                     pcode_time=ret.pcode_time,
                     pcode_op_ref=getattr(ret, "pcode_op_ref", None),
+                    return_value_pcode_op_refs=tuple(
+                        getattr(ret, "return_value_pcode_op_refs", ()) or ()
+                    ),
                 )
             )
 
@@ -6846,6 +6921,11 @@ class ReturnAnalyzer:
         if tracked.varnode is None:
             return None
 
+        value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
+            site_metadata,
+            return_varnode=tracked.varnode,
+            producer_op=producer_op,
+        )
         return self._analyze_return_value(
             tracked.varnode,
             address,
@@ -6856,7 +6936,7 @@ class ReturnAnalyzer:
             all_path_conditions=all_path_conditions,
             active_functions=active_functions,
             current_function=current_function,
-            site_metadata=site_metadata,
+            site_metadata=value_site_metadata,
         )
 
     def _select_path_specific_return_source(
@@ -7176,7 +7256,12 @@ class ReturnAnalyzer:
     ) -> List[ReturnInfo]:
         """Return値を解析"""
         from ..transform import ExpressionExpander
-        
+
+        value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
+            site_metadata,
+            return_varnode=return_varnode,
+        )
+
         tracer.clear_cache()
         
         # MULTIEQUALが含まれるかチェック
@@ -7234,7 +7319,7 @@ class ReturnAnalyzer:
             address,
             expanded_values,
             return_index,
-            site_metadata=site_metadata,
+            site_metadata=value_site_metadata,
         )
         
         if not results:
@@ -7249,7 +7334,7 @@ class ReturnAnalyzer:
                 value=resolved_value,
                 conditions=simplified_conds,
                 branch_index=return_index,
-                site_metadata=site_metadata,
+                site_metadata=value_site_metadata,
             )]
         
         return results

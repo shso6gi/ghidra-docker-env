@@ -365,6 +365,10 @@ def rewrite_analysis_returns(
             pcode_identity=ret_info.pcode_identity,
             pcode_order=ret_info.pcode_order,
             pcode_time=ret_info.pcode_time,
+            pcode_op_ref=getattr(ret_info, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(
+                getattr(ret_info, "return_value_pcode_op_refs", ()) or ()
+            ),
         )
         new_returns.append(new_ret)
     
