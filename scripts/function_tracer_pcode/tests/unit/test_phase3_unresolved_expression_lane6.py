@@ -2085,6 +2085,37 @@ def test_unresolved_expression_post_fix_status_rejects_target_cleared_without_re
     assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
 
 
+def test_unresolved_expression_post_fix_status_rejects_unexplained_target_subset():
+    target = _unresolved_target()
+    cleared_target = list(target)
+    cleared_target[1] = ("pair", "(0,2)")
+    cleared_target = tuple(cleared_target)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target, cleared_target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == ["unresolved_expression_target_set_changed"]
+
+
 def test_unresolved_expression_post_fix_status_rejects_target_cleared_with_stale_unresolved_action():
     target = _unresolved_target()
     blocker = make_unknown_reason(

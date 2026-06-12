@@ -3505,6 +3505,8 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
         isinstance(item, tuple) and item and item[0] == "stage_evidence"
         for item in reason.object_evidence
     )
+    assert _nested_contains(reason.object_evidence, "semantic_recurrence_query")
+    assert _nested_contains(reason.object_evidence, "object_derived_query_plan")
     actions = build_unknown_recovery_actions(result.unknown_reasons)
     assert {
         action.proof_stage
