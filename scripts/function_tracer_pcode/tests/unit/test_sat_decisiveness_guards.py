@@ -3500,6 +3500,11 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     assert "pairwise_unresolved_lowered_unknown_keys_by_pair" not in base_ctx
     reason = result.unknown_reasons[0]
     assert reason.object_evidence is not None
+    assert reason.object_evidence[0] == "unresolved_expression_diagnostic_evidence"
+    assert any(
+        isinstance(item, tuple) and item and item[0] == "stage_evidence"
+        for item in reason.object_evidence
+    )
     actions = build_unknown_recovery_actions(result.unknown_reasons)
     assert {
         action.proof_stage
