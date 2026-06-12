@@ -968,6 +968,11 @@ def _unresolved_expression_proof_actions_complete(
         target = action.get("object_target_key")
         if not _object_target_key_is_specific_unresolved_expression(target):
             continue
+        if (
+            stage in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+            and not _target_has_specific_phi_circular_relation_evidence(target)
+        ):
+            continue
         target_key = _unresolved_expression_target_identity_key(target)
         if target_key not in stages_by_target:
             continue
@@ -1053,10 +1058,37 @@ def _target_contains_originated_phi_circular(value: Any) -> bool:
         ):
             return True
         return any(_target_contains_originated_phi_circular(item) for item in normalized)
+    if isinstance(normalized, list):
+        return any(_target_contains_originated_phi_circular(item) for item in normalized)
     if isinstance(normalized, dict):
         return any(
             _target_contains_originated_phi_circular(key)
             or _target_contains_originated_phi_circular(item)
+            for key, item in normalized.items()
+        )
+    return False
+
+
+def _target_has_specific_phi_circular_relation_evidence(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if isinstance(normalized, tuple):
+        if normalized and normalized[0] == "phi_circular_evidence":
+            scope = normalized[1] if len(normalized) > 1 else None
+            if (
+                isinstance(scope, tuple)
+                and len(scope) == 2
+                and scope[0] == "location_scope"
+                and _text_identity_is_specific(scope[1])
+            ):
+                return _phi_circular_evidence_is_specific(normalized, str(scope[1]))
+            return False
+        return any(_target_has_specific_phi_circular_relation_evidence(item) for item in normalized)
+    if isinstance(normalized, list):
+        return any(_target_has_specific_phi_circular_relation_evidence(item) for item in normalized)
+    if isinstance(normalized, dict):
+        return any(
+            _target_has_specific_phi_circular_relation_evidence(key)
+            or _target_has_specific_phi_circular_relation_evidence(item)
             for key, item in normalized.items()
         )
     return False
@@ -1165,6 +1197,11 @@ def _current_unresolved_expression_actions(entry: Mapping[str, Any]) -> Sequence
             continue
         target = action.get("object_target_key")
         if not _object_target_key_is_specific_unresolved_expression(target):
+            continue
+        if (
+            action.get("proof_stage") in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+            and not _target_has_specific_phi_circular_relation_evidence(target)
+        ):
             continue
         actions.append(action)
     return tuple(actions)

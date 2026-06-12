@@ -866,7 +866,7 @@ def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actio
     assert all(action["required_evidence"] for action in required_actions)
 
 
-def test_unresolved_expression_post_fix_accepts_typed_lowering_detail_added_to_target():
+def test_unresolved_expression_post_fix_keeps_phi_circular_typed_lowering_without_relation_evidence_pending():
     frozen_target = _originated_phi_target()
     current_target = _with_typed_lowering_evidence(frozen_target)
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
@@ -893,13 +893,9 @@ def test_unresolved_expression_post_fix_accepts_typed_lowering_detail_added_to_t
 
     status, failures = _post_fix_status(entry)
 
-    assert status == "pending_proof"
+    assert status == "pending_object_evidence"
     assert failures == ()
-    obligations = _pending_proof_obligations(entry)
-    assert {obligation["proof_stage"] for obligation in obligations} == set(
-        UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
-    )
-    assert all(obligation["proof_obligation_id"] for obligation in obligations)
+    assert _pending_proof_obligations(entry) == ()
 
 
 def test_phi_circular_guard_target_carries_object_detail_proof_evidence():
@@ -971,6 +967,70 @@ def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages()
     assert [action.proof_stage for action in actions] == list(UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES)
     assert all("guard" in " ".join(action.required_evidence) for action in actions)
     assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
+
+
+def test_unresolved_expression_post_fix_accepts_phi_circular_pending_proof_actions_with_relation_evidence():
+    target = _actual_phi_guard_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    assert {action["proof_stage"] for action in _required_completion_actions(entry)} == set(
+        UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+    )
+
+
+def test_unresolved_expression_post_fix_rejects_phi_circular_actions_without_relation_evidence():
+    target = _originated_phi_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_object_evidence"
+    assert failures == ()
+    assert _required_completion_actions(entry) == ()
 
 
 def test_unresolved_expression_deferred_call_target_uses_dedicated_proof_stages():
