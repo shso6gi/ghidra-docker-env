@@ -179,7 +179,7 @@ def test_default_lane6_required_completion_action_hashes_are_current():
         {
             "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
             "required_completion_actions_sha256": (
-                "7087c485808bcda82a5f82158d083c48b53f95c583a2283d20856a39d45fc19f"
+                "c25c782c296a181d96a80f43260a29b03758700625fbdbb6662ea028fddeff8a"
             ),
         },
         {
