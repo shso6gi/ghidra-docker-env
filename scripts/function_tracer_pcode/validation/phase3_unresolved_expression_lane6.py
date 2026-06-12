@@ -555,6 +555,7 @@ def _extra_current_unresolved_expression_observations_from_records(
         ]
         if observation.get("final_result") != STATUS_UNKNOWN or not unresolved_records:
             continue
+        diagnostic_statuses = _pair_lowering_diagnostic_status_counts(unresolved_records)
         observations.append(
             {
                 "category": category,
@@ -564,9 +565,53 @@ def _extra_current_unresolved_expression_observations_from_records(
                 "final_result": observation.get("final_result") or MISSING_SENTINEL,
                 "unresolved_expression_reason_record_count": len(unresolved_records),
                 "observed_reason_ids": list(observation.get("observed_reason_ids") or ()),
+                "pair_lowering_diagnostic_status_counts": diagnostic_statuses,
             }
         )
     return tuple(observations)
+
+
+def _pair_lowering_diagnostic_status_counts(reason_records: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for reason in reason_records or ():
+        target = _normalize_nested_tuple(reason.get("object_target_key"))
+        for diagnostic in _nested_tuples_with_tag(target, "pair_lowering_diagnostic"):
+            status = _pair_lowering_diagnostic_status(diagnostic)
+            if status is None:
+                continue
+            counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _pair_lowering_diagnostic_status(value: Any) -> Optional[str]:
+    diagnostic = _normalize_nested_tuple(value)
+    if not isinstance(diagnostic, tuple) or not diagnostic or diagnostic[0] != "pair_lowering_diagnostic":
+        return None
+    for item in diagnostic[1:]:
+        if isinstance(item, tuple) and len(item) == 2 and item[0] == "status":
+            return str(item[1])
+    return None
+
+
+def _nested_tuples_with_tag(value: Any, tag: str) -> Tuple[Tuple[Any, ...], ...]:
+    found: list[Tuple[Any, ...]] = []
+
+    def visit(item: Any) -> None:
+        normalized = _normalize_nested_tuple(item)
+        if isinstance(normalized, tuple):
+            if normalized and normalized[0] == tag:
+                found.append(normalized)
+            for child in normalized:
+                visit(child)
+        elif isinstance(item, Mapping):
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return tuple(found)
 
 
 def _reason_to_dict(reason: Any) -> Dict[str, Any]:
@@ -1120,25 +1165,33 @@ def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, A
 
 
 def _unresolved_expression_target_identity_key(value: Any) -> str:
-    return _canonical_json(_strip_typed_lowering_evidence(_jsonable(value)))
+    return _canonical_json(_strip_diagnostic_target_evidence(_jsonable(value)))
 
 
-def _strip_typed_lowering_evidence(value: Any) -> Any:
+def _strip_diagnostic_target_evidence(value: Any) -> Any:
     if isinstance(value, list):
-        if value and value[0] == "typed_lowering_evidence":
+        if (
+            value
+            and isinstance(value[0], str)
+            and value[0] in {"typed_lowering_evidence", "pair_lowering_diagnostic"}
+        ):
             return None
         stripped = []
         for item in value:
-            child = _strip_typed_lowering_evidence(item)
+            child = _strip_diagnostic_target_evidence(item)
             if child is not None:
                 stripped.append(child)
         return stripped
     if isinstance(value, tuple):
-        if value and value[0] == "typed_lowering_evidence":
+        if (
+            value
+            and isinstance(value[0], str)
+            and value[0] in {"typed_lowering_evidence", "pair_lowering_diagnostic"}
+        ):
             return None
         stripped = []
         for item in value:
-            child = _strip_typed_lowering_evidence(item)
+            child = _strip_diagnostic_target_evidence(item)
             if child is not None:
                 stripped.append(child)
         return tuple(stripped)
@@ -1146,7 +1199,7 @@ def _strip_typed_lowering_evidence(value: Any) -> Any:
         return {
             str(key): child
             for key, item in sorted(value.items(), key=lambda item: str(item[0]))
-            for child in (_strip_typed_lowering_evidence(item),)
+            for child in (_strip_diagnostic_target_evidence(item),)
             if child is not None
         }
     return value
@@ -1231,7 +1284,7 @@ def _expected_movements_match_definition(entry: Mapping[str, Any]) -> bool:
 
 def _object_target_key_is_specific_unresolved_expression(value: Any) -> bool:
     target = _normalize_nested_tuple(value)
-    if not isinstance(target, tuple) or len(target) != 4 or target[0] != "unresolved_expression":
+    if not isinstance(target, tuple) or len(target) not in {4, 5} or target[0] != "unresolved_expression":
         return False
     if _nested_contains_diagnostic_reason(target):
         return False
@@ -1245,9 +1298,56 @@ def _object_target_key_is_specific_unresolved_expression(value: Any) -> bool:
         return False
     left_ok = _unresolved_expression_side_is_specific(target[2], "left")
     right_ok = _unresolved_expression_side_is_specific(target[3], "right")
+    if len(target) == 5 and not _pair_lowering_diagnostic_is_specific(target[4]):
+        return False
     return left_ok and right_ok and (
         _side_has_unresolved_locations(target[2])
         or _side_has_unresolved_locations(target[3])
+    )
+
+
+def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
+    diagnostic = _normalize_nested_tuple(value)
+    if not isinstance(diagnostic, tuple) or len(diagnostic) != 11:
+        return False
+    if diagnostic[0] != "pair_lowering_diagnostic":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in diagnostic[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if fields.get("candidate_kind") != "phi_circular_guard_summary_relation":
+        return False
+    if fields.get("status") not in {
+        "full_shape_match",
+        "value_shape_mismatch",
+        "guard_literal_conflict",
+        "shape_unavailable",
+        "condition_shape_mismatch",
+    }:
+        return False
+    if not _nonnegative_int_like(fields.get("left_unknown_count")):
+        return False
+    if not _nonnegative_int_like(fields.get("right_unknown_count")):
+        return False
+    for key in ("left_value_shape", "right_value_shape"):
+        if fields.get(key) is not None and not _expression_shape_is_specific(fields.get(key)):
+            return False
+    for key in ("left_guard_literals", "right_guard_literals"):
+        literals = fields.get(key)
+        if not isinstance(literals, tuple):
+            return False
+        if not all(_guard_literal_is_specific(item) for item in literals):
+            return False
+    opposing = fields.get("opposing_guard_literals")
+    if not isinstance(opposing, tuple):
+        return False
+    if not all(_opposing_guard_literal_is_specific(item) for item in opposing):
+        return False
+    return fields.get("required_evidence") == (
+        "guard_condition_pair",
+        "summary_parameter_binding",
     )
 
 
@@ -1485,15 +1585,21 @@ def _typed_lowering_evidence_is_specific(value: Any, expected_scope: str) -> boo
 
 def _phi_circular_evidence_is_specific(value: Any, expected_scope: str) -> bool:
     evidence = _normalize_nested_tuple(value)
-    if not isinstance(evidence, tuple) or len(evidence) != 6:
+    if not isinstance(evidence, tuple) or len(evidence) not in {6, 7}:
         return False
     if evidence[0] != "phi_circular_evidence":
         return False
     scope = evidence[1]
     origins = evidence[2]
     guard_condition_key = evidence[3]
-    summary_parameter_refs = evidence[4]
-    relation_status = evidence[5]
+    if len(evidence) == 7:
+        guard_condition_literals = evidence[4]
+        summary_parameter_refs = evidence[5]
+        relation_status = evidence[6]
+    else:
+        guard_condition_literals = None
+        summary_parameter_refs = evidence[4]
+        relation_status = evidence[5]
     if scope != ("location_scope", expected_scope):
         return False
     if (
@@ -1517,6 +1623,15 @@ def _phi_circular_evidence_is_specific(value: Any, expected_scope: str) -> bool:
             return False
     elif guard_key is not None and not _return_guard_like_key_is_specific(guard_key):
         return False
+    if guard_condition_literals is not None:
+        if (
+            not isinstance(guard_condition_literals, tuple)
+            or len(guard_condition_literals) != 2
+            or guard_condition_literals[0] != "guard_condition_literals"
+            or not isinstance(guard_condition_literals[1], tuple)
+            or not all(_guard_literal_is_specific(item) for item in guard_condition_literals[1])
+        ):
+            return False
     if (
         not isinstance(summary_parameter_refs, tuple)
         or len(summary_parameter_refs) != 2
@@ -1528,6 +1643,76 @@ def _phi_circular_evidence_is_specific(value: Any, expected_scope: str) -> bool:
     if not all(_summary_parameter_ref_is_specific(ref) for ref in refs):
         return False
     return relation_status == ("relation_status", "pending_guard_summary_relation_proof")
+
+
+def _guard_literal_is_specific(value: Any) -> bool:
+    literal = _normalize_nested_tuple(value)
+    return (
+        isinstance(literal, tuple)
+        and len(literal) == 3
+        and literal[0] == "guard_literal"
+        and isinstance(literal[1], bool)
+        and _expression_shape_is_specific(literal[2])
+    )
+
+
+def _opposing_guard_literal_is_specific(value: Any) -> bool:
+    literal = _normalize_nested_tuple(value)
+    return (
+        isinstance(literal, tuple)
+        and len(literal) == 2
+        and literal[0] == "opposing_guard_literal"
+        and _expression_shape_is_specific(literal[1])
+    )
+
+
+def _expression_shape_is_specific(value: Any) -> bool:
+    shape = _normalize_nested_tuple(value)
+    if not isinstance(shape, tuple) or not shape:
+        return False
+    tag = shape[0]
+    if tag == "const":
+        return len(shape) == 3 and isinstance(shape[1], int) and _positive_int_like(shape[2])
+    if tag == "literal":
+        return len(shape) == 3 and _text_identity_is_specific(shape[1]) and _positive_int_like(shape[2])
+    if tag == "parameter":
+        return (
+            len(shape) == 4
+            and _text_identity_is_specific(shape[1])
+            and _nonnegative_int_like(shape[2])
+            and _positive_int_like(shape[3])
+        )
+    if tag == "unknown":
+        return len(shape) == 3 and shape[1] == "phi_circular" and _positive_int_like(shape[2])
+    if tag == "unary":
+        return (
+            len(shape) == 4
+            and _text_identity_is_specific(shape[1])
+            and _positive_int_like(shape[2])
+            and _expression_shape_is_specific(shape[3])
+        )
+    if tag == "binary":
+        return (
+            len(shape) == 5
+            and _text_identity_is_specific(shape[1])
+            and _positive_int_like(shape[2])
+            and _expression_shape_is_specific(shape[3])
+            and _expression_shape_is_specific(shape[4])
+        )
+    if tag == "intrinsic":
+        return (
+            len(shape) == 5
+            and _text_identity_is_specific(shape[1])
+            and (shape[2] is None or _nonnegative_int_like(shape[2]))
+            and _positive_int_like(shape[3])
+            and isinstance(shape[4], tuple)
+            and all(_expression_shape_is_specific(item) for item in shape[4])
+        )
+    return False
+
+
+def _positive_int_like(value: Any) -> bool:
+    return _nonnegative_int_like(value) and int(value) > 0
 
 
 def _phi_circular_origin_detail_is_specific(value: Any) -> bool:

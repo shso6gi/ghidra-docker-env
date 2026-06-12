@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES,
     UNRESOLVED_PROOF_KIND,
     _extra_current_unresolved_expression_observations_from_records,
+    _expression_shape_is_specific,
     _timeout_transition_readiness,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
@@ -379,6 +380,22 @@ def _replace_first_tuple(value, tag, replacement_fn):
             result[key] = new_item
         return result, changed
     return value, False
+
+
+def _find_tuples(value, tag):
+    found = []
+    if isinstance(value, tuple):
+        if value and value[0] == tag:
+            found.append(value)
+        for item in value:
+            found.extend(_find_tuples(item, tag))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_tuples(item, tag))
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.extend(_find_tuples(item, tag))
+    return found
 
 
 def _with_typed_lowering_evidence(target):
@@ -914,9 +931,12 @@ def test_phi_circular_guard_target_accepts_empty_summary_binding_when_no_paramet
     target = _actual_phi_guard_target()
 
     def drop_summary_refs(evidence):
-        updated = list(evidence)
-        updated[4] = ("summary_parameter_refs", ())
-        return tuple(updated)
+        return tuple(
+            ("summary_parameter_refs", ())
+            if isinstance(item, tuple) and item and item[0] == "summary_parameter_refs"
+            else item
+            for item in evidence
+        )
 
     tampered, changed = _replace_first_tuple(target, "phi_circular_evidence", drop_summary_refs)
 
@@ -928,9 +948,12 @@ def test_phi_circular_guard_target_rejects_malformed_summary_binding_evidence():
     target = _actual_phi_guard_target()
 
     def break_summary_refs(evidence):
-        updated = list(evidence)
-        updated[4] = ("summary_parameter_refs", ("raw-summary-binding",))
-        return tuple(updated)
+        return tuple(
+            ("summary_parameter_refs", ("raw-summary-binding",))
+            if isinstance(item, tuple) and item and item[0] == "summary_parameter_refs"
+            else item
+            for item in evidence
+        )
 
     tampered, changed = _replace_first_tuple(target, "phi_circular_evidence", break_summary_refs)
 
@@ -966,7 +989,90 @@ def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages()
     actions = build_unknown_recovery_actions([reason])
     assert [action.proof_stage for action in actions] == list(UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES)
     assert all("guard" in " ".join(action.required_evidence) for action in actions)
+    assert all("pair_lowering_diagnostic" in action.required_evidence for action in actions)
     assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
+
+
+def test_phi_circular_target_records_guard_literals_and_pair_diagnostic():
+    target = _actual_phi_guard_target()
+
+    phi_evidence = _find_tuples(target, "phi_circular_evidence")
+    assert phi_evidence
+    assert any(
+        item[0] == "guard_condition_literals" and item[1]
+        for evidence in phi_evidence
+        for item in evidence
+        if isinstance(item, tuple)
+    )
+    diagnostics = _find_tuples(target, "pair_lowering_diagnostic")
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert ("candidate_kind", "phi_circular_guard_summary_relation") in diagnostic
+    assert ("status", "value_shape_mismatch") in diagnostic
+    assert any(item[0] == "left_guard_literals" and item[1] for item in diagnostic)
+    assert any(item[0] == "right_guard_literals" and item[1] for item in diagnostic)
+
+
+def test_phi_circular_guard_literal_preserves_parameter_index_zero():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    _analysis, case = _phi_guard_case("B11", 0x1000, 0)
+    original_guard = case.conditions[0].expression
+    case.conditions[0].expression = Expression.binary_op(
+        "BOOL_AND",
+        original_guard,
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("param_1", 0, size=4),
+            Expression.constant(0, 4),
+        ),
+    )
+
+    literals = strategy._phi_circular_case_condition_literals(case)
+
+    assert literals
+    assert any(
+        isinstance(literal, tuple)
+        and len(literal) == 3
+        and literal[0] == "guard_literal"
+        and _expression_shape_is_specific(literal[2])
+        and ("parameter", "param_1", 0, 32) in _find_tuples(literal[2], "parameter")
+        for literal in literals
+    )
+
+
+def test_phi_circular_pair_diagnostic_does_not_change_target_identity():
+    current_target = _actual_phi_guard_target()
+    frozen_target = tuple(
+        item for item in current_target if not (isinstance(item, tuple) and item and item[0] == "pair_lowering_diagnostic")
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=current_target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(current_target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [frozen_target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    assert len(frozen_target) == 4
+    assert len(current_target) == 5
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
 
 
 def test_unresolved_expression_post_fix_accepts_phi_circular_pending_proof_actions_with_relation_evidence():
@@ -1299,5 +1405,35 @@ def test_extra_current_unresolved_expression_observations_exclude_manifest_entri
             "final_result": "UNKNOWN",
             "unresolved_expression_reason_record_count": 1,
             "observed_reason_ids": ["return_coverage_gap", "unresolved_expression"],
+            "pair_lowering_diagnostic_status_counts": {},
         },
     )
+
+
+def test_extra_current_unresolved_expression_observations_report_pair_diagnostic_statuses():
+    target = _actual_phi_guard_target()
+    unresolved = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    records = {
+        ("function_call", "fc_is_even", "B11_B12"): {
+            "relative_log_path": "fc_is_even/fc_is_even_B11_B12.log",
+            "payload": {
+                "is_equivalent": None,
+                "unknown_reasons": [unresolved.to_dict()],
+            },
+        },
+    }
+
+    observations = _extra_current_unresolved_expression_observations_from_records(
+        records,
+        manifest_keys=(),
+    )
+
+    assert observations[0]["pair_lowering_diagnostic_status_counts"] == {
+        "value_shape_mismatch": 1,
+    }

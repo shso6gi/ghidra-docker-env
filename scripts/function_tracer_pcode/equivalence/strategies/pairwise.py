@@ -1694,7 +1694,7 @@ class PairwiseStrategy(CheckStrategy):
     ) -> Tuple[Any, ...]:
         """Object-derived target key for unresolved-expression diagnostics."""
 
-        return (
+        target: List[Any] = [
             "unresolved_expression",
             ("pair", pair_id),
             self._unresolved_expression_side_object_key(
@@ -1707,7 +1707,14 @@ class PairwiseStrategy(CheckStrategy):
                 base_ctx.get("analysis2"),
                 case2,
             ),
+        ]
+        lowering_diagnostic = self._unresolved_expression_pair_lowering_diagnostic(
+            case1,
+            case2,
         )
+        if lowering_diagnostic is not None:
+            target.append(lowering_diagnostic)
+        return tuple(target)
 
     def _solver_rewrite_candidate_object_target_key(
         self,
@@ -1936,9 +1943,149 @@ class PairwiseStrategy(CheckStrategy):
             ("location_scope", str(location_scope)),
             ("phi_origins", phi_origins),
             ("guard_condition_key", guard_condition_key),
+            (
+                "guard_condition_literals",
+                self._phi_circular_condition_literals(condition)
+                if condition is not None
+                else (),
+            ),
             ("summary_parameter_refs", summary_parameter_refs),
             ("relation_status", "pending_guard_summary_relation_proof"),
         )
+
+    def _unresolved_expression_pair_lowering_diagnostic(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> Optional[Tuple[Any, ...]]:
+        left_shape, left_unknowns = self._phi_circular_case_shape_and_unknowns(case1)
+        right_shape, right_unknowns = self._phi_circular_case_shape_and_unknowns(case2)
+        if left_shape is None and right_shape is None:
+            return None
+        if not left_unknowns and not right_unknowns:
+            return None
+
+        left_value = self._phi_circular_case_value_shape(left_shape)
+        right_value = self._phi_circular_case_value_shape(right_shape)
+        left_literals = self._phi_circular_case_condition_literals(case1)
+        right_literals = self._phi_circular_case_condition_literals(case2)
+        contradictions = self._phi_circular_opposing_condition_literals(
+            left_literals,
+            right_literals,
+        )
+        if left_shape is not None and right_shape is not None and left_shape == right_shape:
+            status = "full_shape_match"
+        elif left_value is not None and right_value is not None and left_value != right_value:
+            status = "value_shape_mismatch"
+        elif contradictions:
+            status = "guard_literal_conflict"
+        elif left_shape is None or right_shape is None:
+            status = "shape_unavailable"
+        else:
+            status = "condition_shape_mismatch"
+
+        return (
+            "pair_lowering_diagnostic",
+            ("candidate_kind", "phi_circular_guard_summary_relation"),
+            ("status", status),
+            ("left_unknown_count", len(left_unknowns)),
+            ("right_unknown_count", len(right_unknowns)),
+            ("left_value_shape", left_value),
+            ("right_value_shape", right_value),
+            ("left_guard_literals", left_literals),
+            ("right_guard_literals", right_literals),
+            ("opposing_guard_literals", contradictions),
+            ("required_evidence", ("guard_condition_pair", "summary_parameter_binding")),
+        )
+
+    @staticmethod
+    def _phi_circular_case_value_shape(
+        case_shape: Optional[Tuple[Any, ...]],
+    ) -> Optional[Any]:
+        if not case_shape or len(case_shape) < 2:
+            return None
+        value_item = case_shape[1]
+        if isinstance(value_item, tuple) and len(value_item) == 2 and value_item[0] == "value":
+            return value_item[1]
+        return None
+
+    def _phi_circular_case_condition_literals(
+        self,
+        case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        literals: List[Any] = []
+        for condition in getattr(case, "conditions", None) or ():
+            literals.extend(self._phi_circular_condition_literals(condition))
+        return tuple(sorted(literals, key=repr))
+
+    def _phi_circular_condition_literals(self, condition: Any) -> Tuple[Any, ...]:
+        if condition is None:
+            return ()
+        unknowns: List[Any] = []
+        shape = self._phi_circular_expression_shape_key(
+            getattr(condition, "expression", None),
+            unknowns,
+        )
+        if shape is None:
+            return ()
+        return tuple(
+            sorted(
+                self._phi_circular_boolean_literals_from_shape(
+                    shape,
+                    polarity=not bool(getattr(condition, "negated", False)),
+                ),
+                key=repr,
+            )
+        )
+
+    def _phi_circular_boolean_literals_from_shape(
+        self,
+        shape: Any,
+        *,
+        polarity: bool,
+    ) -> Tuple[Any, ...]:
+        if (
+            isinstance(shape, tuple)
+            and len(shape) == 5
+            and shape[0] == "binary"
+            and shape[1] == "BOOL_AND"
+            and polarity
+        ):
+            return (
+                *self._phi_circular_boolean_literals_from_shape(shape[3], polarity=True),
+                *self._phi_circular_boolean_literals_from_shape(shape[4], polarity=True),
+            )
+        if (
+            isinstance(shape, tuple)
+            and len(shape) == 4
+            and shape[0] == "unary"
+            and shape[1] == "BOOL_NEGATE"
+        ):
+            return self._phi_circular_boolean_literals_from_shape(
+                shape[3],
+                polarity=not polarity,
+            )
+        return (("guard_literal", bool(polarity), shape),)
+
+    @staticmethod
+    def _phi_circular_opposing_condition_literals(
+        left_literals: Tuple[Any, ...],
+        right_literals: Tuple[Any, ...],
+    ) -> Tuple[Any, ...]:
+        left_by_atom = {
+            item[2]: bool(item[1])
+            for item in left_literals
+            if isinstance(item, tuple) and len(item) == 3 and item[0] == "guard_literal"
+        }
+        opposing: List[Any] = []
+        for item in right_literals:
+            if not (isinstance(item, tuple) and len(item) == 3 and item[0] == "guard_literal"):
+                continue
+            atom = item[2]
+            right_polarity = bool(item[1])
+            if atom in left_by_atom and left_by_atom[atom] != right_polarity:
+                opposing.append(("opposing_guard_literal", atom))
+        return tuple(sorted(opposing, key=repr))
 
     def _collect_phi_circular_origin_details(self, expr: Any) -> Tuple[Any, ...]:
         details: List[Tuple[Any, ...]] = []
@@ -2156,6 +2303,8 @@ class PairwiseStrategy(CheckStrategy):
                         "object_target_key",
                         "multiequal_pcode_op_ref",
                         "guard_condition_key",
+                        "guard_condition_literals",
+                        "pair_lowering_diagnostic",
                         "typed_lowering_rule",
                     ),
                     description=(
@@ -2170,6 +2319,7 @@ class PairwiseStrategy(CheckStrategy):
                         "left_phi_origin",
                         "right_phi_origin",
                         "guard_condition_pair",
+                        "pair_lowering_diagnostic",
                         "summary_parameter_binding",
                     ),
                     description=(
@@ -4965,6 +5115,124 @@ class PairwiseStrategy(CheckStrategy):
             assertions=tuple(assertions),
             evidence=tuple(evidence),
         )
+
+    def _phi_circular_case_shape_and_unknowns(
+        self,
+        case: ReturnCase,
+    ) -> Tuple[Optional[Tuple[Any, ...]], Tuple[Any, ...]]:
+        unknowns: List[Any] = []
+        value_shape = self._phi_circular_expression_shape_key(
+            getattr(case, "value_expr", None),
+            unknowns,
+        )
+        if value_shape is None:
+            return None, ()
+        condition_shapes: List[Tuple[Any, ...]] = []
+        for condition in getattr(case, "conditions", None) or ():
+            expression = getattr(condition, "expression", None)
+            condition_shape = self._phi_circular_expression_shape_key(expression, unknowns)
+            if condition_shape is None:
+                return None, ()
+            condition_shapes.append(
+                (
+                    "condition",
+                    bool(getattr(condition, "negated", False)),
+                    condition_shape,
+                )
+            )
+        return (
+            (
+                "phi_circular_case_shape",
+                ("value", value_shape),
+                ("conditions", tuple(condition_shapes)),
+            ),
+            tuple(unknowns),
+        )
+
+    def _phi_circular_expression_shape_key(
+        self,
+        expr: Any,
+        unknowns: List[Any],
+    ) -> Optional[Tuple[Any, ...]]:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return None
+        expr_type = expr.expr_type
+        if expr_type == ExpressionType.UNKNOWN:
+            if not self._unknown_expression_is_originated_phi_circular(expr):
+                return None
+            bits = int(expression_smt_bit_width(expr) or 0)
+            if bits <= 0:
+                return None
+            unknowns.append(expr)
+            return ("unknown", "phi_circular", bits)
+        if self._expression_node_is_unsupported_smt_op(expr):
+            return None
+        bits = int(expression_smt_bit_width(expr) or 0)
+        if expr_type == ExpressionType.CONSTANT:
+            return ("const", int(getattr(expr, "value", 0) or 0), bits)
+        if expr_type == ExpressionType.LITERAL:
+            return ("literal", repr(getattr(expr, "value", None)), bits)
+        if expr_type == ExpressionType.PARAMETER:
+            raw_value = getattr(expr, "value", None)
+            return (
+                "parameter",
+                str(getattr(expr, "name", "") or ""),
+                -1 if raw_value is None else int(raw_value),
+                bits,
+            )
+        if expr_type == ExpressionType.VARIABLE:
+            return None
+        if expr_type == ExpressionType.UNARY_OP:
+            operands = getattr(expr, "operands", None) or ()
+            if len(operands) != 1:
+                return None
+            operand = self._phi_circular_expression_shape_key(operands[0], unknowns)
+            if operand is None:
+                return None
+            return ("unary", str(getattr(expr, "operator", "") or ""), bits, operand)
+        if expr_type == ExpressionType.BINARY_OP:
+            operands = getattr(expr, "operands", None) or ()
+            if len(operands) != 2:
+                return None
+            left = self._phi_circular_expression_shape_key(operands[0], unknowns)
+            right = self._phi_circular_expression_shape_key(operands[1], unknowns)
+            if left is None or right is None:
+                return None
+            return (
+                "binary",
+                str(getattr(expr, "operator", "") or ""),
+                bits,
+                left,
+                right,
+            )
+        if expr_type == ExpressionType.INTRINSIC:
+            operands = []
+            for operand_expr in getattr(expr, "operands", None) or ():
+                operand = self._phi_circular_expression_shape_key(operand_expr, unknowns)
+                if operand is None:
+                    return None
+                operands.append(operand)
+            return (
+                "intrinsic",
+                str(getattr(expr, "name", "") or ""),
+                None if getattr(expr, "opcode", None) is None else int(getattr(expr, "opcode")),
+                bits,
+                tuple(operands),
+            )
+        return None
+
+    @classmethod
+    def _unknown_expression_is_originated_phi_circular(cls, expr: Any) -> bool:
+        if getattr(expr, "expr_type", None) != ExpressionType.UNKNOWN:
+            return False
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if getattr(runtime_ref, "kind", None) != "opaque_unknown":
+            return False
+        if getattr(runtime_ref, "reason", None) != "phi_circular":
+            return False
+        if getattr(runtime_ref, "origin_kind", None) != "multiequal_pcode_op":
+            return False
+        return cls._stable_key_or_none(getattr(runtime_ref, "origin_ref", None)) is not None
 
     def _case_conditions_have_unsupported_smt_op_excluding_unknowns(self, case: ReturnCase) -> bool:
         for condition in getattr(case, "conditions", None) or ():
