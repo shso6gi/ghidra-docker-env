@@ -415,6 +415,67 @@ def _find_tuples(value, tag):
     return found
 
 
+def _tuple_fields(value):
+    return {
+        item[0]: item[1]
+        for item in value[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+
+
+def _completed_semantic_recurrence_evidence_from_diagnostic(strategy, target):
+    diagnostic_evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
+        target
+    )
+    fields = _tuple_fields(diagnostic_evidence)
+    completed_stages = (
+        "phi_circular_guard_condition_lowering",
+        "recursive_summary_guard_equivalence",
+    )
+    proof_queries = []
+    for stage_evidence in fields["stage_evidence"]:
+        stage_fields = _tuple_fields(stage_evidence)
+        query_plans = _find_tuples(stage_fields["proof_query_plan"], "semantic_recurrence_query")
+        assert len(query_plans) == 1
+        query_fields = _tuple_fields(query_plans[0])
+        object_content = query_fields["object_content"]
+        proof_queries.append(
+            (
+                "semantic_recurrence_query",
+                ("query_id", query_fields["query_id"]),
+                ("query_stage", query_fields["query_stage"]),
+                ("solver_result", "unsat"),
+                ("query_status", "proven"),
+                ("proof_source", "semantic_recurrence_solver_replay"),
+                ("expected_solver_result", query_fields["expected_solver_result"]),
+                ("assertion_kind", query_fields["assertion_kind"]),
+                ("query_hash", query_fields["query_hash"]),
+                ("object_content", object_content),
+                *object_content,
+            )
+        )
+    semantic_proof = (
+        "semantic_recurrence_proof",
+        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
+        ("status", "complete"),
+        ("completed_stages", completed_stages),
+        ("object_target_key", target),
+        ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
+        ("proof_queries", tuple(proof_queries)),
+    )
+    return (
+        "completed_unresolved_expression_proof",
+        ("object_derived", True),
+        ("status", "complete"),
+        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
+        ("completed_stages", completed_stages),
+        ("object_target_key", target),
+        ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
+        ("stage_evidence", fields["stage_evidence"]),
+        ("semantic_recurrence_proof", semantic_proof),
+    )
+
+
 def _with_typed_lowering_evidence(target):
     def visit(value):
         if isinstance(value, tuple):
@@ -464,6 +525,27 @@ def test_unresolved_expression_target_is_object_specific():
     assert _nested_contains(target, "typed_lowering_evidence")
     assert _nested_contains(target, "blocked_unknown_expression")
     assert not _nested_contains(target, ("reason", "unresolved_expression"))
+
+
+def test_semantic_recurrence_query_hash_uses_stable_object_keys():
+    class StableObject:
+        def __init__(self, value):
+            self.value = value
+
+        def stable_key(self):
+            return ("stable-object", self.value)
+
+        def __repr__(self):
+            return f"unstable-repr-{self.value}-{id(self)}"
+
+    left = PairwiseStrategy._stable_semantic_recurrence_hash(
+        ("query", StableObject(7))
+    )
+    right = PairwiseStrategy._stable_semantic_recurrence_hash(
+        ("query", ("stable-object", 7))
+    )
+
+    assert left == right
 
 
 def test_unresolved_expression_manifest_validator_rejects_ready_without_readiness():
@@ -1543,72 +1625,9 @@ def test_phi_circular_semantic_recurrence_completed_proof_gate_accepts_query_evi
         case2=right_case,
         pair_id="(0,0)",
     )
-    diagnostic_evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(target)
-    fields = {
-        item[0]: item[1]
-        for item in diagnostic_evidence[1:]
-        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
-    }
-    stage_fields_by_name = {
-        stage_fields["proof_stage"]: stage_fields
-        for stage_evidence in fields["stage_evidence"]
-        for stage_fields in (
-            {
-                item[0]: item[1]
-                for item in stage_evidence[1:]
-                if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
-            },
-        )
-    }
-    guard_stage_fields = stage_fields_by_name["phi_circular_guard_condition_lowering"]
-    recurrence_stage_fields = stage_fields_by_name["recursive_summary_guard_equivalence"]
-    completed_stages = (
-        "phi_circular_guard_condition_lowering",
-        "recursive_summary_guard_equivalence",
-    )
-    semantic_proof = (
-        "semantic_recurrence_proof",
-        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
-        ("status", "complete"),
-        ("completed_stages", completed_stages),
-        ("object_target_key", target),
-        ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
-        (
-            "proof_queries",
-            (
-                (
-                    "semantic_recurrence_query",
-                    ("query_id", "guard-transition-query"),
-                    ("query_stage", "phi_circular_guard_condition_lowering"),
-                    ("solver_result", "unsat"),
-                    ("query_status", "proven"),
-                    ("guard_transition_relation", guard_stage_fields["guard_transition_relation"]),
-                ),
-                (
-                    "semantic_recurrence_query",
-                    ("query_id", "summary-recurrence-query"),
-                    ("query_stage", "recursive_summary_guard_equivalence"),
-                    ("solver_result", "unsat"),
-                    ("query_status", "proven"),
-                    (
-                        "summary_parameter_binding",
-                        recurrence_stage_fields["summary_parameter_binding"],
-                    ),
-                    ("recurrence_relation", recurrence_stage_fields["recurrence_relation"]),
-                ),
-            ),
-        ),
-    )
-    completed_evidence = (
-        "completed_unresolved_expression_proof",
-        ("object_derived", True),
-        ("status", "complete"),
-        ("proof_rule", "phi_circular_semantic_recurrence_proof"),
-        ("completed_stages", completed_stages),
-        ("object_target_key", target),
-        ("pair_lowering_diagnostic", fields["pair_lowering_diagnostic"]),
-        ("stage_evidence", fields["stage_evidence"]),
-        ("semantic_recurrence_proof", semantic_proof),
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
     )
     reason = make_unknown_reason(
         UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -1637,6 +1656,83 @@ def test_phi_circular_semantic_recurrence_completed_proof_gate_accepts_query_evi
 
     assert status == "proof_complete"
     assert failures == ()
+
+
+def test_phi_circular_semantic_recurrence_completed_proof_rejects_query_hash_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    completed_evidence = _completed_semantic_recurrence_evidence_from_diagnostic(
+        strategy,
+        target,
+    )
+
+    def corrupt_first_query_hash_in_completed_evidence(evidence):
+        evidence_fields = _tuple_fields(evidence)
+        semantic_proof = evidence_fields["semantic_recurrence_proof"]
+        fields = _tuple_fields(semantic_proof)
+        proof_queries = list(fields["proof_queries"])
+        first_query = proof_queries[0]
+        proof_queries[0] = tuple(
+            ("query_hash", "0" * 64)
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "query_hash"
+            else item
+            for item in first_query
+        )
+        corrupted_semantic_proof = tuple(
+            ("proof_queries", tuple(proof_queries))
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "proof_queries"
+            else item
+            for item in semantic_proof
+        )
+        return tuple(
+            ("semantic_recurrence_proof", corrupted_semantic_proof)
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "semantic_recurrence_proof"
+            else item
+            for item in evidence
+        )
+
+    corrupted_evidence, changed = _replace_first_tuple(
+        completed_evidence,
+        "completed_unresolved_expression_proof",
+        corrupt_first_query_hash_in_completed_evidence,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=corrupted_evidence,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert changed is True
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
 
 
 def test_phi_circular_semantic_recurrence_completed_proof_rejects_missing_queries():

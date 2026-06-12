@@ -3,6 +3,8 @@
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import hashlib
+import json
 import time
 
 from ...model import (
@@ -2157,6 +2159,25 @@ class PairwiseStrategy(CheckStrategy):
             ("right_value_shape", diagnostic_fields.get("right_value_shape")),
             ("value_shape_relation", diagnostic_fields.get("value_shape_relation")),
         )
+        guard_query = self._semantic_recurrence_query_plan(
+            query_id="phi_circular_guard_transition",
+            query_stage="phi_circular_guard_condition_lowering",
+            assertion_kind="guard_transition_equivalence",
+            object_target_key=object_target_key,
+            object_content=(
+                ("guard_transition_relation", guard_transition),
+            ),
+        )
+        recurrence_query = self._semantic_recurrence_query_plan(
+            query_id="recursive_summary_recurrence",
+            query_stage="recursive_summary_guard_equivalence",
+            assertion_kind="summary_recurrence_equivalence",
+            object_target_key=object_target_key,
+            object_content=(
+                ("summary_parameter_binding", summary_binding),
+                ("recurrence_relation", recurrence_relation),
+            ),
+        )
         return (
             (
                 "unresolved_expression_stage_evidence",
@@ -2170,17 +2191,7 @@ class PairwiseStrategy(CheckStrategy):
                 ("typed_lowering_rule", "phi_circular_guard_shape_preserving"),
                 (
                     "proof_query_plan",
-                    (
-                        (
-                            "semantic_recurrence_query",
-                            ("query_id", "phi_circular_guard_transition"),
-                            ("query_stage", "phi_circular_guard_condition_lowering"),
-                            ("query_status", "planned"),
-                            ("expected_solver_result", "unsat"),
-                            ("assertion_kind", "guard_transition_equivalence"),
-                            ("guard_transition_relation", guard_transition),
-                        ),
-                    ),
+                    (guard_query,),
                 ),
                 (
                     "required_semantic_proof",
@@ -2202,18 +2213,7 @@ class PairwiseStrategy(CheckStrategy):
                 ("recurrence_relation", recurrence_relation),
                 (
                     "proof_query_plan",
-                    (
-                        (
-                            "semantic_recurrence_query",
-                            ("query_id", "recursive_summary_recurrence"),
-                            ("query_stage", "recursive_summary_guard_equivalence"),
-                            ("query_status", "planned"),
-                            ("expected_solver_result", "unsat"),
-                            ("assertion_kind", "summary_recurrence_equivalence"),
-                            ("summary_parameter_binding", summary_binding),
-                            ("recurrence_relation", recurrence_relation),
-                        ),
-                    ),
+                    (recurrence_query,),
                 ),
                 (
                     "required_semantic_proof",
@@ -2224,6 +2224,74 @@ class PairwiseStrategy(CheckStrategy):
                 ),
             ),
         )
+
+    @classmethod
+    def _semantic_recurrence_query_plan(
+        cls,
+        *,
+        query_id: str,
+        query_stage: str,
+        assertion_kind: str,
+        object_target_key: Tuple[Any, ...],
+        object_content: Tuple[Tuple[str, Any], ...],
+    ) -> Tuple[Any, ...]:
+        query_body = (
+            ("query_id", query_id),
+            ("query_stage", query_stage),
+            ("expected_solver_result", "unsat"),
+            ("assertion_kind", assertion_kind),
+            ("object_target_key", object_target_key),
+            ("object_content", object_content),
+        )
+        query_hash = cls._stable_semantic_recurrence_hash(query_body)
+        return (
+            "semantic_recurrence_query",
+            ("query_id", query_id),
+            ("query_stage", query_stage),
+            ("query_status", "planned"),
+            ("expected_solver_result", "unsat"),
+            ("proof_source", "object_derived_query_plan"),
+            ("assertion_kind", assertion_kind),
+            ("query_hash", query_hash),
+            ("object_content", object_content),
+            *object_content,
+        )
+
+    @staticmethod
+    def _stable_semantic_recurrence_hash(value: Any) -> str:
+        canonical = json.dumps(
+            PairwiseStrategy._semantic_recurrence_jsonable(value),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _semantic_recurrence_jsonable(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return [PairwiseStrategy._semantic_recurrence_jsonable(item) for item in value]
+        if isinstance(value, list):
+            return [PairwiseStrategy._semantic_recurrence_jsonable(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): PairwiseStrategy._semantic_recurrence_jsonable(item)
+                for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+            }
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            try:
+                return PairwiseStrategy._semantic_recurrence_jsonable(stable_key())
+            except Exception:
+                pass
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                return PairwiseStrategy._semantic_recurrence_jsonable(to_dict())
+            except Exception:
+                pass
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return repr(value)
 
     @classmethod
     def _phi_circular_origin_shape_relation(

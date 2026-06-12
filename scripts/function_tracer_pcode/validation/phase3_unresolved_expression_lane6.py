@@ -1246,6 +1246,7 @@ def _unresolved_expression_completed_action_evidence_is_specific(
             stage=stage,
             target=target,
             diagnostic=diagnostic,
+            stage_evidence=stage_evidence,
         ):
             return False
     else:
@@ -1607,6 +1608,7 @@ def _semantic_recurrence_proof_is_specific(
     stage: str,
     target: Any,
     diagnostic: Any,
+    stage_evidence: Any,
 ) -> bool:
     proof = _normalize_nested_tuple(value)
     if not isinstance(proof, tuple) or proof[0] != "semantic_recurrence_proof":
@@ -1627,6 +1629,9 @@ def _semantic_recurrence_proof_is_specific(
     proof_queries = fields.get("proof_queries")
     if not isinstance(proof_queries, tuple) or not proof_queries:
         return False
+    planned_queries = _semantic_recurrence_query_plan_fields_by_stage(stage_evidence)
+    if not planned_queries:
+        return False
     stages = set()
     for query in proof_queries:
         query_fields = _semantic_recurrence_query_fields(query)
@@ -1634,6 +1639,21 @@ def _semantic_recurrence_proof_is_specific(
             return False
         query_stage = query_fields.get("query_stage")
         if query_stage not in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES:
+            return False
+        planned_fields = planned_queries.get(str(query_stage))
+        if not planned_fields:
+            return False
+        if query_fields.get("query_id") != planned_fields.get("query_id"):
+            return False
+        if query_fields.get("assertion_kind") != planned_fields.get("assertion_kind"):
+            return False
+        if query_fields.get("expected_solver_result") != planned_fields.get("expected_solver_result"):
+            return False
+        if query_fields.get("query_hash") != planned_fields.get("query_hash"):
+            return False
+        if query_fields.get("object_content") != planned_fields.get("object_content"):
+            return False
+        if query_fields.get("proof_source") != "semantic_recurrence_solver_replay":
             return False
         if query_fields.get("solver_result") != "unsat":
             return False
@@ -1645,15 +1665,63 @@ def _semantic_recurrence_proof_is_specific(
     return set(completed_stages).issubset(stages)
 
 
+def _semantic_recurrence_query_plan_fields_by_stage(value: Any) -> Dict[str, Dict[str, Any]]:
+    stage_evidence = _normalize_nested_tuple(value)
+    if not isinstance(stage_evidence, tuple):
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for stage_item in stage_evidence:
+        stage_tuple = _normalize_nested_tuple(stage_item)
+        if not isinstance(stage_tuple, tuple) or stage_tuple[0] != "unresolved_expression_stage_evidence":
+            continue
+        stage_fields = _tuple_fields(stage_tuple)
+        stage = stage_fields.get("proof_stage")
+        if stage not in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES:
+            continue
+        plan = stage_fields.get("proof_query_plan")
+        queries = _semantic_recurrence_query_plan_queries(plan)
+        if len(queries) != 1:
+            continue
+        fields = _tuple_fields(queries[0])
+        if not _semantic_recurrence_query_plan_fields_are_specific(
+            fields,
+            expected_stage=str(stage),
+            stage_fields=stage_fields,
+        ):
+            continue
+        result[str(stage)] = fields
+    return result
+
+
 def _semantic_recurrence_query_fields(value: Any) -> Dict[str, Any]:
     query = _normalize_nested_tuple(value)
     if not isinstance(query, tuple) or query[0] != "semantic_recurrence_query":
         return {}
     fields = _tuple_fields(query)
-    for key in ("query_stage", "solver_result", "query_status", "query_id"):
+    for key in (
+        "query_stage",
+        "solver_result",
+        "query_status",
+        "query_id",
+        "proof_source",
+        "expected_solver_result",
+        "assertion_kind",
+        "query_hash",
+    ):
         if not _text_identity_is_specific(fields.get(key)):
             return {}
     return fields
+
+
+def _semantic_recurrence_query_plan_queries(value: Any) -> Tuple[Any, ...]:
+    plan = _normalize_nested_tuple(value)
+    if not isinstance(plan, tuple):
+        return ()
+    if len(plan) == 2 and plan[0] == "proof_query_plan":
+        queries = plan[1]
+    else:
+        queries = plan
+    return queries if isinstance(queries, tuple) else ()
 
 
 def _semantic_recurrence_query_plan_is_specific(
@@ -1662,33 +1730,48 @@ def _semantic_recurrence_query_plan_is_specific(
     expected_stage: str,
     stage_fields: Mapping[str, Any],
 ) -> bool:
-    plan = _normalize_nested_tuple(value)
-    if not isinstance(plan, tuple):
-        return False
-    if len(plan) == 2 and plan[0] == "proof_query_plan":
-        queries = plan[1]
-    else:
-        queries = plan
-    if not isinstance(queries, tuple) or not queries:
+    queries = _semantic_recurrence_query_plan_queries(value)
+    if not queries:
         return False
     for query in queries:
         query_tuple = _normalize_nested_tuple(query)
         if not isinstance(query_tuple, tuple) or query_tuple[0] != "semantic_recurrence_query":
             return False
         fields = _tuple_fields(query_tuple)
-        if not _text_identity_is_specific(fields.get("query_id")):
-            return False
-        if fields.get("query_stage") != expected_stage:
-            return False
-        if fields.get("query_status") != "planned":
-            return False
-        if fields.get("expected_solver_result") != "unsat":
-            return False
-        if not _semantic_recurrence_query_has_object_content(
+        if not _semantic_recurrence_query_plan_fields_are_specific(
             fields,
+            expected_stage=expected_stage,
             stage_fields=stage_fields,
         ):
             return False
+    return True
+
+
+def _semantic_recurrence_query_plan_fields_are_specific(
+    fields: Mapping[str, Any],
+    *,
+    expected_stage: str,
+    stage_fields: Mapping[str, Any],
+) -> bool:
+    if not _text_identity_is_specific(fields.get("query_id")):
+        return False
+    if fields.get("query_stage") != expected_stage:
+        return False
+    if fields.get("query_status") != "planned":
+        return False
+    if fields.get("expected_solver_result") != "unsat":
+        return False
+    if fields.get("proof_source") != "object_derived_query_plan":
+        return False
+    if not _text_identity_is_specific(fields.get("assertion_kind")):
+        return False
+    if not _sha256_hex_is_specific(fields.get("query_hash")):
+        return False
+    if not _semantic_recurrence_query_has_object_content(
+        fields,
+        stage_fields=stage_fields,
+    ):
+        return False
     return True
 
 
@@ -1698,9 +1781,14 @@ def _semantic_recurrence_query_has_object_content(
     stage_fields: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     stage = fields.get("query_stage")
+    object_content = fields.get("object_content")
+    if not isinstance(object_content, tuple) or not object_content:
+        return False
     if stage == "phi_circular_guard_condition_lowering":
         relation = fields.get("guard_transition_relation")
         if not _guard_transition_relation_is_specific(relation):
+            return False
+        if object_content != (("guard_transition_relation", relation),):
             return False
         if stage_fields is not None and _canonical_json(relation) != _canonical_json(
             stage_fields.get("guard_transition_relation")
@@ -1714,6 +1802,11 @@ def _semantic_recurrence_query_has_object_content(
             return False
         if not _recurrence_relation_is_specific(relation):
             return False
+        if object_content != (
+            ("summary_parameter_binding", binding),
+            ("recurrence_relation", relation),
+        ):
+            return False
         if stage_fields is not None:
             if _canonical_json(binding) != _canonical_json(
                 stage_fields.get("summary_parameter_binding")
@@ -1725,6 +1818,12 @@ def _semantic_recurrence_query_has_object_content(
                 return False
         return True
     return False
+
+
+def _sha256_hex_is_specific(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(ch in "0123456789abcdef" for ch in value)
 
 
 def _phi_origin_pair_is_specific(value: Any) -> bool:
