@@ -347,17 +347,17 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         manifest_kind="phase3_unresolved_expression_lane6_post_fix_gate",
         ready_key="phase3_lane6_post_fix_ready",
         validator=validate_phase3_unresolved_expression_lane6_post_fix_gate,
-        expected_entry_count=1,
+        expected_entry_count=3,
         allowed_post_fix_statuses=(
             "pending_object_evidence",
             "pending_proof",
             "proof_complete",
             "resolved_under_other_conservative_unknown",
         ),
-        expected_post_fix_status_counts={"pending_proof": 1},
+        expected_post_fix_status_counts={"pending_proof": 3},
         expected_post_fix_obligation_counts={
-            "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 6,
+            "pending_proof_entry_count": 3,
+            "pending_proof_obligation_count": 24,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -367,6 +367,16 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "function": "fc_is_even",
                 "binary_pair": "B11_B12",
             },
+            {
+                "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
+                "function": "fc_is_even",
+                "binary_pair": "B10_B13",
+            },
+            {
+                "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+                "function": "fc_is_odd",
+                "binary_pair": "B1_B2",
+            },
         ),
         expected_post_fix_entry_states=(
             {
@@ -374,16 +384,46 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "function": "fc_is_even",
                 "binary_pair": "B11_B12",
                 "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 6,
+                "pending_proof_obligation_count": 14,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 6,
+                "required_completion_action_count": 14,
+            },
+            {
+                "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
+                "function": "fc_is_even",
+                "binary_pair": "B10_B13",
+                "post_fix_status": "pending_proof",
+                "pending_proof_obligation_count": 8,
+                "pending_retry_obligation_count": 0,
+                "required_completion_action_count": 8,
+            },
+            {
+                "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+                "function": "fc_is_odd",
+                "binary_pair": "B1_B2",
+                "post_fix_status": "pending_proof",
+                "pending_proof_obligation_count": 2,
+                "pending_retry_obligation_count": 0,
+                "required_completion_action_count": 2,
             },
         ),
         expected_required_completion_action_hashes=(
             {
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "required_completion_actions_sha256": (
-                    "7a220d862edd7485c4e57e187b0aa1511d7efc0738351c37806f2dfea2036e1a"
+                    "27312a6f83dc29b3fdb787cac2b283fed98a934dd0bc2feaa8283522eca2783f"
+                ),
+            },
+            {
+                "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
+                "required_completion_actions_sha256": (
+                    "7087c485808bcda82a5f82158d083c48b53f95c583a2283d20856a39d45fc19f"
+                ),
+            },
+            {
+                "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+                "required_completion_actions_sha256": (
+                    "c41aa1f18262cb9c63cf66337635b2e0e1b5d69688320f93a5a2273254f47a5a"
                 ),
             },
         ),
@@ -930,7 +970,11 @@ def _post_fix_obligation_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 entry_index=index,
                 status_prefix="pending_proof",
                 obligation_key="pending_proof_obligations",
-                allowed_obligation_statuses={"pending_evidence", "completed_evidence_present"},
+                allowed_obligation_statuses={
+                    "pending_evidence",
+                    "semantic_proof_required",
+                    "completed_evidence_present",
+                },
             )
         elif status == "pending_retry":
             _add_pending_obligation_summary(

@@ -8,6 +8,7 @@ import pytest
 
 from scripts.function_tracer_pcode.validation import phase3_lane_index
 from scripts.function_tracer_pcode.validation.phase3_post_fix_gate_index import (
+    DEFAULT_PHASE3_POST_FIX_GATE_SPECS,
     Phase3PostFixGateSpec,
     build_phase3_post_fix_gate_index,
     validate_phase3_post_fix_gate_index,
@@ -153,6 +154,43 @@ def _actions_sha256(actions):
     ).hexdigest()
 
 
+def test_default_lane6_required_completion_action_hashes_are_current():
+    lane6 = next(
+        spec
+        for spec in DEFAULT_PHASE3_POST_FIX_GATE_SPECS
+        if spec.lane_id == "phase3_unresolved_expression_lane6"
+    )
+
+    assert lane6.expected_entry_count == 3
+    assert lane6.expected_post_fix_status_counts == {"pending_proof": 3}
+    assert lane6.expected_post_fix_obligation_counts == {
+        "pending_proof_entry_count": 3,
+        "pending_proof_obligation_count": 24,
+        "pending_retry_entry_count": 0,
+        "pending_retry_obligation_count": 0,
+    }
+    assert list(lane6.expected_required_completion_action_hashes) == [
+        {
+            "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+            "required_completion_actions_sha256": (
+                "27312a6f83dc29b3fdb787cac2b283fed98a934dd0bc2feaa8283522eca2783f"
+            ),
+        },
+        {
+            "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
+            "required_completion_actions_sha256": (
+                "7087c485808bcda82a5f82158d083c48b53f95c583a2283d20856a39d45fc19f"
+            ),
+        },
+        {
+            "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+            "required_completion_actions_sha256": (
+                "c41aa1f18262cb9c63cf66337635b2e0e1b5d69688320f93a5a2273254f47a5a"
+            ),
+        },
+    ]
+
+
 def test_phase3_post_fix_gate_index_accepts_ready_gates(tmp_path):
     repo = tmp_path / "repo"
     specs = (_spec(1, "lane_one"), _spec(2, "lane_two"))
@@ -170,6 +208,38 @@ def test_phase3_post_fix_gate_index_accepts_ready_gates(tmp_path):
     assert manifest["summary"]["failed"] == 0
     assert [gate["lane_id"] for gate in manifest["gates"]] == ["lane_one", "lane_two"]
     validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=specs)
+
+
+def test_phase3_post_fix_gate_index_accepts_semantic_proof_required_obligation(tmp_path):
+    repo = tmp_path / "repo"
+    spec = _spec(6, "phase3_unresolved_expression_lane6")
+    _write_gate(
+        repo,
+        spec,
+        post_fix_status="pending_proof",
+        pending_obligation_updates={
+            "object_evidence_status": "object_evidence_collected",
+            "semantic_proof_status": "pending_semantic_proof",
+            "status": "semantic_proof_required",
+        },
+        required_action_updates={
+            "object_evidence_status": "object_evidence_collected",
+            "semantic_proof_status": "pending_semantic_proof",
+        },
+    )
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    summary = manifest["gates"][0]["post_fix_obligation_summary"]
+
+    assert manifest["phase3_post_fix_gates_ready"] is True
+    assert summary["pending_proof_invalid_obligations"] == []
+    assert summary["pending_proof_invalid_required_actions"] == []
+    validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
 
 
 def test_phase3_post_fix_gate_index_summarizes_extra_unresolved_expression_observations(tmp_path):

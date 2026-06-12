@@ -2078,6 +2078,13 @@ class PairwiseStrategy(CheckStrategy):
             return None
         if fields.get("opposing_guard_literals"):
             return None
+        stage_evidence = self._phi_circular_semantic_recurrence_stage_evidence(
+            object_target_key=object_target_key,
+            diagnostic=diagnostic,
+            diagnostic_fields=fields,
+        )
+        if not stage_evidence:
+            return None
         return (
             "unresolved_expression_diagnostic_evidence",
             ("object_derived", True),
@@ -2101,6 +2108,121 @@ class PairwiseStrategy(CheckStrategy):
             ),
             ("object_target_key", object_target_key),
             ("pair_lowering_diagnostic", diagnostic),
+            ("stage_evidence", stage_evidence),
+        )
+
+    def _phi_circular_semantic_recurrence_stage_evidence(
+        self,
+        *,
+        object_target_key: Tuple[Any, ...],
+        diagnostic: Tuple[Any, ...],
+        diagnostic_fields: Dict[str, Any],
+    ) -> Tuple[Any, ...]:
+        origin_relation = diagnostic_fields.get("phi_origin_shape_relation")
+        guard_pair = (
+            "guard_condition_pair",
+            ("left_guard_literals", diagnostic_fields.get("left_guard_literals")),
+            ("right_guard_literals", diagnostic_fields.get("right_guard_literals")),
+            ("relation", "exact_match"),
+        )
+        summary_binding = (
+            "summary_parameter_binding",
+            ("left_value_shape", diagnostic_fields.get("left_value_shape")),
+            ("right_value_shape", diagnostic_fields.get("right_value_shape")),
+            ("value_shape_relation", diagnostic_fields.get("value_shape_relation")),
+            ("binding_status", "object_evidence_collected"),
+        )
+        phi_origin_pair = (
+            "phi_origin_pair",
+            ("relation", "exact_match"),
+            ("phi_origin_shape_relation", origin_relation),
+        )
+        guard_transition = (
+            "guard_transition_relation",
+            ("relation", "exact_match"),
+            ("transition_status", "object_evidence_collected"),
+            ("phi_origin_pair", phi_origin_pair),
+            ("guard_condition_pair", guard_pair),
+            ("left_value_shape", diagnostic_fields.get("left_value_shape")),
+            ("right_value_shape", diagnostic_fields.get("right_value_shape")),
+            ("value_shape_relation", diagnostic_fields.get("value_shape_relation")),
+        )
+        recurrence_relation = (
+            "recurrence_relation",
+            ("relation", "exact_match"),
+            ("recurrence_status", "object_evidence_collected"),
+            ("summary_parameter_binding", summary_binding),
+            ("guard_transition_relation", guard_transition),
+            ("left_value_shape", diagnostic_fields.get("left_value_shape")),
+            ("right_value_shape", diagnostic_fields.get("right_value_shape")),
+            ("value_shape_relation", diagnostic_fields.get("value_shape_relation")),
+        )
+        return (
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "phi_circular_guard_condition_lowering"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("pair_lowering_diagnostic", diagnostic),
+                ("phi_origin_pair", phi_origin_pair),
+                ("guard_condition_pair", guard_pair),
+                ("guard_transition_relation", guard_transition),
+                ("typed_lowering_rule", "phi_circular_guard_shape_preserving"),
+                (
+                    "proof_query_plan",
+                    (
+                        (
+                            "semantic_recurrence_query",
+                            ("query_id", "phi_circular_guard_transition"),
+                            ("query_stage", "phi_circular_guard_condition_lowering"),
+                            ("query_status", "planned"),
+                            ("expected_solver_result", "unsat"),
+                            ("assertion_kind", "guard_transition_equivalence"),
+                            ("guard_transition_relation", guard_transition),
+                        ),
+                    ),
+                ),
+                (
+                    "required_semantic_proof",
+                    (
+                        "phi_incoming_values",
+                        "guard_transition_relation",
+                    ),
+                ),
+            ),
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "recursive_summary_guard_equivalence"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("pair_lowering_diagnostic", diagnostic),
+                ("phi_origin_pair", phi_origin_pair),
+                ("guard_condition_pair", guard_pair),
+                ("summary_parameter_binding", summary_binding),
+                ("recurrence_relation", recurrence_relation),
+                (
+                    "proof_query_plan",
+                    (
+                        (
+                            "semantic_recurrence_query",
+                            ("query_id", "recursive_summary_recurrence"),
+                            ("query_stage", "recursive_summary_guard_equivalence"),
+                            ("query_status", "planned"),
+                            ("expected_solver_result", "unsat"),
+                            ("assertion_kind", "summary_recurrence_equivalence"),
+                            ("summary_parameter_binding", summary_binding),
+                            ("recurrence_relation", recurrence_relation),
+                        ),
+                    ),
+                ),
+                (
+                    "required_semantic_proof",
+                    (
+                        "recursive_summary_parameter_binding",
+                        "loop_summary_recurrence_semantics",
+                    ),
+                ),
+            ),
         )
 
     @classmethod
