@@ -1713,7 +1713,158 @@ def _pending_action_object_evidence_status(action: Mapping[str, Any]) -> str:
             return "object_evidence_collected"
         if action.get("object_evidence") is not None:
             return "object_evidence_invalid"
+    if stage in UNRESOLVED_DEFERRED_CALL_PROOF_STAGES:
+        if _unresolved_expression_deferred_call_pending_action_evidence_is_specific(
+            action,
+            stage=stage,
+            target=target,
+        ):
+            return "object_evidence_collected"
+        if action.get("object_evidence") is not None:
+            return "object_evidence_invalid"
     return "pending_evidence"
+
+
+def _unresolved_expression_deferred_call_pending_action_evidence_is_specific(
+    action: Mapping[str, Any],
+    *,
+    stage: str,
+    target: Any,
+) -> bool:
+    evidence = _normalize_nested_tuple(action.get("object_evidence"))
+    if not isinstance(evidence, tuple) or len(evidence) != 9:
+        return False
+    if evidence[0] != "unresolved_expression_diagnostic_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("object_derived") is not True:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    if fields.get("diagnostic_rule") != "deferred_call_object_proof_content":
+        return False
+    evidence_target = fields.get("object_target_key")
+    if not _object_target_key_is_specific_unresolved_expression(evidence_target):
+        return False
+    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+        return False
+    pending_stages = fields.get("pending_stages")
+    if not isinstance(pending_stages, tuple) or stage not in pending_stages:
+        return False
+    if not set(pending_stages).issubset(set(UNRESOLVED_DEFERRED_CALL_PROOF_STAGES)):
+        return False
+    call_evidence = fields.get("deferred_call_evidence")
+    if not _deferred_call_evidence_is_specific(call_evidence):
+        return False
+    stage_evidence = fields.get("stage_evidence")
+    if not isinstance(stage_evidence, tuple):
+        return False
+    matching = [
+        item
+        for item in stage_evidence
+        if _deferred_call_stage_evidence_matches(
+            item,
+            stage=stage,
+            target=target,
+            call_evidence=call_evidence,
+        )
+    ]
+    return len(matching) == 1
+
+
+def _deferred_call_stage_evidence_matches(
+    value: Any,
+    *,
+    stage: str,
+    target: Any,
+    call_evidence: Any,
+) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or evidence[0] != "unresolved_expression_stage_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("proof_stage") != stage:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    if _unresolved_expression_target_identity_key(fields.get("object_target_key")) != _unresolved_expression_target_identity_key(target):
+        return False
+    if _canonical_json(fields.get("deferred_call_evidence")) != _canonical_json(call_evidence):
+        return False
+    required = fields.get("required_semantic_proof")
+    if not isinstance(required, tuple) or not required or not all(_text_identity_is_specific(item) for item in required):
+        return False
+    if stage == "deferred_call_return_resolution":
+        if fields.get("call_resolution_status") != "pending_semantic_proof":
+            return False
+    elif stage == "deferred_call_result_equivalence":
+        if fields.get("result_equivalence_status") != "pending_semantic_proof":
+            return False
+    else:
+        return False
+    return _semantic_recurrence_query_plan_is_specific(
+        fields.get("proof_query_plan"),
+        expected_stage=stage,
+        stage_fields=fields,
+    )
+
+
+def _deferred_call_evidence_is_specific(value: Any) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or len(evidence) != 5:
+        return False
+    if evidence[0] != "deferred_call_object_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    left_refs = fields.get("left_deferred_call_refs")
+    right_refs = fields.get("right_deferred_call_refs")
+    relation = fields.get("deferred_call_ref_relation")
+    if not isinstance(left_refs, tuple) or not isinstance(right_refs, tuple):
+        return False
+    if not left_refs and not right_refs:
+        return False
+    if not all(_deferred_call_runtime_ref_is_specific(ref) for ref in left_refs + right_refs):
+        return False
+    if not _deferred_call_ref_relation_is_specific(
+        relation,
+        left_count=len(left_refs),
+        right_count=len(right_refs),
+    ):
+        return False
+    return fields.get("evidence_status") == "object_evidence_collected"
+
+
+def _deferred_call_runtime_ref_is_specific(value: Any) -> bool:
+    ref = _normalize_nested_tuple(value)
+    return (
+        isinstance(ref, tuple)
+        and len(ref) == 2
+        and ref[0] in {"unknown_runtime_ref", "runtime_ref"}
+        and isinstance(ref[1], tuple)
+        and len(ref[1]) >= 2
+        and ref[1][0] == "deferred_call"
+        and _nested_has_specific_leaf(ref[1])
+        and not _nested_contains_missing_sentinel(ref[1])
+    )
+
+
+def _deferred_call_ref_relation_is_specific(
+    value: Any,
+    *,
+    left_count: int,
+    right_count: int,
+) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or relation[0] != "deferred_call_ref_relation":
+        return False
+    fields = _tuple_fields(relation)
+    if fields.get("relation") not in {
+        "both_sides_deferred_call_unknown",
+        "left_deferred_call_unknown_only",
+        "right_deferred_call_unknown_only",
+    }:
+        return False
+    return fields.get("left_count") == left_count and fields.get("right_count") == right_count
 
 
 def _unresolved_expression_pending_action_evidence_is_specific(
@@ -2077,6 +2228,17 @@ def _semantic_recurrence_query_has_object_content(
                 stage_fields.get("recurrence_relation")
             ):
                 return False
+        return True
+    if stage in UNRESOLVED_DEFERRED_CALL_PROOF_STAGES:
+        call_evidence = fields.get("deferred_call_evidence")
+        if not _deferred_call_evidence_is_specific(call_evidence):
+            return False
+        if object_content != (("deferred_call_evidence", call_evidence),):
+            return False
+        if stage_fields is not None and _canonical_json(call_evidence) != _canonical_json(
+            stage_fields.get("deferred_call_evidence")
+        ):
+            return False
         return True
     return False
 

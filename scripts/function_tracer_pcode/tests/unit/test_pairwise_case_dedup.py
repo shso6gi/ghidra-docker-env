@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     build_unknown_recovery_actions,
     make_unknown_reason,
@@ -98,6 +99,25 @@ def _analysis(returns) -> FunctionReturnAnalysis:
         parameters=[],
         returns=returns,
         return_type="long",
+    )
+
+
+def _signed_semantic_param(
+    *,
+    name: str,
+    suffix: str,
+    bits: int,
+    index: int = 0,
+    semantic_bits: int | None = None,
+) -> ParameterInfo:
+    return ParameterInfo(
+        original_name=name,
+        smt_name=f"{name}{suffix}",
+        bit_width=bits,
+        index=index,
+        is_signed=True,
+        semantic_narrow_bits=semantic_bits,
+        semantic_signedness="signed" if semantic_bits is not None else None,
     )
 
 
@@ -874,6 +894,179 @@ def test_pairwise_executor_returns_unknown_for_width_mismatch_without_overlap_qu
     assert all(action.object_target_key == result.object_target_key for action in actions)
     assert all(action.proof_obligation_id is not None for action in actions)
     assert all(action.proof_obligation_id[-1] == result.object_target_key for action in actions)
+
+
+def test_pairwise_executor_uses_semantic_abi_guard_unsat_before_return_width_backlog():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=1, size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.CONSTANT, value=1, size=8)),
+        return_type="long",
+        return_type_obj=resolve_mock_data_type("long"),
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=0, size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=0, size=4)),
+        return_type="int",
+        return_type_obj=resolve_mock_data_type("int"),
+    )
+
+    class _Strategy:
+        enable_solver_proven_rewrite_fallback = False
+        enable_normalization_fallback = False
+        _active_normalization_stats = {
+            "unknown_results": 0,
+            "return_width_bridge_missing": 0,
+        }
+
+        def __init__(self):
+            self.calls = []
+
+        def _build_condition_only_query(self, *_args):
+            return "(set-logic QF_BV)\n(check-sat)"
+
+        def _solve_query_internal(self, query, _pair_id, stage="full", **_kwargs):
+            self.calls.append((stage, query))
+            if stage == "conds-only-return-width-abi-guard":
+                assert "Return-width guard ABI relations" in query
+                assert "(assert (= param_1 ((_ sign_extend 32) param_1_2)))" in query
+                return QueryResult(is_equivalent=True)
+            return QueryResult(is_equivalent=None)
+
+        def _debug_print(self, _message):
+            pass
+
+    strategy = _Strategy()
+    result = solve_query_twostage(
+        strategy,
+        {
+            "header_lines": [
+                "(declare-const param_1 (_ BitVec 64))",
+                "(declare-const param_1_2 (_ BitVec 32))",
+            ],
+            "params1": [
+                _signed_semantic_param(
+                    name="param_1",
+                    suffix="",
+                    bits=64,
+                    semantic_bits=32,
+                )
+            ],
+            "params2": [
+                _signed_semantic_param(name="param_1", suffix="_2", bits=32)
+            ],
+            "return_size1": 64,
+            "return_size2": 32,
+        },
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert result.is_equivalent is True
+    assert result.pair_stage == "conds-only-return-width-abi-guard"
+    assert [stage for stage, _query in strategy.calls] == [
+        "conds-only",
+        "conds-only-return-width-abi-guard",
+    ]
+    assert _Strategy._active_normalization_stats["unknown_results"] == 0
+    assert _Strategy._active_normalization_stats["return_width_bridge_missing"] == 0
+
+
+@pytest.mark.parametrize(
+    ("semantic_bits", "abi_guard_result"),
+    [
+        (None, None),
+        (32, False),
+    ],
+)
+def test_pairwise_executor_keeps_return_width_backlog_without_proven_semantic_abi_guard(
+    semantic_bits,
+    abi_guard_result,
+):
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=1, size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.CONSTANT, value=1, size=8)),
+        return_type="long",
+        return_type_obj=resolve_mock_data_type("long"),
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=0, size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=0, size=4)),
+        return_type="int",
+        return_type_obj=resolve_mock_data_type("int"),
+    )
+
+    class _Strategy:
+        enable_solver_proven_rewrite_fallback = False
+        enable_normalization_fallback = False
+        _active_normalization_stats = {
+            "unknown_results": 0,
+            "return_width_bridge_missing": 0,
+        }
+
+        def __init__(self):
+            self.calls = []
+
+        def _build_condition_only_query(self, *_args):
+            return "(set-logic QF_BV)\n(check-sat)"
+
+        def _solve_query_internal(self, _query, _pair_id, stage="full", **_kwargs):
+            self.calls.append(stage)
+            if stage == "conds-only-return-width-abi-guard":
+                return QueryResult(is_equivalent=abi_guard_result)
+            return QueryResult(is_equivalent=None)
+
+        def _debug_print(self, _message):
+            pass
+
+    strategy = _Strategy()
+    result = solve_query_twostage(
+        strategy,
+        {
+            "header_lines": [
+                "(declare-const param_1 (_ BitVec 64))",
+                "(declare-const param_1_2 (_ BitVec 32))",
+            ],
+            "params1": [
+                _signed_semantic_param(
+                    name="param_1",
+                    suffix="",
+                    bits=64,
+                    semantic_bits=semantic_bits,
+                )
+            ],
+            "params2": [
+                _signed_semantic_param(name="param_1", suffix="_2", bits=32)
+            ],
+            "return_size1": 64,
+            "return_size2": 32,
+        },
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.pair_stage == "return-width-mismatch"
+    assert result.blocking_reason == "return_width_bridge_missing"
+    expected_calls = ["conds-only"]
+    if semantic_bits is not None:
+        expected_calls.append("conds-only-return-width-abi-guard")
+    assert strategy.calls == expected_calls
+    assert _Strategy._active_normalization_stats["unknown_results"] == 1
+    assert _Strategy._active_normalization_stats["return_width_bridge_missing"] == 1
 
 
 def test_build_normalized_inequality_query_coerces_normalized_values_to_return_width():

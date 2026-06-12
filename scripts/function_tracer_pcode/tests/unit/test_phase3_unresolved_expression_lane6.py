@@ -2450,6 +2450,57 @@ def test_unresolved_expression_post_fix_accepts_deferred_call_pending_proof_acti
     )
 
 
+def test_deferred_call_diagnostic_evidence_keeps_gate_pending_for_semantic_proof():
+    target = _deferred_call_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    evidence = strategy._unresolved_expression_deferred_call_diagnostic_evidence(target)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=evidence,
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-deferred-call-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B10_B13",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    assert evidence is not None
+    assert evidence[0] == "unresolved_expression_diagnostic_evidence"
+    assert _nested_contains(evidence, "deferred_call_object_evidence")
+    assert _nested_contains(evidence, "semantic_recurrence_query")
+    assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
+    assert all(action.object_evidence == evidence for action in actions)
+
+    status, failures = _post_fix_status(entry)
+    required_actions = _required_completion_actions(entry)
+    pending_obligations = _pending_proof_obligations(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    assert {action["object_evidence_status"] for action in required_actions} == {
+        "object_evidence_collected"
+    }
+    assert {obligation["status"] for obligation in pending_obligations} == {
+        "semantic_proof_required"
+    }
+    assert {obligation["object_evidence_status"] for obligation in pending_obligations} == {
+        "object_evidence_collected"
+    }
+
+
 def test_unresolved_expression_opaque_void_target_uses_dedicated_proof_stages():
     target = _opaque_void_target()
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)

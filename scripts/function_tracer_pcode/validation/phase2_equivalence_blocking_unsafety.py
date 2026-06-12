@@ -94,6 +94,14 @@ UNRESOLVED_EXPRESSION_REASON_TUPLE = (
     MISSING_SENTINEL,
     MISSING_SENTINEL,
 )
+UNRESOLVED_EXPRESSION_PENDING_REASON_TUPLE = (
+    "unresolved_expression",
+    "blocks_decision",
+    "expression",
+    "none",
+    MISSING_SENTINEL,
+    UnknownRecoveryActionStatus.PENDING_PROOF.value,
+)
 UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES = {
     (
         "unresolved_expression",
@@ -110,6 +118,24 @@ UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES = {
         "solver_retry_or_normalization",
         "type_normalization",
         "planned",
+    ),
+}
+UNRESOLVED_EXPRESSION_DEFERRED_CALL_PROOF_ACTION_TUPLES = {
+    (
+        "unresolved_expression",
+        "blocks_decision",
+        "expression",
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION.value,
+        "deferred_call_return_resolution",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    ),
+    (
+        "unresolved_expression",
+        "blocks_decision",
+        "expression",
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION.value,
+        "deferred_call_result_equivalence",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
     ),
 }
 RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
@@ -198,6 +224,7 @@ SAT_UNSAFETY_PROOF_ACTION_TUPLES = {
 }
 ALLOWED_EXPOSED_REASON_TUPLES = {
     UNRESOLVED_EXPRESSION_REASON_TUPLE,
+    UNRESOLVED_EXPRESSION_PENDING_REASON_TUPLE,
     (
         "return_coverage_gap",
         "blocks_equivalence",
@@ -274,7 +301,11 @@ ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
         "planned",
     ),
     ALLOWED_NEW_REASON_TUPLE,
-} | SAT_UNSAFETY_PROOF_ACTION_TUPLES | UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES
+} | (
+    SAT_UNSAFETY_PROOF_ACTION_TUPLES
+    | UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES
+    | UNRESOLVED_EXPRESSION_DEFERRED_CALL_PROOF_ACTION_TUPLES
+)
 ALLOWED_PAIR_EXPOSED_REASONS = {
     TARGET_REASON_ID,
     "return_coverage_gap",

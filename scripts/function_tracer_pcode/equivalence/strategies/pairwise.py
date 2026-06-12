@@ -531,6 +531,12 @@ class PairwiseStrategy(CheckStrategy):
                                     object_target_key
                                 )
                             )
+                        if completed_proof_evidence is None:
+                            completed_proof_evidence = (
+                                self._unresolved_expression_deferred_call_diagnostic_evidence(
+                                    object_target_key
+                                )
+                            )
                         unknown_reasons.append(
                             make_unknown_reason(
                                 UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -2112,6 +2118,179 @@ class PairwiseStrategy(CheckStrategy):
             ("object_target_key", object_target_key),
             ("pair_lowering_diagnostic", diagnostic),
             ("stage_evidence", stage_evidence),
+        )
+
+    def _unresolved_expression_deferred_call_diagnostic_evidence(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        if not self._object_target_contains_deferred_call_unknown(object_target_key):
+            return None
+        call_evidence = self._deferred_call_object_evidence_from_target(object_target_key)
+        if call_evidence is None:
+            return None
+        stage_evidence = self._deferred_call_unresolved_expression_stage_evidence(
+            object_target_key=object_target_key,
+            call_evidence=call_evidence,
+        )
+        if not stage_evidence:
+            return None
+        return (
+            "unresolved_expression_diagnostic_evidence",
+            ("object_derived", True),
+            ("status", "object_evidence_collected"),
+            ("diagnostic_rule", "deferred_call_object_proof_content"),
+            (
+                "pending_stages",
+                (
+                    "deferred_call_return_resolution",
+                    "deferred_call_result_equivalence",
+                ),
+            ),
+            (
+                "required_semantic_proof",
+                (
+                    "deferred_call_site",
+                    "callee_identity",
+                    "call_effect_summary",
+                    "argument_binding",
+                    "return_width_policy",
+                ),
+            ),
+            ("object_target_key", object_target_key),
+            ("deferred_call_evidence", call_evidence),
+            ("stage_evidence", stage_evidence),
+        )
+
+    def _deferred_call_unresolved_expression_stage_evidence(
+        self,
+        *,
+        object_target_key: Tuple[Any, ...],
+        call_evidence: Tuple[Any, ...],
+    ) -> Tuple[Any, ...]:
+        resolution_query = self._semantic_recurrence_query_plan(
+            query_id="deferred_call_return_resolution",
+            query_stage="deferred_call_return_resolution",
+            assertion_kind="deferred_call_return_resolution",
+            object_target_key=object_target_key,
+            object_content=(("deferred_call_evidence", call_evidence),),
+        )
+        result_query = self._semantic_recurrence_query_plan(
+            query_id="deferred_call_result_equivalence",
+            query_stage="deferred_call_result_equivalence",
+            assertion_kind="deferred_call_result_equivalence",
+            object_target_key=object_target_key,
+            object_content=(("deferred_call_evidence", call_evidence),),
+        )
+        return (
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "deferred_call_return_resolution"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("deferred_call_evidence", call_evidence),
+                ("call_resolution_status", "pending_semantic_proof"),
+                ("proof_query_plan", (resolution_query,)),
+                (
+                    "required_semantic_proof",
+                    (
+                        "deferred_call_site",
+                        "callee_identity",
+                        "call_effect_summary",
+                    ),
+                ),
+            ),
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "deferred_call_result_equivalence"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("deferred_call_evidence", call_evidence),
+                ("result_equivalence_status", "pending_semantic_proof"),
+                ("proof_query_plan", (result_query,)),
+                (
+                    "required_semantic_proof",
+                    (
+                        "left_return_value",
+                        "right_return_value",
+                        "argument_binding",
+                        "return_width_policy",
+                    ),
+                ),
+            ),
+        )
+
+    def _deferred_call_object_evidence_from_target(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        target = self._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 4:
+            return None
+        left_refs = self._deferred_call_runtime_refs_from_value(target[2])
+        right_refs = self._deferred_call_runtime_refs_from_value(target[3])
+        if not left_refs and not right_refs:
+            return None
+        return (
+            "deferred_call_object_evidence",
+            ("left_deferred_call_refs", left_refs),
+            ("right_deferred_call_refs", right_refs),
+            (
+                "deferred_call_ref_relation",
+                self._deferred_call_ref_relation(left_refs, right_refs),
+            ),
+            ("evidence_status", "object_evidence_collected"),
+        )
+
+    @classmethod
+    def _deferred_call_runtime_refs_from_value(cls, value: Any) -> Tuple[Any, ...]:
+        refs: List[Any] = []
+        seen = set()
+
+        def visit(node: Any) -> None:
+            normalized = cls._normalize_nested_tuple(node)
+            if isinstance(normalized, tuple):
+                if (
+                    len(normalized) == 2
+                    and normalized[0] in {"unknown_runtime_ref", "runtime_ref"}
+                    and isinstance(normalized[1], tuple)
+                    and normalized[1]
+                    and normalized[1][0] == "deferred_call"
+                ):
+                    key = json.dumps(cls._semantic_recurrence_jsonable(normalized), sort_keys=True)
+                    if key not in seen:
+                        seen.add(key)
+                        refs.append(normalized)
+                    return
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, list):
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, dict):
+                for key, item in sorted(normalized.items(), key=lambda item: str(item[0])):
+                    visit(key)
+                    visit(item)
+
+        visit(value)
+        return tuple(refs)
+
+    @staticmethod
+    def _deferred_call_ref_relation(
+        left_refs: Tuple[Any, ...],
+        right_refs: Tuple[Any, ...],
+    ) -> Tuple[Any, ...]:
+        if left_refs and right_refs:
+            relation = "both_sides_deferred_call_unknown"
+        elif left_refs:
+            relation = "left_deferred_call_unknown_only"
+        else:
+            relation = "right_deferred_call_unknown_only"
+        return (
+            "deferred_call_ref_relation",
+            ("relation", relation),
+            ("left_count", len(left_refs)),
+            ("right_count", len(right_refs)),
         )
 
     def _phi_circular_semantic_recurrence_stage_evidence(
