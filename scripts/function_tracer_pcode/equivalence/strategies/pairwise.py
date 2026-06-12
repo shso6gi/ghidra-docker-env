@@ -2147,38 +2147,97 @@ class PairwiseStrategy(CheckStrategy):
         self,
         object_target_key: Tuple[Any, ...],
     ) -> Optional[Tuple[UnknownRecoveryProofObligation, ...]]:
-        if not self._object_target_contains_originated_phi_circular(object_target_key):
-            return None
-        return (
-            UnknownRecoveryProofObligation.create(
-                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
-                "phi_circular_guard_condition_lowering",
-                required_evidence=(
-                    "object_target_key",
-                    "multiequal_pcode_op_ref",
-                    "guard_condition_key",
-                    "typed_lowering_rule",
+        if self._object_target_contains_originated_phi_circular(object_target_key):
+            return (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "phi_circular_guard_condition_lowering",
+                    required_evidence=(
+                        "object_target_key",
+                        "multiequal_pcode_op_ref",
+                        "guard_condition_key",
+                        "typed_lowering_rule",
+                    ),
+                    description=(
+                        "Lower a PHI-circular guard only when its MULTIEQUAL origin "
+                        "and guard-condition provenance are preserved."
+                    ),
                 ),
-                description=(
-                    "Lower a PHI-circular guard only when its MULTIEQUAL origin "
-                    "and guard-condition provenance are preserved."
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "recursive_summary_guard_equivalence",
+                    required_evidence=(
+                        "left_phi_origin",
+                        "right_phi_origin",
+                        "guard_condition_pair",
+                        "summary_parameter_binding",
+                    ),
+                    description=(
+                        "Prove the recursive-summary guard relation before allowing "
+                        "the unresolved PHI-circular guard to affect equivalence."
+                    ),
                 ),
-            ),
-            UnknownRecoveryProofObligation.create(
-                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
-                "recursive_summary_guard_equivalence",
-                required_evidence=(
-                    "left_phi_origin",
-                    "right_phi_origin",
-                    "guard_condition_pair",
-                    "summary_parameter_binding",
+            )
+        if self._object_target_contains_deferred_call_unknown(object_target_key):
+            return (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "deferred_call_return_resolution",
+                    required_evidence=(
+                        "object_target_key",
+                        "deferred_call_site",
+                        "callee_identity",
+                        "call_effect_summary",
+                    ),
+                    description=(
+                        "Resolve the deferred call return expression before lowering "
+                        "the unresolved value into SMT."
+                    ),
                 ),
-                description=(
-                    "Prove the recursive-summary guard relation before allowing "
-                    "the unresolved PHI-circular guard to affect equivalence."
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "deferred_call_result_equivalence",
+                    required_evidence=(
+                        "left_return_value",
+                        "right_return_value",
+                        "argument_binding",
+                        "return_width_policy",
+                    ),
+                    description=(
+                        "Prove the deferred-call result is equivalent to the peer "
+                        "return value under the active guard and ABI width policy."
+                    ),
                 ),
-            ),
-        )
+            )
+        return None
+
+    @classmethod
+    def _object_target_contains_deferred_call_unknown(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if (
+                len(normalized) >= 4
+                and normalized[0] == "deferred_call"
+                and normalized[1] == "call_out_of_scope"
+            ):
+                return True
+            if (
+                len(normalized) >= 2
+                and normalized[0] == "unresolved_kinds"
+                and isinstance(normalized[1], tuple)
+                and "deferred_call_unknown" in normalized[1]
+            ):
+                return True
+            return any(cls._object_target_contains_deferred_call_unknown(item) for item in normalized)
+        if isinstance(normalized, list):
+            return any(cls._object_target_contains_deferred_call_unknown(item) for item in normalized)
+        if isinstance(normalized, dict):
+            return any(
+                cls._object_target_contains_deferred_call_unknown(key)
+                or cls._object_target_contains_deferred_call_unknown(item)
+                for key, item in normalized.items()
+            )
+        return False
 
     @classmethod
     def _object_target_contains_originated_phi_circular(cls, value: Any) -> bool:

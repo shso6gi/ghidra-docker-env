@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.model import (
     UnknownValueRef,
 )
 from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6 import (
+    UNRESOLVED_DEFERRED_CALL_PROOF_STAGES,
     UNRESOLVED_EVIDENCE_KIND,
     UNRESOLVED_GENERIC_PROOF_STAGES,
     UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES,
@@ -163,6 +164,65 @@ def _originated_phi_target():
         ),
     )
     target[3] = tuple(right)
+    return tuple(target)
+
+
+def _deferred_call_runtime_ref(binary_id: str = "B10", entry: int = 0x3000):
+    return (
+        "runtime_ref",
+        (
+            "deferred_call",
+            "call_out_of_scope",
+            ("function", binary_id, entry),
+            (
+                "deferred_call_site",
+                ("function_ref", ("function", binary_id, entry + 0x20)),
+                _pcode(binary_id, entry + 0x40, mnemonic="CALL").stable_key(),
+                ("function", binary_id, entry),
+                ("argument",),
+                0,
+            ),
+        ),
+    )
+
+
+def _deferred_call_target():
+    target = list(_unresolved_target())
+    left = list(target[2])
+    member = list(left[4])
+    return_case = list(member[3])
+    deferred_ref = _deferred_call_runtime_ref("B10", 0x3000)
+    return_case[6] = deferred_ref
+    member[3] = tuple(return_case)
+    member[5] = ("value", deferred_ref)
+    left[4] = tuple(member)
+    left[5] = (
+        "unresolved_locations",
+        (
+            (
+                "unresolved_location",
+                "return_value",
+                (
+                    "unresolved_classification",
+                    ("location_scope", "return_value"),
+                    ("unresolved_kinds", ("deferred_call_unknown",)),
+                    ("unknown_refs", (("unknown_runtime_ref", deferred_ref[1]),)),
+                    ("unsupported_ops", ()),
+                ),
+                deferred_ref,
+                (
+                    "typed_lowering_evidence",
+                    ("location_scope", "return_value"),
+                    ("expression_kind", "UNKNOWN"),
+                    ("expression_bits", 32),
+                    ("typed_expression_key", deferred_ref),
+                    ("contains_unsupported_smt_ops", False),
+                    ("lowering_status", "blocked_unknown_expression"),
+                ),
+            ),
+        ),
+    )
+    target[2] = tuple(left)
     return tuple(target)
 
 
@@ -777,6 +837,58 @@ def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages()
     assert [action.proof_stage for action in actions] == list(UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES)
     assert all("guard" in " ".join(action.required_evidence) for action in actions)
     assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
+
+
+def test_unresolved_expression_deferred_call_target_uses_dedicated_proof_stages():
+    target = _deferred_call_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+
+    assert _object_target_key_is_specific_unresolved_expression(target)
+    assert [action.proof_stage for action in actions] == list(UNRESOLVED_DEFERRED_CALL_PROOF_STAGES)
+    assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
+    assert all("deferred" in " ".join(action.required_evidence) or "return" in " ".join(action.required_evidence) for action in actions)
+
+
+def test_unresolved_expression_post_fix_accepts_deferred_call_pending_proof_actions():
+    target = _deferred_call_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B10_B13",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    assert {action["proof_stage"] for action in _required_completion_actions(entry)} == set(
+        UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
+    )
 
 
 def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_without_actions():

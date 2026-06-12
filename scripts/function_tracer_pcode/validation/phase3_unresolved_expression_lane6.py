@@ -60,7 +60,15 @@ UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES = (
     "phi_circular_guard_condition_lowering",
     "recursive_summary_guard_equivalence",
 )
-UNRESOLVED_PROOF_STAGES = UNRESOLVED_GENERIC_PROOF_STAGES + UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+UNRESOLVED_DEFERRED_CALL_PROOF_STAGES = (
+    "deferred_call_return_resolution",
+    "deferred_call_result_equivalence",
+)
+UNRESOLVED_PROOF_STAGES = (
+    UNRESOLVED_GENERIC_PROOF_STAGES
+    + UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+    + UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
+)
 UNRESOLVED_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
     "unresolved_expression",
@@ -71,8 +79,10 @@ UNRESOLVED_REASON_TUPLE = (
     MISSING_SENTINEL,
 )
 FUNCTION_CALL_BINARY_NAMES = {
+    "B10": "function_call_test-mips64-clang-O1",
     "B11": "function_call_test-mips64-clang-O2",
     "B12": "function_call_test-mips64-clang-O3",
+    "B13": "function_call_test-mips64-gcc-O0",
 }
 
 
@@ -101,6 +111,19 @@ DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
         "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B12"],
         "required_reason_ids": ["unresolved_expression"],
         "role": "recursive-summary guard unresolved-expression current-transition diagnostic",
+        "expected_movements": [
+            _expected_reason_record("unresolved-expression-reason-record"),
+        ],
+    },
+    {
+        "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
+        "category": "function_call",
+        "function": "fc_is_even",
+        "binary_pair": "B10_B13",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B10"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B13"],
+        "required_reason_ids": ["unresolved_expression"],
+        "role": "deferred-call return unresolved-expression current-transition diagnostic",
         "expected_movements": [
             _expected_reason_record("unresolved-expression-reason-record"),
         ],
@@ -713,7 +736,35 @@ def _unresolved_expression_proof_actions_complete(
 def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]:
     if _target_contains_originated_phi_circular(target):
         return UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+    if _target_contains_deferred_call_unknown(target):
+        return UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
     return UNRESOLVED_GENERIC_PROOF_STAGES
+
+
+def _target_contains_deferred_call_unknown(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if isinstance(normalized, tuple):
+        if (
+            len(normalized) >= 4
+            and normalized[0] == "deferred_call"
+            and normalized[1] == "call_out_of_scope"
+        ):
+            return True
+        if (
+            len(normalized) >= 2
+            and normalized[0] == "unresolved_kinds"
+            and isinstance(normalized[1], tuple)
+            and "deferred_call_unknown" in normalized[1]
+        ):
+            return True
+        return any(_target_contains_deferred_call_unknown(item) for item in normalized)
+    if isinstance(normalized, dict):
+        return any(
+            _target_contains_deferred_call_unknown(key)
+            or _target_contains_deferred_call_unknown(item)
+            for key, item in normalized.items()
+        )
+    return False
 
 
 def _target_contains_originated_phi_circular(value: Any) -> bool:

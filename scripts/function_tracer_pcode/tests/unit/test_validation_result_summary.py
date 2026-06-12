@@ -1848,10 +1848,10 @@ def test_phase3_lane6_unresolved_expression_representative_wrapper_pins_pair_and
     script = Path("phase3_run_function_call_unresolved_expression_lane6_representatives.sh").read_text()
 
     assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_is_even}"' in script
-    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_is_even:B11_B12}"' in script
+    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_is_even:B11_B12,fc_is_even:B10_B13}"' in script
     assert ".venv-pyghidra/bin/python" in script
     assert "phase3_unresolved_expression_lane6/unresolved_expression_lane6_representatives.json" in script
-    assert "44e90da602bf10a0f3fa4387f3ef426eab474d181c62ac0a442382a15472c6ea" in script
+    assert "7dfb69393e14bcf5879132a680ab4b3e83379828558ecb539505601808a2dd83" in script
     assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
     assert "Phase 3 lane 6 dry run finished before post-fix gate." in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
