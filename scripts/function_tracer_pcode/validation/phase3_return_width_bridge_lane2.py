@@ -85,9 +85,28 @@ RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS: Mapping[Tuple[str, str], Mapping[str, A
 ABI_CALLING_CONVENTION_RELATIONS = frozenset({"same_return_abi_family"})
 ABI_RETURN_STORAGE_RELATIONS = frozenset({"abi_related_return_storage"})
 HIGH_BIT_EXTENSION_RELATIONS = frozenset({"compatible_under_narrow_width"})
-HIGH_BIT_PROOF_LABELS = frozenset({"high_bits_do_not_affect_compared_return"})
+HIGH_BIT_QUERY_PROOF_LABEL = "high_bits_do_not_affect_compared_return"
+HIGH_BIT_SUMMARY_PARAMETER_PROOF_LABEL = (
+    "summary_parameter_high_bits_follow_return_abi_extension"
+)
+HIGH_BIT_PROOF_LABELS = frozenset(
+    {
+        HIGH_BIT_QUERY_PROOF_LABEL,
+        HIGH_BIT_SUMMARY_PARAMETER_PROOF_LABEL,
+    }
+)
 COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE = "return_width_bridge_narrow_and_high_bit_queries_unsat"
+COMPLETED_RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_PROOF_SOURCE = (
+    "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension"
+)
+COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCES = frozenset(
+    {
+        COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE,
+        COMPLETED_RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_PROOF_SOURCE,
+    }
+)
 RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE = "return-width-bridge-high-bit-extension"
+RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_STAGE = "summary-parameter-extension-object-evidence"
 COMPLETED_PROOF_BLOCKER_FIELDS = (
     "sat_unsafety_reasons",
     "coverage_gap_reasons",
@@ -1238,10 +1257,11 @@ def _completed_evidence_matches_action(
         "proven",
     }:
         return False
-    if (
-        str(evidence_summary.get("proof_source") or evidence.get("proof_source") or MISSING_SENTINEL)
-        != COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE
-    ):
+    if str(
+        evidence_summary.get("proof_source")
+        or evidence.get("proof_source")
+        or MISSING_SENTINEL
+    ) not in COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCES:
         return False
     proof_kind = (
         evidence_summary.get("proof_kind")
@@ -1321,7 +1341,16 @@ def _completed_evidence_has_required_proof_content(
     if str(action.get("proof_kind") or MISSING_SENTINEL) == "abi_relation_proof":
         return _abi_relation_proof_content_is_specific(content, object_target_key)
     if str(action.get("proof_kind") or MISSING_SENTINEL) == "high_bit_proof":
-        return _high_bit_proof_content_is_specific(content, object_target_key)
+        proof_source = str(
+            evidence_summary.get("proof_source")
+            or evidence.get("proof_source")
+            or MISSING_SENTINEL
+        )
+        return _high_bit_proof_content_is_specific(
+            content,
+            object_target_key,
+            proof_source=proof_source,
+        )
     return False
 
 
@@ -1364,12 +1393,22 @@ def _abi_relation_proof_content_is_specific(content: Mapping[str, Any], object_t
     )
 
 
-def _high_bit_proof_content_is_specific(content: Mapping[str, Any], object_target_key: Any) -> bool:
+def _high_bit_proof_content_is_specific(
+    content: Mapping[str, Any],
+    object_target_key: Any,
+    *,
+    proof_source: str,
+) -> bool:
     target = _normalize_nested_tuple(object_target_key)
     return (
         _producer_width_evidence_is_specific(content.get("producer_width"), target)
         and _extension_semantics_evidence_is_specific(content.get("extension_semantics"), target)
         and _high_bits_evidence_is_specific(
+            content.get("high_bits_irrelevant_or_equal"),
+            target,
+        )
+        and _high_bit_proof_source_matches_content(
+            proof_source,
             content.get("high_bits_irrelevant_or_equal"),
             target,
         )
@@ -1438,20 +1477,26 @@ def _extension_semantics_evidence_is_specific(value: Any, target: tuple) -> bool
     right = _find_width_side(target, "right")
     left_policy = _return_width_bridge_extension_policy_for_side(left)
     right_policy = _return_width_bridge_extension_policy_for_side(right)
-    left_extension_ops = _return_width_bridge_matching_extension_ops_for_side(left)
-    right_extension_ops = _return_width_bridge_matching_extension_ops_for_side(right)
+    left_extension_evidence = _return_width_bridge_extension_evidence_for_side(left)
+    right_extension_evidence = _return_width_bridge_extension_evidence_for_side(right)
+    if left_extension_evidence is None or right_extension_evidence is None:
+        return False
+    left_extension_ops, left_summary_extension = left_extension_evidence
+    right_extension_ops, right_summary_extension = right_extension_evidence
     return (
         isinstance(value, Mapping)
         and value.get("object_derived") is True
         and value.get("status") == "proven"
         and left_policy is not None
         and right_policy is not None
-        and left_extension_ops is not None
-        and right_extension_ops is not None
         and value.get("left_extension") == left_policy
         and value.get("right_extension") == right_policy
         and _normalize_nested_tuple(value.get("left_extension_ops")) == left_extension_ops
         and _normalize_nested_tuple(value.get("right_extension_ops")) == right_extension_ops
+        and _normalize_optional_tuple(value.get("left_summary_parameter_extension"))
+        == left_summary_extension
+        and _normalize_optional_tuple(value.get("right_summary_parameter_extension"))
+        == right_summary_extension
         and value.get("relation") in HIGH_BIT_EXTENSION_RELATIONS
     )
 
@@ -1546,6 +1591,113 @@ def _return_width_bridge_matching_extension_ops_for_side(side: Any) -> Optional[
     return tuple(matches) if matches else None
 
 
+def _return_width_bridge_extension_evidence_for_side(
+    side: Any,
+) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+    extension_ops = _return_width_bridge_matching_extension_ops_for_side(side)
+    if extension_ops is not None:
+        return extension_ops, ()
+    summary_extension = _return_width_bridge_summary_parameter_extension_for_side(side)
+    if summary_extension is None:
+        return None
+    return (), (summary_extension,)
+
+
+def _return_width_bridge_summary_parameter_extension_for_side(side: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(side, tuple):
+        return None
+    width = _normalize_nested_tuple(_find_tagged_entry(side, "return_value_width"))
+    if not isinstance(width, tuple) or len(width) < 9:
+        return None
+    producer_bits = width[1]
+    return_bits = width[2]
+    relation = width[5]
+    policy = width[6]
+    if relation != "producer_narrower_than_return_width":
+        return None
+    if policy not in {"sign_extend", "zero_extend"}:
+        return None
+    value_entry = _find_tagged_entry(width, "value")
+    expression_bits = _find_tagged_entry(width, "expression_bits")
+    pcode_input_bits = _find_tagged_entry(width, "return_pcode_value_input_bits")
+    try:
+        producer_bits_int = int(producer_bits)
+        return_bits_int = int(return_bits)
+        expression_bits_int = int(
+            expression_bits[1]
+            if isinstance(expression_bits, tuple) and len(expression_bits) == 2
+            else expression_bits
+        )
+        pcode_input_bits_int = int(
+            pcode_input_bits[1]
+            if isinstance(pcode_input_bits, tuple) and len(pcode_input_bits) == 2
+            else pcode_input_bits
+        )
+    except (TypeError, ValueError):
+        return None
+    if not (
+        producer_bits_int > 0
+        and producer_bits_int == expression_bits_int
+        and producer_bits_int < return_bits_int
+        and pcode_input_bits_int >= return_bits_int
+    ):
+        return None
+    summary_parameter = _return_width_bridge_summary_parameter_value_key(value_entry)
+    if summary_parameter is None:
+        return None
+    return (
+        "summary_parameter_extension",
+        ("parameter", summary_parameter),
+        ("producer_bits", producer_bits_int),
+        ("return_bits", return_bits_int),
+        ("return_pcode_value_input_bits", pcode_input_bits_int),
+        ("policy", policy),
+        ("parameter_kind", "synthetic_recursive_summary"),
+    )
+
+
+def _return_width_bridge_summary_parameter_value_key(value_entry: Any) -> Optional[Tuple[Any, ...]]:
+    value = _normalize_nested_tuple(value_entry)
+    if not isinstance(value, tuple) or len(value) != 2 or value[0] != "value":
+        return None
+    provenance = value[1]
+    if (
+        not isinstance(provenance, tuple)
+        or len(provenance) != 2
+        or provenance[0] != "expression"
+    ):
+        return None
+    expression_key = provenance[1]
+    if not isinstance(expression_key, tuple) or len(expression_key) != 4:
+        return None
+    if expression_key[0] != "parameter":
+        return None
+    name = expression_key[1]
+    index = expression_key[2]
+    size_bytes = expression_key[3]
+    if not isinstance(name, str) or not name.startswith("summary_rec_"):
+        return None
+    index_value = index[1] if isinstance(index, tuple) and len(index) == 2 else index
+    try:
+        index_int = int(index_value)
+        size_int = int(size_bytes)
+    except (TypeError, ValueError):
+        return None
+    if index_int < 10000 or size_int <= 0:
+        return None
+    return (
+        "parameter",
+        name,
+        ("index", index_int),
+        ("size_bits", size_int * 8),
+    )
+
+
+def _normalize_optional_tuple(value: Any) -> Tuple[Any, ...]:
+    normalized = _normalize_nested_tuple(value)
+    return normalized if isinstance(normalized, tuple) else ()
+
+
 def _return_width_bridge_extension_op_profile_matches(
     profile: Any,
     *,
@@ -1593,12 +1745,60 @@ def _high_bits_evidence_is_specific(value: Any, target: tuple) -> bool:
         and len(widths) == 3
     ):
         return False
-    return (
+    common = (
         value.get("narrow_width") == min(int(widths[1]), int(widths[2]))
         and value.get("wide_width") == max(int(widths[1]), int(widths[2]))
         and value.get("proof") in HIGH_BIT_PROOF_LABELS
-        and value.get("query_stage") == RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE
     )
+    if not common:
+        return False
+    proof = value.get("proof")
+    query_stage = value.get("query_stage")
+    if proof == HIGH_BIT_QUERY_PROOF_LABEL:
+        return (
+            query_stage == RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE
+            and not _target_has_summary_parameter_extension(target)
+        )
+    if proof == HIGH_BIT_SUMMARY_PARAMETER_PROOF_LABEL:
+        if query_stage != RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_STAGE:
+            return False
+        return _target_has_summary_parameter_extension(target)
+    return False
+
+
+def _target_has_summary_parameter_extension(target: tuple) -> bool:
+    left = _find_width_side(target, "left")
+    right = _find_width_side(target, "right")
+    return any(
+        _return_width_bridge_summary_parameter_extension_for_side(side) is not None
+        for side in (left, right)
+        if isinstance(side, tuple)
+    )
+
+
+def _high_bit_proof_source_matches_content(
+    proof_source: str,
+    high_bits: Any,
+    target: tuple,
+) -> bool:
+    if not isinstance(high_bits, Mapping):
+        return False
+    proof = high_bits.get("proof")
+    query_stage = high_bits.get("query_stage")
+    has_summary_extension = _target_has_summary_parameter_extension(target)
+    if proof_source == COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE:
+        return (
+            proof == HIGH_BIT_QUERY_PROOF_LABEL
+            and query_stage == RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE
+            and not has_summary_extension
+        )
+    if proof_source == COMPLETED_RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_PROOF_SOURCE:
+        return (
+            proof == HIGH_BIT_SUMMARY_PARAMETER_PROOF_LABEL
+            and query_stage == RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_STAGE
+            and has_summary_extension
+        )
+    return False
 
 
 def _completed_proof_section_is_proven(value: Any) -> bool:

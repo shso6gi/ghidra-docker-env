@@ -164,10 +164,10 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         validator=validate_phase3_return_width_bridge_lane2_post_fix_gate,
         expected_entry_count=1,
         allowed_post_fix_statuses=("completed_recovery", "pending_proof"),
-        expected_post_fix_status_counts={"pending_proof": 1},
+        expected_post_fix_status_counts={"completed_recovery": 1},
         expected_post_fix_obligation_counts={
-            "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 2,
+            "pending_proof_entry_count": 0,
+            "pending_proof_obligation_count": 0,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -183,18 +183,10 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "id": "representative-return-width-bridge-apply-indirect-width-high-bit-near-miss",
                 "function": "fc_apply_indirect",
                 "binary_pair": "B10_B13",
-                "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 2,
+                "post_fix_status": "completed_recovery",
+                "pending_proof_obligation_count": 0,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 2,
-            },
-        ),
-        expected_required_completion_action_hashes=(
-            {
-                "id": "representative-return-width-bridge-apply-indirect-width-high-bit-near-miss",
-                "required_completion_actions_sha256": (
-                    "69022f3ea60e716db3340dee477f1f46695b3b041d239bb091409be641e57b36"
-                ),
+                "required_completion_action_count": 0,
             },
         ),
     ),

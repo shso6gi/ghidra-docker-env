@@ -5943,10 +5943,43 @@ class PairwiseStrategy(CheckStrategy):
             return_size2=base_ctx.get("return_size2", narrow_width),
         )
         if high_bit_query is None:
+            if not self._return_width_bridge_has_summary_parameter_extension_evidence(target):
+                self._debug_print(
+                    f"  Pair {pair_id} return-width bridge proof skipped: high-bit query unavailable"
+                )
+                return None
+            if not self._record_completed_return_width_bridge_proofs(
+                reason_record,
+                analysis1,
+                analysis2,
+                query_stage="summary-parameter-extension-object-evidence",
+                narrow_width=narrow_width,
+                proof_source=(
+                    "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension"
+                ),
+            ):
+                self._debug_print(
+                    "  Pair "
+                    f"{pair_id} return-width bridge proof skipped: summary parameter proof not recorded"
+                )
+                return None
+            if not self._return_width_bridge_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+            ):
+                self._debug_print(
+                    "  Pair "
+                    f"{pair_id} return-width bridge proof skipped: summary parameter proof not accepted"
+                )
+                return None
+            proof_result.last_query = narrow_query
+            proof_result.pair_stage = "return-width-bridge-narrow-ineq"
             self._debug_print(
-                f"  Pair {pair_id} return-width bridge proof skipped: high-bit query unavailable"
+                "  Pair "
+                f"{pair_id}: return-width bridge completed by narrow-width and summary parameter extension proofs"
             )
-            return None
+            return proof_result
         high_bit_result = self._solve_query_internal(
             high_bit_query,
             pair_id,

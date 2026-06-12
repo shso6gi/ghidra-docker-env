@@ -1430,6 +1430,7 @@ class CheckStrategy(ABC):
         *,
         query_stage: str,
         narrow_width: int,
+        proof_source: str = "return_width_bridge_narrow_and_high_bit_queries_unsat",
     ) -> bool:
         if not self.enable_completed_recovery_proofs:
             self._debug_print("  return-width bridge proof record skipped: completed proofs disabled")
@@ -1496,7 +1497,7 @@ class CheckStrategy(ABC):
                     "required_evidence": tuple(action.required_evidence),
                     "object_target_key": object_target_key,
                     "proof_obligation_id": proof_id,
-                    "proof_source": "return_width_bridge_narrow_and_high_bit_queries_unsat",
+                    "proof_source": proof_source,
                     "proof_content": proof_content,
                 }
             )
@@ -2115,7 +2116,11 @@ class CheckStrategy(ABC):
         )
         if required_evidence != tuple(expected_required):
             return None
-        if cls._evidence_text(evidence, "proof_source") != "return_width_bridge_narrow_and_high_bit_queries_unsat":
+        proof_source = cls._evidence_text(evidence, "proof_source")
+        if proof_source not in {
+            "return_width_bridge_narrow_and_high_bit_queries_unsat",
+            "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension",
+        }:
             return None
         if cls._evidence_has_any(evidence, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
             return None
@@ -2145,6 +2150,12 @@ class CheckStrategy(ABC):
                 return None
         elif proof_kind == "high_bit_proof":
             if not cls._return_width_bridge_high_bit_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            ):
+                return None
+            if not cls._return_width_bridge_high_bit_proof_source_matches_content(
+                proof_source,
                 proof_content,
                 object_target_key,
             ):
@@ -2202,9 +2213,23 @@ class CheckStrategy(ABC):
         if proof_kind == "high_bit_proof":
             if value_width_evidence is None or left_extension_policy is None or right_extension_policy is None:
                 return None
-            left_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(left)
-            right_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(right)
-            if left_extension_ops is None or right_extension_ops is None:
+            left_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(left)
+            right_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(right)
+            if left_extension_evidence is None or right_extension_evidence is None:
+                return None
+            left_extension_ops, left_summary_extension = left_extension_evidence
+            right_extension_ops, right_summary_extension = right_extension_evidence
+            query_stage_text = str(query_stage)
+            has_summary_extension = bool(left_summary_extension or right_summary_extension)
+            if query_stage_text == "return-width-bridge-high-bit-extension":
+                if has_summary_extension:
+                    return None
+                high_bit_proof = "high_bits_do_not_affect_compared_return"
+            elif query_stage_text == "summary-parameter-extension-object-evidence":
+                if not has_summary_extension:
+                    return None
+                high_bit_proof = "summary_parameter_high_bits_follow_return_abi_extension"
+            else:
                 return None
             return {
                 "object_derived": True,
@@ -2224,6 +2249,8 @@ class CheckStrategy(ABC):
                     "right_extension": right_extension_policy,
                     "left_extension_ops": left_extension_ops,
                     "right_extension_ops": right_extension_ops,
+                    "left_summary_parameter_extension": left_summary_extension,
+                    "right_summary_parameter_extension": right_summary_extension,
                     "relation": "compatible_under_narrow_width",
                 },
                 "high_bits_irrelevant_or_equal": {
@@ -2231,7 +2258,7 @@ class CheckStrategy(ABC):
                     "status": "proven",
                     "narrow_width": int(narrow_width),
                     "wide_width": wide_width,
-                    "proof": "high_bits_do_not_affect_compared_return",
+                    "proof": high_bit_proof,
                     "proven": True,
                     "query_stage": str(query_stage),
                 },
@@ -2315,10 +2342,12 @@ class CheckStrategy(ABC):
         right = cls._return_width_bridge_find_side(object_target_key, "right")
         if left is None or right is None:
             return False
-        left_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(left)
-        right_extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(right)
-        if left_extension_ops is None or right_extension_ops is None:
+        left_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(left)
+        right_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(right)
+        if left_extension_evidence is None or right_extension_evidence is None:
             return False
+        left_extension_ops, left_summary_extension = left_extension_evidence
+        right_extension_ops, right_summary_extension = right_extension_evidence
         if not (
             isinstance(producer_width, Mapping)
             and producer_width.get("object_derived") is True
@@ -2339,19 +2368,72 @@ class CheckStrategy(ABC):
             == left_extension_ops
             and cls._normalize_nested_tuple(extension_semantics.get("right_extension_ops"))
             == right_extension_ops
+            and cls._return_width_bridge_normalize_optional_tuple(
+                extension_semantics.get("left_summary_parameter_extension")
+            )
+            == left_summary_extension
+            and cls._return_width_bridge_normalize_optional_tuple(
+                extension_semantics.get("right_summary_parameter_extension")
+            )
+            == right_summary_extension
             and extension_semantics.get("relation") == "compatible_under_narrow_width"
         ):
             return False
-        return (
+        high_bit_complete = (
             isinstance(high_bits, Mapping)
             and high_bits.get("object_derived") is True
             and high_bits.get("status") == "proven"
             and high_bits.get("proven") is True
             and high_bits.get("narrow_width") == narrow_width
             and high_bits.get("wide_width") == wide_width
-            and high_bits.get("proof") == "high_bits_do_not_affect_compared_return"
-            and high_bits.get("query_stage") == "return-width-bridge-high-bit-extension"
         )
+        if not high_bit_complete:
+            return False
+        proof = high_bits.get("proof")
+        query_stage = high_bits.get("query_stage")
+        if proof == "high_bits_do_not_affect_compared_return":
+            return (
+                query_stage == "return-width-bridge-high-bit-extension"
+                and not bool(left_summary_extension or right_summary_extension)
+            )
+        if proof == "summary_parameter_high_bits_follow_return_abi_extension":
+            if query_stage != "summary-parameter-extension-object-evidence":
+                return False
+            return bool(left_summary_extension or right_summary_extension)
+        return False
+
+    @classmethod
+    def _return_width_bridge_high_bit_proof_source_matches_content(
+        cls,
+        proof_source: str,
+        content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        high_bits = content.get("high_bits_irrelevant_or_equal")
+        if not isinstance(high_bits, Mapping):
+            return False
+        proof = high_bits.get("proof")
+        query_stage = high_bits.get("query_stage")
+        left = cls._return_width_bridge_find_side(object_target_key, "left")
+        right = cls._return_width_bridge_find_side(object_target_key, "right")
+        has_summary_extension = any(
+            cls._return_width_bridge_summary_parameter_extension_for_side(side) is not None
+            for side in (left, right)
+            if side is not None
+        )
+        if proof_source == "return_width_bridge_narrow_and_high_bit_queries_unsat":
+            return (
+                proof == "high_bits_do_not_affect_compared_return"
+                and query_stage == "return-width-bridge-high-bit-extension"
+                and not has_summary_extension
+            )
+        if proof_source == "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension":
+            return (
+                proof == "summary_parameter_high_bits_follow_return_abi_extension"
+                and query_stage == "summary-parameter-extension-object-evidence"
+                and has_summary_extension
+            )
+        return False
 
     @classmethod
     def _return_width_bridge_common_proof_content_is_complete(
@@ -2568,6 +2650,134 @@ class CheckStrategy(ABC):
                 continue
             matches.append(profile)
         return tuple(matches) if matches else None
+
+    @classmethod
+    def _return_width_bridge_extension_evidence_for_side(
+        cls,
+        side: Any,
+    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+        extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(side)
+        if extension_ops is not None:
+            return extension_ops, ()
+        summary_extension = cls._return_width_bridge_summary_parameter_extension_for_side(side)
+        if summary_extension is None:
+            return None
+        return (), (summary_extension,)
+
+    @classmethod
+    def _return_width_bridge_has_summary_parameter_extension_evidence(
+        cls,
+        object_target_key: Any,
+    ) -> bool:
+        target = cls._normalize_nested_tuple(object_target_key)
+        left = cls._return_width_bridge_find_side(target, "left")
+        right = cls._return_width_bridge_find_side(target, "right")
+        return any(
+            cls._return_width_bridge_summary_parameter_extension_for_side(side) is not None
+            for side in (left, right)
+            if side is not None
+        )
+
+    @classmethod
+    def _return_width_bridge_summary_parameter_extension_for_side(
+        cls,
+        side: Any,
+    ) -> Optional[Tuple[Any, ...]]:
+        width_entry = cls._normalize_nested_tuple(
+            cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        )
+        if not isinstance(width_entry, tuple) or len(width_entry) < 9:
+            return None
+        producer_bits = width_entry[1]
+        return_bits = width_entry[2]
+        relation = width_entry[5]
+        policy = width_entry[6]
+        if relation != "producer_narrower_than_return_width":
+            return None
+        if policy not in {"sign_extend", "zero_extend"}:
+            return None
+        value_entry = cls._return_width_bridge_find_tagged_entry(width_entry, "value")
+        expression_bits = cls._return_width_bridge_find_tagged_entry(width_entry, "expression_bits")
+        pcode_input_bits = cls._return_width_bridge_find_tagged_entry(
+            width_entry,
+            "return_pcode_value_input_bits",
+        )
+        try:
+            producer_bits_int = int(producer_bits)
+            return_bits_int = int(return_bits)
+            expression_bits_int = int(
+                expression_bits[1]
+                if isinstance(expression_bits, tuple) and len(expression_bits) == 2
+                else expression_bits
+            )
+            pcode_input_bits_int = int(
+                pcode_input_bits[1]
+                if isinstance(pcode_input_bits, tuple) and len(pcode_input_bits) == 2
+                else pcode_input_bits
+            )
+        except (TypeError, ValueError):
+            return None
+        if not (
+            producer_bits_int > 0
+            and producer_bits_int == expression_bits_int
+            and producer_bits_int < return_bits_int
+            and pcode_input_bits_int >= return_bits_int
+        ):
+            return None
+        summary_parameter = cls._return_width_bridge_summary_parameter_value_key(value_entry)
+        if summary_parameter is None:
+            return None
+        return (
+            "summary_parameter_extension",
+            ("parameter", summary_parameter),
+            ("producer_bits", producer_bits_int),
+            ("return_bits", return_bits_int),
+            ("return_pcode_value_input_bits", pcode_input_bits_int),
+            ("policy", policy),
+            ("parameter_kind", "synthetic_recursive_summary"),
+        )
+
+    @classmethod
+    def _return_width_bridge_summary_parameter_value_key(cls, value_entry: Any) -> Optional[Tuple[Any, ...]]:
+        value = cls._normalize_nested_tuple(value_entry)
+        if not isinstance(value, tuple) or len(value) != 2 or value[0] != "value":
+            return None
+        provenance = value[1]
+        if (
+            not isinstance(provenance, tuple)
+            or len(provenance) != 2
+            or provenance[0] != "expression"
+        ):
+            return None
+        expression_key = provenance[1]
+        if not isinstance(expression_key, tuple) or len(expression_key) != 4:
+            return None
+        if expression_key[0] != "parameter":
+            return None
+        name = expression_key[1]
+        index = expression_key[2]
+        size_bytes = expression_key[3]
+        if not isinstance(name, str) or not name.startswith("summary_rec_"):
+            return None
+        index_value = index[1] if isinstance(index, tuple) and len(index) == 2 else index
+        try:
+            index_int = int(index_value)
+            size_int = int(size_bytes)
+        except (TypeError, ValueError):
+            return None
+        if index_int < 10000 or size_int <= 0:
+            return None
+        return (
+            "parameter",
+            name,
+            ("index", index_int),
+            ("size_bits", size_int * 8),
+        )
+
+    @classmethod
+    def _return_width_bridge_normalize_optional_tuple(cls, value: Any) -> Tuple[Any, ...]:
+        normalized = cls._normalize_nested_tuple(value)
+        return normalized if isinstance(normalized, tuple) else ()
 
     @classmethod
     def _return_width_bridge_extension_op_profile_matches(
