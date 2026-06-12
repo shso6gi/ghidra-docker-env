@@ -64,10 +64,15 @@ UNRESOLVED_DEFERRED_CALL_PROOF_STAGES = (
     "deferred_call_return_resolution",
     "deferred_call_result_equivalence",
 )
+UNRESOLVED_OPAQUE_VOID_PROOF_STAGES = (
+    "opaque_unknown_return_origin_resolution",
+    "opaque_unknown_return_value_equivalence",
+)
 UNRESOLVED_PROOF_STAGES = (
     UNRESOLVED_GENERIC_PROOF_STAGES
     + UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
     + UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
+    + UNRESOLVED_OPAQUE_VOID_PROOF_STAGES
 )
 UNRESOLVED_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
@@ -79,10 +84,14 @@ UNRESOLVED_REASON_TUPLE = (
     MISSING_SENTINEL,
 )
 FUNCTION_CALL_BINARY_NAMES = {
+    "B1": "function_call_test-arm64-clang-O0",
+    "B2": "function_call_test-arm64-clang-O1",
+    "B3": "function_call_test-arm64-clang-O2",
     "B10": "function_call_test-mips64-clang-O1",
     "B11": "function_call_test-mips64-clang-O2",
     "B12": "function_call_test-mips64-clang-O3",
     "B13": "function_call_test-mips64-gcc-O0",
+    "B15": "function_call_test-mips64-gcc-O2",
 }
 
 
@@ -127,6 +136,61 @@ DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
         "expected_movements": [
             _expected_reason_record("unresolved-expression-reason-record"),
         ],
+    },
+    {
+        "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+        "category": "function_call",
+        "function": "fc_is_odd",
+        "binary_pair": "B1_B2",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B1"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B2"],
+        "required_reason_ids": ["unresolved_expression"],
+        "role": "opaque void return unresolved-expression current-transition diagnostic",
+        "expected_movements": [
+            _expected_reason_record("unresolved-expression-reason-record"),
+        ],
+    },
+)
+
+DEFAULT_TIMEOUT_TRANSITION_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
+    {
+        "id": "representative-recursive-sum-b10-b11-unresolved-to-timeout",
+        "category": "function_call",
+        "function": "fc_recursive_sum",
+        "binary_pair": "B10_B11",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B10"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B11"],
+        "expected_baseline_result": STATUS_UNKNOWN,
+        "expected_current_result": STATUS_TIMEOUT,
+        "expected_baseline_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        "expected_current_reason_ids": ["solver_unknown_timeout"],
+        "role": "current timeout transition representative for unresolved/sat recursive summary work",
+    },
+    {
+        "id": "representative-recursive-sum-b10-b15-coverage-to-timeout",
+        "category": "function_call",
+        "function": "fc_recursive_sum",
+        "binary_pair": "B10_B15",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B10"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B15"],
+        "expected_baseline_result": STATUS_UNKNOWN,
+        "expected_current_result": STATUS_TIMEOUT,
+        "expected_baseline_reason_ids": ["equivalence_blocking_unsafety", "return_coverage_gap"],
+        "expected_current_reason_ids": ["solver_unknown_timeout"],
+        "role": "current timeout transition representative for coverage/effect recursive summary work",
+    },
+    {
+        "id": "representative-recursive-sum-b1-b3-unresolved-to-timeout",
+        "category": "function_call",
+        "function": "fc_recursive_sum",
+        "binary_pair": "B1_B3",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B1"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B3"],
+        "expected_baseline_result": STATUS_UNKNOWN,
+        "expected_current_result": STATUS_TIMEOUT,
+        "expected_baseline_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        "expected_current_reason_ids": ["solver_unknown_timeout"],
+        "role": "current timeout transition representative for arm64 recursive summary work",
     },
 )
 
@@ -202,6 +266,78 @@ def validate_phase3_unresolved_expression_lane6_manifest(manifest: Mapping[str, 
         failures.append(_failed("unresolved_expression_manifest_not_ready"))
     if failures:
         raise ValueError(f"Phase 3 lane 6 manifest is not ready: {failures!r}")
+
+
+def build_phase3_unresolved_expression_timeout_transition_audit(
+    *,
+    baseline_raw_dir: Path,
+    output_dir: Path,
+    current_log_roots: Mapping[str, Path],
+    baseline_log_roots: Mapping[str, Path],
+    representatives: Sequence[Mapping[str, Any]] = DEFAULT_TIMEOUT_TRANSITION_REPRESENTATIVES,
+) -> Path:
+    raw_dir = Path(baseline_raw_dir)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    baseline_manifest = _read_json(raw_dir / "artifact_manifest.json")
+    target_keys = tuple(_entry_key(entry) for entry in representatives)
+    current_records = _records_by_key(current_log_roots, target_keys=target_keys)
+    baseline_records = _records_by_key(baseline_log_roots, target_keys=target_keys)
+    entries = [
+        _materialize_timeout_transition_entry(raw_entry, current_records, baseline_records)
+        for raw_entry in representatives
+    ]
+    readiness = _timeout_transition_readiness(entries)
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "manifest_kind": "phase3_unresolved_expression_timeout_transition_representatives",
+        "artifact_role": "derived_audit_timeout_transition_monitor",
+        "baseline_id": baseline_manifest.get("baseline_id") or MISSING_SENTINEL,
+        "baseline_git_head": baseline_manifest.get("git_head") or MISSING_SENTINEL,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "baseline_raw_artifact_ref": _file_ref(raw_dir / "artifact_manifest.json"),
+        "current_log_roots": {
+            category: _display_path(path) for category, path in sorted(current_log_roots.items())
+        },
+        "baseline_log_roots": {
+            category: _display_path(path) for category, path in sorted(baseline_log_roots.items())
+        },
+        "selection_policy": {
+            "representative_count": len(entries),
+            "criteria": [
+                "concrete fc_recursive_sum function x binary_pair id",
+                "baseline final result is UNKNOWN with recorded blocker reasons",
+                "current final result is TIMEOUT with solver_unknown_timeout",
+                "used only to monitor timeout movement while semantic lanes progress",
+            ],
+        },
+        "phase3_lane6_timeout_transition_ready": readiness["ready"],
+        "readiness": readiness,
+        "entries": entries,
+    }
+    path = output / "unresolved_expression_timeout_transition_representatives.json"
+    _write_json(path, manifest)
+    return path
+
+
+def validate_phase3_unresolved_expression_timeout_transition_audit(manifest: Mapping[str, Any]) -> None:
+    readiness = manifest.get("readiness")
+    failures = []
+    if isinstance(readiness, Mapping):
+        failures.extend(readiness.get("failed_checks") or ())
+        failures.extend(
+            _failed(str(kind))
+            for kind in (readiness.get("failed_kinds") or ())
+            if kind not in {check.get("kind") for check in failures if isinstance(check, Mapping)}
+        )
+    else:
+        failures.append(_failed("unresolved_expression_timeout_transition_readiness_missing"))
+    if manifest.get("manifest_kind") != "phase3_unresolved_expression_timeout_transition_representatives":
+        failures.append(_failed("unresolved_expression_timeout_transition_manifest_kind"))
+    if not manifest.get("phase3_lane6_timeout_transition_ready"):
+        failures.append(_failed("unresolved_expression_timeout_transition_not_ready"))
+    if failures:
+        raise ValueError(f"Phase 3 lane 6 timeout transition audit is not ready: {failures!r}")
 
 
 def build_phase3_unresolved_expression_lane6_post_fix_gate(
@@ -314,6 +450,24 @@ def _materialize_entry(
     entry["baseline_observation"] = _observation(raw_entry, baseline_records.get(key))
     entry["current_observation"] = _observation(raw_entry, current_records.get(key))
     entry["target_object_keys"] = _canonical_targets(_current_targets(entry))
+    return entry
+
+
+def _materialize_timeout_transition_entry(
+    raw_entry: Mapping[str, Any],
+    current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    baseline_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Dict[str, Any]:
+    entry = dict(raw_entry)
+    key = _entry_key(raw_entry)
+    entry["baseline_observation"] = _observation(raw_entry, baseline_records.get(key))
+    entry["current_observation"] = _observation(raw_entry, current_records.get(key))
+    entry["transition"] = {
+        "from_final_result": entry["baseline_observation"].get("final_result") or MISSING_SENTINEL,
+        "to_final_result": entry["current_observation"].get("final_result") or MISSING_SENTINEL,
+        "from_reason_ids": list(entry["baseline_observation"].get("observed_reason_ids") or ()),
+        "to_reason_ids": list(entry["current_observation"].get("observed_reason_ids") or ()),
+    }
     return entry
 
 
@@ -454,6 +608,103 @@ def _readiness(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "checks": checks,
         "covered_target_reason_ids": sorted(TARGET_REASON_IDS),
     }
+
+
+def _timeout_transition_readiness(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    checks = []
+    for entry in entries:
+        checks.extend(_timeout_transition_entry_readiness(entry))
+    return {
+        "ready": not any(check.get("status") == "failed" for check in checks),
+        "failed_kinds": [
+            check.get("kind")
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        ],
+        "failed_checks": [
+            check
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        ],
+        "transition_count": len(entries),
+    }
+
+
+def _timeout_transition_entry_readiness(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    checks = []
+    baseline = entry.get("baseline_observation") if isinstance(entry.get("baseline_observation"), Mapping) else {}
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    details = _entry_details(entry)
+    expected_baseline = entry.get("expected_baseline_result") or STATUS_UNKNOWN
+    expected_current = entry.get("expected_current_result") or STATUS_TIMEOUT
+    expected_baseline_reasons = sorted(str(reason) for reason in (entry.get("expected_baseline_reason_ids") or ()))
+    expected_current_reasons = sorted(str(reason) for reason in (entry.get("expected_current_reason_ids") or ()))
+    actual_baseline_reasons = sorted(str(reason) for reason in (baseline.get("observed_reason_ids") or ()))
+    actual_current_reasons = sorted(str(reason) for reason in (current.get("observed_reason_ids") or ()))
+    if baseline.get("log_status") == "present":
+        checks.append(_ok("timeout_transition_baseline_log_present", **details))
+    else:
+        checks.append(_failed("timeout_transition_baseline_log_present", **details))
+    if current.get("log_status") == "present":
+        checks.append(_ok("timeout_transition_current_log_present", **details))
+    else:
+        checks.append(_failed("timeout_transition_current_log_present", **details))
+    if baseline.get("final_result") == expected_baseline:
+        checks.append(_ok("timeout_transition_baseline_result", result=expected_baseline, **details))
+    else:
+        checks.append(
+            _failed(
+                "timeout_transition_baseline_result",
+                expected=expected_baseline,
+                actual=baseline.get("final_result") or MISSING_SENTINEL,
+                **details,
+            )
+        )
+    if current.get("final_result") == expected_current:
+        checks.append(_ok("timeout_transition_current_result", result=expected_current, **details))
+    else:
+        checks.append(
+            _failed(
+                "timeout_transition_current_result",
+                expected=expected_current,
+                actual=current.get("final_result") or MISSING_SENTINEL,
+                **details,
+            )
+        )
+    if actual_baseline_reasons == expected_baseline_reasons:
+        checks.append(_ok("timeout_transition_baseline_reasons", reasons=actual_baseline_reasons, **details))
+    else:
+        checks.append(
+            _failed(
+                "timeout_transition_baseline_reasons",
+                expected=expected_baseline_reasons,
+                actual=actual_baseline_reasons,
+                **details,
+            )
+        )
+    if actual_current_reasons == expected_current_reasons:
+        checks.append(_ok("timeout_transition_current_reasons", reasons=actual_current_reasons, **details))
+    else:
+        checks.append(
+            _failed(
+                "timeout_transition_current_reasons",
+                expected=expected_current_reasons,
+                actual=actual_current_reasons,
+                **details,
+            )
+        )
+    if _binary_direction_matches(entry, current):
+        checks.append(_ok("timeout_transition_current_binary_direction", **details))
+    else:
+        checks.append(
+            _failed(
+                "timeout_transition_current_binary_direction",
+                observed_binary1=current.get("observed_binary1_name") or MISSING_SENTINEL,
+                observed_binary2=current.get("observed_binary2_name") or MISSING_SENTINEL,
+                **details,
+            )
+        )
+    return checks
 
 
 def _entry_readiness(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
@@ -738,7 +989,30 @@ def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]
         return UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
     if _target_contains_deferred_call_unknown(target):
         return UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
+    if _target_contains_void_opaque_unknown(target):
+        return UNRESOLVED_OPAQUE_VOID_PROOF_STAGES
     return UNRESOLVED_GENERIC_PROOF_STAGES
+
+
+def _target_contains_void_opaque_unknown(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if isinstance(normalized, tuple):
+        if (
+            len(normalized) >= 2
+            and normalized[0] == "opaque_unknown"
+            and normalized[1] == "void"
+        ):
+            return True
+        return any(_target_contains_void_opaque_unknown(item) for item in normalized)
+    if isinstance(normalized, list):
+        return any(_target_contains_void_opaque_unknown(item) for item in normalized)
+    if isinstance(normalized, dict):
+        return any(
+            _target_contains_void_opaque_unknown(key)
+            or _target_contains_void_opaque_unknown(item)
+            for key, item in normalized.items()
+        )
+    return False
 
 
 def _target_contains_deferred_call_unknown(value: Any) -> bool:
@@ -1419,15 +1693,29 @@ def _expression_provenance_is_specific(value: Any) -> bool:
     root = node[0]
     if root == "expression":
         return _expression_node_is_specific(node[1])
+    if root == "runtime_ref":
+        return _runtime_ref_provenance_is_specific(node[1])
     if _nested_contains_missing(node):
         return False
     if root == "storage":
         return _nested_has_specific_leaf(node[1]) and not _nested_contains_missing(node[1])
-    if root == "runtime_ref":
-        return _nested_has_specific_leaf(node[1]) and not _nested_contains_missing(node[1])
     if root == "expression_digest":
         return len(node) >= 5 and _text_identity_is_specific(node[1]) and _nested_has_specific_leaf(node[4])
     return False
+
+
+def _runtime_ref_provenance_is_specific(value: Any) -> bool:
+    runtime_key = _normalize_nested_tuple(value)
+    if (
+        isinstance(runtime_key, tuple)
+        and len(runtime_key) >= 4
+        and runtime_key[0] == "opaque_unknown"
+        and runtime_key[1] == "void"
+        and runtime_key[2] is None
+        and runtime_key[3] is None
+    ):
+        return True
+    return _nested_has_specific_leaf(runtime_key) and not _nested_contains_missing(runtime_key)
 
 
 def _condition_structural_key_is_specific(value: Any) -> bool:
@@ -1622,7 +1910,7 @@ def _binary_direction_matches(entry: Mapping[str, Any], current: Mapping[str, An
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Phase 3 lane 6 unresolved_expression representatives.")
-    parser.add_argument("--gate-stage", choices=("pre-fix", "post-fix"), default="pre-fix")
+    parser.add_argument("--gate-stage", choices=("pre-fix", "post-fix", "timeout-transition-audit"), default="pre-fix")
     parser.add_argument("--baseline-raw-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--current-log-root", action="append", default=[])
@@ -1646,6 +1934,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         if args.require_ready:
             validate_phase3_unresolved_expression_lane6_post_fix_gate(_read_json(path))
+    elif args.gate_stage == "timeout-transition-audit":
+        path = build_phase3_unresolved_expression_timeout_transition_audit(
+            baseline_raw_dir=args.baseline_raw_dir,
+            output_dir=args.output_dir,
+            current_log_roots=current_roots,
+            baseline_log_roots=baseline_roots,
+        )
+        if args.require_ready:
+            validate_phase3_unresolved_expression_timeout_transition_audit(_read_json(path))
     else:
         path = build_phase3_unresolved_expression_lane6_manifest(
             baseline_raw_dir=args.baseline_raw_dir,

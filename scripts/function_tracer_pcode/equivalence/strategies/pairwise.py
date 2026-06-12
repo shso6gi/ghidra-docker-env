@@ -2209,7 +2209,59 @@ class PairwiseStrategy(CheckStrategy):
                     ),
                 ),
             )
+        if self._object_target_contains_void_opaque_unknown(object_target_key):
+            return (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "opaque_unknown_return_origin_resolution",
+                    required_evidence=(
+                        "object_target_key",
+                        "opaque_unknown_ref",
+                        "return_storage",
+                        "return_case_origin",
+                    ),
+                    description=(
+                        "Resolve the opaque return-value origin before lowering the "
+                        "unknown value into SMT."
+                    ),
+                ),
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "opaque_unknown_return_value_equivalence",
+                    required_evidence=(
+                        "left_return_value",
+                        "right_return_value",
+                        "guard_condition_pair",
+                        "return_width_policy",
+                    ),
+                    description=(
+                        "Prove the opaque return value is equivalent to the peer "
+                        "return value under the active guard and width policy."
+                    ),
+                ),
+            )
         return None
+
+    @classmethod
+    def _object_target_contains_void_opaque_unknown(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if (
+                len(normalized) >= 2
+                and normalized[0] == "opaque_unknown"
+                and normalized[1] == "void"
+            ):
+                return True
+            return any(cls._object_target_contains_void_opaque_unknown(item) for item in normalized)
+        if isinstance(normalized, list):
+            return any(cls._object_target_contains_void_opaque_unknown(item) for item in normalized)
+        if isinstance(normalized, dict):
+            return any(
+                cls._object_target_contains_void_opaque_unknown(key)
+                or cls._object_target_contains_void_opaque_unknown(item)
+                for key, item in normalized.items()
+            )
+        return False
 
     @classmethod
     def _object_target_contains_deferred_call_unknown(cls, value: Any) -> bool:

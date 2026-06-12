@@ -12,8 +12,8 @@ if [[ -x "$SCRIPT_DIR/.venv-pyghidra/bin/python" ]]; then
     DEFAULT_PYTHON_BIN="$SCRIPT_DIR/.venv-pyghidra/bin/python"
 fi
 
-export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_is_even}"
-export FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_is_even:B11_B12,fc_is_even:B10_B13}"
+export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_is_even,fc_is_odd}"
+export FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_is_even:B11_B12,fc_is_even:B10_B13,fc_is_odd:B1_B2}"
 export PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
 export OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives}"
 export BASE_PATH="${BASE_PATH:-$SCRIPT_DIR/targets/cate1/function_call_test}"
@@ -29,7 +29,7 @@ export RUNNER_TMP_ROOT="${RUNNER_TMP_ROOT:-${TMPDIR:-/tmp}/ghidra-equivalence-fu
 BASELINE_RAW_DIR="${BASELINE_RAW_DIR:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw}"
 BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"
 PHASE3_MANIFEST_PATH="${PHASE3_MANIFEST_PATH:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/audit/phase3_unresolved_expression_lane6/unresolved_expression_lane6_representatives.json}"
-PHASE3_MANIFEST_SHA256="${PHASE3_MANIFEST_SHA256:-7dfb69393e14bcf5879132a680ab4b3e83379828558ecb539505601808a2dd83}"
+PHASE3_MANIFEST_SHA256="${PHASE3_MANIFEST_SHA256:-807849f759a78caf473691ce999f3dabfb851da4ba50d19f5c71f1cd210ca5c4}"
 PHASE3_GATE_OUTPUT_DIR="${PHASE3_GATE_OUTPUT_DIR:-$OUTPUT_BASE_DIR/phase3_unresolved_expression_lane6_gate}"
 PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"
 

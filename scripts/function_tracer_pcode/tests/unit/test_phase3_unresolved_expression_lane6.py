@@ -25,9 +25,11 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     UNRESOLVED_DEFERRED_CALL_PROOF_STAGES,
     UNRESOLVED_EVIDENCE_KIND,
     UNRESOLVED_GENERIC_PROOF_STAGES,
+    UNRESOLVED_OPAQUE_VOID_PROOF_STAGES,
     UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES,
     UNRESOLVED_PROOF_KIND,
     _extra_current_unresolved_expression_observations_from_records,
+    _timeout_transition_readiness,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
     _pending_proof_obligations,
@@ -36,6 +38,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     _required_completion_actions,
     validate_phase3_unresolved_expression_lane6_manifest,
     validate_phase3_unresolved_expression_lane6_post_fix_gate,
+    validate_phase3_unresolved_expression_timeout_transition_audit,
 )
 
 
@@ -216,6 +219,58 @@ def _deferred_call_target():
                     ("expression_kind", "UNKNOWN"),
                     ("expression_bits", 32),
                     ("typed_expression_key", deferred_ref),
+                    ("contains_unsupported_smt_ops", False),
+                    ("lowering_status", "blocked_unknown_expression"),
+                ),
+            ),
+        ),
+    )
+    target[2] = tuple(left)
+    return tuple(target)
+
+
+def _opaque_void_runtime_ref():
+    return (
+        "runtime_ref",
+        (
+            "opaque_unknown",
+            "void",
+            None,
+            None,
+        ),
+    )
+
+
+def _opaque_void_target():
+    target = list(_unresolved_target())
+    left = list(target[2])
+    member = list(left[4])
+    return_case = list(member[3])
+    opaque_ref = _opaque_void_runtime_ref()
+    return_case[6] = opaque_ref
+    member[3] = tuple(return_case)
+    member[5] = ("value", opaque_ref)
+    left[4] = tuple(member)
+    left[5] = (
+        "unresolved_locations",
+        (
+            (
+                "unresolved_location",
+                "return_value",
+                (
+                    "unresolved_classification",
+                    ("location_scope", "return_value"),
+                    ("unresolved_kinds", ("opaque_unknown",)),
+                    ("unknown_refs", (("unknown_runtime_ref", opaque_ref[1]),)),
+                    ("unsupported_ops", ()),
+                ),
+                opaque_ref,
+                (
+                    "typed_lowering_evidence",
+                    ("location_scope", "return_value"),
+                    ("expression_kind", "UNKNOWN"),
+                    ("expression_bits", 32),
+                    ("typed_expression_key", opaque_ref),
                     ("contains_unsupported_smt_ops", False),
                     ("lowering_status", "blocked_unknown_expression"),
                 ),
@@ -411,6 +466,85 @@ def test_unresolved_expression_post_fix_gate_validator_rejects_ready_without_che
 
     with pytest.raises(ValueError, match="unresolved_expression_post_fix_checks_missing"):
         validate_phase3_unresolved_expression_lane6_post_fix_gate(manifest)
+
+
+def test_unresolved_expression_timeout_transition_audit_accepts_frozen_unknown_to_timeout():
+    entry = {
+        "id": "representative-recursive-sum-b10-b11-unresolved-to-timeout",
+        "category": "function_call",
+        "function": "fc_recursive_sum",
+        "binary_pair": "B10_B11",
+        "expected_observed_binary1_name": "function_call_test-mips64-clang-O1",
+        "expected_observed_binary2_name": "function_call_test-mips64-clang-O2",
+        "expected_baseline_result": "UNKNOWN",
+        "expected_current_result": "TIMEOUT",
+        "expected_baseline_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        "expected_current_reason_ids": ["solver_unknown_timeout"],
+        "baseline_observation": {
+            "log_status": "present",
+            "final_result": "UNKNOWN",
+            "observed_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        },
+        "current_observation": {
+            "log_status": "present",
+            "final_result": "TIMEOUT",
+            "observed_binary1_name": "function_call_test-mips64-clang-O1",
+            "observed_binary2_name": "function_call_test-mips64-clang-O2",
+            "observed_reason_ids": ["solver_unknown_timeout"],
+        },
+    }
+
+    readiness = _timeout_transition_readiness([entry])
+
+    assert readiness["ready"] is True
+    assert readiness["failed_kinds"] == []
+
+
+def test_unresolved_expression_timeout_transition_audit_rejects_reason_drift():
+    entry = {
+        "id": "representative-recursive-sum-b10-b11-unresolved-to-timeout",
+        "category": "function_call",
+        "function": "fc_recursive_sum",
+        "binary_pair": "B10_B11",
+        "expected_observed_binary1_name": "function_call_test-mips64-clang-O1",
+        "expected_observed_binary2_name": "function_call_test-mips64-clang-O2",
+        "expected_baseline_result": "UNKNOWN",
+        "expected_current_result": "TIMEOUT",
+        "expected_baseline_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        "expected_current_reason_ids": ["solver_unknown_timeout"],
+        "baseline_observation": {
+            "log_status": "present",
+            "final_result": "UNKNOWN",
+            "observed_reason_ids": ["sat_unsafety", "unresolved_expression"],
+        },
+        "current_observation": {
+            "log_status": "present",
+            "final_result": "TIMEOUT",
+            "observed_binary1_name": "function_call_test-mips64-clang-O1",
+            "observed_binary2_name": "function_call_test-mips64-clang-O2",
+            "observed_reason_ids": ["solver_unknown_timeout", "unresolved_expression"],
+        },
+    }
+
+    readiness = _timeout_transition_readiness([entry])
+
+    assert readiness["ready"] is False
+    assert "timeout_transition_current_reasons" in readiness["failed_kinds"]
+
+
+def test_unresolved_expression_timeout_transition_validator_rejects_failed_ready_flag():
+    manifest = {
+        "manifest_kind": "phase3_unresolved_expression_timeout_transition_representatives",
+        "phase3_lane6_timeout_transition_ready": False,
+        "readiness": {
+            "ready": False,
+            "failed_checks": [],
+            "failed_kinds": ["timeout_transition_current_reasons"],
+        },
+    }
+
+    with pytest.raises(ValueError, match="unresolved_expression_timeout_transition"):
+        validate_phase3_unresolved_expression_timeout_transition_audit(manifest)
 
 
 def test_unresolved_expression_post_fix_checks_reject_tampered_pre_fix_manifest_ready():
@@ -888,6 +1022,58 @@ def test_unresolved_expression_post_fix_accepts_deferred_call_pending_proof_acti
     assert failures == ()
     assert {action["proof_stage"] for action in _required_completion_actions(entry)} == set(
         UNRESOLVED_DEFERRED_CALL_PROOF_STAGES
+    )
+
+
+def test_unresolved_expression_opaque_void_target_uses_dedicated_proof_stages():
+    target = _opaque_void_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+
+    assert _object_target_key_is_specific_unresolved_expression(target)
+    assert [action.proof_stage for action in actions] == list(UNRESOLVED_OPAQUE_VOID_PROOF_STAGES)
+    assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
+    assert all("opaque" in " ".join(action.required_evidence) or "return" in " ".join(action.required_evidence) for action in actions)
+
+
+def test_unresolved_expression_post_fix_accepts_opaque_void_pending_proof_actions():
+    target = _opaque_void_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
+        "function": "fc_is_odd",
+        "binary_pair": "B1_B2",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    assert {action["proof_stage"] for action in _required_completion_actions(entry)} == set(
+        UNRESOLVED_OPAQUE_VOID_PROOF_STAGES
     )
 
 
