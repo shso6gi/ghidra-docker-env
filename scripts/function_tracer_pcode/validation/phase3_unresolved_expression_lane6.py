@@ -501,10 +501,17 @@ def _observation(
             "observed_reason_ids": [],
             "reason_records": [],
             "reason_record_tuples": [],
+            "pair_lowering_diagnostic_status_counts": {},
+            "pair_lowering_diagnostic_relation_counts": {},
         }
     payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
     reasons = _extract_final_unknown_reasons(payload)
     reason_records = [_reason_to_dict(reason) for reason in reasons]
+    unresolved_reason_records = [
+        reason
+        for reason in reason_records
+        if isinstance(reason, Mapping) and reason.get("reason_id") == "unresolved_expression"
+    ]
     return {
         "log_status": "present",
         "log_path": record.get("relative_log_path") or MISSING_SENTINEL,
@@ -526,6 +533,12 @@ def _observation(
             action.to_dict()
             for action in build_unknown_recovery_actions(reasons)
         ],
+        "pair_lowering_diagnostic_status_counts": (
+            _pair_lowering_diagnostic_status_counts(unresolved_reason_records)
+        ),
+        "pair_lowering_diagnostic_relation_counts": (
+            _pair_lowering_diagnostic_relation_counts(unresolved_reason_records)
+        ),
     }
 
 
@@ -556,6 +569,7 @@ def _extra_current_unresolved_expression_observations_from_records(
         if observation.get("final_result") != STATUS_UNKNOWN or not unresolved_records:
             continue
         diagnostic_statuses = _pair_lowering_diagnostic_status_counts(unresolved_records)
+        diagnostic_relations = _pair_lowering_diagnostic_relation_counts(unresolved_records)
         observations.append(
             {
                 "category": category,
@@ -566,6 +580,7 @@ def _extra_current_unresolved_expression_observations_from_records(
                 "unresolved_expression_reason_record_count": len(unresolved_records),
                 "observed_reason_ids": list(observation.get("observed_reason_ids") or ()),
                 "pair_lowering_diagnostic_status_counts": diagnostic_statuses,
+                "pair_lowering_diagnostic_relation_counts": diagnostic_relations,
             }
         )
     return tuple(observations)
@@ -591,6 +606,48 @@ def _pair_lowering_diagnostic_status(value: Any) -> Optional[str]:
         if isinstance(item, tuple) and len(item) == 2 and item[0] == "status":
             return str(item[1])
     return None
+
+
+def _pair_lowering_diagnostic_relation_counts(
+    reason_records: Sequence[Mapping[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for reason in reason_records or ():
+        target = _normalize_nested_tuple(reason.get("object_target_key"))
+        for diagnostic in _nested_tuples_with_tag(target, "pair_lowering_diagnostic"):
+            fields = _tuple_fields(diagnostic)
+            for field_name in (
+                "unknown_count_relation",
+                "value_shape_relation",
+                "phi_origin_shape_relation",
+            ):
+                relation = _relation_value(fields.get(field_name))
+                if relation is None:
+                    continue
+                key = f"{field_name}:{relation}"
+                counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _relation_value(value: Any) -> Optional[str]:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple):
+        return None
+    for item in relation[1:]:
+        if isinstance(item, tuple) and len(item) == 2 and item[0] == "relation":
+            return str(item[1])
+    return None
+
+
+def _tuple_fields(value: Any) -> Dict[str, Any]:
+    normalized = _normalize_nested_tuple(value)
+    if not isinstance(normalized, tuple):
+        return {}
+    return {
+        item[0]: item[1]
+        for item in normalized[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
 
 
 def _nested_tuples_with_tag(value: Any, tag: str) -> Tuple[Tuple[Any, ...], ...]:
@@ -1113,7 +1170,9 @@ def _unresolved_expression_completed_action_evidence_is_specific(
         return False
     if fields.get("status") != "complete":
         return False
-    if fields.get("proof_rule") != "phi_circular_full_shape_match":
+    if fields.get("proof_rule") == "phi_circular_full_shape_match":
+        return False
+    if fields.get("proof_rule") != "phi_circular_semantic_recurrence_proof":
         return False
     completed_stages = fields.get("completed_stages")
     if not isinstance(completed_stages, tuple) or stage not in completed_stages:
@@ -1451,7 +1510,7 @@ def _object_target_key_is_specific_unresolved_expression(value: Any) -> bool:
 
 def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
     diagnostic = _normalize_nested_tuple(value)
-    if not isinstance(diagnostic, tuple) or len(diagnostic) not in {11, 13}:
+    if not isinstance(diagnostic, tuple) or len(diagnostic) not in {11, 13, 14}:
         return False
     if diagnostic[0] != "pair_lowering_diagnostic":
         return False
@@ -1487,6 +1546,10 @@ def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
         fields.get("value_shape_relation"),
     ):
         return False
+    if "phi_origin_shape_relation" in fields and not _phi_origin_shape_relation_is_specific(
+        fields.get("phi_origin_shape_relation"),
+    ):
+        return False
     for key in ("left_guard_literals", "right_guard_literals"):
         literals = fields.get(key)
         if not isinstance(literals, tuple):
@@ -1502,6 +1565,59 @@ def _pair_lowering_diagnostic_is_specific(value: Any) -> bool:
         "guard_condition_pair",
         "summary_parameter_binding",
     )
+
+
+def _phi_origin_shape_relation_is_specific(value: Any) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) != 4:
+        return False
+    if relation[0] != "phi_origin_shape_relation":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in relation[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if fields.get("relation") not in {
+        "exact_match",
+        "origin_shape_mismatch",
+        "origin_shape_unavailable",
+    }:
+        return False
+    for key in ("left_origin_shapes", "right_origin_shapes"):
+        shapes = fields.get(key)
+        if not isinstance(shapes, tuple):
+            return False
+        if not all(
+            shape is None or _phi_origin_shape_is_specific(shape)
+            for shape in shapes
+        ):
+            return False
+    return True
+
+
+def _phi_origin_shape_is_specific(value: Any) -> bool:
+    shape = _normalize_nested_tuple(value)
+    if not isinstance(shape, tuple) or len(shape) < 2:
+        return False
+    if shape[0] != "pcode_op_cross_binary_shape":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in shape[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    if "relative_target_offset" in fields:
+        for key in ("relative_target_offset", "seq_time", "seq_order", "local_op_ordinal"):
+            if not _nonnegative_int_like(fields.get(key)):
+                return False
+        return _text_identity_is_specific(fields.get("target_space")) and fields.get("opcode") is not None
+    if "address_offset" in fields:
+        for key in ("address_offset", "seq_time", "seq_order", "block_index"):
+            if fields.get(key) is not None and not _nonnegative_int_like(fields.get(key)):
+                return False
+        return _text_identity_is_specific(fields.get("mnemonic"))
+    return False
 
 
 def _unknown_count_relation_is_specific(

@@ -3470,7 +3470,7 @@ def _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, 
     monkeypatch.setattr(strategy, "_unresolved_return_coverage_unknown_reasons", lambda *_args, **_kwargs: [])
 
 
-def test_pairwise_phi_circular_guard_same_origin_stays_unknown_without_completed_proof(monkeypatch):
+def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_proof(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = base_ctx
@@ -3497,11 +3497,23 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_without_completed
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
+    assert "pairwise_unresolved_lowered_unknown_keys_by_pair" not in base_ctx
     reason = result.unknown_reasons[0]
-    assert {obligation.proof_stage for obligation in reason.recovery_proof_obligations} == {
+    assert reason.object_evidence is not None
+    actions = build_unknown_recovery_actions(result.unknown_reasons)
+    assert {
+        action.proof_stage
+        for action in actions
+        if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    } == {
         "phi_circular_guard_condition_lowering",
         "recursive_summary_guard_equivalence",
     }
+    assert {
+        action.status
+        for action in actions
+        if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    } == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
     strategy._solve_query_twostage.assert_not_called()
 
 

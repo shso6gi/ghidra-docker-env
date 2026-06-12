@@ -488,6 +488,20 @@ class PairwiseStrategy(CheckStrategy):
                         case2=case2,
                         pair_id=pair_id,
                     )
+                    object_target_key = None
+                    completed_proof_evidence = None
+                    if lowering is None:
+                        object_target_key = self._unresolved_expression_object_target_key(
+                            base_ctx=base_ctx,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                        )
+                        completed_proof_evidence = (
+                            self._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
+                                object_target_key
+                            )
+                        )
                     if lowering is not None:
                         self._register_pairwise_extra_assertions(
                             base_ctx,
@@ -496,22 +510,24 @@ class PairwiseStrategy(CheckStrategy):
                         )
                         self._debug_print(
                             f"  Pair {pair_id}: unresolved runtime unknown "
-                            "lowered with object-derived equality assumption"
+                            "lowered with object-derived equality evidence"
                         )
                     else:
                         self._clear_pairwise_extra_assertions(base_ctx, pair_id)
                         unknown_count += 1
-                        object_target_key = self._unresolved_expression_object_target_key(
-                            base_ctx=base_ctx,
-                            case1=case1,
-                            case2=case2,
-                            pair_id=pair_id,
-                        )
-                        completed_proof_evidence = (
-                            self._unresolved_expression_completed_phi_circular_full_shape_evidence(
-                                object_target_key
+                        if object_target_key is None:
+                            object_target_key = self._unresolved_expression_object_target_key(
+                                base_ctx=base_ctx,
+                                case1=case1,
+                                case2=case2,
+                                pair_id=pair_id,
                             )
-                        )
+                        if completed_proof_evidence is None:
+                            completed_proof_evidence = (
+                                self._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
+                                    object_target_key
+                                )
+                            )
                         unknown_reasons.append(
                             make_unknown_reason(
                                 UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -525,7 +541,7 @@ class PairwiseStrategy(CheckStrategy):
                                 object_target_key=object_target_key,
                                 object_evidence=completed_proof_evidence,
                                 action_status=(
-                                    UnknownRecoveryActionStatus.PROOF_COMPLETE
+                                    UnknownRecoveryActionStatus.PENDING_PROOF
                                     if completed_proof_evidence is not None
                                     else None
                                 ),
@@ -1983,6 +1999,10 @@ class PairwiseStrategy(CheckStrategy):
         right_literals = self._phi_circular_case_condition_literals(case2)
         left_unknown_count = len(left_unknowns)
         right_unknown_count = len(right_unknowns)
+        origin_shape_relation = self._phi_circular_origin_shape_relation(
+            left_unknowns,
+            right_unknowns,
+        )
         contradictions = self._phi_circular_opposing_condition_literals(
             left_literals,
             right_literals,
@@ -2017,13 +2037,14 @@ class PairwiseStrategy(CheckStrategy):
                 "value_shape_relation",
                 self._phi_circular_value_shape_relation(left_value, right_value),
             ),
+            ("phi_origin_shape_relation", origin_shape_relation),
             ("left_guard_literals", left_literals),
             ("right_guard_literals", right_literals),
             ("opposing_guard_literals", contradictions),
             ("required_evidence", ("guard_condition_pair", "summary_parameter_binding")),
         )
 
-    def _unresolved_expression_completed_phi_circular_full_shape_evidence(
+    def _unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
         self,
         object_target_key: Tuple[Any, ...],
     ) -> Optional[Tuple[Any, ...]]:
@@ -2047,25 +2068,118 @@ class PairwiseStrategy(CheckStrategy):
             return None
         if fields.get("left_value_shape") != fields.get("right_value_shape"):
             return None
+        origin_relation = fields.get("phi_origin_shape_relation")
+        if not (
+            isinstance(origin_relation, tuple)
+            and ("relation", "exact_match") in origin_relation
+        ):
+            return None
         if fields.get("left_guard_literals") != fields.get("right_guard_literals"):
             return None
         if fields.get("opposing_guard_literals"):
             return None
         return (
-            "completed_unresolved_expression_proof",
+            "unresolved_expression_diagnostic_evidence",
             ("object_derived", True),
-            ("status", "complete"),
-            ("proof_rule", "phi_circular_full_shape_match"),
+            ("status", "object_evidence_collected"),
+            ("diagnostic_rule", "phi_circular_full_shape_match"),
             (
-                "completed_stages",
+                "pending_stages",
                 (
                     "phi_circular_guard_condition_lowering",
                     "recursive_summary_guard_equivalence",
                 ),
             ),
+            (
+                "required_semantic_proof",
+                (
+                    "phi_incoming_values",
+                    "guard_transition_relation",
+                    "recursive_summary_parameter_binding",
+                    "loop_summary_recurrence_semantics",
+                ),
+            ),
             ("object_target_key", object_target_key),
             ("pair_lowering_diagnostic", diagnostic),
         )
+
+    @classmethod
+    def _phi_circular_origin_shape_relation(
+        cls,
+        left_unknowns: Tuple[Any, ...],
+        right_unknowns: Tuple[Any, ...],
+    ) -> Tuple[Any, ...]:
+        left_shapes = tuple(
+            cls._phi_circular_unknown_origin_shape_key(unknown)
+            for unknown in left_unknowns
+        )
+        right_shapes = tuple(
+            cls._phi_circular_unknown_origin_shape_key(unknown)
+            for unknown in right_unknowns
+        )
+        if not left_shapes or not right_shapes:
+            relation = "origin_shape_unavailable"
+        elif any(shape is None for shape in left_shapes + right_shapes):
+            relation = "origin_shape_unavailable"
+        elif left_shapes == right_shapes:
+            relation = "exact_match"
+        else:
+            relation = "origin_shape_mismatch"
+        return (
+            "phi_origin_shape_relation",
+            ("relation", relation),
+            ("left_origin_shapes", left_shapes),
+            ("right_origin_shapes", right_shapes),
+        )
+
+    @classmethod
+    def _phi_circular_unknown_origin_shape_key(cls, unknown: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._unknown_expression_is_originated_phi_circular(unknown):
+            return None
+        runtime_ref = getattr(unknown, "runtime_ref", None)
+        origin_key = cls._stable_key_or_none(getattr(runtime_ref, "origin_ref", None))
+        return cls._pcode_origin_cross_binary_shape_key(origin_key)
+
+    @staticmethod
+    def _pcode_origin_cross_binary_shape_key(origin_key: Any) -> Optional[Tuple[Any, ...]]:
+        if not (isinstance(origin_key, tuple) and origin_key and origin_key[0] == "pcode_op"):
+            return None
+        if (
+            len(origin_key) >= 8
+            and isinstance(origin_key[2], tuple)
+            and len(origin_key[2]) == 3
+            and origin_key[2][0] == "function_entry"
+            and isinstance(origin_key[3], tuple)
+            and len(origin_key[3]) == 3
+            and origin_key[3][0] == "seq_target"
+        ):
+            try:
+                relative_target = int(origin_key[3][2]) - int(origin_key[2][2])
+                seq_time = int(origin_key[4])
+                seq_order = int(origin_key[5])
+                local_op_ordinal = int(origin_key[7])
+            except (TypeError, ValueError):
+                return None
+            return (
+                "pcode_op_cross_binary_shape",
+                ("function_entry_space", origin_key[2][1]),
+                ("target_space", origin_key[3][1]),
+                ("relative_target_offset", relative_target),
+                ("seq_time", seq_time),
+                ("seq_order", seq_order),
+                ("opcode", origin_key[6]),
+                ("local_op_ordinal", local_op_ordinal),
+            )
+        if len(origin_key) >= 6:
+            return (
+                "pcode_op_cross_binary_shape",
+                ("address_offset", origin_key[1]),
+                ("seq_time", origin_key[2]),
+                ("seq_order", origin_key[3]),
+                ("block_index", origin_key[4]),
+                ("mnemonic", origin_key[5]),
+            )
+        return None
 
     @classmethod
     def _find_pair_lowering_diagnostic(cls, value: Any) -> Optional[Tuple[Any, ...]]:
@@ -2085,6 +2199,35 @@ class PairwiseStrategy(CheckStrategy):
         if isinstance(normalized, dict):
             for item in normalized.values():
                 found = cls._find_pair_lowering_diagnostic(item)
+                if found is not None:
+                    return found
+        return None
+
+    @classmethod
+    def _find_phi_origin_shape_relation(cls, value: Any) -> Optional[Tuple[Any, ...]]:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if normalized and normalized[0] == "phi_origin_shape_relation":
+                if (
+                    len(normalized) == 2
+                    and isinstance(normalized[1], tuple)
+                    and normalized[1]
+                    and normalized[1][0] == "phi_origin_shape_relation"
+                ):
+                    return normalized[1]
+                return normalized
+            for item in normalized:
+                found = cls._find_phi_origin_shape_relation(item)
+                if found is not None:
+                    return found
+        if isinstance(normalized, list):
+            for item in normalized:
+                found = cls._find_phi_origin_shape_relation(item)
+                if found is not None:
+                    return found
+        if isinstance(normalized, dict):
+            for item in normalized.values():
+                found = cls._find_phi_origin_shape_relation(item)
                 if found is not None:
                     return found
         return None

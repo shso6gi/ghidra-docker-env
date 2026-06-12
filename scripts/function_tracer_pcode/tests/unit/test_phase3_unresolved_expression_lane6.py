@@ -285,7 +285,22 @@ def _opaque_void_target():
 
 
 def _phi_circular_unknown(binary_id: str, entry: int) -> Expression:
-    pcode_ref = _pcode(binary_id, entry + 0x20, mnemonic="MULTIEQUAL")
+    pcode_ref = PcodeOpRef(
+        address_offset=entry + 0x20,
+        seq_time=98,
+        seq_order=0,
+        block_index=0,
+        mnemonic="MULTIEQUAL",
+        input_sizes=(4, 4),
+        output_size=4,
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=entry,
+        target_space="ram",
+        target_offset=entry + 0x20,
+        opcode=60,
+        local_op_ordinal=0,
+    )
     return Expression.unknown(
         "phi_circular",
         runtime_ref=UnknownValueRef.phi_circular(pcode_op_ref=pcode_ref),
@@ -1116,7 +1131,7 @@ def test_phi_circular_pair_diagnostic_does_not_change_target_identity():
     assert failures == ()
 
 
-def test_phi_circular_full_shape_match_completed_proof_gate_passes_without_eq_recovery():
+def test_phi_circular_full_shape_match_diagnostic_evidence_keeps_gate_pending():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
     right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
@@ -1126,7 +1141,107 @@ def test_phi_circular_full_shape_match_completed_proof_gate_passes_without_eq_re
         case2=right_case,
         pair_id="(0,0)",
     )
-    evidence = strategy._unresolved_expression_completed_phi_circular_full_shape_evidence(target)
+    evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(target)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        object_evidence=evidence,
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    assert evidence is not None
+    assert evidence[0] == "unresolved_expression_diagnostic_evidence"
+    assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
+    assert all(action.object_evidence == evidence for action in actions)
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+
+
+def test_phi_circular_shape_mismatch_does_not_build_completed_proof_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 1)
+    base_ctx = {"analysis1": left_analysis, "analysis2": right_analysis}
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx=base_ctx,
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,1)",
+    )
+    evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(target)
+
+    assert evidence is None
+
+
+def test_phi_circular_full_shape_match_rejects_completed_action_without_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-full-shape",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
+
+
+def test_phi_circular_full_shape_match_rejects_completed_action_with_diagnostic_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    evidence = strategy._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(target)
     reason = make_unknown_reason(
         UnknownReasonId.UNRESOLVED_EXPRESSION,
         stage="S_PAIRWISE",
@@ -1150,16 +1265,16 @@ def test_phi_circular_full_shape_match_completed_proof_gate_passes_without_eq_re
         },
     }
 
-    assert evidence is not None
-    assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PROOF_COMPLETE.value}
-    assert all(action.object_evidence == evidence for action in actions)
     status, failures = _post_fix_status(entry)
 
-    assert status == "proof_complete"
-    assert failures == ()
+    assert evidence is not None
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_completed_proof_evidence_invalid"
+    ]
 
 
-def test_phi_circular_full_shape_match_rejects_completed_action_without_evidence():
+def test_phi_circular_full_shape_match_rejects_stale_completed_proof_evidence():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
     right_analysis, right_case = _phi_guard_case("B12", 0x2000, 0)
@@ -1169,12 +1284,33 @@ def test_phi_circular_full_shape_match_rejects_completed_action_without_evidence
         case2=right_case,
         pair_id="(0,0)",
     )
+    diagnostic = next(
+        item
+        for item in target
+        if isinstance(item, tuple) and item and item[0] == "pair_lowering_diagnostic"
+    )
+    stale_evidence = (
+        "completed_unresolved_expression_proof",
+        ("object_derived", True),
+        ("status", "complete"),
+        ("proof_rule", "phi_circular_full_shape_match"),
+        (
+            "completed_stages",
+            (
+                "phi_circular_guard_condition_lowering",
+                "recursive_summary_guard_equivalence",
+            ),
+        ),
+        ("object_target_key", target),
+        ("pair_lowering_diagnostic", diagnostic),
+    )
     reason = make_unknown_reason(
         UnknownReasonId.UNRESOLVED_EXPRESSION,
         stage="S_PAIRWISE",
         pair_or_case="(0,0)",
         evidence_kind=UNRESOLVED_EVIDENCE_KIND,
         object_target_key=target,
+        object_evidence=stale_evidence,
         action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
         recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
     )
@@ -1566,6 +1702,7 @@ def test_extra_current_unresolved_expression_observations_exclude_manifest_entri
             "unresolved_expression_reason_record_count": 1,
             "observed_reason_ids": ["return_coverage_gap", "unresolved_expression"],
             "pair_lowering_diagnostic_status_counts": {},
+            "pair_lowering_diagnostic_relation_counts": {},
         },
     )
 
@@ -1596,4 +1733,9 @@ def test_extra_current_unresolved_expression_observations_report_pair_diagnostic
 
     assert observations[0]["pair_lowering_diagnostic_status_counts"] == {
         "value_shape_mismatch": 1,
+    }
+    assert observations[0]["pair_lowering_diagnostic_relation_counts"] == {
+        "phi_origin_shape_relation:exact_match": 1,
+        "unknown_count_relation:equal": 1,
+        "value_shape_relation:summary_parameter_shift": 1,
     }
