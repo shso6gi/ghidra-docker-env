@@ -1836,9 +1836,11 @@ class PairwiseStrategy(CheckStrategy):
                     self._unresolved_expression_typed_lowering_evidence(
                         value_expr,
                         "return_value",
+                        case_value_expr=value_expr,
                     ),
                 )
             )
+        case_value_expr = getattr(case, "value_expr", None)
         for index, condition in enumerate(getattr(case, "conditions", None) or ()):
             expression = getattr(condition, "expression", None)
             if not self._expression_contains_unresolved(expression):
@@ -1857,6 +1859,8 @@ class PairwiseStrategy(CheckStrategy):
                     self._unresolved_expression_typed_lowering_evidence(
                         expression,
                         "guard_condition",
+                        condition=condition,
+                        case_value_expr=case_value_expr,
                     ),
                 )
             )
@@ -1866,6 +1870,9 @@ class PairwiseStrategy(CheckStrategy):
         self,
         expr: Any,
         location_scope: str,
+        *,
+        condition: Any = None,
+        case_value_expr: Any = None,
     ) -> Tuple[Any, ...]:
         expr_type = getattr(expr, "expr_type", None)
         expr_kind = getattr(expr_type, "name", None)
@@ -1885,7 +1892,7 @@ class PairwiseStrategy(CheckStrategy):
             status = "blocked_unsupported_smt_op"
         else:
             status = "blocked_nested_unresolved_expression"
-        return (
+        evidence: List[Any] = [
             "typed_lowering_evidence",
             ("location_scope", str(location_scope)),
             ("expression_kind", str(expr_kind or "missing")),
@@ -1893,7 +1900,119 @@ class PairwiseStrategy(CheckStrategy):
             ("typed_expression_key", self._expression_runtime_object_key(expr)),
             ("contains_unsupported_smt_ops", unsupported),
             ("lowering_status", status),
+        ]
+        phi_evidence = self._phi_circular_typed_lowering_evidence(
+            expr,
+            location_scope,
+            condition=condition,
+            case_value_expr=case_value_expr,
         )
+        if phi_evidence is not None:
+            evidence.append(phi_evidence)
+        return tuple(evidence)
+
+    def _phi_circular_typed_lowering_evidence(
+        self,
+        expr: Any,
+        location_scope: str,
+        *,
+        condition: Any = None,
+        case_value_expr: Any = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        phi_origins = self._collect_phi_circular_origin_details(expr)
+        if not phi_origins:
+            return None
+        guard_condition_key = (
+            self._return_condition_object_key(condition)
+            if condition is not None
+            else None
+        )
+        summary_parameter_refs = self._collect_summary_parameter_refs(
+            expr,
+            case_value_expr,
+        )
+        return (
+            "phi_circular_evidence",
+            ("location_scope", str(location_scope)),
+            ("phi_origins", phi_origins),
+            ("guard_condition_key", guard_condition_key),
+            ("summary_parameter_refs", summary_parameter_refs),
+            ("relation_status", "pending_guard_summary_relation_proof"),
+        )
+
+    def _collect_phi_circular_origin_details(self, expr: Any) -> Tuple[Any, ...]:
+        details: List[Tuple[Any, ...]] = []
+        seen = set()
+        for unknown in self._collect_unknown_expression_nodes(expr):
+            runtime_ref = getattr(unknown, "runtime_ref", None)
+            if getattr(runtime_ref, "kind", None) != "opaque_unknown":
+                continue
+            if getattr(runtime_ref, "reason", None) != "phi_circular":
+                continue
+            if getattr(runtime_ref, "origin_kind", None) != "multiequal_pcode_op":
+                continue
+            origin_key = self._stable_key_or_none(getattr(runtime_ref, "origin_ref", None))
+            if origin_key is None:
+                continue
+            item = (
+                "phi_origin",
+                ("runtime_ref", self._diagnostic_key_or_semantic_key_or_stable_key_or_none(runtime_ref)),
+                ("origin_kind", "multiequal_pcode_op"),
+                ("pcode_op_ref", origin_key),
+                ("unknown_expression", self._expression_runtime_object_key(unknown)),
+                ("bit_width", int(expression_smt_bit_width(unknown) or 0) or None),
+            )
+            if item in seen:
+                continue
+            seen.add(item)
+            details.append(item)
+        return tuple(sorted(details, key=repr))
+
+    def _collect_summary_parameter_refs(self, *expressions: Any) -> Tuple[Any, ...]:
+        refs: List[Tuple[Any, ...]] = []
+        seen = set()
+        for expr in expressions:
+            for parameter in self._collect_parameter_expression_nodes(expr):
+                name = str(getattr(parameter, "name", "") or "")
+                raw_index = getattr(parameter, "value", None)
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    index = None
+                if not (name.startswith("summary_rec_") or (index is not None and index >= 10000)):
+                    continue
+                item = (
+                    "summary_parameter",
+                    ("index", index),
+                    ("name", name or None),
+                    ("bit_width", int(expression_smt_bit_width(parameter) or 0) or None),
+                    ("expression", self._expression_runtime_object_key(parameter)),
+                )
+                if item in seen:
+                    continue
+                seen.add(item)
+                refs.append(item)
+        return tuple(sorted(refs, key=repr))
+
+    def _collect_parameter_expression_nodes(self, expr: Any) -> Tuple[Any, ...]:
+        result: List[Any] = []
+        self._collect_parameter_expression_nodes_into(expr, result)
+        return tuple(result)
+
+    def _collect_parameter_expression_nodes_into(self, expr: Any, result: List[Any]) -> None:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return
+        if expr.expr_type == ExpressionType.PARAMETER:
+            result.append(expr)
+            return
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for condition, value in expr.value:
+                if condition is not None:
+                    self._collect_parameter_expression_nodes_into(condition.expression, result)
+                self._collect_parameter_expression_nodes_into(value, result)
+            return
+        for operand in getattr(expr, "operands", []) or []:
+            self._collect_parameter_expression_nodes_into(operand, result)
 
     def _unresolved_expression_location_classification(
         self,

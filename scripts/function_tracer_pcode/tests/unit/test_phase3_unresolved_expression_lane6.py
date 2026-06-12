@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     PcodeOpRef,
     ReturnInfo,
+    UnknownValueRef,
 )
 from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6 import (
     UNRESOLVED_EVIDENCE_KIND,
@@ -163,6 +164,106 @@ def _originated_phi_target():
     )
     target[3] = tuple(right)
     return tuple(target)
+
+
+def _phi_circular_unknown(binary_id: str, entry: int) -> Expression:
+    pcode_ref = _pcode(binary_id, entry + 0x20, mnemonic="MULTIEQUAL")
+    return Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.phi_circular(pcode_op_ref=pcode_ref),
+    ).clone_with(size=4)
+
+
+def _phi_guard_case(binary_id: str, entry: int, index: int):
+    summary_value = Expression.parameter(f"summary_rec_{10000 + index}", 10000 + index, size=4)
+    phi_unknown = _phi_circular_unknown(binary_id, entry)
+    guard = Condition(
+        Expression.binary_op(
+            "INT_SLESS",
+            Expression.unary_op("INT_2COMP", phi_unknown),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    ret = ReturnInfo(
+        address=hex(entry + 0x20),
+        value=summary_value,
+        conditions=[guard],
+        pcode_identity=f"{binary_id}:return:{index}",
+        pcode_order=index,
+        pcode_time=entry + 0x20,
+        pcode_op_ref=_pcode(binary_id, entry + 0x20),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_is_even",
+        entry_point=hex(entry),
+        parameters=[_param("x")],
+        returns=[ret],
+        return_type="int",
+        binary_id=binary_id,
+    )
+    case = ReturnCase(
+        index=index,
+        conditions=ret.conditions,
+        value_expr=ret.value,
+        return_info=ret,
+        return_type="int",
+        parameters=analysis.parameters,
+        source_indices=[index],
+        comparison_surface=analysis.get_comparison_surface(),
+    )
+    return analysis, case
+
+
+def _actual_phi_guard_target():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 1)
+    return strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,1)",
+    )
+
+
+def _replace_first_tuple(value, tag, replacement_fn):
+    if isinstance(value, tuple):
+        if value and value[0] == tag:
+            return replacement_fn(value), True
+        changed = False
+        items = []
+        for item in value:
+            new_item, item_changed = _replace_first_tuple(item, tag, replacement_fn)
+            changed = changed or item_changed
+            items.append(new_item)
+            if item_changed:
+                items.extend(value[len(items):])
+                break
+        return tuple(items), changed
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for item in value:
+            new_item, item_changed = _replace_first_tuple(item, tag, replacement_fn)
+            changed = changed or item_changed
+            items.append(new_item)
+            if item_changed:
+                items.extend(value[len(items):])
+                break
+        return items, changed
+    if isinstance(value, dict):
+        result = {}
+        changed = False
+        for key, item in value.items():
+            if changed:
+                result[key] = item
+                continue
+            new_item, item_changed = _replace_first_tuple(item, tag, replacement_fn)
+            changed = changed or item_changed
+            result[key] = new_item
+        return result, changed
+    return value, False
 
 
 def _with_typed_lowering_evidence(target):
@@ -605,6 +706,60 @@ def test_unresolved_expression_post_fix_accepts_typed_lowering_detail_added_to_t
         UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
     )
     assert all(obligation["proof_obligation_id"] for obligation in obligations)
+
+
+def test_phi_circular_guard_target_carries_object_detail_proof_evidence():
+    target = _actual_phi_guard_target()
+
+    assert _object_target_key_is_specific_unresolved_expression(target)
+    assert _nested_contains(target, "typed_lowering_evidence")
+    assert _nested_contains(target, "phi_circular_evidence")
+    assert _nested_contains(target, "phi_origin")
+    assert _nested_contains(target, "summary_parameter")
+    assert _nested_contains(target, ("relation_status", "pending_guard_summary_relation_proof"))
+    assert _nested_contains(target, "guard_condition_key")
+
+
+def test_phi_circular_guard_target_accepts_empty_summary_binding_when_no_parameter_binding_exists():
+    target = _actual_phi_guard_target()
+
+    def drop_summary_refs(evidence):
+        updated = list(evidence)
+        updated[4] = ("summary_parameter_refs", ())
+        return tuple(updated)
+
+    tampered, changed = _replace_first_tuple(target, "phi_circular_evidence", drop_summary_refs)
+
+    assert changed
+    assert _object_target_key_is_specific_unresolved_expression(tampered)
+
+
+def test_phi_circular_guard_target_rejects_malformed_summary_binding_evidence():
+    target = _actual_phi_guard_target()
+
+    def break_summary_refs(evidence):
+        updated = list(evidence)
+        updated[4] = ("summary_parameter_refs", ("raw-summary-binding",))
+        return tuple(updated)
+
+    tampered, changed = _replace_first_tuple(target, "phi_circular_evidence", break_summary_refs)
+
+    assert changed
+    assert not _object_target_key_is_specific_unresolved_expression(tampered)
+
+
+def test_phi_circular_guard_target_rejects_missing_origin_pcode_evidence():
+    target = _actual_phi_guard_target()
+
+    def drop_pcode_origin(origin):
+        updated = list(origin)
+        updated[3] = ("pcode_op_ref", "<missing>")
+        return tuple(updated)
+
+    tampered, changed = _replace_first_tuple(target, "phi_origin", drop_pcode_origin)
+
+    assert changed
+    assert not _object_target_key_is_specific_unresolved_expression(tampered)
 
 
 def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages():

@@ -1075,7 +1075,7 @@ def _unresolved_location_is_specific(value: Any) -> bool:
 
 def _typed_lowering_evidence_is_specific(value: Any, expected_scope: str) -> bool:
     evidence = _normalize_nested_tuple(value)
-    if not isinstance(evidence, tuple) or len(evidence) != 7:
+    if not isinstance(evidence, tuple) or len(evidence) not in {7, 8}:
         return False
     if evidence[0] != "typed_lowering_evidence":
         return False
@@ -1085,7 +1085,7 @@ def _typed_lowering_evidence_is_specific(value: Any, expected_scope: str) -> boo
     typed_expression_key = evidence[4]
     unsupported = evidence[5]
     lowering_status = evidence[6]
-    return (
+    base_ok = (
         isinstance(scope, tuple)
         and len(scope) == 2
         and scope == ("location_scope", expected_scope)
@@ -1113,6 +1113,132 @@ def _typed_lowering_evidence_is_specific(value: Any, expected_scope: str) -> boo
             "blocked_unsupported_smt_op",
             "blocked_nested_unresolved_expression",
         }
+    )
+    if not base_ok:
+        return False
+    if len(evidence) == 7:
+        return True
+    return _phi_circular_evidence_is_specific(evidence[7], expected_scope)
+
+
+def _phi_circular_evidence_is_specific(value: Any, expected_scope: str) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or len(evidence) != 6:
+        return False
+    if evidence[0] != "phi_circular_evidence":
+        return False
+    scope = evidence[1]
+    origins = evidence[2]
+    guard_condition_key = evidence[3]
+    summary_parameter_refs = evidence[4]
+    relation_status = evidence[5]
+    if scope != ("location_scope", expected_scope):
+        return False
+    if (
+        not isinstance(origins, tuple)
+        or len(origins) != 2
+        or origins[0] != "phi_origins"
+        or not isinstance(origins[1], tuple)
+        or not origins[1]
+        or not all(_phi_circular_origin_detail_is_specific(origin) for origin in origins[1])
+    ):
+        return False
+    if (
+        not isinstance(guard_condition_key, tuple)
+        or len(guard_condition_key) != 2
+        or guard_condition_key[0] != "guard_condition_key"
+    ):
+        return False
+    guard_key = guard_condition_key[1]
+    if expected_scope == "guard_condition":
+        if not _return_guard_like_key_is_specific(guard_key):
+            return False
+    elif guard_key is not None and not _return_guard_like_key_is_specific(guard_key):
+        return False
+    if (
+        not isinstance(summary_parameter_refs, tuple)
+        or len(summary_parameter_refs) != 2
+        or summary_parameter_refs[0] != "summary_parameter_refs"
+        or not isinstance(summary_parameter_refs[1], tuple)
+    ):
+        return False
+    refs = summary_parameter_refs[1]
+    if not all(_summary_parameter_ref_is_specific(ref) for ref in refs):
+        return False
+    return relation_status == ("relation_status", "pending_guard_summary_relation_proof")
+
+
+def _phi_circular_origin_detail_is_specific(value: Any) -> bool:
+    detail = _normalize_nested_tuple(value)
+    if not isinstance(detail, tuple) or len(detail) != 6:
+        return False
+    if detail[0] != "phi_origin":
+        return False
+    runtime_ref = detail[1]
+    origin_kind = detail[2]
+    pcode_op_ref = detail[3]
+    unknown_expression = detail[4]
+    bit_width = detail[5]
+    return (
+        isinstance(runtime_ref, tuple)
+        and len(runtime_ref) == 2
+        and runtime_ref[0] == "runtime_ref"
+        and _nested_has_specific_leaf(runtime_ref[1])
+        and not _nested_contains_missing_sentinel(runtime_ref[1])
+        and origin_kind == ("origin_kind", "multiequal_pcode_op")
+        and isinstance(pcode_op_ref, tuple)
+        and len(pcode_op_ref) == 2
+        and pcode_op_ref[0] == "pcode_op_ref"
+        and _pcode_ref_is_specific(pcode_op_ref[1])
+        and isinstance(unknown_expression, tuple)
+        and len(unknown_expression) == 2
+        and unknown_expression[0] == "unknown_expression"
+        and _nested_has_specific_leaf(unknown_expression[1])
+        and not _nested_contains_missing_sentinel(unknown_expression[1])
+        and isinstance(bit_width, tuple)
+        and len(bit_width) == 2
+        and bit_width[0] == "bit_width"
+        and _nonnegative_int_like(bit_width[1])
+        and int(bit_width[1]) > 0
+    )
+
+
+def _summary_parameter_ref_is_specific(value: Any) -> bool:
+    ref = _normalize_nested_tuple(value)
+    if not isinstance(ref, tuple) or len(ref) != 5:
+        return False
+    if ref[0] != "summary_parameter":
+        return False
+    index = ref[1]
+    name = ref[2]
+    bit_width = ref[3]
+    expression = ref[4]
+    if (
+        not isinstance(index, tuple)
+        or len(index) != 2
+        or index[0] != "index"
+        or not _nonnegative_int_like(index[1])
+    ):
+        return False
+    if (
+        not isinstance(name, tuple)
+        or len(name) != 2
+        or name[0] != "name"
+        or (name[1] is not None and not _text_identity_is_specific(name[1]))
+    ):
+        return False
+    if not (int(index[1]) >= 10000 or str(name[1] or "").startswith("summary_rec_")):
+        return False
+    return (
+        isinstance(bit_width, tuple)
+        and len(bit_width) == 2
+        and bit_width[0] == "bit_width"
+        and _nonnegative_int_like(bit_width[1])
+        and int(bit_width[1]) > 0
+        and isinstance(expression, tuple)
+        and len(expression) == 2
+        and expression[0] == "expression"
+        and _expression_provenance_is_specific(expression[1])
     )
 
 
