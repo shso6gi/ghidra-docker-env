@@ -375,19 +375,66 @@ class ReturnAnalyzer:
         self,
         varnode,
     ) -> Tuple[PcodeOpRef, ...]:
+        refs: List[PcodeOpRef] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        for pcode_op in self._return_value_producer_chain(varnode):
+            ref = PcodeOpRef.from_pcode_op(
+                pcode_op,
+                binary_id=self._binary_id,
+                program_uid=self._program_identity(),
+                function_entry=self._current_function_entry_address(),
+            )
+            if ref is None:
+                continue
+            key = ref.stable_key()
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(ref)
+        return tuple(refs)
+
+    @staticmethod
+    def _return_value_producer_chain(varnode, *, max_depth: int = 4) -> Tuple[Any, ...]:
+        """Collect the direct return producer plus transparent single-input producers."""
         if varnode is None:
             return ()
-        get_def = getattr(varnode, "getDef", None)
-        pcode_op = get_def() if callable(get_def) else None
-        if pcode_op is None:
-            return ()
-        ref = PcodeOpRef.from_pcode_op(
-            pcode_op,
-            binary_id=self._binary_id,
-            program_uid=self._program_identity(),
-            function_entry=self._current_function_entry_address(),
-        )
-        return (ref,) if ref is not None else ()
+        refs: List[Any] = []
+        current = varnode
+        seen_varnodes: Set[int] = set()
+        transparent_single_input_ops = {
+            "COPY",
+            "CAST",
+            "INT_SEXT",
+            "INT_ZEXT",
+            "SUBPIECE",
+        }
+        for _depth in range(max(1, int(max_depth))):
+            marker = id(current)
+            if marker in seen_varnodes:
+                break
+            seen_varnodes.add(marker)
+            get_def = getattr(current, "getDef", None)
+            pcode_op = get_def() if callable(get_def) else None
+            if pcode_op is None:
+                break
+            refs.append(pcode_op)
+            try:
+                mnemonic = str(pcode_op.getMnemonic() or "")
+            except Exception:
+                break
+            if mnemonic not in transparent_single_input_ops:
+                break
+            try:
+                input_count = int(pcode_op.getNumInputs())
+            except Exception:
+                break
+            if input_count != 1:
+                break
+            try:
+                current = pcode_op.getInput(0)
+            except Exception:
+                break
+        return tuple(refs)
 
     def _site_metadata_with_return_value_pcode_op_refs(
         self,

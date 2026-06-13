@@ -22,11 +22,13 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
 )
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
+    UnknownRecoveryProofObligation,
     UnknownRecoveryProofKind,
     UnknownReasonRecord,
     UnknownReasonId,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
+    make_unknown_reason,
 )
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
@@ -759,7 +761,9 @@ def _return_coverage_completion_evidence_without_proof_id(action):
     return evidence
 
 
-def _sat_unsafety_resolution_evidence(action, **overrides):
+def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrides):
+    if counterexample_raw is None:
+        counterexample_raw = {"x_1": 0, "x_2": 0}
     evidence = {
         "object_derived": True,
         "status": "complete",
@@ -777,6 +781,9 @@ def _sat_unsafety_resolution_evidence(action, **overrides):
                 "model_ref": ("query_model", "pair", action.pair_or_case),
                 "fixed_model_assertion_count": 2,
                 "counterexample_symbol_keys": ("x_1", "x_2"),
+                "counterexample_model_sha256": (
+                    PairwiseStrategy._counterexample_model_fingerprint(counterexample_raw)
+                ),
             },
             "active_unsafety_discharge": {
                 "status": "discharged",
@@ -1404,29 +1411,88 @@ def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch
     strategy = MonolithicStrategy(formula_builder, _SatSolverRunner(), debug=False)
     monkeypatch.setattr(strategy, "_collect_monolithic_return_coverage_unsafety_reasons", lambda *_args: [])
 
-    def _validated_replay(*_args):
+    def _validated_counterexample(*_args):
         strategy._last_counterexample_replay_fixed_model_assertion_count = 2
         return True
 
-    monkeypatch.setattr(strategy, "_counterexample_is_decisive_across_case_split", _validated_replay)
+    monkeypatch.setattr(strategy, "_counterexample_is_decisive_across_case_split", _validated_counterexample)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.evidence_refs == ("counterexample_replay_missing",)
+    assert not any(
+        evidence.get("proof_source") == "monolithic_global_counterexample_validation"
+        for evidence in analysis1.completed_recovery_proof_evidence
+    )
+
+
+def test_monolithic_same_function_sat_accepts_prior_completed_counterexample_replay(monkeypatch):
+    class _SatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(
+                results=[
+                    SolverResult(
+                        "fake",
+                        SolverStatus.SAT,
+                        elapsed_time=0.01,
+                        model={"x_1": 0, "x_2": 0},
+                    )
+                ]
+            )
+
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    strategy = MonolithicStrategy(formula_builder, _SatSolverRunner(), debug=False)
+    monkeypatch.setattr(strategy, "_collect_monolithic_return_coverage_unsafety_reasons", lambda *_args: [])
+    monkeypatch.setattr(strategy, "_counterexample_is_decisive_across_case_split", lambda *_args: True)
+    pending_reason = strategy._make_sat_unsafety_unknown_reason(
+        ("counterexample_replay_missing",),
+        analysis1,
+        analysis2,
+        case1=None,
+        case2=None,
+        pair_id="monolithic",
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    action = build_unknown_recovery_actions([pending_reason])[0]
+    analysis1.completed_recovery_proof_evidence = (
+        _sat_unsafety_resolution_evidence(action),
+    )
 
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is False
     assert result.counterexample_raw == {"x_1": 0, "x_2": 0}
     assert result.unknown_reasons == []
-    proof_evidence = tuple(
-        evidence
-        for evidence in analysis1.completed_recovery_proof_evidence
-        if evidence.get("proof_source") == "monolithic_global_counterexample_validation"
-    )
-    assert proof_evidence
-    assert (
-        proof_evidence[0]["proof_content"]["counterexample_replay"][
-            "fixed_model_assertion_count"
-        ]
-        == 2
-    )
 
 
 def test_monolithic_same_function_sat_with_unfixed_model_is_unknown():
@@ -1480,8 +1546,86 @@ def test_monolithic_same_function_sat_with_unfixed_model_is_unknown():
 
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    assert reason.recovery_proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+    assert reason.proof_stage == "sat_counterexample_safety"
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.evidence_kind == "case_partition_replay"
+    action = build_unknown_recovery_actions([reason])[0]
+    assert action.reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    assert action.proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+    assert action.proof_stage == "sat_counterexample_safety"
+    assert action.status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert analysis1.completed_recovery_proof_evidence == ()
+
+
+def test_sat_counterexample_ambiguous_reason_has_object_proof_action():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type="int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type="int",
+        parameters=analysis2.parameters,
+    )
+
+    reason = strategy._make_sat_counterexample_ambiguous_unknown_reason(
+        ("with-ineq",),
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+
+    assert reason.reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    assert reason.decision_effect == "blocks_disequivalence"
+    assert reason.reason_scope == "pair"
+    assert reason.recovery_proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+    assert reason.proof_stage == "sat_counterexample_safety"
+    assert reason.evidence_kind == "case_partition_replay"
+    assert reason.object_target_key[0] == "sat_counterexample_ambiguous"
+    assert reason.object_evidence["object_derived"] is True
+    assert reason.object_evidence["ambiguity_evidence_refs"] == ("with-ineq",)
+    assert action.count_kind == "proof_action"
+    assert action.reason_id == UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+    assert action.proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+    assert action.proof_stage == "sat_counterexample_safety"
+    assert action.evidence_kind == "case_partition_replay"
+    assert action.status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert action.proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value,
+        "sat_counterexample_safety",
+        UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
+        "case_partition_replay",
+        reason.object_target_key,
+    )
 
 
 def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(monkeypatch):
@@ -2415,6 +2559,19 @@ def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monk
             counterexample_raw={"x_1": 0, "x_2": 0},
         )
     )
+    pending_reason = strategy._make_sat_unsafety_unknown_reason(
+        ("counterexample_replay_missing",),
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([pending_reason])[0]
+    analysis1.completed_recovery_proof_evidence = (
+        _sat_unsafety_resolution_evidence(action),
+    )
 
     result = strategy.check(analysis1, analysis2)
 
@@ -2422,7 +2579,72 @@ def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monk
     assert result.sat_pairs == 1
     assert result.unknown_pairs == 0
     assert result.unknown_reasons == []
-    assert any(
+
+
+def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexample_replay(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="same_func",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis is analysis1 else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_args, **_kwargs: True,
+    )
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.evidence_refs == ("counterexample_replay_missing",)
+    assert not any(
         evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
         for evidence in analysis1.completed_recovery_proof_evidence
     )
@@ -2604,6 +2826,17 @@ def test_sat_unsafety_completed_proof_requires_object_derived_proof_content():
 def test_sat_unsafety_completed_proof_requires_fixed_counterexample_replay_model():
     action = _sat_unsafety_resolution_action()
 
+    missing_hash = deepcopy(_sat_unsafety_resolution_evidence(action))
+    missing_hash["proof_content"]["counterexample_replay"].pop(
+        "counterexample_model_sha256",
+        None,
+    )
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(missing_hash) is None
+
+    malformed_hash = deepcopy(_sat_unsafety_resolution_evidence(action))
+    malformed_hash["proof_content"]["counterexample_replay"]["counterexample_model_sha256"] = "a" * 63
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(malformed_hash) is None
+
     missing_count = deepcopy(_sat_unsafety_resolution_evidence(action))
     missing_count["proof_content"]["counterexample_replay"].pop(
         "fixed_model_assertion_count",
@@ -2625,6 +2858,75 @@ def test_sat_unsafety_completed_proof_requires_fixed_counterexample_replay_model
     empty_keys = deepcopy(_sat_unsafety_resolution_evidence(action))
     empty_keys["proof_content"]["counterexample_replay"]["counterexample_symbol_keys"] = ()
     assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(empty_keys) is None
+
+
+def test_sat_unsafety_completed_proof_requires_current_counterexample_model_match():
+    action = _sat_unsafety_resolution_action()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.SAT_UNSAFETY,
+        stage=action.stage,
+        pair_or_case=action.pair_or_case,
+        evidence_refs=action.evidence_refs,
+        recovery_proof_kind=action.proof_kind,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                action.proof_kind,
+                action.proof_stage,
+                required_evidence=action.required_evidence,
+            ),
+        ),
+        proof_stage=action.proof_stage,
+        evidence_kind=action.evidence_kind,
+        object_target_key=action.object_target_key,
+        proof_obligation_id=action.proof_obligation_id,
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _sat_unsafety_resolution_evidence(
+            action,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        ),
+    )
+
+    assert strategy._sat_unsafety_resolution_proof_is_complete(
+        reason,
+        analysis1,
+        analysis2,
+        current_counterexample_raw={"x_1": 0, "x_2": 0},
+    )
+    assert not strategy._sat_unsafety_resolution_proof_is_complete(
+        reason,
+        analysis1,
+        analysis2,
+        current_counterexample_raw=None,
+    )
+    assert not strategy._sat_unsafety_resolution_proof_is_complete(
+        reason,
+        analysis1,
+        analysis2,
+        current_counterexample_raw={},
+    )
+    assert not strategy._sat_unsafety_resolution_proof_is_complete(
+        reason,
+        analysis1,
+        analysis2,
+        current_counterexample_raw={"x_1": 1, "x_2": 0},
+    )
 
 
 def test_sat_unsafety_completed_proof_rejects_nested_blocker_fields_inside_proof_content():

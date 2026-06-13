@@ -45,7 +45,6 @@ from .pairwise_query_builder import (
     save_unknown_query,
 )
 from .pairwise_query_executor import (
-    count_counterexample_model_assertions,
     solve_query_internal,
     solve_query_twostage,
     validate_counterexample_across_cases,
@@ -598,6 +597,7 @@ class PairwiseStrategy(CheckStrategy):
                             sat_unsafety_reason,
                             analysis1,
                             analysis2,
+                            current_counterexample_raw=result.counterexample_raw,
                         ):
                             unknown_count += 1
                             unknown_reasons.append(sat_unsafety_reason)
@@ -621,11 +621,14 @@ class PairwiseStrategy(CheckStrategy):
                     if not is_decisive:
                         unknown_count += 1
                         unknown_reasons.append(
-                            make_unknown_reason(
-                                UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+                            self._make_sat_counterexample_ambiguous_unknown_reason(
+                                (result.pair_stage or "unknown",),
+                                analysis1,
+                                analysis2,
+                                case1=case1,
+                                case2=case2,
+                                pair_id=pair_id,
                                 stage="S_PAIRWISE",
-                                pair_or_case=pair_id,
-                                evidence_refs=(result.pair_stage or "unknown",),
                             )
                         )
                         self._debug_print(
@@ -647,21 +650,11 @@ class PairwiseStrategy(CheckStrategy):
                             pair_id=pair_id,
                             stage="S_PAIRWISE",
                         )
-                        self._record_completed_sat_counterexample_replay_proof(
-                            sat_replay_reason,
-                            analysis1,
-                            analysis2,
-                            counterexample_raw=result.counterexample_raw,
-                            fixed_model_assertion_count=count_counterexample_model_assertions(
-                                base_ctx,
-                                result.counterexample_raw,
-                            ),
-                            replay_source="pairwise_case_split_counterexample_validation",
-                        )
                         if not self._sat_unsafety_resolution_proof_is_complete(
                             sat_replay_reason,
                             analysis1,
                             analysis2,
+                            current_counterexample_raw=result.counterexample_raw,
                         ):
                             unknown_count += 1
                             unknown_reasons.append(sat_replay_reason)

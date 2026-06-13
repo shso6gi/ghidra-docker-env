@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 import hashlib
+import json
 from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
 from dataclasses import dataclass, field
 
@@ -1386,11 +1387,25 @@ class CheckStrategy(ABC):
             return False
         return all(proof_id in completed for proof_id in required_ids)
 
+    @classmethod
+    def _completed_recovery_proof_evidence(
+        cls,
+        *analyses: FunctionReturnAnalysis,
+    ) -> Tuple[Mapping[str, Any], ...]:
+        evidence_records: List[Mapping[str, Any]] = []
+        for analysis in analyses:
+            for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+                if isinstance(evidence, Mapping):
+                    evidence_records.append(evidence)
+        return tuple(evidence_records)
+
     def _sat_unsafety_resolution_proof_is_complete(
         self,
         reason_record: UnknownReasonRecord,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        *,
+        current_counterexample_raw: Optional[Mapping[str, Any]] = None,
     ) -> bool:
         if reason_record.reason_id != UnknownReasonId.SAT_UNSAFETY.value:
             return False
@@ -1399,7 +1414,27 @@ class CheckStrategy(ABC):
         proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
         if proof_obligation_id is None:
             return False
-        return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
+        current_model_sha256 = self._counterexample_model_fingerprint(current_counterexample_raw)
+        if current_model_sha256 is None:
+            return False
+        for evidence in self._completed_recovery_proof_evidence(analysis1, analysis2):
+            evidence_proof_id = self._sat_unsafety_resolution_proof_id_from_evidence(evidence)
+            if evidence_proof_id != proof_obligation_id:
+                continue
+            proof_content = self._evidence_get(evidence, "proof_content")
+            if not isinstance(proof_content, Mapping):
+                continue
+            counterexample_replay = proof_content.get("counterexample_replay")
+            if not isinstance(counterexample_replay, Mapping):
+                continue
+            evidence_model_sha256 = self._evidence_text(
+                counterexample_replay,
+                "counterexample_model_sha256",
+            )
+            if evidence_model_sha256 != current_model_sha256:
+                continue
+            return True
+        return False
 
     def _return_width_bridge_proof_is_complete(
         self,
@@ -1531,6 +1566,9 @@ class CheckStrategy(ABC):
             return
         if fixed_model_assertion_count <= 0:
             return
+        counterexample_model_sha256 = self._counterexample_model_fingerprint(counterexample_raw)
+        if counterexample_model_sha256 is None:
+            return
 
         records: List[Dict[str, Any]] = [
             dict(item)
@@ -1564,6 +1602,7 @@ class CheckStrategy(ABC):
                         "replay_source": replay_source,
                         "fixed_model_assertion_count": fixed_model_assertion_count,
                         "counterexample_symbol_keys": counterexample_keys,
+                        "counterexample_model_sha256": counterexample_model_sha256,
                     },
                     "active_unsafety_discharge": {
                         "status": "discharged",
@@ -1578,6 +1617,42 @@ class CheckStrategy(ABC):
             }
         )
         analysis1.completed_recovery_proof_evidence = tuple(records)
+
+    @classmethod
+    def _counterexample_model_fingerprint(
+        cls,
+        counterexample_raw: Optional[Mapping[str, Any]],
+    ) -> Optional[str]:
+        if not isinstance(counterexample_raw, Mapping) or not counterexample_raw:
+            return None
+        normalized = cls._normalize_counterexample_model_value(counterexample_raw)
+        try:
+            payload = json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _normalize_counterexample_model_value(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._normalize_counterexample_model_value(value[key])
+                for key in sorted(value.keys(), key=lambda item: str(item))
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._normalize_counterexample_model_value(item) for item in value]
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return repr(value)
+        return str(value)
 
     @classmethod
     def _completed_recovery_proof_ids(
@@ -2088,6 +2163,15 @@ class CheckStrategy(ABC):
         )
         if not isinstance(counterexample_symbol_keys, tuple) or not counterexample_symbol_keys:
             return None
+        counterexample_model_sha256 = cls._evidence_text(
+            counterexample_replay,
+            "counterexample_model_sha256",
+        )
+        if (
+            len(counterexample_model_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in counterexample_model_sha256)
+        ):
+            return None
         return proof_id
 
     @classmethod
@@ -2217,8 +2301,8 @@ class CheckStrategy(ABC):
             right_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(right)
             if left_extension_evidence is None or right_extension_evidence is None:
                 return None
-            left_extension_ops, left_summary_extension = left_extension_evidence
-            right_extension_ops, right_summary_extension = right_extension_evidence
+            left_extension_ops, left_summary_extension, left_literal_extension = left_extension_evidence
+            right_extension_ops, right_summary_extension, right_literal_extension = right_extension_evidence
             query_stage_text = str(query_stage)
             has_summary_extension = bool(left_summary_extension or right_summary_extension)
             if query_stage_text == "return-width-bridge-high-bit-extension":
@@ -2251,6 +2335,8 @@ class CheckStrategy(ABC):
                     "right_extension_ops": right_extension_ops,
                     "left_summary_parameter_extension": left_summary_extension,
                     "right_summary_parameter_extension": right_summary_extension,
+                    "left_constant_literal_extension": left_literal_extension,
+                    "right_constant_literal_extension": right_literal_extension,
                     "relation": "compatible_under_narrow_width",
                 },
                 "high_bits_irrelevant_or_equal": {
@@ -2346,8 +2432,8 @@ class CheckStrategy(ABC):
         right_extension_evidence = cls._return_width_bridge_extension_evidence_for_side(right)
         if left_extension_evidence is None or right_extension_evidence is None:
             return False
-        left_extension_ops, left_summary_extension = left_extension_evidence
-        right_extension_ops, right_summary_extension = right_extension_evidence
+        left_extension_ops, left_summary_extension, left_literal_extension = left_extension_evidence
+        right_extension_ops, right_summary_extension, right_literal_extension = right_extension_evidence
         if not (
             isinstance(producer_width, Mapping)
             and producer_width.get("object_derived") is True
@@ -2376,6 +2462,14 @@ class CheckStrategy(ABC):
                 extension_semantics.get("right_summary_parameter_extension")
             )
             == right_summary_extension
+            and cls._return_width_bridge_normalize_optional_tuple(
+                extension_semantics.get("left_constant_literal_extension")
+            )
+            == left_literal_extension
+            and cls._return_width_bridge_normalize_optional_tuple(
+                extension_semantics.get("right_constant_literal_extension")
+            )
+            == right_literal_extension
             and extension_semantics.get("relation") == "compatible_under_narrow_width"
         ):
             return False
@@ -2649,20 +2743,25 @@ class CheckStrategy(ABC):
             ):
                 continue
             matches.append(profile)
-        return tuple(matches) if matches else None
+        if matches:
+            return tuple(matches)
+        return None
 
     @classmethod
     def _return_width_bridge_extension_evidence_for_side(
         cls,
         side: Any,
-    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...], Tuple[Any, ...]]]:
+        summary_extension = cls._return_width_bridge_summary_parameter_extension_for_side(side)
+        if summary_extension is not None:
+            return (), (summary_extension,), ()
         extension_ops = cls._return_width_bridge_matching_extension_ops_for_side(side)
         if extension_ops is not None:
-            return extension_ops, ()
-        summary_extension = cls._return_width_bridge_summary_parameter_extension_for_side(side)
-        if summary_extension is None:
+            return extension_ops, (), ()
+        literal_extension = cls._return_width_bridge_constant_literal_extension_for_side(side)
+        if literal_extension is None:
             return None
-        return (), (summary_extension,)
+        return (), (), (literal_extension,)
 
     @classmethod
     def _return_width_bridge_has_summary_parameter_extension_evidence(
@@ -2736,6 +2835,105 @@ class CheckStrategy(ABC):
             ("policy", policy),
             ("parameter_kind", "synthetic_recursive_summary"),
         )
+
+    @classmethod
+    def _return_width_bridge_constant_literal_extension_for_side(
+        cls,
+        side: Any,
+    ) -> Optional[Tuple[Any, ...]]:
+        width_entry = cls._normalize_nested_tuple(
+            cls._return_width_bridge_find_tagged_entry(side, "return_value_width")
+        )
+        if not isinstance(width_entry, tuple) or len(width_entry) < 7:
+            return None
+        relation = width_entry[5]
+        policy = width_entry[6]
+        if relation != "producer_narrower_than_return_width":
+            return None
+        if policy not in {"sign_extend", "zero_extend"}:
+            return None
+        value_entry = cls._return_width_bridge_find_tagged_entry(width_entry, "value")
+        value = cls._normalize_nested_tuple(value_entry)
+        if not isinstance(value, tuple) or len(value) != 2 or value[0] != "value":
+            return None
+        expr = value[1]
+        if not (
+            isinstance(expr, tuple)
+            and len(expr) == 2
+            and expr[0] == "expression"
+            and isinstance(expr[1], tuple)
+            and len(expr[1]) >= 3
+            and expr[1][0] == "const"
+        ):
+            return None
+        const_payload = expr[1]
+        try:
+            const_value = int(const_payload[1][1])
+            const_size_bits = int(const_payload[2]) * 8
+            producer_bits = int(width_entry[1])
+            return_bits = int(width_entry[2])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if not (
+            const_size_bits == producer_bits
+            and 0 < producer_bits < return_bits
+        ):
+            return None
+        source_mask = (1 << producer_bits) - 1
+        low_value = const_value & source_mask
+        has_material_high_bits = (const_value >> producer_bits) != 0
+        has_signed_negative_low_bits = (
+            policy == "sign_extend"
+            and bool(low_value & (1 << (producer_bits - 1)))
+        )
+        if not (has_material_high_bits or has_signed_negative_low_bits):
+            return None
+        if policy == "zero_extend":
+            extended_value = low_value
+        else:
+            sign_bit = 1 << (producer_bits - 1)
+            if low_value & sign_bit:
+                extended_value = low_value | (((1 << (return_bits - producer_bits)) - 1) << producer_bits)
+            else:
+                extended_value = low_value
+        wide_mask = (1 << return_bits) - 1
+        if (const_value & wide_mask) != extended_value:
+            return None
+        return (
+            "constant_literal_extension",
+            ("value", const_value),
+            ("producer_bits", producer_bits),
+            ("return_bits", return_bits),
+            ("policy", policy),
+            ("extended_value", extended_value),
+        )
+
+    @classmethod
+    def _return_width_bridge_value_is_deterministic_width_expression(cls, value_entry: Any) -> bool:
+        value = cls._normalize_nested_tuple(value_entry)
+        if not isinstance(value, tuple) or len(value) != 2 or value[0] != "value":
+            return False
+        return cls._return_width_bridge_expression_key_is_deterministic_width(value[1])
+
+    @classmethod
+    def _return_width_bridge_expression_key_is_deterministic_width(cls, expr: Any) -> bool:
+        if not isinstance(expr, tuple) or len(expr) != 2 or expr[0] != "expression":
+            return False
+        node = expr[1]
+        if not isinstance(node, tuple) or not node:
+            return False
+        kind = node[0]
+        if kind in {"const", "parameter", "variable"}:
+            return True
+        if kind in {"unary", "binary"}:
+            operands = node[3:] if kind == "unary" else node[3:]
+            return all(
+                cls._return_width_bridge_expression_key_is_deterministic_width(
+                    ("expression", operand)
+                )
+                for operand in operands
+            )
+        return False
 
     @classmethod
     def _return_width_bridge_summary_parameter_value_key(cls, value_entry: Any) -> Optional[Tuple[Any, ...]]:
@@ -3174,6 +3372,64 @@ class CheckStrategy(ABC):
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )
 
+    def _make_sat_counterexample_ambiguous_unknown_reason(
+        self,
+        evidence_refs: Sequence[str],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        case1: Any,
+        case2: Any,
+        pair_id: str,
+        stage: str,
+    ) -> UnknownReasonRecord:
+        object_target_key = self._sat_counterexample_ambiguous_object_target_key(
+            evidence_refs,
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id=pair_id,
+        )
+        return make_unknown_reason(
+            UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+            stage=stage,
+            pair_or_case=pair_id,
+            evidence_refs=tuple(str(ref) for ref in evidence_refs or ()),
+            detail="SAT counterexample is ambiguous under replayed case partition",
+            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+            recovery_proof_obligations=(
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+                    "sat_counterexample_safety",
+                    required_evidence=(
+                        "counterexample_replay",
+                        "case_partition_disambiguation",
+                        "coverage_effect_safety",
+                    ),
+                    description=(
+                        "Replay the SAT counterexample and prove it identifies a unique "
+                        "disequivalence witness under the active case partition."
+                    ),
+                ),
+            ),
+            proof_stage="sat_counterexample_safety",
+            evidence_kind="case_partition_replay",
+            object_target_key=object_target_key,
+            object_evidence={
+                "object_derived": True,
+                "evidence_version": 1,
+                "evidence_kind": "case_partition_replay",
+                "object_target_kind": object_target_key[0],
+                "object_target_key": object_target_key,
+                "left": self._sat_unsafety_side_object_evidence("left", analysis1, case1),
+                "right": self._sat_unsafety_side_object_evidence("right", analysis2, case2),
+                "ambiguity_evidence_refs": tuple(str(ref) for ref in evidence_refs or ()),
+            },
+            recovery_action="sat_counterexample_disambiguation_required",
+            action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+
     def _sat_unsafety_object_evidence(
         self,
         sat_unsafety_reasons: Sequence[str],
@@ -3299,6 +3555,24 @@ class CheckStrategy(ABC):
                     for reason in sat_unsafety_reasons
                 ),
             ),
+        )
+
+    def _sat_counterexample_ambiguous_object_target_key(
+        self,
+        evidence_refs: Sequence[str],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        case1: Any,
+        case2: Any,
+        pair_id: str,
+    ) -> Tuple[Any, ...]:
+        return (
+            "sat_counterexample_ambiguous",
+            ("pair", pair_id),
+            self._sat_unsafety_side_object_key("left", analysis1, case1),
+            self._sat_unsafety_side_object_key("right", analysis2, case2),
+            ("ambiguity_evidence_refs", tuple(str(ref) for ref in evidence_refs or ())),
         )
 
     def _sat_unsafety_side_object_key(

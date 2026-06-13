@@ -447,6 +447,8 @@ def _register_defaults() -> None:
             UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE,
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
+            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+            target_regression="sat_counterexample_ambiguous",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -705,6 +707,26 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="sat_unsafety",
             description="Recover SAT unsafety only with replay plus coverage/effect safety proof.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+                    "sat_counterexample_safety",
+                    required_evidence=(
+                        "counterexample_replay",
+                        "case_partition_disambiguation",
+                        "coverage_effect_safety",
+                    ),
+                    description=(
+                        "Accept an ambiguous SAT counterexample only after replay proves "
+                        "a unique disequivalence witness under the active case partition."
+                    ),
+                ),
+            ),
+            target_regression="sat_counterexample_ambiguous",
+            description="Recover ambiguous SAT counterexamples only with replay plus partition proof.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,

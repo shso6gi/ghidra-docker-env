@@ -6,6 +6,7 @@ from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
+from ...model.render_smt import expression_smt_bit_width
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ..param_semantics import hint_objects_by_identity
@@ -604,9 +605,23 @@ def build_return_width_bridge_high_bit_query(
     if wide_bits <= narrow_bits:
         return None
 
-    wide_expr_bits = int(getattr(wide_case.value_expr, "get_bit_width", lambda: 0)() or 0)
+    extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
+    wide_expr_bits = int(expression_smt_bit_width(wide_case.value_expr) or 0)
     if wide_expr_bits < wide_bits:
-        return None
+        has_object_extension = _return_case_has_object_extension_to_width(
+            wide_case,
+            input_bits=wide_expr_bits,
+            output_bits=wide_bits,
+            extension_op=extension_op,
+        )
+        has_constant_extension = _return_case_has_constant_literal_extension_to_width(
+            wide_case,
+            input_bits=wide_expr_bits,
+            output_bits=wide_bits,
+            extension_op=extension_op,
+        )
+        if not (has_object_extension or has_constant_extension):
+            return None
 
     wide_value_smt = wide_case.get_value_smt(
         wide_replace_fn,
@@ -615,7 +630,6 @@ def build_return_width_bridge_high_bit_query(
     )
     low_bits = f"((_ extract {narrow_bits - 1} 0) {wide_value_smt})"
     extend_bits = wide_bits - narrow_bits
-    extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
     expected_wide_smt = f"((_ {extension_op} {extend_bits}) {low_bits})"
 
     lines = _build_query_header(
@@ -643,6 +657,81 @@ def build_return_width_bridge_high_bit_query(
         ]
     )
     return "\n".join(lines)
+
+
+def _return_case_has_object_extension_to_width(
+    return_case: ReturnCase,
+    *,
+    input_bits: int,
+    output_bits: int,
+    extension_op: str,
+) -> bool:
+    if input_bits <= 0 or output_bits <= 0 or input_bits >= output_bits:
+        return False
+    expected_mnemonic = {
+        "sign_extend": "INT_SEXT",
+        "zero_extend": "INT_ZEXT",
+    }.get(extension_op)
+    if expected_mnemonic is None:
+        return False
+    return_info = getattr(return_case, "return_info", None)
+    for ref in getattr(return_info, "return_value_pcode_op_refs", ()) or ():
+        if getattr(ref, "mnemonic", None) != expected_mnemonic:
+            continue
+        input_size = None
+        try:
+            input_size = ref.input_size(0)
+        except Exception:
+            input_size = None
+        output_size = getattr(ref, "output_size", None)
+        try:
+            ref_input_bits = int(input_size) * 8 if input_size else None
+            ref_output_bits = int(output_size) * 8 if output_size else None
+        except (TypeError, ValueError):
+            continue
+        if ref_input_bits == int(input_bits) and ref_output_bits == int(output_bits):
+            return True
+    return False
+
+
+def _return_case_has_constant_literal_extension_to_width(
+    return_case: ReturnCase,
+    *,
+    input_bits: int,
+    output_bits: int,
+    extension_op: str,
+) -> bool:
+    if input_bits <= 0 or output_bits <= 0 or input_bits >= output_bits:
+        return False
+    if extension_op not in {"sign_extend", "zero_extend"}:
+        return False
+    expr = getattr(return_case, "value_expr", None)
+    expr_type = getattr(expr, "expr_type", None)
+    expr_kind = getattr(expr_type, "__class__", None)
+    if expr_type is None or expr_kind is None or expr_type != expr_kind.CONSTANT:
+        return False
+    try:
+        value = int(getattr(expr, "value"))
+    except (TypeError, ValueError):
+        return False
+    source_mask = (1 << int(input_bits)) - 1
+    low_value = value & source_mask
+    has_material_high_bits = (value >> int(input_bits)) != 0
+    has_signed_negative_low_bits = (
+        extension_op == "sign_extend"
+        and bool(low_value & (1 << (int(input_bits) - 1)))
+    )
+    if not (has_material_high_bits or has_signed_negative_low_bits):
+        return False
+    if extension_op == "zero_extend":
+        extended = low_value
+    else:
+        sign_bit = 1 << (int(input_bits) - 1)
+        if low_value & sign_bit:
+            extended = low_value | (((1 << (int(output_bits) - int(input_bits))) - 1) << int(input_bits))
+        else:
+            extended = low_value
+    return (value & ((1 << int(output_bits)) - 1)) == extended
 
 
 def build_normalized_inequality_query(

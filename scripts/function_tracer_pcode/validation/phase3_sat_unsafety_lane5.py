@@ -939,6 +939,8 @@ def _completed_evidence_has_required_proof_content(
         or _normalize_nested_tuple(content.get("object_target_key")) != _normalize_nested_tuple(object_target_key)
     ):
         return False
+    if not _sat_counterexample_replay_content_is_complete(content.get("counterexample_replay")):
+        return False
     return all(
         _proof_status_value_is_complete(content.get(field))
         for field in SAT_REQUIRED_EVIDENCE
@@ -963,6 +965,31 @@ def _proof_status_value_is_complete(value: Any) -> bool:
             key != "status" for key in value
         )
     return False
+
+
+def _sat_counterexample_replay_content_is_complete(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if not _proof_status_value_is_complete(value):
+        return False
+    fixed_model_assertion_count = value.get("fixed_model_assertion_count")
+    if (
+        isinstance(fixed_model_assertion_count, bool)
+        or not isinstance(fixed_model_assertion_count, int)
+        or fixed_model_assertion_count <= 0
+    ):
+        return False
+    symbol_keys = _normalize_nested_tuple(value.get("counterexample_symbol_keys"))
+    if not isinstance(symbol_keys, tuple) or not symbol_keys:
+        return False
+    model_sha256 = value.get("counterexample_model_sha256")
+    return _lower_hex_sha256(model_sha256)
+
+
+def _lower_hex_sha256(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(char in "0123456789abcdef" for char in value)
 
 
 def _expected_movements_match_definition(entry: Mapping[str, Any]) -> bool:

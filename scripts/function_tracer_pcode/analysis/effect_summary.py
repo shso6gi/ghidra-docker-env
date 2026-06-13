@@ -2335,6 +2335,24 @@ def _select_aligned_explicit_call_arguments(
     if storage_aligned is not None:
         return storage_aligned
 
+    storage_window_aligned = _select_explicit_call_arguments_by_storage_window(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit,
+    )
+    if storage_window_aligned is not None:
+        return storage_window_aligned
+
+    dependency_tail_aligned = _select_explicit_call_arguments_by_dependency_tail(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit,
+    )
+    if dependency_tail_aligned is not None:
+        return dependency_tail_aligned
+
     preferred_args = [
         _recover_preferred_call_argument_expression(
             call_op,
@@ -2419,6 +2437,241 @@ def _select_explicit_call_arguments_by_input_storage(
         used_indexes.add(matches[0])
         selected.append(explicit_args[matches[0]])
     return selected
+
+
+def _select_explicit_call_arguments_by_storage_window(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> Optional[List[Expression]]:
+    try:
+        input_count = int(call_op.getNumInputs())
+    except Exception:
+        return None
+    if input_count <= 1:
+        return None
+    if len(explicit_args) != input_count - 1:
+        return None
+    callee_count = len(callee_parameters or ())
+    if callee_count <= 0 or len(explicit_args) <= callee_count:
+        return None
+
+    get_input = getattr(call_op, "getInput", None)
+    get_storage = getattr(tracer, "_get_storage_info_from_varnode", None)
+    if not callable(get_input) or not callable(get_storage):
+        return None
+
+    input_storages: List[Optional[StorageInfo]] = []
+    for index in range(1, input_count):
+        try:
+            varnode = get_input(index)
+        except Exception:
+            return None
+        try:
+            input_storages.append(_coerce_storage_info(get_storage(varnode)))
+        except Exception:
+            input_storages.append(None)
+
+    param_storages = [
+        _coerce_storage_info(callee_param.get("storage"))
+        for callee_param in callee_parameters
+    ]
+    if any(storage is None for storage in param_storages):
+        return None
+
+    matching_windows = _matching_explicit_call_argument_storage_windows(
+        input_storages,
+        explicit_args,
+        param_storages,
+    )
+
+    if len(matching_windows) != 1:
+        return None
+    start = matching_windows[0]
+    return list(explicit_args[start:start + callee_count])
+
+
+def _matching_explicit_call_argument_storage_windows(
+    input_storages: Sequence[Optional[StorageInfo]],
+    explicit_args: Sequence[Expression],
+    param_storages: Sequence[Optional[StorageInfo]],
+) -> List[int]:
+    callee_count = len(param_storages or ())
+    if callee_count <= 0 or len(input_storages) != len(explicit_args):
+        return []
+    matching_windows: List[int] = []
+    for start in range(0, len(explicit_args) - callee_count + 1):
+        if _explicit_call_argument_window_matches_storage(
+            input_storages[start:start + callee_count],
+            explicit_args[start:start + callee_count],
+            param_storages,
+        ):
+            matching_windows.append(start)
+    return matching_windows
+
+
+def _explicit_call_argument_window_matches_storage(
+    input_storages: Sequence[Optional[StorageInfo]],
+    explicit_args: Sequence[Expression],
+    param_storages: Sequence[Optional[StorageInfo]],
+) -> bool:
+    if len(input_storages) != len(param_storages):
+        return False
+    for input_storage, explicit_arg, param_storage in zip(
+        input_storages,
+        explicit_args,
+        param_storages,
+    ):
+        if param_storage is None:
+            return False
+        if _call_input_storage_is_constant_argument(input_storage, explicit_arg):
+            continue
+        if input_storage is None:
+            return False
+        if not _storage_matches_parameter(input_storage, param_storage):
+            return False
+    return True
+
+
+def _call_input_storage_is_constant_argument(
+    input_storage: Optional[StorageInfo],
+    explicit_arg: Optional[Expression],
+) -> bool:
+    if explicit_arg is None or explicit_arg.expr_type != ExpressionType.CONSTANT:
+        return False
+    if input_storage is None:
+        return False
+    return (
+        not bool(getattr(input_storage, "is_register", False))
+        and str(getattr(input_storage, "space_name", "") or "").lower() == "const"
+    )
+
+
+def _select_explicit_call_arguments_by_dependency_tail(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> Optional[List[Expression]]:
+    try:
+        input_count = int(call_op.getNumInputs())
+    except Exception:
+        return None
+    if input_count <= 1 or len(explicit_args) != input_count - 1:
+        return None
+    callee_count = len(callee_parameters or ())
+    if callee_count <= 0 or len(explicit_args) <= callee_count:
+        return None
+    if not _call_inputs_have_object_storage(call_op, tracer, explicit_args):
+        return None
+    if _has_ambiguous_storage_windows(call_op, tracer, callee_parameters, explicit_args):
+        return None
+
+    hidden_prefix = list(explicit_args[:-callee_count])
+    selected_tail = list(explicit_args[-callee_count:])
+    selected_tail_storages = _call_input_storages_for_explicit_args(
+        call_op,
+        tracer,
+        explicit_args,
+    )
+    if selected_tail_storages is None:
+        return None
+    selected_tail_storages = selected_tail_storages[-callee_count:]
+    param_storages = [
+        _coerce_storage_info(callee_param.get("storage"))
+        for callee_param in callee_parameters
+    ]
+    if len(selected_tail_storages) != callee_count or any(
+        storage is None for storage in param_storages
+    ):
+        return None
+    if not _explicit_call_argument_window_matches_storage(
+        selected_tail_storages,
+        selected_tail,
+        param_storages,
+    ):
+        return None
+
+    for hidden_index, hidden_arg in enumerate(hidden_prefix):
+        if hidden_arg is None:
+            return None
+        if hidden_index >= len(selected_tail):
+            return None
+        if not _expressions_equivalent(hidden_arg, selected_tail[hidden_index]):
+            return None
+    return selected_tail
+
+
+def _call_input_storages_for_explicit_args(
+    call_op,
+    tracer,
+    explicit_args: Sequence[Expression],
+) -> Optional[List[Optional[StorageInfo]]]:
+    get_input = getattr(call_op, "getInput", None)
+    get_storage = getattr(tracer, "_get_storage_info_from_varnode", None)
+    if not callable(get_input) or not callable(get_storage):
+        return None
+    try:
+        input_count = int(call_op.getNumInputs())
+    except Exception:
+        return None
+    if input_count <= 1 or len(explicit_args) != input_count - 1:
+        return None
+
+    input_storages: List[Optional[StorageInfo]] = []
+    for index in range(1, input_count):
+        try:
+            varnode = get_input(index)
+        except Exception:
+            return None
+        try:
+            input_storages.append(_coerce_storage_info(get_storage(varnode)))
+        except Exception:
+            input_storages.append(None)
+    return input_storages
+
+
+def _call_inputs_have_object_storage(
+    call_op,
+    tracer,
+    explicit_args: Sequence[Expression],
+) -> bool:
+    input_storages = _call_input_storages_for_explicit_args(call_op, tracer, explicit_args)
+    if input_storages is None:
+        return False
+    for storage in input_storages:
+        if storage is not None:
+            return True
+    return False
+
+
+def _has_ambiguous_storage_windows(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> bool:
+    input_storages = _call_input_storages_for_explicit_args(call_op, tracer, explicit_args)
+    if input_storages is None:
+        return False
+
+    param_storages = [
+        _coerce_storage_info(callee_param.get("storage"))
+        for callee_param in callee_parameters
+    ]
+    if any(storage is None for storage in param_storages):
+        return False
+    return (
+        len(
+            _matching_explicit_call_argument_storage_windows(
+                input_storages,
+                explicit_args,
+                param_storages,
+            )
+        )
+        > 1
+    )
 
 
 def _explicit_argument_matches_preferred(

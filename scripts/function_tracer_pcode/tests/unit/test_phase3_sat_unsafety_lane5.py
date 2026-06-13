@@ -125,6 +125,42 @@ def _sat_reason():
     )
 
 
+def _completed_sat_replay_evidence(action, **counterexample_overrides):
+    object_target_key = action["object_target_key"]
+    replay = {
+        "status": "replayed",
+        "replay_source": "counterexample_model_replay",
+        "fixed_model_assertion_count": 2,
+        "counterexample_symbol_keys": (("sym", "x"),),
+        "counterexample_model_sha256": "0" * 64,
+    }
+    replay.update(counterexample_overrides)
+    return {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": "sat_unsafety",
+        "proof_kind": SAT_PROOF_KIND,
+        "proof_stage": SAT_PROOF_STAGE,
+        "evidence_kind": SAT_EVIDENCE_KIND,
+        "object_target_key": object_target_key,
+        "proof_obligation_id": action["proof_obligation_id"],
+        "proof_content": {
+            "object_derived": True,
+            "object_target_key": object_target_key,
+            "counterexample_replay": replay,
+            "active_unsafety_discharge": {
+                "status": "discharged",
+                "discharged_unsafety_count": 1,
+            },
+            "coverage_effect_safety": {
+                "status": "complete",
+                "coverage_gap_count": 0,
+                "unsupported_effect_count": 0,
+            },
+        },
+    }
+
+
 def _analysis_with_deferred_call_program_id(program_id: int) -> tuple[FunctionReturnAnalysis, ReturnCase]:
     binary_id = "B10"
     entry = 0x1000
@@ -360,6 +396,64 @@ def test_sat_unsafety_pending_proof_obligations_materialize_required_evidence():
     assert obligations[0]["proof_obligation_id"]
     assert obligations[0]["completed_evidence_present"] is False
     assert obligations[0]["status"] == "pending_evidence"
+
+
+def test_sat_unsafety_post_fix_accepts_completed_replay_with_model_fingerprint():
+    action = build_unknown_recovery_actions([_sat_reason()])[0].to_dict()
+    entry = {
+        "id": "representative-sat-unsafety-is-even-guard",
+        "function": "fc_is_even",
+        "binary_pair": "B9_B10",
+        "required_completion_actions": [action],
+        "current_observation": {
+            "final_result": "NOT_EQ",
+            "observed_reason_ids": [],
+            "decision_gated_by_pending_proof": False,
+            "proof_actions": [],
+            "completed_recovery_proof_evidence": [
+                _completed_sat_replay_evidence(action),
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "completed_recovery"
+    assert failures == ()
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"counterexample_model_sha256": None},
+        {"counterexample_model_sha256": "a" * 63},
+        {"counterexample_model_sha256": "A" * 64},
+        {"fixed_model_assertion_count": 0},
+        {"counterexample_symbol_keys": ()},
+    ],
+)
+def test_sat_unsafety_post_fix_rejects_completed_replay_without_fixed_model_fingerprint(override):
+    action = build_unknown_recovery_actions([_sat_reason()])[0].to_dict()
+    entry = {
+        "id": "representative-sat-unsafety-is-even-guard",
+        "function": "fc_is_even",
+        "binary_pair": "B9_B10",
+        "required_completion_actions": [action],
+        "current_observation": {
+            "final_result": "NOT_EQ",
+            "observed_reason_ids": [],
+            "decision_gated_by_pending_proof": False,
+            "proof_actions": [],
+            "completed_recovery_proof_evidence": [
+                _completed_sat_replay_evidence(action, **override),
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert "sat_unsafety_completed_proof_required" in {failure["kind"] for failure in failures}
 
 
 def test_sat_unsafety_post_fix_accepts_current_sat_action_when_target_details_change():

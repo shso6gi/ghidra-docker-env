@@ -272,6 +272,7 @@ class MonolithicStrategy(CheckStrategy):
                     sat_unsafety_reason,
                     analysis1,
                     analysis2,
+                    current_counterexample_raw=counterexample_raw,
                 ):
                     unknown_reasons.append(sat_unsafety_reason)
                     self._debug_print(
@@ -286,8 +287,13 @@ class MonolithicStrategy(CheckStrategy):
                 counterexample_raw,
             ):
                 unknown_reasons.append(
-                    make_unknown_reason(
-                        UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+                    self._make_sat_counterexample_ambiguous_unknown_reason(
+                        ("monolithic_case_partition_replay",),
+                        analysis1,
+                        analysis2,
+                        case1=None,
+                        case2=None,
+                        pair_id="monolithic",
                         stage="S_MONOLITHIC_FALLBACK",
                     )
                 )
@@ -312,22 +318,11 @@ class MonolithicStrategy(CheckStrategy):
                     pair_id="monolithic",
                     stage="S_MONOLITHIC_FALLBACK",
                 )
-                self._record_completed_sat_counterexample_replay_proof(
-                    sat_replay_reason,
-                    analysis1,
-                    analysis2,
-                    counterexample_raw=counterexample_raw,
-                    fixed_model_assertion_count=getattr(
-                        self,
-                        "_last_counterexample_replay_fixed_model_assertion_count",
-                        0,
-                    ),
-                    replay_source="monolithic_global_counterexample_validation",
-                )
                 if not self._sat_unsafety_resolution_proof_is_complete(
                     sat_replay_reason,
                     analysis1,
                     analysis2,
+                    current_counterexample_raw=counterexample_raw,
                 ):
                     unknown_reasons.append(sat_replay_reason)
                     self._debug_print(

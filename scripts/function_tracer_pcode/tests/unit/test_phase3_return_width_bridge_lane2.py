@@ -528,6 +528,134 @@ def _summary_parameter_return_cases():
     )
 
 
+def _narrow_producer_return_cases(*, extension_ref=None):
+    left_expr = Expression.parameter("left_value", 0, data_type="int", size=4)
+    right_expr = Expression.parameter("right_value", 0, data_type="int", size=4)
+    return (
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=left_expr,
+            return_info=ReturnInfo(address="00100fe4", value=left_expr),
+            return_type="int",
+        ),
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=right_expr,
+            return_info=ReturnInfo(
+                address="120001fc8",
+                value=right_expr,
+                return_value_pcode_op_refs=tuple(
+                    ref for ref in (extension_ref,) if ref is not None
+                ),
+            ),
+            return_type="long",
+        ),
+    )
+
+
+def _constant_narrow_producer_return_cases():
+    left_expr = Expression.constant(0xFFFFFF9C, size=4)
+    right_expr = Expression.constant(0xFFFFFFFFFFFFFF9C, size=4)
+    return (
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=left_expr,
+            return_info=ReturnInfo(address="00100fe4", value=left_expr),
+            return_type="int",
+        ),
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=right_expr,
+            return_info=ReturnInfo(address="120001fc8", value=right_expr),
+            return_type="long",
+        ),
+    )
+
+
+def _wide_return_input_arithmetic_return_cases():
+    left_param = Expression.parameter("left_value", 0, data_type="int", size=4)
+    right_param = Expression.parameter("right_value", 0, data_type="int", size=4)
+    left_expr = Expression.binary_op("INT_ADD", left_param, Expression.constant(1, size=4))
+    right_expr = Expression.binary_op("INT_ADD", right_param, Expression.constant(1, size=4))
+    return_ref = PcodeOpRef(
+        binary_id="B13",
+        function_entry_space="ram",
+        function_entry_offset=4831846228,
+        target_space="ram",
+        target_offset=4831846336,
+        seq_time=38,
+        seq_order=1,
+        opcode=10,
+        local_op_ordinal=1,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    return (
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=left_expr,
+            return_info=ReturnInfo(address="00100fe4", value=left_expr),
+            return_type="int",
+        ),
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=right_expr,
+            return_info=ReturnInfo(
+                address="120001fc8",
+                value=right_expr,
+                pcode_op_ref=return_ref,
+            ),
+            return_type="long",
+        ),
+    )
+
+
+def _wide_return_input_parameter_return_cases():
+    left_expr = Expression.parameter("left_value", 0, data_type="int", size=4)
+    right_expr = Expression.parameter("right_value", 0, data_type="int", size=4)
+    return_ref = PcodeOpRef(
+        binary_id="B13",
+        function_entry_space="ram",
+        function_entry_offset=4831846228,
+        target_space="ram",
+        target_offset=4831846336,
+        seq_time=38,
+        seq_order=1,
+        opcode=10,
+        local_op_ordinal=1,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    return (
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=left_expr,
+            return_info=ReturnInfo(address="00100fe4", value=left_expr),
+            return_type="int",
+        ),
+        ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=right_expr,
+            return_info=ReturnInfo(
+                address="120001fc8",
+                value=right_expr,
+                pcode_op_ref=return_ref,
+            ),
+            return_type="long",
+        ),
+    )
+
+
 def _return_width_bridge_pairwise_ctx():
     analysis1 = _AnalysisStub()
     analysis2 = _AnalysisStub()
@@ -570,6 +698,109 @@ def _assert_summary_parameter_high_bit_query_is_unavailable():
         return_size2=64,
     )
     assert query is None
+
+
+def test_return_width_bridge_high_bit_query_rejects_narrow_producer_without_object_extension():
+    case1, case2 = _narrow_producer_return_cases()
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        case1,
+        case2,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is None
+
+
+def test_return_width_bridge_high_bit_query_accepts_narrow_constant_literal_without_object_extension():
+    case1, case2 = _constant_narrow_producer_return_cases()
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        case1,
+        case2,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is not None
+    assert "Return width bridge high-bit extension proof" in query
+    assert "Expected extension: sign_extend" in query
+
+
+def test_return_width_bridge_high_bit_query_rejects_arithmetic_with_only_wide_return_input():
+    case1, case2 = _wide_return_input_arithmetic_return_cases()
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        case1,
+        case2,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is None
+
+
+def test_return_width_bridge_high_bit_query_rejects_parameter_with_wide_return_input():
+    case1, case2 = _wide_return_input_parameter_return_cases()
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        case1,
+        case2,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is None
+
+
+def test_return_width_bridge_high_bit_query_accepts_narrow_producer_with_object_extension():
+    ref = PcodeOpRef(
+        binary_id="B13",
+        function_entry_space="ram",
+        function_entry_offset=4831846228,
+        target_space="ram",
+        target_offset=4831846336,
+        seq_time=38,
+        seq_order=1,
+        opcode=17,
+        local_op_ordinal=1,
+        mnemonic="INT_SEXT",
+        input_sizes=(4,),
+        output_size=8,
+    )
+    case1, case2 = _narrow_producer_return_cases(extension_ref=ref)
+    query = build_return_width_bridge_high_bit_query(
+        {"header_lines": []},
+        case1,
+        case2,
+        None,
+        None,
+        "(0,0)",
+        narrow_bits=32,
+        return_size1=32,
+        return_size2=64,
+    )
+
+    assert query is not None
+    assert "Return width bridge high-bit extension proof" in query
+    assert "Expected extension: sign_extend" in query
 
 
 def _solve_direct(query: str):
@@ -683,6 +914,111 @@ def test_return_width_bridge_high_bit_completed_content_accepts_object_extension
     assert CheckStrategy._return_width_bridge_high_bit_proof_content_is_complete(
         content,
         CheckStrategy._normalize_nested_tuple(target),
+    )
+
+
+def test_return_width_bridge_high_bit_completed_content_accepts_constant_literal_extension():
+    target = _target()
+    target[4][-1] = _return_value_width(
+        return_width=64,
+        producer_width=32,
+        signed=True,
+        value=["expression", ["const", ["int", 0xFFFFFFFFFFFFFF9C], 4]],
+    )
+    content = CheckStrategy._return_width_bridge_completed_proof_content(
+        "high_bit_proof",
+        target,
+        query_stage="return-width-bridge-high-bit-extension",
+        narrow_width=32,
+    )
+
+    assert content is not None
+    extension_semantics = content["extension_semantics"]
+    assert extension_semantics["right_extension_ops"] == ()
+    assert extension_semantics["right_constant_literal_extension"] == (
+        (
+            "constant_literal_extension",
+            ("value", 0xFFFFFFFFFFFFFF9C),
+            ("producer_bits", 32),
+            ("return_bits", 64),
+            ("policy", "sign_extend"),
+            ("extended_value", 0xFFFFFFFFFFFFFF9C),
+        ),
+    )
+    assert CheckStrategy._return_width_bridge_high_bit_proof_content_is_complete(
+        content,
+        CheckStrategy._normalize_nested_tuple(target),
+    )
+
+
+def test_return_width_bridge_high_bit_completed_content_rejects_arithmetic_wide_return_input():
+    value = [
+        "expression",
+        [
+            "binary",
+            "INT_ADD",
+            4,
+            ["parameter", "param_1", ["int", 0], 4],
+            ["const", ["int", 1], 4],
+        ],
+    ]
+    target = _target()
+    target[4][-1] = _return_value_width(
+        return_width=64,
+        producer_width=32,
+        signed=True,
+        value=value,
+        pcode_input_bits=64,
+    )
+    content = CheckStrategy._return_width_bridge_completed_proof_content(
+        "high_bit_proof",
+        target,
+        query_stage="return-width-bridge-high-bit-extension",
+        narrow_width=32,
+    )
+
+    assert content is None
+
+
+def test_return_width_bridge_high_bit_completed_content_rejects_parameter_wide_return_input():
+    value = ["expression", ["parameter", "param_1", ["int", 0], 4]]
+    target = _target()
+    target[4][-1] = _return_value_width(
+        return_width=64,
+        producer_width=32,
+        signed=True,
+        value=value,
+        pcode_input_bits=64,
+    )
+
+    assert (
+        CheckStrategy._return_width_bridge_completed_proof_content(
+            "high_bit_proof",
+            target,
+            query_stage="return-width-bridge-high-bit-extension",
+            narrow_width=32,
+        )
+        is None
+    )
+
+
+def test_return_width_bridge_high_bit_completed_content_rejects_mismatched_constant_literal_extension():
+    target = _target()
+    target[4][-1] = _return_value_width(
+        return_width=64,
+        producer_width=32,
+        signed=True,
+        value=["expression", ["const", ["int", 0x00000000FFFFFF9C], 4]],
+    )
+
+    assert (
+        CheckStrategy._return_width_bridge_completed_proof_content(
+            "high_bit_proof",
+            target,
+            query_stage="return-width-bridge-high-bit-extension",
+            narrow_width=32,
+        )
+        is None
     )
 
 
@@ -963,6 +1299,63 @@ def test_return_value_pcode_op_refs_do_not_recurse_through_phi_inputs():
 
     assert [ref.mnemonic for ref in refs] == ["MULTIEQUAL"]
     assert all(ref.mnemonic != "INT_SEXT" for ref in refs)
+
+
+def test_return_value_pcode_op_refs_follow_transparent_copy_to_extension_op():
+    class FakeVarnode:
+        def __init__(self, size, defining_op=None):
+            self._size = size
+            self._defining_op = defining_op
+
+        def getDef(self):
+            return self._defining_op
+
+        def getSize(self):
+            return self._size
+
+    class FakePcodeOp:
+        def __init__(self, mnemonic, opcode, inputs, output):
+            self._mnemonic = mnemonic
+            self._opcode = opcode
+            self._inputs = tuple(inputs)
+            self._output = output
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOpcode(self):
+            return self._opcode
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return None
+
+        def getParent(self):
+            return None
+
+    narrow = FakeVarnode(4)
+    widened = FakeVarnode(8)
+    ext_op = FakePcodeOp("INT_SEXT", 17, [narrow], widened)
+    widened._defining_op = ext_op
+    copy_output = FakeVarnode(8)
+    copy_op = FakePcodeOp("COPY", 19, [widened], copy_output)
+    copy_output._defining_op = copy_op
+
+    refs = ReturnAnalyzer(None, binary_id="B-test")._return_value_pcode_op_refs_from_varnode(
+        copy_output
+    )
+
+    assert [ref.mnemonic for ref in refs] == ["COPY", "INT_SEXT"]
+    assert refs[1].input_size(0) == 4
+    assert refs[1].output_size == 8
 
 
 def test_return_width_bridge_completed_evidence_rejects_metadata_only_proof():
