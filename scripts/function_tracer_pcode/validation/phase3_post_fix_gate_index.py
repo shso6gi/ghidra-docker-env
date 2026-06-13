@@ -409,13 +409,13 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-unresolved-expression-is-even-deferred-call-return-current-transition",
                 "required_completion_actions_sha256": (
-                    "0cfbf8c71ce0e555db6e6f46d08ed993ab7114cf6996c877bf2722a5d97c0e09"
+                    "c25c782c296a181d96a80f43260a29b03758700625fbdbb6662ea028fddeff8a"
                 ),
             },
             {
                 "id": "representative-unresolved-expression-is-odd-opaque-void-return-current-transition",
                 "required_completion_actions_sha256": (
-                    "c41aa1f18262cb9c63cf66337635b2e0e1b5d69688320f93a5a2273254f47a5a"
+                    "8f7b1965f1695980dae75cef754649f63f6ce47472d493fabd39fb2151c1a79d"
                 ),
             },
         ),
