@@ -2,7 +2,7 @@
 """Pairwise戦略（分岐ペア分割方式・二段階チェック対応）"""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import hashlib
 import json
 import time
@@ -484,6 +484,22 @@ class PairwiseStrategy(CheckStrategy):
                             resolved_pairs.add((i, j))
                             self._debug_print(
                                 f"  Pair {pair_id}: Method-B closure proof completed in current run "
+                                f"-> UNSAT ({unsat_count}/{total_pairs})"
+                            )
+                            continue
+                    elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
+                        self._record_completed_readonly_identity_projection_proof_if_safe(
+                            reason_record,
+                            analysis1,
+                            analysis2,
+                            case1,
+                            case2,
+                        )
+                        if self._readonly_identity_proof_is_complete(reason_record, analysis1, analysis2):
+                            unsat_count += 1
+                            resolved_pairs.add((i, j))
+                            self._debug_print(
+                                f"  Pair {pair_id}: readonly identity projection proof completed in current run "
                                 f"-> UNSAT ({unsat_count}/{total_pairs})"
                             )
                             continue
@@ -2049,6 +2065,352 @@ class PairwiseStrategy(CheckStrategy):
             self._readonly_count_storage_identity_key(right_ref),
             self._readonly_count_index_identity_key(right_ref),
         )
+
+    def _record_completed_readonly_identity_projection_proof_if_safe(
+        self,
+        reason_record,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        if reason_record.reason_id != UnknownReasonId.READONLY_IDENTITY_MISSING.value:
+            return
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if not self._readonly_identity_target_is_specific(object_target_key):
+            return
+        left_ref = getattr(getattr(case1, "value_expr", None), "runtime_ref", None)
+        right_ref = getattr(getattr(case2, "value_expr", None), "runtime_ref", None)
+        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
+            return
+        relation = self._readonly_identity_storage_relation_from_target(object_target_key)
+        if not isinstance(relation, tuple) or not relation or relation[0] != "same_register_base_projection":
+            return
+        if not self._readonly_projection_term_contracts_match(left_ref, right_ref):
+            return
+        if not self._readonly_projection_semantic_witnesses_match(left_ref, right_ref):
+            return
+        if not self._case_pair_has_runtime_guard_coverage_or_equivalence(case1, case2):
+            return
+        extension_evidence = self._readonly_projection_parameter_extension_evidence(
+            analysis1,
+            analysis2,
+            left_ref,
+            right_ref,
+            relation,
+        )
+        if extension_evidence is None:
+            return
+
+        actions = tuple(build_unknown_recovery_actions([reason_record]))
+        if len(actions) != 1:
+            return
+        action = actions[0]
+        proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
+        if proof_id is None:
+            return
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis1, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        if proof_id in existing_ids:
+            return
+        proof_content = {
+            "object_derived": True,
+            "object_target_key": object_target_key,
+            "left_side": object_target_key[2],
+            "right_side": object_target_key[3],
+            "object_storage_identity": "matched",
+            "count_identity": "matched",
+            "guard_implication": "proven",
+            "finite_witness": "checked",
+            "storage_relation": relation,
+            "term_contract_relation": {
+                "object_derived": True,
+                "status": "matched",
+                "relation": "same_except_count_storage_projection",
+                "left_term_contract": self._readonly_reduction_term_sequence_contract_key(
+                    left_ref,
+                    result_size=getattr(left_ref, "result_size", None),
+                ),
+                "right_term_contract": self._readonly_reduction_term_sequence_contract_key(
+                    right_ref,
+                    result_size=getattr(right_ref, "result_size", None),
+                ),
+            },
+            "parameter_extension": extension_evidence,
+        }
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": UnknownReasonId.READONLY_IDENTITY_MISSING.value,
+                "proof_kind": action.proof_kind,
+                "recovery_proof_kind": action.proof_kind,
+                "proof_stage": action.proof_stage,
+                "evidence_kind": action.evidence_kind,
+                "required_evidence": tuple(action.required_evidence),
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_id,
+                "proof_source": "readonly_same_register_projection_semantic_extension",
+                "proof_content": proof_content,
+            }
+        )
+        analysis1.completed_recovery_proof_evidence = tuple(records)
+
+    def _readonly_projection_term_contracts_match(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        left_key = self._readonly_reduction_term_sequence_contract_key(
+            left_ref,
+            result_size=getattr(left_ref, "result_size", None),
+        )
+        right_key = self._readonly_reduction_term_sequence_contract_key(
+            right_ref,
+            result_size=getattr(right_ref, "result_size", None),
+        )
+        if not isinstance(left_key, tuple) or not isinstance(right_key, tuple):
+            return False
+        if left_key == right_key:
+            return True
+        if (
+            len(left_key) != len(right_key)
+            or len(left_key) < 5
+            or left_key[0] != "readonly_reduction_term_sequence_contract"
+            or right_key[0] != "readonly_reduction_term_sequence_contract"
+        ):
+            return False
+        return left_key[:3] == right_key[:3] and left_key[4:] == right_key[4:]
+
+    def _readonly_projection_semantic_witnesses_match(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        left_witnesses = self._readonly_semantic_witness_keys(left_ref)
+        right_witnesses = self._readonly_semantic_witness_keys(right_ref)
+        return bool(left_witnesses) and left_witnesses == right_witnesses
+
+    def _readonly_semantic_witness_keys(self, readonly_ref: ReadonlyReductionRef) -> Tuple[Any, ...]:
+        witnesses = getattr(readonly_ref, "semantic_witnesses", None)
+        if witnesses is None:
+            proof = getattr(readonly_ref, "accumulator_proof", None)
+            witnesses = getattr(proof, "semantic_witnesses", None)
+        keys: List[Any] = []
+        for witness in witnesses or ():
+            if hasattr(witness, "stable_key"):
+                keys.append(witness.stable_key())
+                continue
+            try:
+                keys.append(tuple(witness))
+            except TypeError:
+                return ()
+        return tuple(keys)
+
+    def _readonly_projection_parameter_extension_evidence(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+        relation: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            left_bits = self._readonly_projection_span(relation, "left_bits")
+            right_bits = self._readonly_projection_span(relation, "right_bits")
+        except (TypeError, ValueError):
+            return None
+        if left_bits is None or right_bits is None:
+            return None
+        left_low, left_size = left_bits
+        right_low, right_size = right_bits
+        if left_size == right_size:
+            return None
+        if left_size > right_size:
+            wide_side, narrow_side = "left", "right"
+            wide_bits, narrow_bits = left_size, right_size
+            wide_low, narrow_low = left_low, right_low
+            wide_analysis, narrow_analysis = analysis1, analysis2
+            wide_ref, narrow_ref = left_ref, right_ref
+        else:
+            wide_side, narrow_side = "right", "left"
+            wide_bits, narrow_bits = right_size, left_size
+            wide_low, narrow_low = right_low, left_low
+            wide_analysis, narrow_analysis = analysis2, analysis1
+            wide_ref, narrow_ref = right_ref, left_ref
+        shared_index = self._readonly_shared_parameter_index(left_ref, right_ref)
+        if shared_index is None:
+            return None
+        wide_hint = infer_parameter_semantics(wide_analysis).get(shared_index)
+        signedness = None
+        source = None
+        if (
+            wide_hint is not None
+            and wide_hint.narrow_bits == narrow_bits
+            and wide_hint.signedness in {"signed", "unsigned"}
+            and wide_hint.signedness_source == "explicit"
+        ):
+            signedness = wide_hint.signedness
+            source = "param_semantic_hint"
+        if signedness is None:
+            signedness = self._readonly_declared_narrow_parameter_signedness(
+                wide_analysis,
+                shared_index,
+                narrow_bits,
+                wide_bits,
+            )
+            source = "declared_parameter_narrow_type_on_wide_storage" if signedness is not None else None
+        if signedness is None:
+            return None
+        if self._readonly_declared_parameter_bits(narrow_analysis, shared_index) != narrow_bits:
+            return None
+        if not self._readonly_projection_ref_storage_matches(
+            wide_ref,
+            wide_bits=wide_bits,
+            low_bit=wide_low,
+        ):
+            return None
+        if not self._readonly_projection_ref_storage_matches(
+            narrow_ref,
+            wide_bits=wide_bits,
+            low_bit=narrow_low,
+            size_bits=narrow_bits,
+        ):
+            return None
+        return {
+            "object_derived": True,
+            "status": "proven",
+            "relation": "same_register_base_projection_semantic_extension",
+            "projection_relation": relation,
+            "wide_side": wide_side,
+            "narrow_side": narrow_side,
+            "parameter_index": shared_index,
+            "signedness": signedness,
+            "narrow_bits": narrow_bits,
+            "wide_bits": wide_bits,
+            "extension": "sign_extend" if signedness == "signed" else "zero_extend",
+            "proof_source": source,
+        }
+
+    @staticmethod
+    def _readonly_projection_span(relation: Tuple[Any, ...], tag: str) -> Optional[Tuple[int, int]]:
+        for item in relation:
+            if isinstance(item, tuple) and len(item) == 3 and item[0] == tag:
+                return int(item[1]), int(item[2])
+        return None
+
+    def _readonly_shared_parameter_index(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> Optional[int]:
+        left_index = self._readonly_count_index_identity_key(left_ref)
+        right_index = self._readonly_count_index_identity_key(right_ref)
+        if (
+            isinstance(left_index, tuple)
+            and isinstance(right_index, tuple)
+            and len(left_index) == 2
+            and len(right_index) == 2
+            and left_index[0] == "parameter"
+            and right_index[0] == "parameter"
+            and left_index[1] == right_index[1]
+        ):
+            return int(left_index[1])
+        return None
+
+    @staticmethod
+    def _readonly_declared_parameter_bits(
+        analysis: FunctionReturnAnalysis,
+        index: int,
+    ) -> Optional[int]:
+        for param in getattr(analysis, "parameters", ()) or ():
+            try:
+                if int(param.get("index", -1)) != int(index):
+                    continue
+                return int(param.get("size", 0)) * 8
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _readonly_declared_narrow_parameter_signedness(
+        self,
+        analysis: FunctionReturnAnalysis,
+        index: int,
+        narrow_bits: int,
+        wide_bits: int,
+    ) -> Optional[str]:
+        for param in getattr(analysis, "parameters", ()) or ():
+            try:
+                if int(param.get("index", -1)) != int(index):
+                    continue
+                size_bits = int(param.get("size", 0)) * 8
+            except (TypeError, ValueError):
+                return None
+            storage_info = param.get("storage_info") or param.get("storage")
+            storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+            storage_key = storage_key_fn() if callable(storage_key_fn) else None
+            if size_bits != int(narrow_bits):
+                continue
+            if storage_key is None:
+                continue
+            components = self._register_storage_identity_components(("parameter_storage", tuple(storage_key)))
+            if components is None or components[2] != int(wide_bits):
+                continue
+            signedness = self._readonly_parameter_declared_signedness(param)
+            if signedness is None:
+                return None
+            return signedness
+        return None
+
+    @staticmethod
+    def _readonly_parameter_declared_signedness(param: Mapping[str, Any]) -> Optional[str]:
+        if "is_signed" in param:
+            explicit_signedness = param.get("is_signed")
+            if explicit_signedness is True:
+                return "signed"
+            if explicit_signedness is False:
+                return "unsigned"
+            return None
+        data_type_obj = param.get("data_type_obj")
+        if data_type_obj is None:
+            return None
+        is_signed = getattr(data_type_obj, "isSigned", None)
+        if not callable(is_signed):
+            return None
+        try:
+            signed_value = is_signed()
+        except Exception:
+            return None
+        if signed_value is True:
+            return "signed"
+        if signed_value is False:
+            return "unsigned"
+        return None
+
+    def _readonly_projection_ref_storage_matches(
+        self,
+        readonly_ref: ReadonlyReductionRef,
+        *,
+        wide_bits: int,
+        low_bit: int,
+        size_bits: Optional[int] = None,
+    ) -> bool:
+        storage = self._readonly_count_storage_identity_key(readonly_ref)
+        components = self._register_storage_identity_components(storage)
+        if components is None:
+            return False
+        _, _, base_bits, ref_low, ref_size = components
+        expected_size = int(size_bits) if size_bits is not None else int(wide_bits)
+        return base_bits == int(wide_bits) and ref_low == int(low_bit) and ref_size == expected_size
 
     def _readonly_identity_object_target_key(
         self,

@@ -1071,7 +1071,7 @@ def _storage_backed_identity_proof_content_is_specific(content: Mapping[str, Any
     target = _normalize_nested_tuple(object_target_key)
     left = _readonly_side(target, "left")
     right = _readonly_side(target, "right")
-    return (
+    if not (
         content.get("object_derived") is True
         and _normalize_nested_tuple(content.get("object_target_key")) == target
         and _normalize_nested_tuple(content.get("left_side")) == left
@@ -1080,6 +1080,85 @@ def _storage_backed_identity_proof_content_is_specific(content: Mapping[str, Any
         and content.get("count_identity") == "matched"
         and content.get("guard_implication") in {"proven", "vacuous"}
         and content.get("finite_witness") == "checked"
+    ):
+        return False
+    storage_relation = _readonly_storage_relation_from_target(target)
+    if storage_relation is None:
+        return False
+    if storage_relation[0] == "same_register_base_projection":
+        if _normalize_nested_tuple(content.get("storage_relation")) != storage_relation:
+            return False
+        return _readonly_projection_extension_proof_content_is_specific(
+            content.get("parameter_extension"),
+            storage_relation,
+        )
+    return True
+
+
+def _readonly_storage_relation_from_target(object_target_key: Any) -> Any:
+    target = _normalize_nested_tuple(object_target_key)
+    if not isinstance(target, tuple) or len(target) != 5:
+        return None
+    relation = _normalize_nested_tuple(target[4])
+    if not isinstance(relation, tuple) or len(relation) != 3:
+        return None
+    storage = _normalize_nested_tuple(relation[2])
+    if not isinstance(storage, tuple) or len(storage) != 2 or storage[0] != "count_storage_relation":
+        return None
+    storage_relation = _normalize_nested_tuple(storage[1])
+    return storage_relation if isinstance(storage_relation, tuple) else None
+
+
+def _readonly_projection_extension_proof_content_is_specific(extension: Any, storage_relation: Any) -> bool:
+    if not isinstance(extension, Mapping):
+        return False
+    if extension.get("object_derived") is not True or extension.get("status") != "proven":
+        return False
+    if extension.get("relation") != "same_register_base_projection_semantic_extension":
+        return False
+    if _normalize_nested_tuple(extension.get("projection_relation")) != storage_relation:
+        return False
+    if extension.get("wide_side") not in {"left", "right"} or extension.get("narrow_side") not in {"left", "right"}:
+        return False
+    if extension.get("wide_side") == extension.get("narrow_side"):
+        return False
+    if extension.get("signedness") not in {"signed", "unsigned"}:
+        return False
+    if extension.get("extension") not in {"sign_extend", "zero_extend"}:
+        return False
+    if (extension.get("signedness") == "signed") != (extension.get("extension") == "sign_extend"):
+        return False
+    try:
+        narrow_bits = int(extension.get("narrow_bits"))
+        wide_bits = int(extension.get("wide_bits"))
+        parameter_index = int(extension.get("parameter_index"))
+    except (TypeError, ValueError):
+        return False
+    if parameter_index < 0 or narrow_bits <= 0 or wide_bits <= narrow_bits:
+        return False
+    relation_spans = {
+        item[0]: item
+        for item in storage_relation
+        if isinstance(item, tuple) and len(item) == 3 and item[0] in {"left_bits", "right_bits"}
+    }
+    left_span = relation_spans.get("left_bits")
+    right_span = relation_spans.get("right_bits")
+    if left_span is None or right_span is None:
+        return False
+    try:
+        left_size = int(left_span[2])
+        right_size = int(right_span[2])
+    except (TypeError, ValueError):
+        return False
+    expected_wide_side = "left" if left_size > right_size else "right"
+    expected_narrow_side = "right" if expected_wide_side == "left" else "left"
+    return (
+        extension.get("wide_side") == expected_wide_side
+        and extension.get("narrow_side") == expected_narrow_side
+        and max(left_size, right_size) == wide_bits
+        and min(left_size, right_size) == narrow_bits
+        and extension.get("proof_source")
+        in {"param_semantic_hint", "declared_parameter_narrow_type_on_wide_storage"}
     )
 
 

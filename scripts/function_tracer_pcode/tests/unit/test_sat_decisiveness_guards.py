@@ -4977,6 +4977,51 @@ def _readonly_identity_reason(target=None):
 
 
 def _readonly_identity_evidence(action, **overrides):
+    storage_relation = None
+    if len(action.object_target_key) == 5:
+        relation = action.object_target_key[4]
+        if (
+            isinstance(relation, tuple)
+            and len(relation) == 3
+            and isinstance(relation[2], tuple)
+            and len(relation[2]) == 2
+            and relation[2][0] == "count_storage_relation"
+        ):
+            storage_relation = relation[2][1]
+    proof_content = {
+        "object_derived": True,
+        "object_target_key": action.object_target_key,
+        "left_side": action.object_target_key[2],
+        "right_side": action.object_target_key[3],
+        "object_storage_identity": "matched",
+        "count_identity": "matched",
+        "guard_implication": "proven",
+        "finite_witness": "checked",
+    }
+    if (
+        isinstance(storage_relation, tuple)
+        and storage_relation
+        and storage_relation[0] == "same_register_base_projection"
+    ):
+        proof_content.update(
+            {
+                "storage_relation": storage_relation,
+                "parameter_extension": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "relation": "same_register_base_projection_semantic_extension",
+                    "projection_relation": storage_relation,
+                    "wide_side": "left",
+                    "narrow_side": "right",
+                    "parameter_index": 1,
+                    "signedness": "signed",
+                    "narrow_bits": 32,
+                    "wide_bits": 64,
+                    "extension": "sign_extend",
+                    "proof_source": "param_semantic_hint",
+                },
+            }
+        )
     evidence = {
         "object_derived": True,
         "status": "complete",
@@ -4988,16 +5033,7 @@ def _readonly_identity_evidence(action, **overrides):
         "required_evidence": tuple(action.required_evidence),
         "object_target_key": action.object_target_key,
         "proof_obligation_id": action.proof_obligation_id,
-        "proof_content": {
-            "object_derived": True,
-            "object_target_key": action.object_target_key,
-            "left_side": action.object_target_key[2],
-            "right_side": action.object_target_key[3],
-            "object_storage_identity": "matched",
-            "count_identity": "matched",
-            "guard_implication": "proven",
-            "finite_witness": "checked",
-        },
+        "proof_content": proof_content,
     }
     evidence.update(overrides)
     return evidence
@@ -5149,6 +5185,19 @@ def test_readonly_identity_completed_evidence_rejects_missing_side_payload():
     action = build_unknown_recovery_actions([reason])[0]
     evidence = _readonly_identity_evidence(action)
     evidence["proof_content"].pop("left_side")
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_completed_evidence_rejects_projection_without_extension_payload():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _readonly_identity_reason()
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    evidence["proof_content"].pop("parameter_extension")
     analysis1 = _analysis_with_completed_evidence(evidence)
     analysis2 = _analysis_with_completed_evidence()
 

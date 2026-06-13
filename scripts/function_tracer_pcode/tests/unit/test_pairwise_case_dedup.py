@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise import Pairwi
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownReasonId,
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
@@ -41,7 +42,11 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     LocationBaseRef,
     PostStateValueRef,
+    ReductionAccumulatorProof,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     ReturnInfo,
+    StorageInfo,
 )
 from conftest import resolve_mock_data_type
 
@@ -122,6 +127,123 @@ def _signed_semantic_param(
         semantic_narrow_bits=semantic_bits,
         semantic_signedness="signed" if semantic_bits is not None else None,
     )
+
+
+def _storage(name: str, offset: int, size_bits: int) -> StorageInfo:
+    return StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name=name,
+        base_register_name="a1",
+        base_register_offset=0x31D4,
+        base_register_size_bits=64,
+        bit_offset_in_base=offset,
+        size=max(1, size_bits // 8),
+        size_bits=size_bits,
+    )
+
+
+def _readonly_projection_ref(*, storage: StorageInfo, param_size: int):
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=storage.storage_identity_key(),
+        limit_expr=Expression.parameter(
+            "count",
+            index=1,
+            data_type="int" if param_size == 4 else "long",
+            size=param_size,
+            storage_info=storage,
+        ),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=2,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ),
+            ),
+        ),
+    )
+    ref = proof.lower_to_readonly_reduction_ref()
+    assert ref is not None
+    return ref
+
+
+def _readonly_projection_case(ref, *, param_size: int, storage: StorageInfo) -> ReturnCase:
+    value = Expression(ExpressionType.UNKNOWN, name="readonly", size=4, runtime_ref=ref)
+    params = [
+        {"name": "base", "index": 0, "size": 8},
+        {
+            "name": "count",
+            "index": 1,
+            "size": param_size,
+            "is_signed": True,
+            "storage_info": storage,
+        },
+    ]
+    return ReturnCase(
+        index=0,
+        conditions=[],
+        summary_conditions=[],
+        value_expr=value,
+        return_info=ReturnInfo(address="0x1000", value=value, conditions=[]),
+        parameters=params,
+        return_type="int",
+    )
+
+
+def _readonly_projection_reason_and_analyses(*, left_param: dict | None = None):
+    wide_storage = _storage("a1", 0, 64)
+    narrow_storage = _storage("a1_lo", 32, 32)
+    left_ref = _readonly_projection_ref(storage=wide_storage, param_size=8)
+    right_ref = _readonly_projection_ref(storage=narrow_storage, param_size=4)
+    left_case = _readonly_projection_case(left_ref, param_size=4, storage=wide_storage)
+    right_case = _readonly_projection_case(right_ref, param_size=4, storage=narrow_storage)
+    if left_param is not None:
+        left_case.parameters[1].update(left_param)
+        for key, value in list(left_case.parameters[1].items()):
+            if value is None:
+                left_case.parameters[1].pop(key)
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=left_case.parameters,
+        returns=[left_case.return_info],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x2000",
+        parameters=right_case.parameters,
+        returns=[right_case.return_info],
+        return_type="int",
+    )
+    target = strategy._readonly_identity_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.READONLY_IDENTITY_MISSING,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind="object_storage_identity",
+        object_target_key=target,
+    )
+    return strategy, reason, analysis1, analysis2, left_case, right_case
 
 
 def test_extract_return_cases_deduplicates_same_condition_set():
@@ -1306,3 +1428,191 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
 
     assert "((_ zero_extend 32) (bvmul" not in smt
     assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"
+
+
+def test_readonly_identity_projection_producer_records_completed_proof_with_narrow_storage_type():
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses()
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
+    evidence = analysis1.completed_recovery_proof_evidence[0]
+    content = evidence["proof_content"]
+    assert content["parameter_extension"]["proof_source"] == "declared_parameter_narrow_type_on_wide_storage"
+    assert content["parameter_extension"]["extension"] == "sign_extend"
+
+
+def test_readonly_identity_projection_producer_records_completed_proof_with_object_signedness():
+    class SignedDataType:
+        def isSigned(self):
+            return True
+
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
+        left_param={"is_signed": None, "data_type_obj": SignedDataType()},
+    )
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
+    content = analysis1.completed_recovery_proof_evidence[0]["proof_content"]
+    assert content["parameter_extension"]["proof_source"] == "declared_parameter_narrow_type_on_wide_storage"
+    assert content["parameter_extension"]["extension"] == "sign_extend"
+
+
+def test_readonly_identity_declared_signedness_rejects_non_bool_values():
+    assert PairwiseStrategy._readonly_parameter_declared_signedness({"is_signed": None}) is None
+    assert PairwiseStrategy._readonly_parameter_declared_signedness({"is_signed": 1}) is None
+
+    class NumericSignedDataType:
+        def isSigned(self):
+            return 1
+
+    assert (
+        PairwiseStrategy._readonly_parameter_declared_signedness(
+            {"data_type_obj": NumericSignedDataType()},
+        )
+        is None
+    )
+
+
+def test_readonly_identity_projection_producer_rejects_missing_declared_signedness():
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
+        left_param={"is_signed": None, "data_type_obj": None},
+    )
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_projection_producer_rejects_data_type_obj_without_signedness():
+    class OpaqueDataType:
+        pass
+
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
+        left_param={"is_signed": None, "data_type_obj": OpaqueDataType()},
+    )
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_projection_producer_rejects_data_type_obj_unknown_signedness():
+    class UnknownSignednessDataType:
+        def isSigned(self):
+            return None
+
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
+        left_param={"is_signed": None, "data_type_obj": UnknownSignednessDataType()},
+    )
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_projection_producer_rejects_term_contract_mismatch():
+    wide_storage = _storage("a1", 0, 64)
+    narrow_storage = _storage("a1_lo", 32, 32)
+    left_ref = _readonly_projection_ref(storage=wide_storage, param_size=8)
+    right_proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=narrow_storage.storage_identity_key(),
+        limit_expr=Expression.parameter(
+            "count",
+            index=1,
+            data_type="int",
+            size=4,
+            storage_info=narrow_storage,
+        ),
+        result_size=4,
+        stride=8,
+        element_size=4,
+        index_scale=8,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+        ),
+    )
+    right_ref = right_proof.lower_to_readonly_reduction_ref()
+    assert right_ref is not None
+    left_case = _readonly_projection_case(left_ref, param_size=4, storage=wide_storage)
+    right_case = _readonly_projection_case(right_ref, param_size=4, storage=narrow_storage)
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=left_case.parameters,
+        returns=[left_case.return_info],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x2000",
+        parameters=right_case.parameters,
+        returns=[right_case.return_info],
+        return_type="int",
+    )
+    target = strategy._readonly_identity_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.READONLY_IDENTITY_MISSING,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind="object_storage_identity",
+        object_target_key=target,
+    )
+
+    strategy._record_completed_readonly_identity_projection_proof_if_safe(
+        reason,
+        analysis1,
+        analysis2,
+        left_case,
+        right_case,
+    )
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False

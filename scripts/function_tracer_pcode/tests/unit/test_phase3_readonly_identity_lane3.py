@@ -252,6 +252,7 @@ def _setup_logs(tmp_path: Path, *, current_payload: dict):
 def _completed_evidence(actions, *, include_proof_content=True, proof_content_overrides=None):
     records = []
     for action in actions:
+        storage_relation = action["object_target_key"][4][2][1]
         evidence = {
             "reason_id": action["reason_id"],
             "proof_stage": action["proof_stage"],
@@ -273,6 +274,21 @@ def _completed_evidence(actions, *, include_proof_content=True, proof_content_ov
                 "count_identity": "matched",
                 "guard_implication": "proven",
                 "finite_witness": "checked",
+                "storage_relation": storage_relation,
+                "parameter_extension": {
+                    "object_derived": True,
+                    "status": "proven",
+                    "relation": "same_register_base_projection_semantic_extension",
+                    "projection_relation": storage_relation,
+                    "wide_side": "left",
+                    "narrow_side": "right",
+                    "parameter_index": 1,
+                    "signedness": "signed",
+                    "narrow_bits": 32,
+                    "wide_bits": 64,
+                    "extension": "sign_extend",
+                    "proof_source": "param_semantic_hint",
+                },
             }
             proof_content.update(proof_content_overrides or {})
             evidence["proof_content"] = proof_content
@@ -770,6 +786,45 @@ def test_phase3_readonly_identity_lane3_post_fix_rejects_metadata_only_completed
     )
     gate = json.loads(post_fix_path.read_text())
     assert gate["phase3_lane3_post_fix_ready"] is False
+    with pytest.raises(ValueError, match="readonly_identity_post_fix_expected_movement"):
+        validate_phase3_readonly_identity_lane3_post_fix_gate(gate)
+
+
+def test_phase3_readonly_identity_lane3_post_fix_rejects_projection_without_extension_proof(tmp_path):
+    reason = _readonly_reason(_target())
+    actions = [action.to_dict() for action in build_unknown_recovery_actions([reason])]
+    unknown_payload = _payload(reasons=[reason], actions=actions)
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=unknown_payload)
+    pre_fix_path = build_phase3_readonly_identity_lane3_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=_completed_evidence(
+                actions,
+                proof_content_overrides={"parameter_extension": None},
+            ),
+        ),
+    )
+
+    post_fix_path = build_phase3_readonly_identity_lane3_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane3_post_fix_ready"] is False
+    assert gate["entries"][0]["post_fix_status"] == "failed"
     with pytest.raises(ValueError, match="readonly_identity_post_fix_expected_movement"):
         validate_phase3_readonly_identity_lane3_post_fix_gate(gate)
 
