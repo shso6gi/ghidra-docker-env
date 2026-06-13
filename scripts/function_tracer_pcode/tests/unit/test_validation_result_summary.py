@@ -1929,9 +1929,11 @@ def test_phase3_post_fix_gate_index_wrapper_validates_all_gates():
         'phase3_post_fix_gate_index}"'
     ) in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'PHASE3_PRINT_SUMMARY="${PHASE3_PRINT_SUMMARY:-1}"' in script
     assert '--repo-root "$SCRIPT_DIR"' in script
     assert '--output-dir "$OUTPUT_DIR"' in script
     assert 'ARGS+=(--require-ready)' in script
+    assert 'ARGS+=(--print-summary)' in script
     assert (
         '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
         'phase3_post_fix_gate_index "${ARGS[@]}"'

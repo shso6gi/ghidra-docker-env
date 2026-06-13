@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.validation.phase3_post_fix_gate_index import 
     DEFAULT_PHASE3_POST_FIX_GATE_SPECS,
     Phase3PostFixGateSpec,
     build_phase3_post_fix_gate_index,
+    phase3_post_fix_gate_index_text_summary,
     validate_phase3_post_fix_gate_index,
 )
 
@@ -373,6 +374,30 @@ def test_phase3_post_fix_gate_index_summarizes_post_fix_status_counts(tmp_path):
     assert manifest["gates"][0]["post_fix_status_counts"] == {"pending_proof": 1}
     assert manifest["gates"][1]["post_fix_status_counts"] == {"completed_recovery": 1}
     validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=specs)
+
+
+def test_phase3_post_fix_gate_index_text_summary_includes_lane_status_and_obligations(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    specs = (_spec(1, "lane_one"), _spec(2, "lane_two"))
+    _write_gate(repo, specs[0], post_fix_status="pending_proof")
+    _write_gate(repo, specs[1], post_fix_status="completed_recovery")
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    text = phase3_post_fix_gate_index_text_summary(manifest)
+
+    assert "ready=True failed_checks=0" in text
+    assert "post_fix_status_counts={completed_recovery:1, pending_proof:1}" in text
+    assert "lane1 lane_one: ready=True entries=1 statuses={pending_proof:1}" in text
+    assert "lane2 lane_two: ready=True entries=1 statuses={completed_recovery:1}" in text
+    assert "pending_proof_obligation_count:1" in text
 
 
 def test_phase3_post_fix_gate_index_accepts_expected_status_distribution(tmp_path):

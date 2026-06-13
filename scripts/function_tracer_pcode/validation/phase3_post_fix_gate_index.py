@@ -3346,6 +3346,64 @@ def _expected_post_fix_obligation_counts_from_specs(
     return dict(sorted(counts.items())) if any_expected else {}
 
 
+def phase3_post_fix_gate_index_text_summary(manifest: Mapping[str, Any]) -> str:
+    """Return a compact operator-facing summary for a built gate index."""
+
+    summary = manifest.get("summary")
+    failed = (
+        summary.get("failed", MISSING_SENTINEL)
+        if isinstance(summary, Mapping)
+        else MISSING_SENTINEL
+    )
+    ready = manifest.get("phase3_post_fix_gates_ready", MISSING_SENTINEL)
+    status_counts = manifest.get("post_fix_status_counts")
+    obligation_counts = manifest.get("post_fix_obligation_counts")
+    lines = [
+        "Phase 3 post-fix gate summary",
+        f"ready={ready} failed_checks={failed}",
+        f"post_fix_status_counts={_format_count_mapping(status_counts)}",
+        f"post_fix_obligation_counts={_format_count_mapping(obligation_counts)}",
+        "lanes:",
+    ]
+    for gate in manifest.get("gates") or ():
+        if not isinstance(gate, Mapping):
+            continue
+        lane_number = gate.get("lane_number", MISSING_SENTINEL)
+        lane_id = gate.get("lane_id", MISSING_SENTINEL)
+        gate_ready = gate.get("ready_value", gate.get("ready", MISSING_SENTINEL))
+        entry_count = gate.get("entry_count", MISSING_SENTINEL)
+        gate_status_counts = _format_count_mapping(gate.get("post_fix_status_counts"))
+        gate_obligation_counts = _format_obligation_counts(
+            gate.get("post_fix_obligation_summary")
+        )
+        lines.append(
+            "  "
+            f"lane{lane_number} {lane_id}: "
+            f"ready={gate_ready} entries={entry_count} "
+            f"statuses={gate_status_counts} obligations={gate_obligation_counts}"
+        )
+    return "\n".join(lines)
+
+
+def _format_count_mapping(value: Any) -> str:
+    if not isinstance(value, Mapping) or not value:
+        return "{}"
+    return "{" + ", ".join(
+        f"{key}:{value[key]}" for key in sorted(value, key=str)
+    ) + "}"
+
+
+def _format_obligation_counts(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "{}"
+    counts = {
+        key: value.get(key)
+        for key in OBLIGATION_COUNT_KEYS
+        if isinstance(value.get(key), int) and value.get(key) > 0
+    }
+    return _format_count_mapping(counts)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build a Phase 3 post-fix gate artifact index.",
@@ -3353,14 +3411,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--require-ready", action="store_true")
+    parser.add_argument(
+        "--print-summary",
+        action="store_true",
+        help="Print a compact lane/status summary after writing the index.",
+    )
     args = parser.parse_args(argv)
     path = build_phase3_post_fix_gate_index(
         repo_root=Path(args.repo_root),
         output_dir=Path(args.output_dir),
     )
+    manifest = _read_json(path)
     if args.require_ready:
-        validate_phase3_post_fix_gate_index(_read_json(path), repo_root=Path(args.repo_root))
+        validate_phase3_post_fix_gate_index(manifest, repo_root=Path(args.repo_root))
     print(path)
+    if args.print_summary:
+        print(phase3_post_fix_gate_index_text_summary(manifest))
     return 0
 
 
