@@ -231,7 +231,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-readonly-identity-even-index-step2-count-mismatch",
                 "required_completion_actions_sha256": (
-                    "1697fdabe62fda73e4a71687ecdc8eb7e9ad3f9057b6c13a7916e5ce1007ae4d"
+                    "2d6d2003dead6532e894ef3c3c412a9361204e968e575268afd863b47c28029f"
                 ),
             },
         ),
@@ -277,7 +277,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-method-b-even-index-step2-covering-guard",
                 "required_completion_actions_sha256": (
-                    "02e523c335626b44c38bc9cf2330491c020ba4b8123be4231e7ecc632651f140"
+                    "8a04d1c734b20463e67118b0d72dee8264c45563b531cb0bfe3443536e6236b3"
                 ),
             },
         ),

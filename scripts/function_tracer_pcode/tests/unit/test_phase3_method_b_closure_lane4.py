@@ -151,6 +151,40 @@ def _loop_value(binary_id: str, count_index: int, *, has_loop: bool):
     ]
 
 
+def _summary_profile(binary_id: str, count_index: int):
+    return [
+        "method_b_summary_profile",
+        ["runtime_ref", _runtime_ref(binary_id, count_index)],
+        ["loop_summary", _loop_summary(binary_id, 2 if binary_id == "B13" else 1)],
+        ["term_contract", _runtime_ref(binary_id, count_index)[6]],
+        [
+            "count_identities",
+            [
+                ["parameter", count_index],
+                ["parameter_storage", ["register_storage", -1, 12756, 64, 0 if binary_id == "B10" else 32, 64 if binary_id == "B10" else 32]],
+            ],
+        ],
+    ]
+
+
+def _one_sided_summary_relation():
+    return [
+        "method_b_closure_relation",
+        ["kind", "one_sided_summary"],
+        ["summary_side", "right"],
+        ["exact_side", "left"],
+        ["summary", _summary_profile("B13", 1)],
+        [
+            "exact_terms",
+            [
+                ["readonly_reduction_term", 0, 4],
+                ["readonly_reduction_term", 8, 4],
+            ],
+        ],
+        ["exact_constant_bias", 0],
+    ]
+
+
 def _side(side: str, binary_id: str, address: str, count_index: int, *, has_loop: bool):
     return [
         "method_b_closure_side",
@@ -162,13 +196,19 @@ def _side(side: str, binary_id: str, address: str, count_index: int, *, has_loop
     ]
 
 
-def _target():
+def _target_without_relation():
     return [
         "method_b_closure",
         ["pair", "(4,0)"],
         _side("left", "B10", "00100fe4", 1, has_loop=False),
         _side("right", "B13", "120001fc8", 1, has_loop=True),
     ]
+
+
+def _target():
+    target = _target_without_relation()
+    target.append(_one_sided_summary_relation())
+    return target
 
 
 def _method_b_reason(target=None):
@@ -245,6 +285,19 @@ def _setup_logs(tmp_path: Path, *, current_payload: dict):
     return raw_dir, baseline_root, current_root
 
 
+def _method_b_relation_field(target, field_name, default=None):
+    try:
+        relation = target[4]
+        for item in relation[1:]:
+            if isinstance(item, list) and len(item) >= 2 and item[0] == field_name:
+                return item[1]
+            if isinstance(item, tuple) and len(item) >= 2 and item[0] == field_name:
+                return item[1]
+    except (IndexError, TypeError):
+        return default
+    return default
+
+
 def _completed_evidence(actions, *, include_proof_content=True):
     records = []
     for action in actions:
@@ -264,19 +317,35 @@ def _completed_evidence(actions, *, include_proof_content=True):
                 "object_derived": True,
                 "object_target_key": action["object_target_key"],
             }
+            exact_side = _method_b_relation_field(action["object_target_key"], "exact_side", "left")
+            summary_side = _method_b_relation_field(action["object_target_key"], "summary_side", "right")
+            exact_terms = _method_b_relation_field(action["object_target_key"], "exact_terms", [])
+            constant_bias = _method_b_relation_field(action["object_target_key"], "exact_constant_bias", 0)
             if action["proof_stage"] == "method_b_covering_case":
                 proof_content.update(
                     {
                         "seed_compensation": "proven",
-                        "term_sequence": "proven",
+                        "term_sequence": "matched",
                         "pure_side_effect_profile": "proven",
+                        "exact_side": exact_side,
+                        "summary_side": summary_side,
+                        "count_value": 2,
+                        "exact_terms": exact_terms,
+                        "expected_terms": exact_terms,
+                        "constant_bias": constant_bias,
+                        "result_size": 4,
+                        "covering_evidence": "method_b_covering_materialized_terms",
                     }
                 )
             else:
                 proof_content.update(
                     {
                         "guard_partition": "proven",
-                        "partition_coverage_proof": "proven",
+                        "partition_coverage_proof": "covered",
+                        "exact_side": exact_side,
+                        "summary_side": summary_side,
+                        "count_value": 2,
+                        "guard_evidence": "reduction_count_implication",
                     }
                 )
             evidence["proof_content"] = proof_content
@@ -367,6 +436,22 @@ def test_phase3_method_b_closure_lane4_manifest_and_post_fix_gate_ready(tmp_path
     assert "hidden_lane4_pre_fix_manifest_failure" in ready_check["error"]
     with pytest.raises(ValueError, match="phase3_pre_fix_manifest_ready"):
         validate_phase3_method_b_closure_lane4_post_fix_gate(tampered_pre_fix_gate)
+
+
+def test_phase3_method_b_closure_lane4_rejects_relationless_target(tmp_path):
+    current_payload = _payload(reasons=[_method_b_reason(_target_without_relation())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+
+    pre_fix_path = build_phase3_method_b_closure_lane4_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    manifest = json.loads(pre_fix_path.read_text())
+
+    with pytest.raises(ValueError, match="method_b_closure_current_targets_present"):
+        validate_phase3_method_b_closure_lane4_manifest(manifest)
 
 
 def test_phase3_method_b_closure_lane4_manifest_rejects_nested_diagnostic_reason(tmp_path):
@@ -589,6 +674,100 @@ def test_phase3_method_b_closure_lane4_post_fix_rejects_metadata_only_completed_
             actions=[],
             is_equivalent=True,
             completed_evidence=_completed_evidence(actions, include_proof_content=False),
+        ),
+    )
+
+    post_fix_path = build_phase3_method_b_closure_lane4_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane4_post_fix_ready"] is False
+    with pytest.raises(ValueError, match="method_b_closure_post_fix_expected_movement"):
+        validate_phase3_method_b_closure_lane4_post_fix_gate(gate)
+
+
+def test_phase3_method_b_closure_lane4_post_fix_rejects_status_only_completed_payload(tmp_path):
+    reason = _method_b_reason(_target())
+    actions = [action.to_dict() for action in build_unknown_recovery_actions([reason])]
+    raw_dir, baseline_root, current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[reason], actions=actions),
+    )
+    pre_fix_path = build_phase3_method_b_closure_lane4_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    completed_evidence = _completed_evidence(actions)
+    for record in completed_evidence:
+        content = record["evidence"]["proof_content"]
+        record["evidence"]["proof_content"] = {
+            key: content[key]
+            for key in (
+                "object_derived",
+                "object_target_key",
+                "seed_compensation",
+                "term_sequence",
+                "pure_side_effect_profile",
+                "guard_partition",
+                "partition_coverage_proof",
+            )
+            if key in content
+        }
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=completed_evidence,
+        ),
+    )
+
+    post_fix_path = build_phase3_method_b_closure_lane4_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane4_post_fix_ready"] is False
+    with pytest.raises(ValueError, match="method_b_closure_post_fix_expected_movement"):
+        validate_phase3_method_b_closure_lane4_post_fix_gate(gate)
+
+
+def test_phase3_method_b_closure_lane4_post_fix_rejects_completed_payload_term_mismatch(tmp_path):
+    reason = _method_b_reason(_target())
+    actions = [action.to_dict() for action in build_unknown_recovery_actions([reason])]
+    raw_dir, baseline_root, current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[reason], actions=actions),
+    )
+    pre_fix_path = build_phase3_method_b_closure_lane4_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    completed_evidence = _completed_evidence(actions)
+    completed_evidence[0]["evidence"]["proof_content"]["exact_terms"] = [
+        ["readonly_reduction_term", 0, 4],
+    ]
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=completed_evidence,
         ),
     )
 

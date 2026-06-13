@@ -144,13 +144,34 @@ def _side(side: str, binary_id: str, address: str, count_index: int):
     ]
 
 
-def _target():
+def _target_without_relation():
     return [
         "readonly_identity",
         ["pair", "(0,0)"],
         _side("left", "B10", "00100fe4", 1),
         _side("right", "B13", "120001fc8", 2),
     ]
+
+
+def _target():
+    target = _target_without_relation()
+    target.append(
+        [
+            "readonly_identity_relation",
+            ["shared_count_identities", [["parameter", 1]]],
+            [
+                "count_storage_relation",
+                [
+                    "same_register_base_projection",
+                    ["base", [-1, 12756, 64]],
+                    ["left_bits", 0, 64],
+                    ["right_bits", 32, 32],
+                    ["projection", "left_contains_right"],
+                ],
+            ],
+        ]
+    )
+    return target
 
 
 def _readonly_reason(target=None):
@@ -359,6 +380,41 @@ def test_phase3_readonly_identity_lane3_manifest_and_post_fix_gate_ready(tmp_pat
     assert "hidden_lane3_pre_fix_manifest_failure" in ready_check["error"]
     with pytest.raises(ValueError, match="phase3_pre_fix_manifest_ready"):
         validate_phase3_readonly_identity_lane3_post_fix_gate(tampered_pre_fix_gate)
+
+
+def test_phase3_readonly_identity_lane3_accepts_storage_projection_relation(tmp_path):
+    current_payload = _payload(reasons=[_readonly_reason(_target())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+
+    pre_fix_path = build_phase3_readonly_identity_lane3_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    manifest = json.loads(pre_fix_path.read_text())
+    validate_phase3_readonly_identity_lane3_manifest(manifest)
+    relation = manifest["entries"][0]["target_object_keys"][0][4]
+
+    assert relation[0] == "readonly_identity_relation"
+    assert relation[1] == ["shared_count_identities", [["parameter", 1]]]
+    assert relation[2][1][0] == "same_register_base_projection"
+
+
+def test_phase3_readonly_identity_lane3_rejects_relationless_target(tmp_path):
+    current_payload = _payload(reasons=[_readonly_reason(_target_without_relation())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+
+    pre_fix_path = build_phase3_readonly_identity_lane3_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"loop": current_root},
+        baseline_log_roots={"loop": baseline_root},
+    )
+    manifest = json.loads(pre_fix_path.read_text())
+
+    with pytest.raises(ValueError, match="readonly_identity_current_targets_present"):
+        validate_phase3_readonly_identity_lane3_manifest(manifest)
 
 
 def test_phase3_readonly_identity_lane3_manifest_rejects_diagnostic_reason_in_target(tmp_path):

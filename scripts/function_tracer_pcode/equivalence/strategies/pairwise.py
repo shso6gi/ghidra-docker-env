@@ -80,6 +80,7 @@ from ..unknown_reason import (
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
     UnknownReasonId,
+    build_unknown_recovery_actions,
     make_unknown_reason,
 )
 
@@ -99,7 +100,7 @@ class _UnresolvedDeferredCallLowering:
 
 @dataclass(frozen=True)
 class _ExactReadonlyReductionProof:
-    """Object proof that an exact load-sum denotes one reduction count."""
+    """Object proof that an exact load-sum denotes one or more reduction counts."""
 
     exact_terms: tuple[ReadonlyReductionTermRef, ...]
     constant_bias: int
@@ -107,6 +108,19 @@ class _ExactReadonlyReductionProof:
     count_value: int
     expected_terms: tuple[ReadonlyReductionTermRef, ...]
     evidence: str
+    count_values: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class _MethodBCoveringCaseProof:
+    """Object proof for one Method-B exact-vs-summary covering case."""
+
+    exact_side: str
+    summary_side: str
+    exact_case: ReturnCase
+    summary_case: ReturnCase
+    accumulator_proof: Any
+    exact_proof: _ExactReadonlyReductionProof
 
 
 @dataclass(frozen=True)
@@ -431,7 +445,6 @@ class PairwiseStrategy(CheckStrategy):
                             f"({loop_fallback_reason})"
                         )
                         continue
-                    unknown_count += 1
                     reason_id = self._unknown_reason_id_for_loop_fallback(loop_fallback_reason)
                     object_target_key = None
                     evidence_kind = None
@@ -450,17 +463,32 @@ class PairwiseStrategy(CheckStrategy):
                             case2=case2,
                             pair_id=pair_id,
                         )
-                    unknown_reasons.append(
-                        make_unknown_reason(
-                            reason_id,
-                            stage="S_PAIRWISE",
-                            pair_or_case=pair_id,
-                            evidence_refs=(loop_fallback_reason,),
-                            evidence_kind=evidence_kind,
-                            object_target_key=object_target_key,
-                            detail=loop_fallback_reason,
-                        )
+                    reason_record = make_unknown_reason(
+                        reason_id,
+                        stage="S_PAIRWISE",
+                        pair_or_case=pair_id,
+                        evidence_refs=(loop_fallback_reason,),
+                        evidence_kind=evidence_kind,
+                        object_target_key=object_target_key,
+                        detail=loop_fallback_reason,
                     )
+                    if reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                        self._record_completed_method_b_covering_case_proof_if_safe(
+                            reason_record,
+                            analysis1,
+                            case1,
+                            case2,
+                        )
+                        if self._method_b_closure_proof_is_complete(reason_record, analysis1, analysis2):
+                            unsat_count += 1
+                            resolved_pairs.add((i, j))
+                            self._debug_print(
+                                f"  Pair {pair_id}: Method-B closure proof completed in current run "
+                                f"-> UNSAT ({unsat_count}/{total_pairs})"
+                            )
+                            continue
+                    unknown_count += 1
+                    unknown_reasons.append(reason_record)
                     self._debug_print(
                         f"  Pair {pair_id}: loop summary requires semantic proof "
                         f"({loop_fallback_reason}) -> UNKNOWN"
@@ -1074,6 +1102,7 @@ class PairwiseStrategy(CheckStrategy):
                     count_value=count_value,
                     expected_terms=tuple(getattr(witness, "terms", ()) or ()),
                     evidence="exact_return_witness",
+                    count_values=(count_value,),
                 )
         return self._exact_terms_match_reduction_proof_under_case_conditions(
             exact_case,
@@ -1165,8 +1194,331 @@ class PairwiseStrategy(CheckStrategy):
                     count_value=int(count_value),
                     expected_terms=tuple(expected_terms),
                     evidence="loop_summary_materialized_terms",
+                    count_values=(int(count_value),),
                 )
         return None
+
+    def _prove_exact_load_sum_covers_readonly_loop_summary(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        summary_ref: ReadonlyReductionRef,
+    ) -> Optional[Tuple[_ExactReadonlyReductionProof, _ReadonlyLoopSummaryProofAdapter]]:
+        loop_summary = getattr(summary_ref, "loop_summary", None)
+        if loop_summary is None:
+            return None
+        requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+        if callable(requires_effect_proof) and requires_effect_proof():
+            return None
+        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+        if callable(requires_path_proof) and requires_path_proof():
+            return None
+        result_size = max(1, int(getattr(summary_ref, "result_size", 0) or 0))
+        term_descriptor = getattr(loop_summary, "term_descriptor", None)
+        if term_descriptor is None:
+            return None
+        if max(1, int(getattr(term_descriptor, "result_size", 0) or result_size)) != result_size:
+            return None
+        if self._normalize_constant_bias(
+            int(getattr(summary_ref, "constant_bias", 0) or 0),
+            result_size,
+        ) != self._normalize_constant_bias(
+            int(getattr(loop_summary, "constant_bias", 0) or 0),
+            result_size,
+        ):
+            return None
+        extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
+            exact_case.value_expr,
+            exact_case.parameters,
+            getattr(summary_ref, "pointer_base_ref", None),
+            program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
+        )
+        if extracted is None:
+            return None
+        extracted_terms, extracted_bias = extracted
+        exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
+        if exact_bits != result_size * 8:
+            return None
+        if self._normalize_constant_bias(extracted_bias, result_size) != self._normalize_constant_bias(
+            int(getattr(loop_summary, "constant_bias", 0) or 0),
+            result_size,
+        ):
+            return None
+        adapter = _ReadonlyLoopSummaryProofAdapter(
+            pointer_base_ref=getattr(summary_ref, "pointer_base_ref", None),
+            count_parameter_name=str(getattr(summary_ref, "count_parameter_name", None) or "count"),
+            count_parameter_index=getattr(summary_ref, "count_parameter_index", None),
+            count_parameter_storage_identity_key=getattr(
+                summary_ref,
+                "count_parameter_storage_identity_key",
+                None,
+            ),
+            limit_expr=getattr(loop_summary, "limit_expr", None),
+            result_size=result_size,
+            loop_summary=loop_summary,
+        )
+        extracted_key = tuple(term.stable_key() for term in extracted_terms)
+        max_count = self._exact_reduction_count_search_bound(adapter, len(extracted_terms))
+        matching_count_values: List[int] = []
+        first_expected_terms: Optional[Tuple[ReadonlyReductionTermRef, ...]] = None
+        for count_value in range(1, max_count + 1):
+            expected_terms = adapter.full_terms_for_count_value(count_value)
+            if expected_terms is None:
+                continue
+            if extracted_key != tuple(term.stable_key() for term in expected_terms):
+                continue
+            matching_count_values.append(int(count_value))
+            if first_expected_terms is None:
+                first_expected_terms = tuple(expected_terms)
+        if matching_count_values and first_expected_terms is not None:
+            return (
+                _ExactReadonlyReductionProof(
+                    exact_terms=tuple(extracted_terms),
+                    constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
+                    result_size=result_size,
+                    count_value=int(matching_count_values[0]),
+                    expected_terms=first_expected_terms,
+                    evidence="method_b_covering_materialized_terms",
+                    count_values=tuple(matching_count_values),
+                ),
+                adapter,
+            )
+        return None
+
+    def _method_b_covering_case_proof(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> Optional[_MethodBCoveringCaseProof]:
+        right_ref = self._method_b_readonly_summary_ref(getattr(case2, "value_expr", None))
+        if right_ref is not None:
+            proven = self._prove_exact_load_sum_covers_readonly_loop_summary(case1, case2, right_ref)
+            if proven is not None:
+                proof, adapter = proven
+                return _MethodBCoveringCaseProof("left", "right", case1, case2, adapter, proof)
+        left_ref = self._method_b_readonly_summary_ref(getattr(case1, "value_expr", None))
+        if left_ref is not None:
+            proven = self._prove_exact_load_sum_covers_readonly_loop_summary(case2, case1, left_ref)
+            if proven is not None:
+                proof, adapter = proven
+                return _MethodBCoveringCaseProof("right", "left", case2, case1, adapter, proof)
+        return None
+
+    def _record_completed_method_b_covering_case_proof_if_safe(
+        self,
+        reason_record,
+        analysis: FunctionReturnAnalysis,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+            return
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if not isinstance(object_target_key, tuple) or len(object_target_key) != 5:
+            return
+        covering = self._method_b_covering_case_proof(case1, case2)
+        if covering is None:
+            return
+        proof = covering.exact_proof
+        relation = self._normalize_nested_tuple(object_target_key[4])
+        if not self._method_b_covering_relation_matches_proof(
+            relation,
+            exact_side=covering.exact_side,
+            summary_side=covering.summary_side,
+            proof=proof,
+        ):
+            return
+        actions = tuple(build_unknown_recovery_actions([reason_record]))
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, dict)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        changed = self._append_completed_method_b_covering_case_evidence(
+            records,
+            existing_ids,
+            actions,
+            object_target_key=object_target_key,
+            covering=covering,
+        )
+        count_values = tuple(int(value) for value in (proof.count_values or (proof.count_value,)) if int(value) > 0)
+        if self._cases_admit_reduction_count_values(
+            covering.exact_case,
+            covering.summary_case,
+            covering.accumulator_proof,
+            count_values,
+        ):
+            changed = self._append_completed_method_b_guard_partition_evidence(
+                records,
+                existing_ids,
+                actions,
+                object_target_key=object_target_key,
+                covering=covering,
+            ) or changed
+        if changed:
+            analysis.completed_recovery_proof_evidence = tuple(records)
+
+    def _append_completed_method_b_covering_case_evidence(
+        self,
+        records: List[Dict[str, Any]],
+        existing_ids: set,
+        actions: Sequence[Any],
+        *,
+        object_target_key: Tuple[Any, ...],
+        covering: _MethodBCoveringCaseProof,
+    ) -> bool:
+        action = self._method_b_recovery_action(
+            actions,
+            proof_kind=UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value,
+            proof_stage="method_b_covering_case",
+        )
+        if action is None:
+            return False
+        proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
+        if proof_id is None or proof_id in existing_ids:
+            return False
+        proof = covering.exact_proof
+        count_values = tuple(int(value) for value in (proof.count_values or (proof.count_value,)) if int(value) > 0)
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+                "proof_kind": action.proof_kind,
+                "recovery_proof_kind": action.proof_kind,
+                "proof_stage": action.proof_stage,
+                "evidence_kind": action.evidence_kind,
+                "required_evidence": tuple(action.required_evidence),
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_id,
+                "proof_source": "method_b_one_sided_summary_exact_terms",
+                "proof_content": {
+                    "object_derived": True,
+                    "object_target_key": object_target_key,
+                    "seed_compensation": "proven",
+                    "term_sequence": "matched",
+                    "pure_side_effect_profile": "proven",
+                    "exact_side": covering.exact_side,
+                    "summary_side": covering.summary_side,
+                    "count_value": int(proof.count_value),
+                    "count_values": count_values,
+                    "exact_terms": tuple(term.stable_key() for term in proof.exact_terms),
+                    "expected_terms": tuple(term.stable_key() for term in proof.expected_terms),
+                    "constant_bias": int(proof.constant_bias),
+                    "result_size": int(proof.result_size),
+                    "covering_evidence": proof.evidence,
+                },
+            }
+        )
+        existing_ids.add(proof_id)
+        return True
+
+    def _append_completed_method_b_guard_partition_evidence(
+        self,
+        records: List[Dict[str, Any]],
+        existing_ids: set,
+        actions: Sequence[Any],
+        *,
+        object_target_key: Tuple[Any, ...],
+        covering: _MethodBCoveringCaseProof,
+    ) -> bool:
+        action = self._method_b_recovery_action(
+            actions,
+            proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION.value,
+            proof_stage="method_b_guard_partition",
+        )
+        if action is None:
+            return False
+        proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
+        if proof_id is None or proof_id in existing_ids:
+            return False
+        proof = covering.exact_proof
+        count_values = tuple(int(value) for value in (proof.count_values or (proof.count_value,)) if int(value) > 0)
+        guard_evidence = (
+            "reduction_count_implication"
+            if len(count_values) == 1
+            else "reduction_count_membership_implication"
+        )
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+                "proof_kind": action.proof_kind,
+                "recovery_proof_kind": action.proof_kind,
+                "proof_stage": action.proof_stage,
+                "evidence_kind": action.evidence_kind,
+                "required_evidence": tuple(action.required_evidence),
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_id,
+                "proof_source": "method_b_reduction_count_guard_partition",
+                "proof_content": {
+                    "object_derived": True,
+                    "object_target_key": object_target_key,
+                    "guard_partition": "proven",
+                    "partition_coverage_proof": "covered",
+                    "exact_side": covering.exact_side,
+                    "summary_side": covering.summary_side,
+                    "count_value": int(proof.count_value),
+                    "count_values": count_values,
+                    "guard_evidence": guard_evidence,
+                },
+            }
+        )
+        existing_ids.add(proof_id)
+        return True
+
+    @staticmethod
+    def _method_b_recovery_action(
+        actions: Sequence[Any],
+        *,
+        proof_kind: str,
+        proof_stage: str,
+    ):
+        return next(
+            (
+                candidate
+                for candidate in actions
+                if candidate.proof_stage == proof_stage and candidate.proof_kind == proof_kind
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _method_b_covering_relation_matches_proof(
+        relation: Any,
+        *,
+        exact_side: str,
+        summary_side: str,
+        proof: _ExactReadonlyReductionProof,
+    ) -> bool:
+        if not isinstance(relation, tuple) or relation[0] != "method_b_closure_relation":
+            return False
+        fields = {
+            item[0]: item[1]
+            for item in relation[1:]
+            if isinstance(item, tuple) and len(item) == 2
+        }
+        if fields.get("kind") != "one_sided_summary":
+            return False
+        if fields.get("exact_side") != exact_side or fields.get("summary_side") != summary_side:
+            return False
+        exact_terms = fields.get("exact_terms")
+        if not isinstance(exact_terms, tuple) or not exact_terms:
+            return False
+        if tuple(exact_terms) != tuple(term.stable_key() for term in proof.exact_terms):
+            return False
+        try:
+            exact_constant_bias = int(fields.get("exact_constant_bias"))
+        except (TypeError, ValueError):
+            return False
+        return exact_constant_bias == int(proof.constant_bias)
 
     def _exact_terms_match_reduction_proof_under_case_conditions(
         self,
@@ -1202,6 +1554,7 @@ class PairwiseStrategy(CheckStrategy):
                     count_value=int(count_value),
                     expected_terms=tuple(expected_terms),
                     evidence="materialized_full_terms",
+                    count_values=(int(count_value),),
                 )
         return None
 
@@ -1699,7 +2052,87 @@ class PairwiseStrategy(CheckStrategy):
                 base_ctx.get("analysis2"),
                 case2,
             ),
+            self._readonly_identity_relation_object_key(case1, case2),
         )
+
+    def _readonly_identity_relation_object_key(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        left_ref = getattr(getattr(case1, "value_expr", None), "runtime_ref", None)
+        right_ref = getattr(getattr(case2, "value_expr", None), "runtime_ref", None)
+        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
+            return ("readonly_identity_relation", ("kind", "missing_readonly_ref"))
+        left_identities = self._readonly_count_identity_keys(left_ref)
+        right_identities = self._readonly_count_identity_keys(right_ref)
+        shared_identities = tuple(sorted(left_identities & right_identities, key=repr))
+        return (
+            "readonly_identity_relation",
+            ("shared_count_identities", shared_identities),
+            (
+                "count_storage_relation",
+                self._readonly_count_storage_relation_key(left_ref, right_ref),
+            ),
+        )
+
+    def _readonly_count_storage_relation_key(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> Tuple[Any, ...]:
+        left_storage = self._readonly_count_storage_identity_key(left_ref)
+        right_storage = self._readonly_count_storage_identity_key(right_ref)
+        if left_storage is None or right_storage is None:
+            return ("missing_storage_identity", left_storage, right_storage)
+        if left_storage == right_storage:
+            return ("same_storage_identity", left_storage)
+        left_register = self._register_storage_identity_components(left_storage)
+        right_register = self._register_storage_identity_components(right_storage)
+        if left_register is None or right_register is None:
+            return ("different_storage_identity", left_storage, right_storage)
+        if left_register[:3] != right_register[:3]:
+            return ("different_register_base", left_storage, right_storage)
+        left_low, left_size = left_register[3], left_register[4]
+        right_low, right_size = right_register[3], right_register[4]
+        left_high = left_low + left_size
+        right_high = right_low + right_size
+        contains = None
+        if left_low <= right_low and right_high <= left_high:
+            contains = "left_contains_right"
+        elif right_low <= left_low and left_high <= right_high:
+            contains = "right_contains_left"
+        return (
+            "same_register_base_projection",
+            ("base", left_register[:3]),
+            ("left_bits", left_low, left_size),
+            ("right_bits", right_low, right_size),
+            ("projection", contains or "overlap_or_disjoint"),
+        )
+
+    def _register_storage_identity_components(
+        self,
+        storage_identity: Optional[tuple],
+    ) -> Optional[Tuple[int, int, int, int, int]]:
+        normalized = tuple(storage_identity or ())
+        if (
+            len(normalized) == 2
+            and normalized[0] == "parameter_storage"
+            and isinstance(normalized[1], tuple)
+        ):
+            normalized = tuple(normalized[1])
+        if len(normalized) != 6 or normalized[0] != "register_storage":
+            return None
+        try:
+            return (
+                int(normalized[1]),
+                int(normalized[2]),
+                int(normalized[3]),
+                int(normalized[4]),
+                int(normalized[5]),
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _method_b_closure_object_target_key(
         self,
@@ -1724,6 +2157,127 @@ class PairwiseStrategy(CheckStrategy):
                 base_ctx.get("analysis2"),
                 case2,
             ),
+            self._method_b_closure_relation_object_key(case1, case2),
+        )
+
+    def _method_b_closure_relation_object_key(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        left_ref = self._method_b_readonly_summary_ref(getattr(case1, "value_expr", None))
+        right_ref = self._method_b_readonly_summary_ref(getattr(case2, "value_expr", None))
+        if left_ref is not None and right_ref is None:
+            return self._method_b_one_sided_summary_relation(
+                summary_side="left",
+                summary_ref=left_ref,
+                exact_side="right",
+                exact_case=case2,
+            )
+        if right_ref is not None and left_ref is None:
+            return self._method_b_one_sided_summary_relation(
+                summary_side="right",
+                summary_ref=right_ref,
+                exact_side="left",
+                exact_case=case1,
+            )
+        if left_ref is not None and right_ref is not None:
+            return (
+                "method_b_closure_relation",
+                ("kind", "dual_summary"),
+                ("left_summary", self._method_b_summary_profile_key(left_ref)),
+                ("right_summary", self._method_b_summary_profile_key(right_ref)),
+            )
+        return ("method_b_closure_relation", ("kind", "missing_method_b_summary"))
+
+    def _method_b_readonly_summary_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, ReadonlyReductionRef) and getattr(runtime_ref, "loop_summary", None) is not None:
+            return runtime_ref
+        return None
+
+    def _method_b_one_sided_summary_relation(
+        self,
+        *,
+        summary_side: str,
+        summary_ref: ReadonlyReductionRef,
+        exact_side: str,
+        exact_case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
+            getattr(exact_case, "value_expr", None),
+            getattr(exact_case, "parameters", ()) or (),
+            getattr(summary_ref, "pointer_base_ref", None),
+            program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
+        )
+        exact_terms_key: Any = ("exact_terms_unavailable",)
+        exact_bias: Any = None
+        if extracted is not None:
+            exact_terms, exact_bias = extracted
+            exact_terms_key = tuple(term.stable_key() for term in exact_terms)
+        return (
+            "method_b_closure_relation",
+            ("kind", "one_sided_summary"),
+            ("summary_side", summary_side),
+            ("exact_side", exact_side),
+            ("summary", self._method_b_summary_profile_key(summary_ref)),
+            ("exact_terms", exact_terms_key),
+            ("exact_constant_bias", exact_bias),
+        )
+
+    def _method_b_summary_profile_key(self, readonly_ref: ReadonlyReductionRef) -> Tuple[Any, ...]:
+        term_contract = self._readonly_reduction_term_sequence_contract_key(
+            readonly_ref,
+            result_size=getattr(readonly_ref, "result_size", None),
+        )
+        term_contract = self._method_b_normalized_term_contract_key(readonly_ref, term_contract)
+        return (
+            "method_b_summary_profile",
+            ("runtime_ref", self._semantic_key_or_stable_key_or_none(readonly_ref)),
+            (
+                "loop_summary",
+                self._semantic_key_or_stable_key_or_none(getattr(readonly_ref, "loop_summary", None)),
+            ),
+            ("term_contract", term_contract),
+            ("count_identities", tuple(sorted(self._readonly_count_identity_keys(readonly_ref), key=repr))),
+        )
+
+    def _method_b_normalized_term_contract_key(
+        self,
+        readonly_ref: ReadonlyReductionRef,
+        term_contract: Optional[tuple],
+    ) -> Optional[tuple]:
+        if not isinstance(term_contract, tuple) or not term_contract:
+            return term_contract
+        if term_contract[0] != "loop_summary_method_b" or len(term_contract) < 9:
+            return term_contract
+        pointer_base = self._semantic_key_or_stable_key_or_none(getattr(readonly_ref, "pointer_base_ref", None))
+        count_identities = tuple(sorted(self._readonly_count_identity_keys(readonly_ref), key=repr))
+        count_identity = count_identities[0] if count_identities else None
+        if pointer_base is None or count_identity is None:
+            return term_contract
+        term_sequence = term_contract[5]
+        if not isinstance(term_sequence, tuple) or len(term_sequence) < 7:
+            return term_contract
+        try:
+            result_size = max(1, int(getattr(readonly_ref, "result_size", 0) or term_sequence[6]))
+        except (TypeError, ValueError):
+            return term_contract
+        return (
+            "readonly_reduction_term_sequence_contract",
+            str(getattr(readonly_ref, "reduction_kind", None) or "memory_sum"),
+            pointer_base,
+            count_identity,
+            term_contract[3],
+            result_size,
+            term_sequence[3],
+            term_contract[4],
+            getattr(readonly_ref, "constant_bias", 0),
+            term_sequence[5],
+            bool(getattr(readonly_ref, "signed_counter", False)),
+            term_contract[6],
+            term_contract[7],
+            term_contract[8],
         )
 
     def _unresolved_expression_object_target_key(
@@ -4576,6 +5130,103 @@ class PairwiseStrategy(CheckStrategy):
         return self._case_implies_reduction_count(exact_case, accumulator_proof, exact_count) and (
             self._case_allows_reduction_count(summary_case, accumulator_proof, exact_count)
         )
+
+    def _cases_admit_reduction_count_values(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        accumulator_proof,
+        exact_counts: Sequence[int],
+    ) -> bool:
+        count_values = tuple(sorted({int(value) for value in exact_counts if int(value) > 0}))
+        if not count_values:
+            return False
+        if len(count_values) == 1:
+            return self._cases_admit_reduction_count(
+                exact_case,
+                summary_case,
+                accumulator_proof,
+                count_values[0],
+            )
+        return self._combined_conditions_imply_reduction_count_values(
+            exact_case,
+            summary_case,
+            accumulator_proof,
+            count_values,
+        )
+
+    def _combined_conditions_imply_reduction_count_values(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        accumulator_proof,
+        exact_counts: Sequence[int],
+    ) -> bool:
+        count_values = tuple(sorted({int(value) for value in exact_counts if int(value) > 0}))
+        if not count_values:
+            return False
+        if len(count_values) == 1:
+            return self._combined_conditions_imply_reduction_count(
+                exact_case,
+                summary_case,
+                accumulator_proof,
+                count_values[0],
+            )
+        count_bits = max(
+            self._case_reduction_count_bit_width(exact_case, accumulator_proof),
+            self._case_reduction_count_bit_width(summary_case, accumulator_proof),
+        )
+        parameters = (
+            list(getattr(exact_case, "parameters", None) or [])
+            + list(getattr(summary_case, "parameters", None) or [])
+        )
+        count_expr = self._reduction_count_parameter_expression(
+            parameters,
+            accumulator_proof,
+            int(count_bits),
+        )
+        if count_expr is None:
+            return False
+        membership = self._reduction_count_membership_condition(
+            count_expr,
+            count_values,
+            int(count_bits),
+        )
+        if membership is None:
+            return False
+        implication_conditions = list(self._combined_summary_conditions(exact_case, summary_case) or [])
+        implication_conditions.append(membership.negate())
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            implication_conditions,
+            parameters,
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+        if solver_result is not None:
+            return solver_result
+        return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
+
+    def _reduction_count_membership_condition(
+        self,
+        count_expr: Expression,
+        count_values: Sequence[int],
+        count_bits: int,
+    ) -> Optional[Condition]:
+        values = tuple(sorted({int(value) for value in count_values if int(value) > 0}))
+        if not values:
+            return None
+        count_size = max(1, (max(1, int(count_bits)) + 7) // 8)
+        equalities = [
+            Expression.binary_op(
+                "INT_EQUAL",
+                count_expr,
+                Expression.constant(value, size=count_size),
+            )
+            for value in values
+        ]
+        membership_expr = equalities[0]
+        for equality in equalities[1:]:
+            membership_expr = Expression.binary_op("BOOL_OR", membership_expr, equality)
+        return Condition(membership_expr, False)
 
     def _case_implies_reduction_count(
         self,

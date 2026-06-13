@@ -32,6 +32,7 @@ from .phase3_return_width_bridge_lane2 import (
     _file_ref,
     _identity_set_check,
     _identity_to_dict,
+    _int_like,
     _jsonable,
     _nonnegative_int_like,
     _normalize_nested_tuple,
@@ -52,6 +53,7 @@ from .phase3_readonly_identity_lane3 import (
     _nested_completed_proof_has_active_blocker,
     _nested_contains_diagnostic_reason,
     _pcode_op_ref_is_specific,
+    _readonly_term_contract_is_specific,
     _readonly_value_entry_is_specific,
     _readonly_return_case_member_is_specific,
 )
@@ -1125,11 +1127,13 @@ def _method_b_proof_content_is_specific(
             _proof_status_value_is_complete(content.get("seed_compensation"))
             and _proof_status_value_is_complete(content.get("term_sequence"))
             and _proof_status_value_is_complete(content.get("pure_side_effect_profile"))
+            and _method_b_covering_proof_content_matches_relation(content, target)
         )
     if proof_stage == METHOD_B_GUARD_PROOF_STAGE:
         return (
             _proof_status_value_is_complete(content.get("guard_partition"))
             and _proof_status_value_is_complete(content.get("partition_coverage_proof"))
+            and _method_b_guard_proof_content_matches_relation(content, target)
         )
     return False
 
@@ -1138,9 +1142,124 @@ def _proof_status_value_is_complete(value: Any) -> bool:
     return str(value or "") in {"complete", "completed", "covered", "matched", "proven", "checked", "vacuous"}
 
 
+def _method_b_one_sided_relation_payload(object_target_key: Any) -> Optional[Dict[str, Any]]:
+    target = _normalize_nested_tuple(object_target_key)
+    if not (
+        isinstance(target, tuple)
+        and len(target) == 5
+        and _method_b_closure_relation_is_specific(target[4])
+    ):
+        return None
+    fields = _method_b_relation_fields(target[4])
+    if not fields or fields.get("kind", (None,))[0] != "one_sided_summary":
+        return None
+    exact_bias = fields.get("exact_constant_bias", (None,))[0]
+    if not _int_like(exact_bias):
+        return None
+    return {
+        "summary_side": fields.get("summary_side", (None,))[0],
+        "exact_side": fields.get("exact_side", (None,))[0],
+        "exact_terms": _normalize_nested_tuple(fields.get("exact_terms", (None,))[0]),
+        "exact_constant_bias": int(exact_bias),
+    }
+
+
+def _method_b_relation_fields(value: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) < 2 or relation[0] != "method_b_closure_relation":
+        return None
+    return {
+        item[0]: item[1:]
+        for item in relation[1:]
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], str)
+    }
+
+
+def _method_b_proof_sides_match_relation(
+    content: Mapping[str, Any],
+    relation_payload: Mapping[str, Any],
+) -> bool:
+    return (
+        str(content.get("exact_side") or "") == relation_payload.get("exact_side")
+        and str(content.get("summary_side") or "") == relation_payload.get("summary_side")
+    )
+
+
+def _positive_int_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return int(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _method_b_covering_proof_content_matches_relation(
+    content: Mapping[str, Any],
+    object_target_key: Any,
+) -> bool:
+    relation_payload = _method_b_one_sided_relation_payload(object_target_key)
+    if relation_payload is None or not _method_b_proof_sides_match_relation(content, relation_payload):
+        return False
+    if not (
+        _positive_int_like(content.get("count_value"))
+        and _positive_int_like(content.get("result_size"))
+        and _int_like(content.get("constant_bias"))
+    ):
+        return False
+    exact_terms = _normalize_nested_tuple(content.get("exact_terms"))
+    expected_terms = _normalize_nested_tuple(content.get("expected_terms"))
+    relation_terms = relation_payload.get("exact_terms")
+    if exact_terms != relation_terms or expected_terms != relation_terms:
+        return False
+    if int(content.get("constant_bias")) != relation_payload.get("exact_constant_bias"):
+        return False
+    return str(content.get("covering_evidence") or "") == "method_b_covering_materialized_terms"
+
+
+def _method_b_guard_proof_content_matches_relation(
+    content: Mapping[str, Any],
+    object_target_key: Any,
+) -> bool:
+    relation_payload = _method_b_one_sided_relation_payload(object_target_key)
+    if relation_payload is None or not _method_b_proof_sides_match_relation(content, relation_payload):
+        return False
+    count_values = _method_b_guard_count_values(content)
+    if not count_values:
+        return False
+    return (
+        str(content.get("guard_evidence") or "")
+        in {"reduction_count_implication", "reduction_count_membership_implication"}
+    )
+
+
+def _method_b_guard_count_values(content: Mapping[str, Any]) -> Tuple[int, ...]:
+    raw_values = content.get("count_values")
+    if raw_values is None:
+        if not _positive_int_like(content.get("count_value")):
+            return ()
+        return (int(content.get("count_value")),)
+    values = _normalize_nested_tuple(raw_values)
+    if not isinstance(values, tuple) or not values:
+        return ()
+    normalized = []
+    for value in values:
+        if not _positive_int_like(value):
+            return ()
+        normalized.append(int(value))
+    if len(set(normalized)) != len(normalized):
+        return ()
+    if content.get("count_value") is not None:
+        if not _positive_int_like(content.get("count_value")):
+            return ()
+        if int(content.get("count_value")) not in set(normalized):
+            return ()
+    return tuple(normalized)
+
+
 def _object_target_key_is_specific_method_b_closure(value: Any) -> bool:
     target = _normalize_nested_tuple(value)
-    if not isinstance(target, tuple) or len(target) != 4 or target[0] != "method_b_closure":
+    if not isinstance(target, tuple) or len(target) != 5 or target[0] != "method_b_closure":
         return False
     pair = target[1]
     if not (
@@ -1152,7 +1271,90 @@ def _object_target_key_is_specific_method_b_closure(value: Any) -> bool:
         return False
     if _nested_contains_diagnostic_reason(target):
         return False
-    return _method_b_side_is_specific(target[2], "left") and _method_b_side_is_specific(target[3], "right")
+    return (
+        _method_b_side_is_specific(target[2], "left")
+        and _method_b_side_is_specific(target[3], "right")
+        and _method_b_closure_relation_is_specific(target[4])
+    )
+
+
+def _method_b_closure_relation_is_specific(value: Any) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) < 2 or relation[0] != "method_b_closure_relation":
+        return False
+    if _nested_contains_missing_sentinel_or_empty(relation) or _nested_contains_diagnostic_reason(relation):
+        return False
+    fields = {
+        item[0]: item[1:]
+        for item in relation[1:]
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], str)
+    }
+    kind = fields.get("kind", (None,))[0]
+    if kind == "one_sided_summary":
+        return (
+            len(relation) == 7
+            and fields.get("summary_side", (None,))[0] in {"left", "right"}
+            and fields.get("exact_side", (None,))[0] in {"left", "right"}
+            and fields.get("summary_side", (None,))[0] != fields.get("exact_side", (None,))[0]
+            and _method_b_summary_profile_is_specific(fields.get("summary", (None,))[0])
+            and _method_b_exact_terms_are_specific(fields.get("exact_terms", (None,))[0])
+            and _int_like(fields.get("exact_constant_bias", (None,))[0])
+        )
+    if kind == "dual_summary":
+        return (
+            len(relation) == 4
+            and _method_b_summary_profile_is_specific(fields.get("left_summary", (None,))[0])
+            and _method_b_summary_profile_is_specific(fields.get("right_summary", (None,))[0])
+        )
+    return False
+
+
+def _method_b_summary_profile_is_specific(value: Any) -> bool:
+    profile = _normalize_nested_tuple(value)
+    if not isinstance(profile, tuple) or len(profile) != 5 or profile[0] != "method_b_summary_profile":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in profile[1:]
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+    }
+    return (
+        _method_b_runtime_ref_key_is_specific(fields.get("runtime_ref"))
+        and _method_b_loop_summary_key_is_specific(fields.get("loop_summary"))
+        and _readonly_term_contract_is_specific(fields.get("term_contract"))
+        and _method_b_count_identities_are_specific(fields.get("count_identities"))
+    )
+
+
+def _method_b_count_identities_are_specific(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    return (
+        isinstance(normalized, tuple)
+        and bool(normalized)
+        and all(isinstance(item, tuple) and bool(item) for item in normalized)
+        and not _nested_contains_missing_sentinel_or_empty(normalized)
+        and not _nested_contains_diagnostic_reason(normalized)
+    )
+
+
+def _method_b_exact_terms_are_specific(value: Any) -> bool:
+    terms = _normalize_nested_tuple(value)
+    return (
+        isinstance(terms, tuple)
+        and bool(terms)
+        and all(_method_b_readonly_term_is_specific(term) for term in terms)
+    )
+
+
+def _method_b_readonly_term_is_specific(value: Any) -> bool:
+    term = _normalize_nested_tuple(value)
+    return (
+        isinstance(term, tuple)
+        and len(term) == 3
+        and term[0] == "readonly_reduction_term"
+        and _nonnegative_int_like(term[1])
+        and _positive_int_like(term[2])
+    )
 
 
 def _method_b_side_is_specific(value: Any, expected_side: str) -> bool:

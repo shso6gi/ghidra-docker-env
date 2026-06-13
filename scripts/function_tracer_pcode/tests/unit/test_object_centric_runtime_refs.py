@@ -45,6 +45,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     build_unknown_recovery_actions,
+    make_unknown_reason,
 )
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.formula.returns import _readonly_refs_share_surface
@@ -935,6 +936,457 @@ def test_storage_backed_count_identity_conflict_rejects_index_fallback():
     assert decision.reason == "readonly_contract_mismatch"
 
 
+def test_readonly_count_storage_relation_records_same_register_projection_without_compatibility():
+    wide_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        base_register_offset=0x31D4,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+        size=8,
+        size_bits=64,
+    )
+    narrow_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1_lo",
+        base_register_name="a1",
+        base_register_offset=0x31D4,
+        base_register_size_bits=64,
+        bit_offset_in_base=32,
+        size=4,
+        size_bits=32,
+    )
+    wide_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_count_storage.storage_identity_key(),
+        limit_expr=Expression.parameter(
+            "count",
+            index=1,
+            data_type="long",
+            size=8,
+            storage_info=wide_count_storage,
+        ),
+        result_size=4,
+        stride=8,
+        element_size=4,
+        index_scale=8,
+    ).lower_to_readonly_reduction_ref()
+    narrow_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=narrow_count_storage.storage_identity_key(),
+        limit_expr=Expression.parameter(
+            "count",
+            index=1,
+            data_type="int",
+            size=4,
+            storage_info=narrow_count_storage,
+        ),
+        result_size=4,
+        stride=8,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert wide_ref is not None
+    assert narrow_ref is not None
+    assert not strategy._readonly_count_identities_compatible(wide_ref, narrow_ref)
+    assert strategy._readonly_count_storage_relation_key(wide_ref, narrow_ref) == (
+        "same_register_base_projection",
+        ("base", (-1, 0x31D4, 64)),
+        ("left_bits", 0, 64),
+        ("right_bits", 32, 32),
+        ("projection", "left_contains_right"),
+    )
+
+
+def test_method_b_closure_relation_records_one_sided_summary_exact_terms():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(4, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=1))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    exact_case = ReturnCase(
+        0,
+        [],
+        exact_expr,
+        ReturnInfo(address="0x1000", value=exact_expr, conditions=[]),
+        parameters=parameters,
+    )
+    summary_case = ReturnCase(
+        1,
+        [],
+        summary_expr,
+        ReturnInfo(address="0x1004", value=summary_expr, conditions=[]),
+        parameters=parameters,
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    relation = strategy._method_b_closure_relation_object_key(exact_case, summary_case)
+
+    assert relation[0] == "method_b_closure_relation"
+    assert ("kind", "one_sided_summary") in relation
+    assert ("summary_side", "right") in relation
+    assert ("exact_side", "left") in relation
+    assert ("exact_terms", (("readonly_reduction_term", 0, 4), ("readonly_reduction_term", 4, 4))) in relation
+    assert ("exact_constant_bias", 0) in relation
+
+
+def test_method_b_covering_case_producer_records_only_covering_evidence():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(4, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=1))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    exact_return = ReturnInfo(address="0x1000", value=exact_expr, conditions=[])
+    summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[])
+    exact_case = ReturnCase(0, [], exact_expr, exact_return, parameters=parameters)
+    summary_case = ReturnCase(1, [], summary_expr, summary_return, parameters=parameters)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[exact_return],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=parameters,
+        returns=[summary_return],
+        return_type="int",
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._method_b_closure_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target,
+    )
+
+    strategy._record_completed_method_b_covering_case_proof_if_safe(
+        reason,
+        analysis1,
+        exact_case,
+        summary_case,
+    )
+
+    evidence = tuple(analysis1.completed_recovery_proof_evidence)
+    assert len(evidence) == 1
+    assert evidence[0]["proof_stage"] == "method_b_covering_case"
+    assert evidence[0]["evidence_kind"] == "seed_compensation"
+    assert evidence[0]["proof_content"]["term_sequence"] == "matched"
+    assert evidence[0]["proof_content"]["exact_terms"] == (
+        ("readonly_reduction_term", 0, 4),
+        ("readonly_reduction_term", 4, 4),
+    )
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    count_is_two = Condition(
+        Expression.binary_op("INT_EQUAL", count, Expression.constant(2, size=4)),
+        False,
+    )
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(4, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=1))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    exact_return = ReturnInfo(address="0x1000", value=exact_expr, conditions=[count_is_two])
+    summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[count_is_two])
+    exact_case = ReturnCase(0, [count_is_two], exact_expr, exact_return, parameters=parameters)
+    summary_case = ReturnCase(1, [count_is_two], summary_expr, summary_return, parameters=parameters)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[exact_return],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=parameters,
+        returns=[summary_return],
+        return_type="int",
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._method_b_closure_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target,
+    )
+
+    strategy._record_completed_method_b_covering_case_proof_if_safe(
+        reason,
+        analysis1,
+        exact_case,
+        summary_case,
+    )
+
+    evidence = tuple(analysis1.completed_recovery_proof_evidence)
+    assert [item["proof_stage"] for item in evidence] == [
+        "method_b_covering_case",
+        "method_b_guard_partition",
+    ]
+    assert evidence[1]["proof_content"]["guard_partition"] == "proven"
+    assert evidence[1]["proof_content"]["partition_coverage_proof"] == "covered"
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+
+
+def test_method_b_guard_partition_producer_records_count_membership_when_range_is_proven():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    count_gt_two = Condition(
+        Expression.binary_op("INT_SLESS", Expression.constant(2, size=4), count),
+        False,
+    )
+    count_lt_five = Condition(
+        Expression.binary_op("INT_SLESS", count, Expression.constant(5, size=4)),
+        False,
+    )
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(8, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=2))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    conditions = [count_gt_two, count_lt_five]
+    exact_return = ReturnInfo(address="0x1000", value=exact_expr, conditions=conditions)
+    summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=conditions)
+    exact_case = ReturnCase(0, conditions, exact_expr, exact_return, parameters=parameters)
+    summary_case = ReturnCase(1, conditions, summary_expr, summary_return, parameters=parameters)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[exact_return],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=parameters,
+        returns=[summary_return],
+        return_type="int",
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._method_b_closure_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target,
+    )
+
+    strategy._record_completed_method_b_covering_case_proof_if_safe(
+        reason,
+        analysis1,
+        exact_case,
+        summary_case,
+    )
+
+    evidence = tuple(analysis1.completed_recovery_proof_evidence)
+    assert [item["proof_stage"] for item in evidence] == [
+        "method_b_covering_case",
+        "method_b_guard_partition",
+    ]
+    assert evidence[0]["proof_content"]["count_values"] == (3, 4)
+    assert evidence[1]["proof_content"]["count_values"] == (3, 4)
+    assert evidence[1]["proof_content"]["guard_evidence"] == "reduction_count_membership_implication"
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+
+
+def test_method_b_guard_partition_producer_rejects_open_count_range():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    count_gt_two = Condition(
+        Expression.binary_op("INT_SLESS", Expression.constant(2, size=4), count),
+        False,
+    )
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(8, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=2))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    exact_return = ReturnInfo(address="0x1000", value=exact_expr, conditions=[count_gt_two])
+    summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[count_gt_two])
+    exact_case = ReturnCase(0, [count_gt_two], exact_expr, exact_return, parameters=parameters)
+    summary_case = ReturnCase(1, [count_gt_two], summary_expr, summary_return, parameters=parameters)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[exact_return],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=parameters,
+        returns=[summary_return],
+        return_type="int",
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._method_b_closure_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target,
+    )
+
+    strategy._record_completed_method_b_covering_case_proof_if_safe(
+        reason,
+        analysis1,
+        exact_case,
+        summary_case,
+    )
+
+    evidence = tuple(analysis1.completed_recovery_proof_evidence)
+    assert [item["proof_stage"] for item in evidence] == ["method_b_covering_case"]
+    assert evidence[0]["proof_content"]["count_values"] == (3, 4)
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    exact_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(4, size=8)),
+            size=4,
+        ),
+    )
+    summary_expr = _readonly_sum_expr(_readonly_loop_summary(start=0, step=2))
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "count", "index": 1, "data_type": "int", "size": 4},
+    ]
+    exact_return = ReturnInfo(address="0x1000", value=exact_expr, conditions=[])
+    summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[])
+    exact_case = ReturnCase(0, [], exact_expr, exact_return, parameters=parameters)
+    summary_case = ReturnCase(1, [], summary_expr, summary_return, parameters=parameters)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[exact_return],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=parameters,
+        returns=[summary_return],
+        return_type="int",
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._method_b_closure_object_target_key(
+        base_ctx={"analysis1": analysis1, "analysis2": analysis2},
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target,
+    )
+
+    strategy._record_completed_method_b_covering_case_proof_if_safe(
+        reason,
+        analysis1,
+        exact_case,
+        summary_case,
+    )
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+
+
 def test_pairwise_parameter_identity_key_refuses_descriptor_name_fallback():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     name_only_expr = Expression.parameter("count", data_type="int", size=4)
@@ -983,6 +1435,39 @@ def test_pairwise_condition_symbols_do_not_alias_name_only_parameters():
     right_symbol = rewritten[1].expression.operands[0].name
     assert left_symbol != right_symbol
     assert ConditionSMTOracle.conjunction_is_unsat(rewritten) is not True
+
+
+def test_pairwise_condition_symbols_preserve_low_subpiece_parameter_identity():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    count = Expression.parameter(
+        "param_2",
+        index=1,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("param_2", index=1),
+    )
+    low = Expression.binary_op(
+        "SUBPIECE",
+        count,
+        Expression.constant(0, size=4),
+    ).clone_with(size=4)
+    widened = Expression.unary_op("INT_SEXT", low).clone_with(size=8)
+    conditions = [
+        Condition(
+            Expression.binary_op("INT_EQUAL", count, Expression.constant(2, size=4)),
+            False,
+        ),
+        Condition(
+            Expression.binary_op("INT_SLESS", Expression.constant(2, size=8), widened),
+            False,
+        ),
+    ]
+
+    rewritten = strategy._conditions_with_object_identity_parameter_symbols(
+        conditions,
+        [{"name": "param_2", "size": 4, "data_type": "int", "index": 1}],
+    )
+
+    assert ConditionSMTOracle.conjunction_is_unsat(rewritten) is True
 
 
 def test_pairwise_materialized_readonly_term_refuses_unresolved_pointer_base(monkeypatch):
@@ -2100,6 +2585,42 @@ def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
         assert action.object_target_key == record.object_target_key
         assert action.proof_obligation_id is not None
         assert action.proof_obligation_id[-1] == record.object_target_key
+
+
+def test_pairwise_method_b_completed_in_current_run_resolves_pair():
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    count_is_two = Condition(
+        Expression.binary_op("INT_EQUAL", count, Expression.constant(2, size=4)),
+        False,
+    )
+    exact = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(base, size=4),
+        Expression.memory(
+            Expression.binary_op("INT_ADD", base, Expression.constant(4, size=8)),
+            size=4,
+        ),
+    )
+    summary = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    exact_analysis = _analysis_with_return("exact", exact, conditions=[count_is_two])
+    summary_analysis = _analysis_with_return("summary", summary, conditions=[count_is_two])
+    strategy = _pairwise_strategy_for_full_path()
+    strategy._collect_return_coverage_unsafety_reasons = Mock(return_value=[])
+    strategy._cases_have_equivalent_runtime_reductions = Mock(return_value=False)
+    strategy._case_pair_loop_summary_safe_fallback_reason = Mock(return_value="loop_summary_guard_mismatch")
+
+    result = strategy.check(exact_analysis, summary_analysis)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    assert [item["proof_stage"] for item in exact_analysis.completed_recovery_proof_evidence] == [
+        "method_b_covering_case",
+        "method_b_guard_partition",
+    ]
+    strategy.solver_runner.run_sequential.assert_not_called()
 
 
 def test_pairwise_full_path_recursively_falls_back_unknown_for_nested_unproven_loop_summary():

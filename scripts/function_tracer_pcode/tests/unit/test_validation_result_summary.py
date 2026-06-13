@@ -1797,7 +1797,7 @@ def test_phase3_lane3_readonly_representative_wrapper_pins_pair_and_manifest_has
     assert 'LOOP_PAIR_FILTER="${LOOP_PAIR_FILTER:-lmb_sum_even_index_step2:B10_B13}"' in script
     assert ".venv-pyghidra/bin/python" in script
     assert "phase3_readonly_identity_lane3/readonly_identity_lane3_representatives.json" in script
-    assert "bca1a298585a58a6b0e27467fc7025387b641cbc639bc9aec859c8269abdf570" in script
+    assert "aea0daccd8f3c9c1e65e321a08c5e39fafc45f856e40bef50031ed049fc65ecb" in script
     assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
     assert "Phase 3 lane 3 dry run finished before post-fix gate." in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
@@ -1815,7 +1815,7 @@ def test_phase3_lane4_method_b_closure_representative_wrapper_pins_pair_and_mani
     assert 'LOOP_PAIR_FILTER="${LOOP_PAIR_FILTER:-lmb_sum_even_index_step2:B10_B13}"' in script
     assert ".venv-pyghidra/bin/python" in script
     assert "phase3_method_b_closure_lane4/method_b_closure_lane4_representatives.json" in script
-    assert "925d7614fa46b74c4cf2378182cf701a47fe771fc8a9b445b90509fdb92ae9e1" in script
+    assert "20ac51ac82a2f77bdb683c263cd86e3a39dfe1d25c7d256ace1872b8e0caa942" in script
     assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
     assert "Phase 3 lane 4 dry run finished before post-fix gate." in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script

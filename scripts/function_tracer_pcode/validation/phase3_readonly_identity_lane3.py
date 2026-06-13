@@ -1136,7 +1136,7 @@ def _completed_recovery_proof_summaries(payload: Mapping[str, Any]) -> Sequence[
 
 def _object_target_key_is_specific_readonly_identity(value: Any) -> bool:
     target = _normalize_nested_tuple(value)
-    if not isinstance(target, tuple) or len(target) != 4 or target[0] != "readonly_identity":
+    if not isinstance(target, tuple) or len(target) != 5 or target[0] != "readonly_identity":
         return False
     pair = target[1]
     if not (
@@ -1148,7 +1148,64 @@ def _object_target_key_is_specific_readonly_identity(value: Any) -> bool:
         return False
     if _nested_contains_diagnostic_reason(target):
         return False
-    return _readonly_side_is_specific(target[2], "left") and _readonly_side_is_specific(target[3], "right")
+    sides_are_specific = _readonly_side_is_specific(target[2], "left") and _readonly_side_is_specific(target[3], "right")
+    return sides_are_specific and _readonly_identity_relation_is_specific(target[4])
+
+
+def _readonly_identity_relation_is_specific(value: Any) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or len(relation) != 3 or relation[0] != "readonly_identity_relation":
+        return False
+    shared = relation[1]
+    storage = relation[2]
+    return (
+        isinstance(shared, tuple)
+        and len(shared) == 2
+        and shared[0] == "shared_count_identities"
+        and isinstance(shared[1], tuple)
+        and all(_readonly_component_key_is_specific(item) for item in shared[1])
+        and isinstance(storage, tuple)
+        and len(storage) == 2
+        and storage[0] == "count_storage_relation"
+        and _readonly_storage_relation_is_specific(storage[1])
+    )
+
+
+def _readonly_storage_relation_is_specific(value: Any) -> bool:
+    relation = _normalize_nested_tuple(value)
+    if not isinstance(relation, tuple) or not relation or not _text_identity_is_specific(relation[0]):
+        return False
+    kind = relation[0]
+    if kind == "same_storage_identity":
+        return len(relation) == 2 and _readonly_component_key_is_specific(relation[1])
+    if kind in {"missing_storage_identity", "different_storage_identity", "different_register_base"}:
+        return (
+            len(relation) == 3
+            and all(item is None or _readonly_component_key_is_specific(item) for item in relation[1:])
+        )
+    if kind == "same_register_base_projection":
+        return (
+            len(relation) == 5
+            and _tag_payload_specific(relation[1], "base")
+            and _readonly_bit_span_is_specific(relation[2], "left_bits")
+            and _readonly_bit_span_is_specific(relation[3], "right_bits")
+            and isinstance(relation[4], tuple)
+            and len(relation[4]) == 2
+            and relation[4][0] == "projection"
+            and _text_identity_is_specific(relation[4][1])
+        )
+    return False
+
+
+def _readonly_bit_span_is_specific(value: Any, tag: str) -> bool:
+    span = _normalize_nested_tuple(value)
+    return (
+        isinstance(span, tuple)
+        and len(span) == 3
+        and span[0] == tag
+        and _nonnegative_int_like(span[1])
+        and _positive_int_like(span[2])
+    )
 
 
 def _readonly_side_is_specific(value: Any, expected_side: str) -> bool:

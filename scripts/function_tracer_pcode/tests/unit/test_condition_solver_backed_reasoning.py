@@ -322,6 +322,18 @@ def test_smt_oracle_declines_param_pattern_without_object_identity():
     assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
 
 
+def test_smt_oracle_proves_subpiece_sext_singleton_bound_contradiction():
+    count = _indexed_param("param_2", 1, size=4)
+    low = Expression.binary_op("SUBPIECE", count, _const(0, size=4)).clone_with(size=4)
+    widened = Expression.unary_op("INT_SEXT", low).clone_with(size=8)
+    conditions = [
+        Condition(Expression.binary_op("INT_EQUAL", count, _const(2, size=4)), False),
+        Condition(Expression.binary_op("INT_SLESS", _const(2, size=8), widened), False),
+    ]
+
+    assert ConditionSMTOracle.conjunction_is_unsat(conditions) is True
+
+
 def test_smt_oracle_reuses_rewritten_shared_expression_nodes():
     p = Expression.parameter(
         "count",

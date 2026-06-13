@@ -4830,6 +4830,489 @@ def test_call_effect_summary_reason_accepts_targeted_clean_proof_with_analysis_b
     assert strategy._call_effect_summary_proof_is_complete(reason, analysis1, analysis2) is True
 
 
+def _readonly_identity_target():
+    return (
+        "readonly_identity",
+        ("pair", "(0,0)"),
+        (
+            "readonly_identity_side",
+            "left",
+            ("function_ref", ("function", "B10", 0x1000)),
+            ("readonly_return_case_partition_member", 0, (0,), ("return_case", 0, "0x1000", ("pcode_op",), "0x1000:return", 1), ("comparison_surface", "return_value", 32, None), ("value", ("readonly_value", "left")), ("guards", ())),
+            ("readonly_reduction_ref", "memory_sum"),
+            ("guards", ()),
+            ("value", ("readonly_value", "left")),
+        ),
+        (
+            "readonly_identity_side",
+            "right",
+            ("function_ref", ("function", "B13", 0x2000)),
+            ("readonly_return_case_partition_member", 0, (0,), ("return_case", 0, "0x2000", ("pcode_op",), "0x2000:return", 1), ("comparison_surface", "return_value", 32, None), ("value", ("readonly_value", "right")), ("guards", ())),
+            ("readonly_reduction_ref", "memory_sum"),
+            ("guards", ()),
+            ("value", ("readonly_value", "right")),
+        ),
+        (
+            "readonly_identity_relation",
+            ("shared_count_identities", (("parameter", 1),)),
+            (
+                "count_storage_relation",
+                (
+                    "same_register_base_projection",
+                    ("base", (-1, 12756, 64)),
+                    ("left_bits", 0, 64),
+                    ("right_bits", 32, 32),
+                    ("projection", "left_contains_right"),
+                ),
+            ),
+        ),
+    )
+
+
+def _method_b_closure_target():
+    method_b_term_contract = (
+        "readonly_reduction_term_sequence_contract",
+        "memory_sum",
+        ("parameter", 0),
+        ("parameter_storage", ("register_storage", -1, 12756, 64, 32, 32)),
+        ("loop_limit_parameter", 1),
+        4,
+        0,
+        2,
+        0,
+        4,
+        True,
+        (),
+        (32, 0),
+        ("loop_side_effect_profile", "pure_memory_read", True, False),
+    )
+    method_b_summary_profile = (
+        "method_b_summary_profile",
+        (
+            "runtime_ref",
+            (
+                "readonly_reduction_proof_semantic",
+                "memory_sum",
+                ("parameter", 0),
+                ("parameter_storage", ("register_storage", -1, 12756, 64, 32, 32)),
+                4,
+                (32, 0),
+                method_b_term_contract,
+            ),
+        ),
+        (
+            "loop_summary",
+            (
+                "loop_summary_method_b",
+                "scalar_element_index",
+                0,
+                ("loop_limit_parameter", 1),
+                2,
+                ("scalar_memory_term_sequence", "sum", ("parameter", 0), 0, 4, 4, 4),
+                (),
+                (32, 0),
+                ("loop_side_effect_profile", "pure_memory_read", True, False),
+            ),
+        ),
+        ("term_contract", method_b_term_contract),
+        (
+            "count_identities",
+            (
+                ("parameter", 1),
+                ("parameter_storage", ("register_storage", -1, 12756, 64, 32, 32)),
+            ),
+        ),
+    )
+    return (
+        "method_b_closure",
+        ("pair", "(0,0)"),
+        (
+            "method_b_closure_side",
+            "left",
+            ("function_ref", ("function", "B10", 0x1000)),
+            ("readonly_return_case_partition_member", 0, (0,), ("return_case", 0, "0x1000", ("pcode_op",), "0x1000:return", 1), ("comparison_surface", "return_value", 32, None), ("value", ("expression", "sum")), ("guards", ())),
+            ("loop_value", ("method_b_loop_value", None, None, ("expression", "sum"))),
+            ("guards", ()),
+        ),
+        (
+            "method_b_closure_side",
+            "right",
+            ("function_ref", ("function", "B13", 0x2000)),
+            ("readonly_return_case_partition_member", 0, (0,), ("return_case", 0, "0x2000", ("pcode_op",), "0x2000:return", 1), ("comparison_surface", "return_value", 32, None), ("value", ("runtime_ref", "summary")), ("guards", ())),
+            ("loop_value", ("method_b_loop_value", ("runtime_ref", "summary"), ("loop_summary", "summary"), ("runtime_ref", "summary"))),
+            ("guards", ()),
+        ),
+        (
+            "method_b_closure_relation",
+            ("kind", "one_sided_summary"),
+            ("summary_side", "right"),
+            ("exact_side", "left"),
+            ("summary", method_b_summary_profile),
+            ("exact_terms", (("readonly_reduction_term", 0, 4), ("readonly_reduction_term", 8, 4))),
+            ("exact_constant_bias", 0),
+        ),
+    )
+
+
+def _analysis_with_completed_evidence(*evidence_items):
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        completed_recovery_proof_evidence=tuple(evidence_items),
+    )
+
+
+def _readonly_identity_reason(target=None):
+    return make_unknown_reason(
+        UnknownReasonId.READONLY_IDENTITY_MISSING,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_refs=("loop_summary_shape_mismatch",),
+        evidence_kind="object_storage_identity",
+        object_target_key=target or _readonly_identity_target(),
+    )
+
+
+def _readonly_identity_evidence(action, **overrides):
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.READONLY_IDENTITY_MISSING.value,
+        "proof_kind": action.proof_kind,
+        "recovery_proof_kind": action.proof_kind,
+        "proof_stage": action.proof_stage,
+        "evidence_kind": action.evidence_kind,
+        "required_evidence": tuple(action.required_evidence),
+        "object_target_key": action.object_target_key,
+        "proof_obligation_id": action.proof_obligation_id,
+        "proof_content": {
+            "object_derived": True,
+            "object_target_key": action.object_target_key,
+            "left_side": action.object_target_key[2],
+            "right_side": action.object_target_key[3],
+            "object_storage_identity": "matched",
+            "count_identity": "matched",
+            "guard_implication": "proven",
+            "finite_witness": "checked",
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _method_b_reason(target=None):
+    return make_unknown_reason(
+        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        object_target_key=target or _method_b_closure_target(),
+    )
+
+
+def _method_b_relation_field(target, field_name, default=None):
+    try:
+        relation = target[4]
+        for item in relation[1:]:
+            if isinstance(item, tuple) and len(item) >= 2 and item[0] == field_name:
+                return item[1]
+    except (IndexError, TypeError):
+        return default
+    return default
+
+
+def _method_b_evidence(action, **overrides):
+    proof_content = {
+        "object_derived": True,
+        "object_target_key": action.object_target_key,
+    }
+    exact_side = _method_b_relation_field(action.object_target_key, "exact_side", "left")
+    summary_side = _method_b_relation_field(action.object_target_key, "summary_side", "right")
+    exact_terms = _method_b_relation_field(action.object_target_key, "exact_terms", ())
+    constant_bias = _method_b_relation_field(action.object_target_key, "exact_constant_bias", 0)
+    if action.proof_stage == "method_b_covering_case":
+        proof_content.update(
+            {
+                "seed_compensation": "proven",
+                "term_sequence": "matched",
+                "pure_side_effect_profile": "proven",
+                "exact_side": exact_side,
+                "summary_side": summary_side,
+                "count_value": 2,
+                "exact_terms": exact_terms,
+                "expected_terms": exact_terms,
+                "constant_bias": constant_bias,
+                "result_size": 4,
+                "covering_evidence": "method_b_covering_materialized_terms",
+            }
+        )
+    elif action.proof_stage == "method_b_guard_partition":
+        proof_content.update(
+            {
+                "guard_partition": "proven",
+                "partition_coverage_proof": "covered",
+                "exact_side": exact_side,
+                "summary_side": summary_side,
+                "count_value": 2,
+                "count_values": (2,),
+                "guard_evidence": "reduction_count_implication",
+            }
+        )
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+        "proof_kind": action.proof_kind,
+        "recovery_proof_kind": action.proof_kind,
+        "proof_stage": action.proof_stage,
+        "evidence_kind": action.evidence_kind,
+        "required_evidence": tuple(action.required_evidence),
+        "object_target_key": action.object_target_key,
+        "proof_obligation_id": action.proof_obligation_id,
+        "proof_content": proof_content,
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def test_readonly_identity_completed_evidence_connects_to_recovery_gate():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _readonly_identity_reason()
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == (reason.proof_obligation_id,)
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
+
+
+def test_readonly_identity_completed_evidence_rejects_relationless_target():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    relationless_target = _readonly_identity_target()[:4]
+    reason = _readonly_identity_reason(target=relationless_target)
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_completed_evidence_rejects_missing_relation_marker():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    weak_target = (*_readonly_identity_target()[:4], ("readonly_identity_relation", ("kind", "missing_readonly_ref")))
+    reason = _readonly_identity_reason(target=weak_target)
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_completed_evidence_rejects_malformed_storage_relation():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    malformed_target = (
+        *_readonly_identity_target()[:4],
+        (
+            "readonly_identity_relation",
+            ("shared_count_identities", (("parameter", 1),)),
+            (
+                "count_storage_relation",
+                (
+                    "same_register_base_projection",
+                    ("base", (-1, 12756, 64)),
+                    ("left_bits", 0, 64),
+                ),
+            ),
+        ),
+    )
+    reason = _readonly_identity_reason(target=malformed_target)
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_completed_evidence_rejects_missing_side_payload():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _readonly_identity_reason()
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _readonly_identity_evidence(action)
+    evidence["proof_content"].pop("left_side")
+    analysis1 = _analysis_with_completed_evidence(evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_requires_both_completed_actions_for_recovery_gate():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    covering_evidence = _method_b_evidence(actions[0])
+    guard_evidence = _method_b_evidence(actions[1])
+    analysis2 = _analysis_with_completed_evidence()
+
+    partial = _analysis_with_completed_evidence(covering_evidence)
+    assert strategy._method_b_closure_proof_is_complete(reason, partial, analysis2) is False
+
+    complete = _analysis_with_completed_evidence(covering_evidence, guard_evidence)
+    assert PairwiseStrategy._completed_recovery_proof_ids(complete) == tuple(
+        action.proof_obligation_id for action in actions
+    )
+    assert strategy._method_b_closure_proof_is_complete(reason, complete, analysis2) is True
+
+
+def test_method_b_closure_completed_evidence_rejects_status_only_payload():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    evidence = [_method_b_evidence(action) for action in actions]
+    for item in evidence:
+        content = item["proof_content"]
+        item["proof_content"] = {
+            key: content[key]
+            for key in (
+                "object_derived",
+                "object_target_key",
+                "seed_compensation",
+                "term_sequence",
+                "pure_side_effect_profile",
+                "guard_partition",
+                "partition_coverage_proof",
+            )
+            if key in content
+        }
+    analysis1 = _analysis_with_completed_evidence(*evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_rejects_term_payload_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    covering_evidence = _method_b_evidence(actions[0])
+    guard_evidence = _method_b_evidence(actions[1])
+    covering_evidence["proof_content"]["exact_terms"] = (("readonly_reduction_term", 0, 4),)
+    analysis1 = _analysis_with_completed_evidence(covering_evidence, guard_evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == (actions[1].proof_obligation_id,)
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_rejects_side_payload_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    covering_evidence = _method_b_evidence(actions[0])
+    guard_evidence = _method_b_evidence(actions[1])
+    covering_evidence["proof_content"]["summary_side"] = "left"
+    analysis1 = _analysis_with_completed_evidence(covering_evidence, guard_evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == (actions[1].proof_obligation_id,)
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_accepts_count_membership_payload():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    covering_evidence = _method_b_evidence(actions[0])
+    guard_evidence = _method_b_evidence(actions[1])
+    guard_evidence["proof_content"]["count_value"] = 3
+    guard_evidence["proof_content"]["count_values"] = (3, 4)
+    guard_evidence["proof_content"]["guard_evidence"] = "reduction_count_membership_implication"
+    analysis1 = _analysis_with_completed_evidence(covering_evidence, guard_evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == tuple(
+        action.proof_obligation_id for action in actions
+    )
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+
+
+def test_method_b_closure_completed_evidence_rejects_count_value_outside_membership_payload():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = _method_b_reason()
+    actions = build_unknown_recovery_actions([reason])
+    covering_evidence = _method_b_evidence(actions[0])
+    guard_evidence = _method_b_evidence(actions[1])
+    guard_evidence["proof_content"]["count_value"] = 2
+    guard_evidence["proof_content"]["count_values"] = (3, 4)
+    guard_evidence["proof_content"]["guard_evidence"] = "reduction_count_membership_implication"
+    analysis1 = _analysis_with_completed_evidence(covering_evidence, guard_evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == (actions[0].proof_obligation_id,)
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_rejects_relationless_target():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    relationless_target = _method_b_closure_target()[:4]
+    reason = _method_b_reason(target=relationless_target)
+    actions = build_unknown_recovery_actions([reason])
+    evidence = tuple(_method_b_evidence(action) for action in actions)
+    analysis1 = _analysis_with_completed_evidence(*evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_rejects_missing_summary_relation():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    weak_target = (*_method_b_closure_target()[:4], ("method_b_closure_relation", ("kind", "missing_method_b_summary")))
+    reason = _method_b_reason(target=weak_target)
+    actions = build_unknown_recovery_actions([reason])
+    evidence = tuple(_method_b_evidence(action) for action in actions)
+    analysis1 = _analysis_with_completed_evidence(*evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_method_b_closure_completed_evidence_rejects_weak_summary_profile():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    weak_target = (
+        *_method_b_closure_target()[:4],
+        (
+            "method_b_closure_relation",
+            ("kind", "one_sided_summary"),
+            ("summary_side", "right"),
+            ("exact_side", "left"),
+            ("summary", ("method_b_summary_profile", ("runtime_ref", "summary"))),
+            ("exact_terms", (("readonly_reduction_term", 0, 4), ("readonly_reduction_term", 8, 4))),
+            ("exact_constant_bias", 0),
+        ),
+    )
+    reason = _method_b_reason(target=weak_target)
+    actions = build_unknown_recovery_actions([reason])
+    evidence = tuple(_method_b_evidence(action) for action in actions)
+    analysis1 = _analysis_with_completed_evidence(*evidence)
+    analysis2 = _analysis_with_completed_evidence()
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis1) == ()
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+
+
 def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap():
     class _CoverageGapSolverRunner:
         def __init__(self):

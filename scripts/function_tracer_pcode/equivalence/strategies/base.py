@@ -89,6 +89,20 @@ class CheckStrategy(ABC):
             ("producer_width", "extension_semantics", "high_bits_irrelevant_or_equal"),
         ),
     }
+    _READONLY_IDENTITY_ACTION_REQUIREMENT = (
+        "object_storage_identity",
+        ("object_storage_identity", "count_identity", "guard_implication", "finite_witness"),
+    )
+    _METHOD_B_ACTION_REQUIREMENTS = {
+        ("proof_backed_covering_case", "method_b_covering_case"): (
+            "seed_compensation",
+            ("seed_compensation", "term_sequence", "pure_side_effect_profile"),
+        ),
+        ("guard_partition_completion", "method_b_guard_partition"): (
+            "guard_partition",
+            ("guard_partition", "partition_coverage_proof"),
+        ),
+    }
     
     def __init__(
         self,
@@ -1350,6 +1364,14 @@ class CheckStrategy(ABC):
             reason_record,
             analysis1,
             analysis2,
+        ) or self._readonly_identity_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
+        ) or self._method_b_closure_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
         )
 
     def _call_effect_summary_proof_is_complete(
@@ -1454,6 +1476,48 @@ class CheckStrategy(ABC):
         if len(required_ids) != len(self._RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS):
             return False
         if any(proof_id is None for proof_id in required_ids):
+            return False
+        return all(proof_id in completed for proof_id in required_ids)
+
+    def _readonly_identity_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        if reason_record.reason_id != UnknownReasonId.READONLY_IDENTITY_MISSING.value:
+            return False
+        if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.STORAGE_BACKED_IDENTITY_PROPAGATION.value:
+            return False
+        return self._all_recovery_actions_have_completed_proofs(reason_record, analysis1, analysis2)
+
+    def _method_b_closure_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+            return False
+        if reason_record.recovery_proof_kind not in {
+            UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value,
+            UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION.value,
+        }:
+            return False
+        return self._all_recovery_actions_have_completed_proofs(reason_record, analysis1, analysis2)
+
+    def _all_recovery_actions_have_completed_proofs(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        completed = set(self._completed_recovery_proof_ids(analysis1, analysis2))
+        required_ids = tuple(
+            self._normalize_nested_tuple(action.proof_obligation_id)
+            for action in build_unknown_recovery_actions([reason_record])
+        )
+        if not required_ids or any(proof_id is None for proof_id in required_ids):
             return False
         return all(proof_id in completed for proof_id in required_ids)
 
@@ -1686,6 +1750,14 @@ class CheckStrategy(ABC):
                 proof_ids.append(proof_id)
         for evidence in evidence_records:
             proof_id = cls._return_width_bridge_proof_id_from_evidence(evidence)
+            if proof_id is not None:
+                proof_ids.append(proof_id)
+        for evidence in evidence_records:
+            proof_id = cls._readonly_identity_proof_id_from_evidence(evidence)
+            if proof_id is not None:
+                proof_ids.append(proof_id)
+        for evidence in evidence_records:
+            proof_id = cls._method_b_closure_proof_id_from_evidence(evidence)
             if proof_id is not None:
                 proof_ids.append(proof_id)
         return tuple(proof_ids)
@@ -2247,6 +2319,717 @@ class CheckStrategy(ABC):
         else:
             return None
         return proof_id
+
+    @classmethod
+    def _readonly_identity_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._evidence_bool(evidence, "object_derived"):
+            return None
+        if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
+            return None
+        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.READONLY_IDENTITY_MISSING.value:
+            return None
+        proof_kind = cls._evidence_text(evidence, "proof_kind") or cls._evidence_text(
+            evidence,
+            "recovery_proof_kind",
+        )
+        if proof_kind != UnknownRecoveryProofKind.STORAGE_BACKED_IDENTITY_PROPAGATION.value:
+            return None
+        proof_stage = cls._evidence_text(evidence, "proof_stage")
+        if proof_stage != "readonly_operand_identity":
+            return None
+        expected_evidence_kind, expected_required = cls._READONLY_IDENTITY_ACTION_REQUIREMENT
+        evidence_kind = cls._evidence_text(evidence, "evidence_kind")
+        if evidence_kind != expected_evidence_kind:
+            return None
+        if not cls._evidence_required_evidence_matches(evidence, expected_required):
+            return None
+        if cls._evidence_has_any(evidence, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return None
+        object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        if not cls._readonly_identity_target_is_specific(object_target_key):
+            return None
+        proof_id = build_proof_obligation_id(
+            UnknownReasonId.READONLY_IDENTITY_MISSING.value,
+            proof_stage,
+            proof_kind,
+            evidence_kind,
+            object_target_key,
+        )
+        provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
+        if provided_id is None or provided_id != proof_id:
+            return None
+        proof_content = cls._evidence_get(evidence, "proof_content")
+        if not cls._readonly_identity_proof_content_is_complete(proof_content, object_target_key):
+            return None
+        return proof_id
+
+    @classmethod
+    def _method_b_closure_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._evidence_bool(evidence, "object_derived"):
+            return None
+        if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
+            return None
+        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+            return None
+        proof_kind = cls._evidence_text(evidence, "proof_kind") or cls._evidence_text(
+            evidence,
+            "recovery_proof_kind",
+        )
+        proof_stage = cls._evidence_text(evidence, "proof_stage")
+        requirement = cls._METHOD_B_ACTION_REQUIREMENTS.get((proof_kind, proof_stage))
+        if requirement is None:
+            return None
+        expected_evidence_kind, expected_required = requirement
+        evidence_kind = cls._evidence_text(evidence, "evidence_kind")
+        if evidence_kind != expected_evidence_kind:
+            return None
+        if not cls._evidence_required_evidence_matches(evidence, expected_required):
+            return None
+        if cls._evidence_has_any(evidence, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return None
+        object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        if not cls._method_b_closure_target_is_specific(object_target_key):
+            return None
+        proof_id = build_proof_obligation_id(
+            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+            proof_stage,
+            proof_kind,
+            evidence_kind,
+            object_target_key,
+        )
+        provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
+        if provided_id is None or provided_id != proof_id:
+            return None
+        proof_content = cls._evidence_get(evidence, "proof_content")
+        if not cls._method_b_closure_proof_content_is_complete(
+            proof_content,
+            object_target_key,
+            proof_stage=proof_stage,
+        ):
+            return None
+        return proof_id
+
+    @classmethod
+    def _evidence_required_evidence_matches(cls, evidence: Any, expected_required: Sequence[str]) -> bool:
+        required_evidence = tuple(
+            str(item)
+            for item in (cls._evidence_get(evidence, "required_evidence") or ())
+        )
+        return required_evidence == tuple(expected_required)
+
+    @classmethod
+    def _readonly_identity_target_is_specific(cls, object_target_key: Any) -> bool:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) != 5 or target[0] != "readonly_identity":
+            return False
+        return (
+            cls._proof_target_pair_is_specific(target[1])
+            and cls._readonly_identity_side_is_specific(target[2], "left")
+            and cls._readonly_identity_side_is_specific(target[3], "right")
+            and cls._readonly_identity_relation_is_specific(target[4])
+        )
+
+    @classmethod
+    def _method_b_closure_target_is_specific(cls, object_target_key: Any) -> bool:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) != 5 or target[0] != "method_b_closure":
+            return False
+        return (
+            cls._proof_target_pair_is_specific(target[1])
+            and cls._method_b_closure_side_is_specific(target[2], "left")
+            and cls._method_b_closure_side_is_specific(target[3], "right")
+            and cls._method_b_closure_relation_is_specific(target[4])
+        )
+
+    @classmethod
+    def _proof_target_pair_is_specific(cls, value: Any) -> bool:
+        pair = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(pair, tuple)
+            and len(pair) == 2
+            and pair[0] == "pair"
+            and cls._proof_text_is_specific(pair[1])
+        )
+
+    @classmethod
+    def _readonly_identity_side_is_specific(cls, value: Any, expected_side: str) -> bool:
+        side = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(side, tuple)
+            and len(side) == 7
+            and side[0] == "readonly_identity_side"
+            and side[1] == expected_side
+            and not cls._proof_target_contains_diagnostic_value(side)
+        )
+
+    @classmethod
+    def _method_b_closure_side_is_specific(cls, value: Any, expected_side: str) -> bool:
+        side = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(side, tuple)
+            and len(side) == 6
+            and side[0] == "method_b_closure_side"
+            and side[1] == expected_side
+            and not cls._proof_target_contains_diagnostic_value(side)
+        )
+
+    @classmethod
+    def _readonly_identity_relation_is_specific(cls, value: Any) -> bool:
+        relation = cls._normalize_nested_tuple(value)
+        if (
+            not isinstance(relation, tuple)
+            or len(relation) != 3
+            or relation[0] != "readonly_identity_relation"
+            or cls._proof_target_contains_diagnostic_value(relation)
+        ):
+            return False
+        shared = relation[1]
+        storage = relation[2]
+        return (
+            isinstance(shared, tuple)
+            and len(shared) == 2
+            and shared[0] == "shared_count_identities"
+            and isinstance(shared[1], tuple)
+            and all(cls._readonly_component_key_is_specific(item) for item in shared[1])
+            and isinstance(storage, tuple)
+            and len(storage) == 2
+            and storage[0] == "count_storage_relation"
+            and cls._readonly_storage_relation_is_specific(storage[1])
+        )
+
+    @classmethod
+    def _readonly_storage_relation_is_specific(cls, value: Any) -> bool:
+        relation = cls._normalize_nested_tuple(value)
+        if not isinstance(relation, tuple) or not relation or not cls._proof_text_is_specific(relation[0]):
+            return False
+        kind = relation[0]
+        if kind == "same_storage_identity":
+            return len(relation) == 2 and cls._readonly_component_key_is_specific(relation[1])
+        if kind in {"missing_storage_identity", "different_storage_identity", "different_register_base"}:
+            return (
+                len(relation) == 3
+                and all(item is None or cls._readonly_component_key_is_specific(item) for item in relation[1:])
+            )
+        if kind == "same_register_base_projection":
+            return (
+                len(relation) == 5
+                and cls._tag_payload_is_specific(relation[1], "base")
+                and cls._readonly_bit_span_is_specific(relation[2], "left_bits")
+                and cls._readonly_bit_span_is_specific(relation[3], "right_bits")
+                and isinstance(relation[4], tuple)
+                and len(relation[4]) == 2
+                and relation[4][0] == "projection"
+                and cls._proof_text_is_specific(relation[4][1])
+            )
+        return False
+
+    @classmethod
+    def _tag_payload_is_specific(cls, value: Any, tag: str) -> bool:
+        item = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == tag
+            and cls._object_leaf_is_specific(item[1])
+        )
+
+    @classmethod
+    def _object_leaf_is_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if normalized is None:
+            return False
+        if isinstance(normalized, str):
+            return cls._proof_text_is_specific(normalized)
+        if isinstance(normalized, bool):
+            return True
+        if isinstance(normalized, int):
+            return True
+        if isinstance(normalized, tuple):
+            return bool(normalized) and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        return False
+
+    @classmethod
+    def _readonly_bit_span_is_specific(cls, value: Any, tag: str) -> bool:
+        span = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(span, tuple)
+            and len(span) == 3
+            and span[0] == tag
+            and cls._proof_nonnegative_int_like(span[1])
+            and cls._proof_positive_int_like(span[2])
+        )
+
+    @classmethod
+    def _readonly_component_key_is_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if not isinstance(normalized, tuple) or not normalized or not cls._proof_text_is_specific(normalized[0]):
+            return False
+        if cls._proof_target_contains_missing_or_diagnostic(normalized):
+            return False
+        root = normalized[0]
+        if root in {"parameter", "loop_limit_parameter"}:
+            return len(normalized) == 2 and cls._proof_nonnegative_int_like(normalized[1])
+        if root == "parameter_storage":
+            return len(normalized) == 2 and cls._readonly_component_key_is_specific(normalized[1])
+        if root == "register_storage":
+            return len(normalized) == 6 and all(cls._proof_int_like(item) for item in normalized[1:])
+        if root in {"binary", "kind"}:
+            return len(normalized) == 2 and cls._proof_text_is_specific(normalized[1])
+        if root in {"base", "count", "storage"}:
+            return len(normalized) == 2 and cls._readonly_component_key_is_specific(normalized[1])
+        if root in {"stride", "element_size", "result_size"}:
+            return len(normalized) == 2 and cls._proof_nonnegative_int_like(normalized[1])
+        if root in {"start_offset", "constant_bias"}:
+            return len(normalized) == 2 and cls._proof_int_like(normalized[1])
+        if root in {"expression", "condition"}:
+            return len(normalized) >= 2 and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        if root in {"const", "literal", "variable", "binary", "unary", "memory", "call", "intrinsic", "phi"}:
+            return len(normalized) >= 2 and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        return False
+
+    @classmethod
+    def _method_b_closure_relation_is_specific(cls, value: Any) -> bool:
+        relation = cls._normalize_nested_tuple(value)
+        if (
+            not isinstance(relation, tuple)
+            or len(relation) < 2
+            or relation[0] != "method_b_closure_relation"
+            or cls._proof_target_contains_diagnostic_value(relation)
+        ):
+            return False
+        fields = {
+            item[0]: item[1:]
+            for item in relation[1:]
+            if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], str)
+        }
+        kind = fields.get("kind", (None,))[0]
+        if kind == "one_sided_summary":
+            return (
+                len(relation) == 7
+                and fields.get("summary_side", (None,))[0] in {"left", "right"}
+                and fields.get("exact_side", (None,))[0] in {"left", "right"}
+                and fields.get("summary_side", (None,))[0] != fields.get("exact_side", (None,))[0]
+                and cls._method_b_summary_profile_is_specific(fields.get("summary", (None,))[0])
+                and cls._method_b_exact_terms_are_specific(fields.get("exact_terms", (None,))[0])
+                and cls._proof_int_like(fields.get("exact_constant_bias", (None,))[0])
+            )
+        if kind == "dual_summary":
+            return (
+                len(relation) == 4
+                and cls._method_b_summary_profile_is_specific(fields.get("left_summary", (None,))[0])
+                and cls._method_b_summary_profile_is_specific(fields.get("right_summary", (None,))[0])
+            )
+        return False
+
+    @classmethod
+    def _method_b_summary_profile_is_specific(cls, value: Any) -> bool:
+        profile = cls._normalize_nested_tuple(value)
+        if not isinstance(profile, tuple) or len(profile) != 5 or profile[0] != "method_b_summary_profile":
+            return False
+        fields = {
+            item[0]: item[1]
+            for item in profile[1:]
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+        }
+        return (
+            cls._method_b_runtime_ref_key_is_specific(fields.get("runtime_ref"))
+            and cls._method_b_loop_summary_key_is_specific(fields.get("loop_summary"))
+            and cls._readonly_term_contract_is_specific(fields.get("term_contract"))
+            and cls._method_b_count_identities_are_specific(fields.get("count_identities"))
+        )
+
+    @classmethod
+    def _method_b_runtime_ref_key_is_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(normalized, tuple)
+            and len(normalized) >= 2
+            and normalized[0]
+            in {
+                "readonly_reduction",
+                "readonly_reduction_proof_semantic",
+                "readonly_reduction_loop_semantic",
+                "readonly_reduction_semantic",
+                "counted_loop_summary",
+                "counted_loop_summary_loop_semantic",
+                "counted_loop_summary_semantic",
+            }
+            and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        )
+
+    @classmethod
+    def _method_b_loop_summary_key_is_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(normalized, tuple)
+            and len(normalized) >= 2
+            and normalized[0] in {"loop_summary", "loop_summary_method_b"}
+            and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        )
+
+    @classmethod
+    def _readonly_term_contract_is_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if not isinstance(normalized, tuple) or len(normalized) < 2:
+            return False
+        if cls._proof_target_contains_missing_or_diagnostic(normalized):
+            return False
+        if normalized[0] == "readonly_reduction_term_sequence_contract":
+            return (
+                len(normalized) >= 14
+                and cls._proof_text_is_specific(normalized[1])
+                and cls._readonly_component_key_is_specific(normalized[2])
+                and cls._readonly_component_key_is_specific(normalized[3])
+                and cls._readonly_component_key_is_specific(normalized[4])
+                and all(cls._proof_int_like(item) for item in normalized[5:10])
+                and isinstance(normalized[10], bool)
+                and isinstance(normalized[11], tuple)
+                and cls._readonly_projection_key_is_specific(normalized[12])
+                and cls._readonly_side_effect_profile_is_specific(normalized[13])
+            )
+        if normalized[0] == "affine_readonly_sum":
+            return len(normalized) >= 4 and all(
+                cls._readonly_component_key_is_specific(item) for item in normalized[1:]
+            )
+        return False
+
+    @classmethod
+    def _readonly_projection_key_is_specific(cls, value: Any) -> bool:
+        projection = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(projection, tuple)
+            and len(projection) == 2
+            and all(cls._proof_int_like(item) for item in projection)
+        )
+
+    @classmethod
+    def _readonly_side_effect_profile_is_specific(cls, value: Any) -> bool:
+        profile = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(profile, tuple)
+            and len(profile) >= 2
+            and profile[0] == "loop_side_effect_profile"
+            and cls._proof_text_is_specific(profile[1])
+            and not cls._proof_target_contains_missing_or_diagnostic(profile)
+        )
+
+    @classmethod
+    def _method_b_count_identities_are_specific(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(normalized, tuple)
+            and bool(normalized)
+            and all(isinstance(item, tuple) and bool(item) for item in normalized)
+            and not cls._proof_target_contains_missing_or_diagnostic(normalized)
+        )
+
+    @classmethod
+    def _method_b_closure_relation_fields(cls, value: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
+        relation = cls._normalize_nested_tuple(value)
+        if not isinstance(relation, tuple) or len(relation) < 2 or relation[0] != "method_b_closure_relation":
+            return None
+        return {
+            item[0]: item[1:]
+            for item in relation[1:]
+            if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], str)
+        }
+
+    @classmethod
+    def _method_b_one_sided_relation_payload(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not (
+            isinstance(target, tuple)
+            and len(target) == 5
+            and cls._method_b_closure_relation_is_specific(target[4])
+        ):
+            return None
+        fields = cls._method_b_closure_relation_fields(target[4])
+        if not fields or fields.get("kind", (None,))[0] != "one_sided_summary":
+            return None
+        exact_bias = fields.get("exact_constant_bias", (None,))[0]
+        if not cls._proof_int_like(exact_bias):
+            return None
+        return {
+            "summary_side": fields.get("summary_side", (None,))[0],
+            "exact_side": fields.get("exact_side", (None,))[0],
+            "exact_terms": cls._normalize_nested_tuple(fields.get("exact_terms", (None,))[0]),
+            "exact_constant_bias": int(exact_bias),
+        }
+
+    @classmethod
+    def _method_b_exact_terms_are_specific(cls, value: Any) -> bool:
+        terms = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(terms, tuple)
+            and bool(terms)
+            and all(cls._method_b_readonly_term_is_specific(term) for term in terms)
+        )
+
+    @classmethod
+    def _method_b_readonly_term_is_specific(cls, value: Any) -> bool:
+        term = cls._normalize_nested_tuple(value)
+        return (
+            isinstance(term, tuple)
+            and len(term) == 3
+            and term[0] == "readonly_reduction_term"
+            and cls._proof_nonnegative_int_like(term[1])
+            and cls._proof_positive_int_like(term[2])
+        )
+
+    @classmethod
+    def _proof_target_contains_weak_value(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if normalized is None:
+            return True
+        if isinstance(normalized, str):
+            text = normalized.strip()
+            return (
+                not text
+                or text == "<missing>"
+                or text.startswith("missing_")
+                or text.endswith("_unavailable")
+                or text in {
+                    "missing_readonly_ref",
+                    "missing_method_b_summary",
+                    "exact_terms_unavailable",
+                    "loop_summary_shape_mismatch",
+                    "loop_summary_guard_mismatch",
+                    "loop_summary_unproven",
+                    "readonly_contract_mismatch",
+                    "readonly_contract_type_mismatch",
+                    "readonly_contract_missing_loop",
+                    "readonly_contract_effects_unproven",
+                    "readonly_contract_result_width_mismatch",
+                    "readonly_contract_term_sequence_mismatch",
+                }
+            )
+        if isinstance(normalized, tuple):
+            if not normalized:
+                return True
+            return any(cls._proof_target_contains_weak_value(item) for item in normalized)
+        return False
+
+    @classmethod
+    def _proof_target_contains_diagnostic_value(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, str):
+            text = normalized.strip()
+            return (
+                text == "<missing>"
+                or text.startswith("missing_")
+                or text.endswith("_unavailable")
+                or text in {
+                    "missing_readonly_ref",
+                    "missing_method_b_summary",
+                    "exact_terms_unavailable",
+                    "loop_summary_shape_mismatch",
+                    "loop_summary_guard_mismatch",
+                    "loop_summary_unproven",
+                    "readonly_contract_mismatch",
+                    "readonly_contract_type_mismatch",
+                    "readonly_contract_missing_loop",
+                    "readonly_contract_effects_unproven",
+                    "readonly_contract_result_width_mismatch",
+                    "readonly_contract_term_sequence_mismatch",
+                }
+            )
+        if isinstance(normalized, tuple):
+            return any(cls._proof_target_contains_diagnostic_value(item) for item in normalized)
+        return False
+
+    @classmethod
+    def _proof_target_contains_missing_or_diagnostic(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if normalized is None:
+            return True
+        if isinstance(normalized, str):
+            text = normalized.strip()
+            return (
+                not text
+                or text == "<missing>"
+                or text.startswith("missing_")
+                or text.endswith("_unavailable")
+                or text in {
+                    "missing_readonly_ref",
+                    "missing_method_b_summary",
+                    "exact_terms_unavailable",
+                    "loop_summary_shape_mismatch",
+                    "loop_summary_guard_mismatch",
+                    "loop_summary_unproven",
+                    "readonly_contract_mismatch",
+                    "readonly_contract_type_mismatch",
+                    "readonly_contract_missing_loop",
+                    "readonly_contract_effects_unproven",
+                    "readonly_contract_result_width_mismatch",
+                    "readonly_contract_term_sequence_mismatch",
+                }
+            )
+        if isinstance(normalized, tuple):
+            return any(cls._proof_target_contains_missing_or_diagnostic(item) for item in normalized)
+        return False
+
+    @classmethod
+    def _proof_text_is_specific(cls, value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip()) and not cls._proof_target_contains_weak_value(value)
+
+    @classmethod
+    def _proof_int_like(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            int(value)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @classmethod
+    def _proof_nonnegative_int_like(cls, value: Any) -> bool:
+        return cls._proof_int_like(value) and int(value) >= 0
+
+    @classmethod
+    def _proof_positive_int_like(cls, value: Any) -> bool:
+        return cls._proof_int_like(value) and int(value) > 0
+
+    @classmethod
+    def _readonly_identity_proof_content_is_complete(
+        cls,
+        proof_content: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(proof_content, Mapping):
+            return False
+        if not cls._evidence_bool(proof_content, "object_derived"):
+            return False
+        if cls._normalize_nested_tuple(proof_content.get("object_target_key")) != object_target_key:
+            return False
+        if cls._evidence_has_any_recursive(proof_content, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return False
+        if cls._normalize_nested_tuple(proof_content.get("left_side")) != object_target_key[2]:
+            return False
+        if cls._normalize_nested_tuple(proof_content.get("right_side")) != object_target_key[3]:
+            return False
+        return (
+            cls._evidence_text(proof_content, "object_storage_identity") == "matched"
+            and cls._evidence_text(proof_content, "count_identity") == "matched"
+            and cls._evidence_text(proof_content, "guard_implication") in {"proven", "vacuous"}
+            and cls._evidence_text(proof_content, "finite_witness") == "checked"
+        )
+
+    @classmethod
+    def _method_b_closure_proof_content_is_complete(
+        cls,
+        proof_content: Any,
+        object_target_key: Tuple[Any, ...],
+        *,
+        proof_stage: str,
+    ) -> bool:
+        if not isinstance(proof_content, Mapping):
+            return False
+        if not cls._evidence_bool(proof_content, "object_derived"):
+            return False
+        if cls._normalize_nested_tuple(proof_content.get("object_target_key")) != object_target_key:
+            return False
+        if cls._evidence_has_any_recursive(proof_content, cls._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return False
+        if proof_stage == "method_b_covering_case":
+            if not all(
+                cls._proof_status_value_is_complete(proof_content.get(field))
+                for field in ("seed_compensation", "term_sequence", "pure_side_effect_profile")
+            ):
+                return False
+            return cls._method_b_covering_proof_content_matches_relation(proof_content, object_target_key)
+        if proof_stage == "method_b_guard_partition":
+            if not all(
+                cls._proof_status_value_is_complete(proof_content.get(field))
+                for field in ("guard_partition", "partition_coverage_proof")
+            ):
+                return False
+            return cls._method_b_guard_proof_content_matches_relation(proof_content, object_target_key)
+        return False
+
+    @classmethod
+    def _method_b_proof_sides_match_relation(
+        cls,
+        proof_content: Mapping[str, Any],
+        relation_payload: Mapping[str, Any],
+    ) -> bool:
+        return (
+            cls._evidence_text(proof_content, "exact_side") == relation_payload.get("exact_side")
+            and cls._evidence_text(proof_content, "summary_side") == relation_payload.get("summary_side")
+        )
+
+    @classmethod
+    def _method_b_covering_proof_content_matches_relation(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        relation_payload = cls._method_b_one_sided_relation_payload(object_target_key)
+        if relation_payload is None or not cls._method_b_proof_sides_match_relation(proof_content, relation_payload):
+            return False
+        if not (
+            cls._proof_positive_int_like(proof_content.get("count_value"))
+            and cls._proof_positive_int_like(proof_content.get("result_size"))
+            and cls._proof_int_like(proof_content.get("constant_bias"))
+        ):
+            return False
+        exact_terms = cls._normalize_nested_tuple(proof_content.get("exact_terms"))
+        expected_terms = cls._normalize_nested_tuple(proof_content.get("expected_terms"))
+        relation_terms = relation_payload.get("exact_terms")
+        if exact_terms != relation_terms or expected_terms != relation_terms:
+            return False
+        if int(proof_content.get("constant_bias")) != relation_payload.get("exact_constant_bias"):
+            return False
+        return cls._evidence_text(proof_content, "covering_evidence") == "method_b_covering_materialized_terms"
+
+    @classmethod
+    def _method_b_guard_proof_content_matches_relation(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        relation_payload = cls._method_b_one_sided_relation_payload(object_target_key)
+        if relation_payload is None or not cls._method_b_proof_sides_match_relation(proof_content, relation_payload):
+            return False
+        count_values = cls._method_b_guard_count_values(proof_content)
+        if not count_values:
+            return False
+        guard_evidence = cls._evidence_text(proof_content, "guard_evidence")
+        return guard_evidence in {
+            "reduction_count_implication",
+            "reduction_count_membership_implication",
+        }
+
+    @classmethod
+    def _method_b_guard_count_values(cls, proof_content: Mapping[str, Any]) -> Tuple[int, ...]:
+        raw_values = proof_content.get("count_values")
+        if raw_values is None:
+            if not cls._proof_positive_int_like(proof_content.get("count_value")):
+                return ()
+            return (int(proof_content.get("count_value")),)
+        values = cls._normalize_nested_tuple(raw_values)
+        if not isinstance(values, tuple) or not values:
+            return ()
+        normalized: List[int] = []
+        for value in values:
+            if not cls._proof_positive_int_like(value):
+                return ()
+            normalized.append(int(value))
+        if len(set(normalized)) != len(normalized):
+            return ()
+        if proof_content.get("count_value") is not None:
+            if not cls._proof_positive_int_like(proof_content.get("count_value")):
+                return ()
+            if int(proof_content.get("count_value")) not in set(normalized):
+                return ()
+        return tuple(normalized)
+
+    @classmethod
+    def _proof_status_value_is_complete(cls, value: Any) -> bool:
+        return str(value or "") in {"complete", "completed", "covered", "matched", "proven", "checked", "vacuous"}
 
     @classmethod
     def _return_width_bridge_completed_proof_content(
