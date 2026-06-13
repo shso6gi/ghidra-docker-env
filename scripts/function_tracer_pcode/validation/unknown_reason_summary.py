@@ -243,7 +243,7 @@ def summarize_validation_unknowns(
             _inc(unknown_by_decision_effect, record.decision_effect)
             _inc(unknown_by_reason_scope, record.reason_scope)
             actions = build_unknown_recovery_actions((record,))
-            if _is_proof_backlog(record):
+            if _is_proof_backlog(record, actions):
                 _inc(proof_backlog_by_reason, record.reason_id)
                 for action in actions:
                     _inc(proof_backlog_by_proof_kind, action.proof_kind)
@@ -889,7 +889,8 @@ def _primary_unknown_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, 
     )
 
 
-def _is_proof_backlog(record: UnknownReasonRecord) -> bool:
+def _is_proof_backlog(record: UnknownReasonRecord, actions: Sequence[Any] = ()) -> bool:
+    action_statuses = {str(getattr(action, "status", "")) for action in actions}
     return (
         record.reason_class in _PROOF_BACKLOG_CLASSES
         or record.action_status
@@ -897,6 +898,16 @@ def _is_proof_backlog(record: UnknownReasonRecord) -> bool:
             UnknownRecoveryActionStatus.PENDING_PROOF.value,
             UnknownRecoveryActionStatus.PLANNED.value,
         }
+        or (
+            record.object_target_key is not None
+            and bool(
+                action_statuses
+                & {
+                    UnknownRecoveryActionStatus.PENDING_PROOF.value,
+                    UnknownRecoveryActionStatus.PLANNED.value,
+                }
+            )
+        )
     )
 
 

@@ -3228,6 +3228,46 @@ def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_e
     assert ("lowering_kind", "deferred_call") in evidence[0]
 
 
+def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func1",
+        binary_id="B1",
+        entry=0x1000,
+        target_expr_missing=True,
+        return_deferred_unknown=True,
+    )
+    analysis2 = _analysis_with_deferred_call_argument_blocker(
+        function_name="func2",
+        binary_id="B14",
+        entry=0x2000,
+        target_expr_missing=True,
+        return_deferred_unknown=True,
+    )
+    _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+    ]
+    assert {
+        reason.detail for reason in result.unknown_reasons
+    } == {
+        "function1:effect_call_argument_evidence_incomplete",
+        "function2:effect_call_argument_evidence_incomplete",
+    }
+    assert "pairwise_extra_assertions_by_pair" not in formula_builder.build_base_context.return_value
+    strategy._solve_query_twostage.assert_not_called()
+
+
 def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()

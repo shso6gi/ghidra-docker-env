@@ -537,6 +537,12 @@ class PairwiseStrategy(CheckStrategy):
                                     object_target_key
                                 )
                             )
+                        if completed_proof_evidence is None:
+                            completed_proof_evidence = (
+                                self._unresolved_expression_opaque_unknown_diagnostic_evidence(
+                                    object_target_key
+                                )
+                            )
                         unknown_reasons.append(
                             make_unknown_reason(
                                 UnknownReasonId.UNRESOLVED_EXPRESSION,
@@ -2167,6 +2173,187 @@ class PairwiseStrategy(CheckStrategy):
             ("deferred_call_evidence", call_evidence),
             ("stage_evidence", stage_evidence),
         )
+
+    def _unresolved_expression_opaque_unknown_diagnostic_evidence(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        if not self._object_target_contains_void_opaque_unknown(object_target_key):
+            return None
+        opaque_evidence = self._opaque_unknown_return_object_evidence_from_target(
+            object_target_key
+        )
+        if opaque_evidence is None:
+            return None
+        stage_evidence = self._opaque_unknown_unresolved_expression_stage_evidence(
+            object_target_key=object_target_key,
+            opaque_evidence=opaque_evidence,
+        )
+        if not stage_evidence:
+            return None
+        return (
+            "unresolved_expression_diagnostic_evidence",
+            ("object_derived", True),
+            ("status", "object_evidence_collected"),
+            ("diagnostic_rule", "opaque_unknown_return_object_proof_content"),
+            (
+                "pending_stages",
+                (
+                    "opaque_unknown_return_origin_resolution",
+                    "opaque_unknown_return_value_equivalence",
+                ),
+            ),
+            (
+                "required_semantic_proof",
+                (
+                    "opaque_unknown_ref",
+                    "return_case_origin",
+                    "guard_condition_pair",
+                    "return_width_policy",
+                ),
+            ),
+            ("object_target_key", object_target_key),
+            ("opaque_unknown_evidence", opaque_evidence),
+            ("stage_evidence", stage_evidence),
+        )
+
+    def _opaque_unknown_unresolved_expression_stage_evidence(
+        self,
+        *,
+        object_target_key: Tuple[Any, ...],
+        opaque_evidence: Tuple[Any, ...],
+    ) -> Tuple[Any, ...]:
+        origin_query = self._semantic_recurrence_query_plan(
+            query_id="opaque_unknown_return_origin_resolution",
+            query_stage="opaque_unknown_return_origin_resolution",
+            assertion_kind="opaque_unknown_return_origin_resolution",
+            object_target_key=object_target_key,
+            object_content=(("opaque_unknown_evidence", opaque_evidence),),
+        )
+        value_query = self._semantic_recurrence_query_plan(
+            query_id="opaque_unknown_return_value_equivalence",
+            query_stage="opaque_unknown_return_value_equivalence",
+            assertion_kind="opaque_unknown_return_value_equivalence",
+            object_target_key=object_target_key,
+            object_content=(("opaque_unknown_evidence", opaque_evidence),),
+        )
+        return (
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "opaque_unknown_return_origin_resolution"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("opaque_unknown_evidence", opaque_evidence),
+                ("origin_resolution_status", "pending_semantic_proof"),
+                ("proof_query_plan", (origin_query,)),
+                (
+                    "required_semantic_proof",
+                    (
+                        "opaque_unknown_ref",
+                        "return_case_origin",
+                    ),
+                ),
+            ),
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "opaque_unknown_return_value_equivalence"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("opaque_unknown_evidence", opaque_evidence),
+                ("value_equivalence_status", "pending_semantic_proof"),
+                ("proof_query_plan", (value_query,)),
+                (
+                    "required_semantic_proof",
+                    (
+                        "left_return_value",
+                        "right_return_value",
+                        "guard_condition_pair",
+                        "return_width_policy",
+                    ),
+                ),
+            ),
+        )
+
+    def _opaque_unknown_return_object_evidence_from_target(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        target = self._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 4:
+            return None
+        sides = []
+        opaque_refs: List[Any] = []
+        seen_refs = set()
+        for side in target[2:4]:
+            side_tuple = self._normalize_nested_tuple(side)
+            if not isinstance(side_tuple, tuple) or len(side_tuple) < 6:
+                return None
+            side_label = side_tuple[1]
+            function_ref = side_tuple[2]
+            return_storage = side_tuple[3]
+            partition_member = side_tuple[4]
+            unresolved_locations = side_tuple[5]
+            side_refs = self._opaque_unknown_refs_from_value(
+                (partition_member, unresolved_locations)
+            )
+            for ref in side_refs:
+                key = repr(ref)
+                if key not in seen_refs:
+                    seen_refs.add(key)
+                    opaque_refs.append(ref)
+            sides.append(
+                (
+                    "return_side",
+                    ("side", side_label),
+                    ("function_ref", function_ref),
+                    ("return_storage", return_storage),
+                    ("return_case_origin", partition_member),
+                    ("unresolved_locations", unresolved_locations),
+                    ("opaque_unknown_refs", side_refs),
+                )
+            )
+        if not opaque_refs:
+            return None
+        return (
+            "opaque_unknown_return_object_evidence",
+            ("opaque_unknown_refs", tuple(sorted(opaque_refs, key=repr))),
+            ("return_sides", tuple(sides)),
+            ("return_width_policy", tuple(side[3] for side in target[2:4] if isinstance(side, tuple) and len(side) >= 4)),
+            ("evidence_status", "object_evidence_collected"),
+        )
+
+    @classmethod
+    def _opaque_unknown_refs_from_value(cls, value: Any) -> Tuple[Any, ...]:
+        refs: List[Any] = []
+        seen = set()
+
+        def visit(node: Any) -> None:
+            normalized = cls._normalize_nested_tuple(node)
+            if isinstance(normalized, tuple):
+                if (
+                    len(normalized) == 2
+                    and normalized[0] in {"runtime_ref", "unknown_runtime_ref"}
+                    and isinstance(normalized[1], tuple)
+                    and len(normalized[1]) >= 2
+                    and normalized[1][0] == "opaque_unknown"
+                    and normalized[1][1] == "void"
+                ):
+                    key = repr(normalized)
+                    if key not in seen:
+                        seen.add(key)
+                        refs.append(normalized)
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, list):
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, dict):
+                for key, item in normalized.items():
+                    visit(key)
+                    visit(item)
+
+        visit(value)
+        return tuple(sorted(refs, key=repr))
 
     def _deferred_call_unresolved_expression_stage_evidence(
         self,

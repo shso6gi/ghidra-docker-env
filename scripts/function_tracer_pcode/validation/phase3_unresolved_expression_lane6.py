@@ -1722,6 +1722,15 @@ def _pending_action_object_evidence_status(action: Mapping[str, Any]) -> str:
             return "object_evidence_collected"
         if action.get("object_evidence") is not None:
             return "object_evidence_invalid"
+    if stage in UNRESOLVED_OPAQUE_VOID_PROOF_STAGES:
+        if _unresolved_expression_opaque_unknown_pending_action_evidence_is_specific(
+            action,
+            stage=stage,
+            target=target,
+        ):
+            return "object_evidence_collected"
+        if action.get("object_evidence") is not None:
+            return "object_evidence_invalid"
     return "pending_evidence"
 
 
@@ -1865,6 +1874,175 @@ def _deferred_call_ref_relation_is_specific(
     }:
         return False
     return fields.get("left_count") == left_count and fields.get("right_count") == right_count
+
+
+def _unresolved_expression_opaque_unknown_pending_action_evidence_is_specific(
+    action: Mapping[str, Any],
+    *,
+    stage: str,
+    target: Any,
+) -> bool:
+    evidence = _normalize_nested_tuple(action.get("object_evidence"))
+    if not isinstance(evidence, tuple) or len(evidence) != 9:
+        return False
+    if evidence[0] != "unresolved_expression_diagnostic_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("object_derived") is not True:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    if fields.get("diagnostic_rule") != "opaque_unknown_return_object_proof_content":
+        return False
+    evidence_target = fields.get("object_target_key")
+    if not _object_target_key_is_specific_unresolved_expression(evidence_target):
+        return False
+    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+        return False
+    pending_stages = fields.get("pending_stages")
+    if not isinstance(pending_stages, tuple) or stage not in pending_stages:
+        return False
+    if not set(pending_stages).issubset(set(UNRESOLVED_OPAQUE_VOID_PROOF_STAGES)):
+        return False
+    opaque_evidence = fields.get("opaque_unknown_evidence")
+    if not _opaque_unknown_return_evidence_is_specific(opaque_evidence):
+        return False
+    stage_evidence = fields.get("stage_evidence")
+    if not isinstance(stage_evidence, tuple):
+        return False
+    matching = [
+        item
+        for item in stage_evidence
+        if _opaque_unknown_stage_evidence_matches(
+            item,
+            stage=stage,
+            target=target,
+            opaque_evidence=opaque_evidence,
+        )
+    ]
+    return len(matching) == 1
+
+
+def _opaque_unknown_stage_evidence_matches(
+    value: Any,
+    *,
+    stage: str,
+    target: Any,
+    opaque_evidence: Any,
+) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or evidence[0] != "unresolved_expression_stage_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("proof_stage") != stage:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    if _unresolved_expression_target_identity_key(fields.get("object_target_key")) != _unresolved_expression_target_identity_key(target):
+        return False
+    if _canonical_json(fields.get("opaque_unknown_evidence")) != _canonical_json(opaque_evidence):
+        return False
+    required = fields.get("required_semantic_proof")
+    if not isinstance(required, tuple) or not required or not all(_text_identity_is_specific(item) for item in required):
+        return False
+    if stage == "opaque_unknown_return_origin_resolution":
+        if fields.get("origin_resolution_status") != "pending_semantic_proof":
+            return False
+    elif stage == "opaque_unknown_return_value_equivalence":
+        if fields.get("value_equivalence_status") != "pending_semantic_proof":
+            return False
+    else:
+        return False
+    return _semantic_recurrence_query_plan_is_specific(
+        fields.get("proof_query_plan"),
+        expected_stage=stage,
+        stage_fields=fields,
+    )
+
+
+def _opaque_unknown_return_evidence_is_specific(value: Any) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or len(evidence) != 5:
+        return False
+    if evidence[0] != "opaque_unknown_return_object_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    opaque_refs = fields.get("opaque_unknown_refs")
+    return_sides = fields.get("return_sides")
+    width_policy = fields.get("return_width_policy")
+    if not isinstance(opaque_refs, tuple) or not opaque_refs:
+        return False
+    if not all(_opaque_unknown_ref_is_specific(ref) for ref in opaque_refs):
+        return False
+    if not isinstance(return_sides, tuple) or len(return_sides) != 2:
+        return False
+    if not all(_opaque_return_side_evidence_is_specific(side) for side in return_sides):
+        return False
+    if not isinstance(width_policy, tuple) or len(width_policy) != 2:
+        return False
+    if not all(_return_storage_policy_is_specific(item) for item in width_policy):
+        return False
+    return fields.get("evidence_status") == "object_evidence_collected"
+
+
+def _opaque_return_side_evidence_is_specific(value: Any) -> bool:
+    side = _normalize_nested_tuple(value)
+    if not isinstance(side, tuple) or side[0] != "return_side":
+        return False
+    fields = _tuple_fields(side)
+    if fields.get("side") not in {"left", "right"}:
+        return False
+    if not _nested_has_specific_leaf(fields.get("function_ref")):
+        return False
+    if not _return_storage_policy_is_specific(fields.get("return_storage")):
+        return False
+    if not _return_case_origin_is_specific(fields.get("return_case_origin")):
+        return False
+    unresolved_locations = fields.get("unresolved_locations")
+    if not isinstance(unresolved_locations, tuple) or unresolved_locations[0] != "unresolved_locations":
+        return False
+    opaque_refs = fields.get("opaque_unknown_refs")
+    if not isinstance(opaque_refs, tuple):
+        return False
+    return all(_opaque_unknown_ref_is_specific(ref) for ref in opaque_refs)
+
+
+def _opaque_unknown_ref_is_specific(value: Any) -> bool:
+    ref = _normalize_nested_tuple(value)
+    return (
+        isinstance(ref, tuple)
+        and len(ref) == 2
+        and ref[0] in {"runtime_ref", "unknown_runtime_ref"}
+        and isinstance(ref[1], tuple)
+        and len(ref[1]) >= 2
+        and ref[1][0] == "opaque_unknown"
+        and ref[1][1] == "void"
+        and not _nested_contains_missing_sentinel(ref)
+    )
+
+
+def _return_storage_policy_is_specific(value: Any) -> bool:
+    storage = _normalize_nested_tuple(value)
+    return (
+        isinstance(storage, tuple)
+        and len(storage) >= 4
+        and storage[0] == "return_storage"
+        and storage[1] == "return_value"
+        and _nonnegative_int_like(storage[2])
+    )
+
+
+def _return_case_origin_is_specific(value: Any) -> bool:
+    origin = _normalize_nested_tuple(value)
+    if not isinstance(origin, tuple) or len(origin) < 6:
+        return False
+    if origin[0] != "return_case_partition_member":
+        return False
+    if not _nonnegative_int_like(origin[1]):
+        return False
+    if not isinstance(origin[2], tuple):
+        return False
+    return _nested_has_specific_leaf(origin[3]) and not _nested_contains_missing_sentinel(origin[3])
 
 
 def _unresolved_expression_pending_action_evidence_is_specific(
@@ -2237,6 +2415,17 @@ def _semantic_recurrence_query_has_object_content(
             return False
         if stage_fields is not None and _canonical_json(call_evidence) != _canonical_json(
             stage_fields.get("deferred_call_evidence")
+        ):
+            return False
+        return True
+    if stage in UNRESOLVED_OPAQUE_VOID_PROOF_STAGES:
+        opaque_evidence = fields.get("opaque_unknown_evidence")
+        if not _opaque_unknown_return_evidence_is_specific(opaque_evidence):
+            return False
+        if object_content != (("opaque_unknown_evidence", opaque_evidence),):
+            return False
+        if stage_fields is not None and _canonical_json(opaque_evidence) != _canonical_json(
+            stage_fields.get("opaque_unknown_evidence")
         ):
             return False
         return True
