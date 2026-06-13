@@ -285,7 +285,7 @@ class EquivalenceResult:
             lines.append("UNKNOWN Reasons:")
             for reason in self.unknown_reasons[:10]:
                 scope = reason.pair_or_case or reason.stage or reason.reason_scope
-                recovery = reason.recovery_proof_kind
+                recovery = self._reason_recovery_display(reason)
                 lines.append(
                     f"  {reason.reason_id}: class={reason.reason_class}, "
                     f"effect={reason.decision_effect}, scope={scope}, recovery={recovery}"
@@ -367,3 +367,21 @@ class EquivalenceResult:
         
         lines.append("=" * 70)
         return "\n".join(lines)
+
+    def _reason_recovery_display(self, reason: UnknownReasonRecord) -> str:
+        matching_actions = [
+            action
+            for action in self.unknown_recovery_actions
+            if action.reason_id == reason.reason_id
+            and (reason.pair_or_case is None or action.pair_or_case == reason.pair_or_case)
+        ]
+        if not matching_actions:
+            return reason.recovery_proof_kind
+        proof_kinds = sorted({action.proof_kind for action in matching_actions if action.proof_kind})
+        statuses = sorted({action.status for action in matching_actions if action.status})
+        if not proof_kinds:
+            proof_kinds = [reason.recovery_proof_kind]
+        proof_text = ",".join(proof_kinds)
+        if statuses:
+            return f"{proof_text} ({','.join(statuses)})"
+        return proof_text

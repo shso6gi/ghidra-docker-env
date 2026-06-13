@@ -1189,6 +1189,84 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
     assert result.unknown_pairs == 1
 
 
+def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 64,
+    }
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f1",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x1000", value=_const(1, size=4), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f2",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x2000", value=_const(1, size=8), conditions=[])],
+        return_type="long",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type="int",
+        parameters=[],
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type="long",
+        parameters=[],
+    )
+    target = ("return_width_bridge", ("pair", "(0,0)"), ("return_widths", 32, 64))
+    query_result = QueryResult(is_equivalent=None)
+    query_result.pair_stage = "return-width-mismatch"
+    query_result.blocking_reason = UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value
+    query_result.blocking_detail = "pairwise value inequality: return width mismatch (32 vs 64)"
+    query_result.evidence_kind = "return_width_bridge_status"
+    query_result.object_target_key = target
+    query_result.object_evidence = ("return_width_bridge_status", ("status", "planned"))
+    query_result.action_status = UnknownRecoveryActionStatus.PLANNED
+
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == "f1" else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    strategy._solve_query_twostage = Mock(return_value=query_result)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_pairs == 1
+    assert len(result.unknown_reasons) == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PLANNED.value
+    assert reason.object_target_key == target
+    assert reason.object_evidence == query_result.object_evidence
+
+
 def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown():
     class _ValidationSolverRunner:
         def __init__(self):
@@ -3468,6 +3546,38 @@ def _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, 
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_unresolved_return_coverage_unknown_reasons", lambda *_args, **_kwargs: [])
+
+
+def test_unresolved_expression_action_status_marks_planned_without_stage_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = (
+        "unresolved_expression",
+        ("pair", "(0,1)"),
+        (
+            "unresolved_expression_side",
+            "left",
+            ("opaque_unknown", "phi_circular", "expr", "runtime", "multiequal_pcode_op", ("pcode_op", "B1")),
+        ),
+        (
+            "unresolved_expression_side",
+            "right",
+            ("opaque_unknown", "phi_circular", "expr", "runtime", "multiequal_pcode_op", ("pcode_op", "B2")),
+        ),
+    )
+
+    assert strategy._unresolved_expression_recovery_proof_obligations(target)
+    assert (
+        strategy._unresolved_expression_action_status(target, object_evidence=None)
+        == UnknownRecoveryActionStatus.PLANNED
+    )
+    assert (
+        strategy._unresolved_expression_action_status(
+            target,
+            object_evidence=("unresolved_expression_diagnostic_evidence",),
+        )
+        == UnknownRecoveryActionStatus.PENDING_PROOF
+    )
+    assert strategy._unresolved_expression_action_status(None, object_evidence=None) is None
 
 
 def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_proof(monkeypatch):

@@ -1150,7 +1150,6 @@ def build_unknown_recovery_actions(
                 record.proof_stage is not None
                 or record.evidence_kind is not None
                 or record.recovery_action is not None
-                or record.action_status is not None
             ):
                 proof_kind = record.recovery_proof_kind
                 if proof_kind == UnknownRecoveryProofKind.NONE.value:

@@ -4,6 +4,7 @@ import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...smt import SolverStatus
+from ..unknown_reason import UnknownRecoveryActionStatus
 from ..formula.returns import (
     ReturnWidthMismatchError,
     expression_has_unresolved_value,
@@ -347,6 +348,7 @@ def solve_query_twostage(
                 pair_id,
                 exc,
             )
+        result.action_status = UnknownRecoveryActionStatus.PLANNED
         bridge_solver = getattr(strategy, "_solve_return_width_bridge_with_completed_proof", None)
         if callable(bridge_solver):
             bridged_result = bridge_solver(

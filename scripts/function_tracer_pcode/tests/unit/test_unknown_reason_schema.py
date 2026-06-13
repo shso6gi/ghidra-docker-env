@@ -613,6 +613,38 @@ def test_equivalence_result_serializes_unknown_recovery_backlog():
     }
 
 
+def test_equivalence_result_unknown_reason_text_uses_recovery_actions():
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+                action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+                recovery_proof_obligations=(
+                    UnknownRecoveryProofObligation(
+                        proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                        proof_stage="deferred_call_return_resolution",
+                    ),
+                ),
+            )
+        ],
+    )
+
+    rendered = result.to_string()
+
+    assert (
+        "recovery=solver_retry_or_normalization (pending_proof)"
+        in rendered
+    )
+
+
 def test_equivalence_result_gates_equivalent_decision_when_pending_proof_exists():
     record = make_unknown_reason(
         UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
@@ -1086,6 +1118,27 @@ def test_checker_check_builds_reason_selected_recovery_actions():
         "producer_width",
         "extension_semantics",
         "high_bits_irrelevant_or_equal",
+    ]
+
+
+def test_return_width_action_status_does_not_collapse_obligation_proof_kinds():
+    reason = make_unknown_reason(
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_refs=("return_storage:r0",),
+        action_status=UnknownRecoveryActionStatus.PLANNED,
+    )
+
+    actions = build_unknown_recovery_actions([reason])
+
+    assert [action.proof_kind for action in actions] == [
+        UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
+        UnknownRecoveryProofKind.HIGH_BIT_PROOF.value,
+    ]
+    assert [action.status for action in actions] == [
+        UnknownRecoveryActionStatus.PLANNED.value,
+        UnknownRecoveryActionStatus.PLANNED.value,
     ]
 
 

@@ -20,6 +20,7 @@ from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
     UnknownDecisionEffect,
+    UnknownRecoveryActionStatus,
     UnknownReasonClass,
     UnknownReasonId,
     UnknownRecoveryProofKind,
@@ -891,7 +892,11 @@ def _primary_unknown_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, 
 def _is_proof_backlog(record: UnknownReasonRecord) -> bool:
     return (
         record.reason_class in _PROOF_BACKLOG_CLASSES
-        or record.action_status == "pending_proof"
+        or record.action_status
+        in {
+            UnknownRecoveryActionStatus.PENDING_PROOF.value,
+            UnknownRecoveryActionStatus.PLANNED.value,
+        }
     )
 
 

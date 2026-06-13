@@ -549,10 +549,9 @@ class PairwiseStrategy(CheckStrategy):
                                 evidence_kind="unresolved_expression_safety",
                                 object_target_key=object_target_key,
                                 object_evidence=completed_proof_evidence,
-                                action_status=(
-                                    UnknownRecoveryActionStatus.PENDING_PROOF
-                                    if completed_proof_evidence is not None
-                                    else None
+                                action_status=self._unresolved_expression_action_status(
+                                    object_target_key,
+                                    completed_proof_evidence,
                                 ),
                                 detail="pairwise case contains solver-unresolved expression evidence",
                             )
@@ -703,7 +702,14 @@ class PairwiseStrategy(CheckStrategy):
                         evidence_refs=(result.pair_stage or "unknown", result.blocking_detail),
                         evidence_kind=getattr(result, "evidence_kind", None),
                         object_target_key=getattr(result, "object_target_key", None),
+                        recovery_proof_obligations=getattr(
+                            result,
+                            "recovery_proof_obligations",
+                            None,
+                        ),
                         proof_obligation_id=getattr(result, "proof_obligation_id", None),
+                        object_evidence=getattr(result, "object_evidence", None),
+                        action_status=getattr(result, "action_status", None),
                         detail=result.blocking_detail,
                     )
                 )
@@ -3070,6 +3076,19 @@ class PairwiseStrategy(CheckStrategy):
                     ),
                 ),
             )
+        return None
+
+    def _unresolved_expression_action_status(
+        self,
+        object_target_key: Optional[Tuple[Any, ...]],
+        object_evidence: Any,
+    ) -> Optional[UnknownRecoveryActionStatus]:
+        if object_evidence is not None:
+            return UnknownRecoveryActionStatus.PENDING_PROOF
+        if object_target_key is None:
+            return None
+        if self._unresolved_expression_recovery_proof_obligations(object_target_key):
+            return UnknownRecoveryActionStatus.PLANNED
         return None
 
     @classmethod

@@ -135,6 +135,41 @@ def test_validation_unknown_summary_tracks_plan16_dimensions_for_target_cases():
     ] == 1
 
 
+def test_validation_unknown_summary_treats_planned_action_as_proof_backlog():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "fc_is_even",
+                reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION,
+                        pair_or_case="(5,1)",
+                        action_status=UnknownRecoveryActionStatus.PLANNED,
+                        recovery_proof_obligations=(
+                            UnknownRecoveryProofObligation(
+                                proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                                proof_stage="phi_circular_guard_condition_lowering",
+                            ),
+                            UnknownRecoveryProofObligation(
+                                proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                                proof_stage="recursive_summary_guard_equivalence",
+                            ),
+                        ),
+                    )
+                ],
+            )
+        ]
+    )
+
+    assert summary.proof_backlog_by_reason == {
+        UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION.value: 1,
+    }
+    assert summary.proof_backlog_by_action_status == {
+        UnknownRecoveryActionStatus.PLANNED.value: 2,
+    }
+    assert summary.operational_unknown_by_reason == {}
+
+
 def test_validation_summary_normalizes_bool_debug_trace_final_result_counts():
     summary = summarize_validation_unknowns(
         [
