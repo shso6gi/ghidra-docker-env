@@ -1200,6 +1200,119 @@ def test_phi_circular_guard_literal_preserves_parameter_index_zero():
     )
 
 
+def test_phi_circular_same_origin_shape_without_proof_does_not_prove_disjoint_cases():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    x_left = Expression.parameter("x", index=0, size=4)
+    x_right = Expression.parameter("x", index=0, size=4)
+    left_phi = _phi_circular_unknown("B11", 0x1000)
+    right_phi = _phi_circular_unknown("B12", 0x2000)
+    left_guard = Expression.binary_op(
+        "INT_SLESS",
+        Expression.unary_op("INT_2COMP", left_phi),
+        Expression.constant(0, 4),
+    )
+    right_guard = Expression.binary_op(
+        "INT_SLESS",
+        Expression.unary_op("INT_2COMP", right_phi),
+        Expression.constant(0, 4),
+    )
+    left_nonzero = Expression.binary_op("INT_NOTEQUAL", x_left, Expression.constant(0, 4))
+    right_nonzero = Expression.binary_op("INT_NOTEQUAL", x_right, Expression.constant(0, 4))
+    right_not_same_region = Expression.binary_op(
+        "BOOL_AND",
+        right_guard,
+        right_nonzero,
+    )
+    right_x_is_one = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_ADD", x_right, Expression.constant(0xFFFFFFFF, 4)),
+        Expression.constant(0, 4),
+    )
+    left_case = ReturnCase(
+        index=0,
+        conditions=[Condition(left_nonzero, False), Condition(left_guard, False)],
+        value_expr=Expression.parameter("summary_rec_10001", 10001, size=4),
+        return_info=ReturnInfo(
+            address="0x1020",
+            value=Expression.parameter("summary_rec_10001", 10001, size=4),
+        ),
+        parameters=[_param("x")],
+    )
+    right_case = ReturnCase(
+        index=1,
+        conditions=[Condition(right_not_same_region, True), Condition(right_x_is_one, False)],
+        value_expr=Expression.constant(0, 4),
+        return_info=ReturnInfo(address="0x2020", value=Expression.constant(0, 4)),
+        parameters=[_param("x")],
+    )
+
+    assert strategy._cases_are_contradictory(left_case, right_case) is False
+
+
+def test_phi_circular_guard_symbol_contradiction_evidence_is_not_accepted_without_proof():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_analysis, left_case = _phi_guard_case("B11", 0x1000, 0)
+    right_analysis, right_case = _phi_guard_case("B12", 0x2000, 1)
+    x_left = Expression.parameter("x", index=0, size=4)
+    x_right = Expression.parameter("x", index=0, size=4)
+    left_case.conditions = [
+        Condition(Expression.binary_op("INT_NOTEQUAL", x_left, Expression.constant(0, 4)), False),
+        *left_case.conditions,
+    ]
+    right_guard = right_case.conditions[0].expression
+    right_nonzero = Expression.binary_op("INT_NOTEQUAL", x_right, Expression.constant(0, 4))
+    right_case.conditions = [
+        Condition(Expression.binary_op("BOOL_AND", right_guard, right_nonzero), True),
+        Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression.binary_op("INT_ADD", x_right, Expression.constant(0xFFFFFFFF, 4)),
+                Expression.constant(0, 4),
+            ),
+            False,
+        ),
+    ]
+    target = strategy._unresolved_expression_object_target_key(
+        base_ctx={"analysis1": left_analysis, "analysis2": right_analysis},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,1)",
+    )
+    weak_evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": "unresolved_expression",
+        "proof_rule": "phi_circular_guard_symbol_contradiction_precheck",
+        "object_target_key": target,
+        "object_evidence": (
+            "completed_unresolved_expression_proof",
+            ("object_derived", True),
+            ("status", "complete"),
+            ("proof_rule", "phi_circular_guard_symbol_contradiction_precheck"),
+            ("object_target_key", target),
+        ),
+    }
+    entry = {
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
+        "function": "fc_is_even",
+        "binary_pair": "B11_B12",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "completed_recovery_proof_evidence": [
+                {"side": "function1", "evidence": weak_evidence}
+            ],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert [failure["kind"] for failure in failures] == [
+        "unresolved_expression_cleared_target_missing_evidence"
+    ]
+
+
 def test_phi_circular_pair_diagnostic_rejects_malformed_value_shape_relation():
     target = _actual_phi_guard_target()
 
