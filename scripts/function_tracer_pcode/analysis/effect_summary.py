@@ -2326,6 +2326,15 @@ def _select_aligned_explicit_call_arguments(
     if len(explicit) <= len(callee_parameters):
         return explicit
 
+    storage_aligned = _select_explicit_call_arguments_by_input_storage(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit,
+    )
+    if storage_aligned is not None:
+        return storage_aligned
+
     preferred_args = [
         _recover_preferred_call_argument_expression(
             call_op,
@@ -2359,6 +2368,56 @@ def _select_aligned_explicit_call_arguments(
             return None
         used_indexes.add(matches[0])
         selected.append(explicit[matches[0]])
+    return selected
+
+
+def _select_explicit_call_arguments_by_input_storage(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> Optional[List[Expression]]:
+    try:
+        input_count = int(call_op.getNumInputs())
+    except Exception:
+        return None
+    if input_count <= 1:
+        return None
+    if len(explicit_args) != input_count - 1:
+        return None
+
+    get_input = getattr(call_op, "getInput", None)
+    get_storage = getattr(tracer, "_get_storage_info_from_varnode", None)
+    if not callable(get_input) or not callable(get_storage):
+        return None
+
+    input_storages: List[Optional[StorageInfo]] = []
+    for index in range(1, input_count):
+        try:
+            varnode = get_input(index)
+        except Exception:
+            return None
+        try:
+            input_storages.append(_coerce_storage_info(get_storage(varnode)))
+        except Exception:
+            input_storages.append(None)
+
+    selected: List[Expression] = []
+    used_indexes: Set[int] = set()
+    for callee_param in callee_parameters:
+        param_storage = _coerce_storage_info(callee_param.get("storage"))
+        if param_storage is None:
+            return None
+        matches = [
+            index for index, input_storage in enumerate(input_storages)
+            if index not in used_indexes
+            and input_storage is not None
+            and _storage_matches_parameter(input_storage, param_storage)
+        ]
+        if len(matches) != 1:
+            return None
+        used_indexes.add(matches[0])
+        selected.append(explicit_args[matches[0]])
     return selected
 
 
@@ -3431,8 +3490,13 @@ def _recover_call_argument_from_storage(
     if not compatible_paths:
         return None
 
-    path_candidates: List[Expression] = []
-    for path_blocks, _path_conditions in compatible_paths:
+    path_candidates: List[Tuple[List[Condition], Expression]] = []
+    for path_blocks, path_conditions in compatible_paths:
+        merged_conditions = ConditionSimplifier.simplify_conditions(
+            list(path_conditions or []) + list(current_conditions or []),
+        )
+        if ConditionSimplifier.is_contradiction(merged_conditions):
+            continue
         path_ops = list(_iter_path_ops_before_call(path_blocks, call_op))
         candidate = _select_best_storage_candidate(
             path_ops,
@@ -3452,15 +3516,44 @@ def _recover_call_argument_from_storage(
                 callee_param,
             )
         if candidate is not None:
-            path_candidates.append(candidate)
+            path_candidates.append((list(merged_conditions), candidate))
         else:
             return None
     if not path_candidates:
         return None
-    chosen = path_candidates[0]
-    if all(_expressions_equivalent(chosen, candidate) for candidate in path_candidates[1:]):
+    chosen = path_candidates[0][1]
+    if all(_expressions_equivalent(chosen, candidate) for _conds, candidate in path_candidates[1:]):
         return chosen
-    return None
+
+    branch_candidates: List[Tuple[Condition, Expression]] = []
+    seen_signatures: Set[Tuple[object, ...]] = set()
+    for conditions, candidate in path_candidates:
+        if not conditions:
+            return None
+        branch_condition = Condition.combine_and(conditions)
+        if branch_condition is None:
+            return None
+        signature = _runtime_conditions_signature(conditions)
+        if signature in seen_signatures:
+            return None
+        seen_signatures.add(signature)
+        branch_candidates.append((branch_condition, candidate))
+
+    if len(branch_candidates) < 2:
+        return None
+    for left_index in range(len(path_candidates)):
+        left_conditions = path_candidates[left_index][0]
+        for right_conditions, _candidate in path_candidates[left_index + 1:]:
+            if not ConditionSimplifier.is_contradiction(
+                list(left_conditions) + list(right_conditions)
+            ):
+                return None
+    result = Expression.phi(branch_candidates)
+    result.size = max(
+        int(getattr(candidate, "size", 0) or 0)
+        for _condition, candidate in branch_candidates
+    )
+    return result
 
 
 def _recover_unmodified_live_in_argument(
