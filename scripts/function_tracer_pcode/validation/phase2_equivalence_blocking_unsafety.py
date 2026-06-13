@@ -249,6 +249,14 @@ ALLOWED_EXPOSED_REASON_TUPLES = {
         MISSING_SENTINEL,
         MISSING_SENTINEL,
     ),
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "abi_relation_high_bit_proof",
+        MISSING_SENTINEL,
+        UnknownRecoveryActionStatus.PLANNED.value,
+    ),
     ALLOWED_NEW_REASON_TUPLE,
 } | SAT_UNSAFETY_REASON_TUPLES
 ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {

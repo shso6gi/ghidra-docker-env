@@ -745,6 +745,13 @@ def _pending_deferred_call_unresolved_reason():
     )
 
 
+def _planned_return_width_bridge_reason():
+    return make_unknown_reason(
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+        action_status=UnknownRecoveryActionStatus.PLANNED,
+    )
+
+
 def _write_all_representative_logs(root: Path, payload_by_function=None):
     payload_by_function = payload_by_function or {}
     _write_phase2_run_manifest(root)
@@ -1851,6 +1858,62 @@ def test_phase2_accepts_return_width_bridge_reclassification_to_equivalence_bloc
             "function_call_test-arm64-clang-O1",
             None,
             [_pending_reason()],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is True
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is True
+    assert manifest["overall_baseline_comparison_gate"]["unexpected_deltas"] == {
+        "final_result_counts_delta": {},
+        "pair_result_multiset_delta": {},
+        "proof_action_multiset_delta": {},
+        "reason_record_multiset_delta": {},
+        "timeout_class_multiset_delta": {},
+        "validation_unknown_unit_multiset_delta": {},
+    }
+    validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_accepts_return_width_bridge_planned_metadata_enrichment(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_return_width_metadata",
+        "B1",
+        "B2",
+        _payload(
+            "fc_return_width_metadata",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_return_width_metadata",
+        "B1",
+        "B2",
+        _payload(
+            "fc_return_width_metadata",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [_planned_return_width_bridge_reason()],
         ),
     )
 
