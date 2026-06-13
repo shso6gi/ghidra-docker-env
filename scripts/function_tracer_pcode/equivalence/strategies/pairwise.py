@@ -720,6 +720,27 @@ class PairwiseStrategy(CheckStrategy):
                         self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                     continue
 
+                if result.blocking_reason == UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
+                    completed_bridge_result = self._solve_return_width_bridge_with_completed_proof(
+                        base_ctx,
+                        case1,
+                        case2,
+                        symbol_replace_fn1,
+                        symbol_replace_fn2,
+                        pair_id,
+                        object_target_key=getattr(result, "object_target_key", None),
+                        blocking_detail=str(result.blocking_detail or ""),
+                    )
+                    if completed_bridge_result is not None and completed_bridge_result.is_equivalent is True:
+                        unsat_count += 1
+                        resolved_pairs.add((i, j))
+                        last_formula = completed_bridge_result.last_query or last_formula
+                        self._debug_print(
+                            f"  Pair {pair_id}: return-width bridge proof -> UNSAT "
+                            f"({unsat_count}/{total_pairs})"
+                        )
+                        continue
+
                 unknown_count += 1
                 unknown_reasons.append(
                     make_unknown_reason(
@@ -6923,6 +6944,11 @@ class PairwiseStrategy(CheckStrategy):
         if not isinstance(target, tuple):
             self._debug_print(
                 f"  Pair {pair_id} return-width bridge proof skipped: object target missing"
+            )
+            return None
+        if not self._return_width_bridge_target_is_specific(target):
+            self._debug_print(
+                f"  Pair {pair_id} return-width bridge proof skipped: weak object target"
             )
             return None
         narrow_width = self._return_width_bridge_target_narrow_width(target)
