@@ -1820,24 +1820,44 @@ def _deferred_call_stage_evidence_matches(
 
 def _deferred_call_evidence_is_specific(value: Any) -> bool:
     evidence = _normalize_nested_tuple(value)
-    if not isinstance(evidence, tuple) or len(evidence) != 5:
+    if not isinstance(evidence, tuple) or len(evidence) != 8:
         return False
     if evidence[0] != "deferred_call_object_evidence":
         return False
     fields = _tuple_fields(evidence)
     left_refs = fields.get("left_deferred_call_refs")
     right_refs = fields.get("right_deferred_call_refs")
+    left_semantic_refs = fields.get("left_deferred_call_semantic_refs")
+    right_semantic_refs = fields.get("right_deferred_call_semantic_refs")
     relation = fields.get("deferred_call_ref_relation")
+    semantic_relation = fields.get("deferred_call_semantic_ref_relation")
     if not isinstance(left_refs, tuple) or not isinstance(right_refs, tuple):
+        return False
+    if not isinstance(left_semantic_refs, tuple) or not isinstance(right_semantic_refs, tuple):
         return False
     if not left_refs and not right_refs:
         return False
     if not all(_deferred_call_runtime_ref_is_specific(ref) for ref in left_refs + right_refs):
         return False
+    if not all(
+        _deferred_call_semantic_ref_is_specific(ref)
+        for ref in left_semantic_refs + right_semantic_refs
+    ):
+        return False
+    if _deferred_call_semantic_refs_from_runtime_refs(left_refs) != left_semantic_refs:
+        return False
+    if _deferred_call_semantic_refs_from_runtime_refs(right_refs) != right_semantic_refs:
+        return False
     if not _deferred_call_ref_relation_is_specific(
         relation,
         left_count=len(left_refs),
         right_count=len(right_refs),
+    ):
+        return False
+    if not _deferred_call_ref_relation_is_specific(
+        semantic_relation,
+        left_count=len(left_semantic_refs),
+        right_count=len(right_semantic_refs),
     ):
         return False
     return fields.get("evidence_status") == "object_evidence_collected"
@@ -1854,6 +1874,52 @@ def _deferred_call_runtime_ref_is_specific(value: Any) -> bool:
         and ref[1][0] == "deferred_call"
         and _nested_has_specific_leaf(ref[1])
         and not _nested_contains_missing_sentinel(ref[1])
+    )
+
+
+def _deferred_call_semantic_ref_is_specific(value: Any) -> bool:
+    ref = _normalize_nested_tuple(value)
+    if not isinstance(ref, tuple) or len(ref) != 3 or ref[0] != "deferred_call_semantic_ref":
+        return False
+    fields = _tuple_fields(ref)
+    payload = fields.get("deferred_call_payload")
+    forms = fields.get("ref_forms")
+    return (
+        isinstance(payload, tuple)
+        and len(payload) >= 2
+        and payload[0] == "deferred_call"
+        and _nested_has_specific_leaf(payload)
+        and not _nested_contains_missing_sentinel(payload)
+        and isinstance(forms, tuple)
+        and bool(forms)
+        and all(form in {"unknown_runtime_ref", "runtime_ref"} for form in forms)
+    )
+
+
+def _deferred_call_semantic_refs_from_runtime_refs(refs: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for ref in refs:
+        normalized = _normalize_nested_tuple(ref)
+        if (
+            not isinstance(normalized, tuple)
+            or len(normalized) != 2
+            or normalized[0] not in {"unknown_runtime_ref", "runtime_ref"}
+            or not isinstance(normalized[1], tuple)
+            or not normalized[1]
+            or normalized[1][0] != "deferred_call"
+        ):
+            continue
+        payload = normalized[1]
+        key = _canonical_json(_jsonable(payload))
+        entry = grouped.setdefault(key, {"payload": payload, "forms": set()})
+        entry["forms"].add(normalized[0])
+    return tuple(
+        (
+            "deferred_call_semantic_ref",
+            ("deferred_call_payload", grouped[key]["payload"]),
+            ("ref_forms", tuple(sorted(grouped[key]["forms"]))),
+        )
+        for key in sorted(grouped)
     )
 
 

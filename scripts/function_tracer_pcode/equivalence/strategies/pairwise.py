@@ -3354,13 +3354,21 @@ class PairwiseStrategy(CheckStrategy):
         right_refs = self._deferred_call_runtime_refs_from_value(target[3])
         if not left_refs and not right_refs:
             return None
+        left_semantic_refs = self._deferred_call_semantic_refs(left_refs)
+        right_semantic_refs = self._deferred_call_semantic_refs(right_refs)
         return (
             "deferred_call_object_evidence",
             ("left_deferred_call_refs", left_refs),
             ("right_deferred_call_refs", right_refs),
+            ("left_deferred_call_semantic_refs", left_semantic_refs),
+            ("right_deferred_call_semantic_refs", right_semantic_refs),
             (
                 "deferred_call_ref_relation",
                 self._deferred_call_ref_relation(left_refs, right_refs),
+            ),
+            (
+                "deferred_call_semantic_ref_relation",
+                self._deferred_call_ref_relation(left_semantic_refs, right_semantic_refs),
             ),
             ("evidence_status", "object_evidence_collected"),
         )
@@ -3397,6 +3405,42 @@ class PairwiseStrategy(CheckStrategy):
 
         visit(value)
         return tuple(refs)
+
+    @classmethod
+    def _deferred_call_semantic_refs(cls, refs: Tuple[Any, ...]) -> Tuple[Any, ...]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for ref in refs:
+            normalized = cls._normalize_nested_tuple(ref)
+            if (
+                not isinstance(normalized, tuple)
+                or len(normalized) != 2
+                or normalized[0] not in {"unknown_runtime_ref", "runtime_ref"}
+                or not isinstance(normalized[1], tuple)
+                or not normalized[1]
+                or normalized[1][0] != "deferred_call"
+            ):
+                continue
+            payload = normalized[1]
+            key = json.dumps(cls._semantic_recurrence_jsonable(payload), sort_keys=True)
+            entry = grouped.setdefault(
+                key,
+                {
+                    "payload": payload,
+                    "forms": set(),
+                },
+            )
+            entry["forms"].add(normalized[0])
+        semantic_refs = []
+        for key in sorted(grouped):
+            entry = grouped[key]
+            semantic_refs.append(
+                (
+                    "deferred_call_semantic_ref",
+                    ("deferred_call_payload", entry["payload"]),
+                    ("ref_forms", tuple(sorted(entry["forms"]))),
+                )
+            )
+        return tuple(semantic_refs)
 
     @staticmethod
     def _deferred_call_ref_relation(

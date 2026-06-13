@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES,
     UNRESOLVED_PROOF_KIND,
     _extra_current_unresolved_expression_observations_from_records,
+    _deferred_call_evidence_is_specific,
     _expression_shape_is_specific,
     _timeout_transition_readiness,
     UNRESOLVED_REASON_TUPLE,
@@ -2611,6 +2612,52 @@ def test_deferred_call_diagnostic_evidence_keeps_gate_pending_for_semantic_proof
     }
     assert {obligation["object_evidence_status"] for obligation in pending_obligations} == {
         "object_evidence_collected"
+    }
+
+
+def test_deferred_call_evidence_deduplicates_runtime_ref_forms_by_semantic_call():
+    target = _deferred_call_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    evidence = strategy._deferred_call_object_evidence_from_target(target)
+
+    assert evidence is not None
+    fields = _tuple_fields(evidence)
+    left_refs = fields["left_deferred_call_refs"]
+    left_semantic_refs = fields["left_deferred_call_semantic_refs"]
+    relation = _tuple_fields(fields["deferred_call_ref_relation"])
+    semantic_relation = _tuple_fields(fields["deferred_call_semantic_ref_relation"])
+
+    assert len(left_refs) == 2
+    assert len(left_semantic_refs) == 1
+    assert relation["left_count"] == 2
+    assert semantic_relation["left_count"] == 1
+    semantic_fields = _tuple_fields(left_semantic_refs[0])
+    assert semantic_fields["ref_forms"] == ("runtime_ref", "unknown_runtime_ref")
+    assert _deferred_call_evidence_is_specific(evidence)
+
+
+def test_deferred_call_semantic_refs_keep_distinct_callsites_separate():
+    first = _deferred_call_runtime_ref("B10", 0x3000)
+    second = _deferred_call_runtime_ref("B10", 0x3100)
+    refs = (
+        first,
+        ("unknown_runtime_ref", first[1]),
+        second,
+        ("unknown_runtime_ref", second[1]),
+    )
+
+    semantic_refs = PairwiseStrategy._deferred_call_semantic_refs(refs)
+
+    assert len(semantic_refs) == 2
+    assert {tuple(_tuple_fields(ref)["ref_forms"]) for ref in semantic_refs} == {
+        ("runtime_ref", "unknown_runtime_ref")
+    }
+    assert {
+        _tuple_fields(ref)["deferred_call_payload"][3]
+        for ref in semantic_refs
+    } == {
+        first[1][3],
+        second[1][3],
     }
 
 
