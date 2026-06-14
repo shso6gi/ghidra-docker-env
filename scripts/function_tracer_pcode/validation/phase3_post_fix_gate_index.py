@@ -580,6 +580,9 @@ def build_phase3_post_fix_gate_index(
     gates = [_materialize_post_fix_gate(repo, spec) for spec in specs]
     checks = _post_fix_index_checks(specs, gates)
     summary = _summary(checks)
+    warnings = _post_fix_index_warnings(specs, gates)
+    summary["warnings"] = len(warnings)
+    summary["warning_kinds"] = sorted({str(warning.get("kind")) for warning in warnings})
     post_fix_status_counts = _post_fix_status_counts_from_gates(gates)
     expected_post_fix_status_counts = _expected_post_fix_status_counts_from_specs(specs)
     post_fix_obligation_counts = _post_fix_obligation_counts_from_gates(gates)
@@ -596,6 +599,7 @@ def build_phase3_post_fix_gate_index(
         "expected_post_fix_obligation_counts": expected_post_fix_obligation_counts,
         "post_fix_obligation_counts": post_fix_obligation_counts,
         "summary": summary,
+        "warnings": warnings,
         "gates": gates,
         "checks": checks,
     }
@@ -635,10 +639,20 @@ def validate_phase3_post_fix_gate_index(
     failed = summary.get("failed_kinds") if isinstance(summary, Mapping) else None
     failed_kinds = list(failed or ()) if isinstance(failed, (list, tuple)) else []
     summary_failed = summary.get("failed") if isinstance(summary, Mapping) else MISSING_SENTINEL
+    warnings = manifest.get("warnings")
+    warning_list = list(warnings) if isinstance(warnings, (list, tuple)) else []
     if not isinstance(summary, Mapping):
         failures.append("summary")
     elif not isinstance(summary_failed, int) or isinstance(summary_failed, bool):
         failures.append("summary_failed_count")
+    elif summary.get("warnings", 0) != len(warning_list):
+        failures.append("summary_warning_count")
+    if not isinstance(warnings, (list, tuple)):
+        failures.append("warnings")
+    elif isinstance(summary, Mapping) and list(summary.get("warning_kinds") or ()) != sorted(
+        {str(warning.get("kind")) for warning in warning_list if isinstance(warning, Mapping)}
+    ):
+        failures.append("summary_warning_kinds")
 
     checks = manifest.get("checks")
     failed_check_kinds: list[str] = []
@@ -648,6 +662,9 @@ def validate_phase3_post_fix_gate_index(
     else:
         failed_check_kinds = _failed_check_kinds(checks)
         computed_summary = _summary(checks)
+        if isinstance(summary, Mapping):
+            computed_summary["warnings"] = summary.get("warnings", 0)
+            computed_summary["warning_kinds"] = list(summary.get("warning_kinds") or ())
         if isinstance(summary_failed, int) and summary_failed != len(failed_check_kinds):
             failures.append("summary_failed_count")
         if failed_kinds != failed_check_kinds:
@@ -698,8 +715,11 @@ def validate_phase3_post_fix_gate_index(
         if not _strict_json_equal(actual_rows, expected_rows):
             failures.append("gate_specs")
         derived_checks = _post_fix_index_checks(specs, gates)
+        derived_warnings = _post_fix_index_warnings(specs, gates)
         if checks_is_sequence and not _strict_json_equal(list(checks), list(derived_checks)):
             failures.append("derived_checks")
+        if not _strict_json_equal(list(manifest.get("warnings") or ()), derived_warnings):
+            failures.append("derived_warnings")
         if failed_check_kinds != _failed_check_kinds(derived_checks):
             failures.append("derived_failed_kinds")
         if not isinstance(manifest_repo_root, str) or not manifest_repo_root:
@@ -710,8 +730,11 @@ def validate_phase3_post_fix_gate_index(
                 for spec in specs
             ]
             materialized_checks = _post_fix_index_checks(specs, materialized_gates)
+            materialized_warnings = _post_fix_index_warnings(specs, materialized_gates)
             if not _strict_json_equal(gates, materialized_gates):
                 failures.append("materialized_gates")
+            if not _strict_json_equal(list(manifest.get("warnings") or ()), materialized_warnings):
+                failures.append("materialized_warnings")
             if (
                 isinstance(observed_status_counts, Mapping)
                 and not _strict_json_equal(
@@ -1701,47 +1724,64 @@ def _entry_state_is_pending_to_complete_progress(
     )
 
 
-def _post_fix_action_hashes_match_expected_or_progress(
-    spec: Optional[Phase3PostFixGateSpec],
-    actual_states: Any,
+def _post_fix_action_hashes_structurally_match(
     actual_hashes: Any,
     expected_hashes: Sequence[Mapping[str, str]],
 ) -> bool:
-    if _strict_json_equal(actual_hashes, expected_hashes):
-        return True
-    if spec is None or not _proof_complete_progress_allowed(spec):
-        return False
     if not isinstance(actual_hashes, (list, tuple)):
         return False
-    actual_hash_by_id = {
+    actual_ids = [
+        item.get("id")
+        for item in actual_hashes
+        if isinstance(item, Mapping) and _specific_text(item.get("id"))
+    ]
+    expected_ids = [
+        item.get("id")
+        for item in expected_hashes
+        if isinstance(item, Mapping) and _specific_text(item.get("id"))
+    ]
+    return sorted(actual_ids) == sorted(expected_ids) and len(actual_ids) == len(expected_ids)
+
+
+def _post_fix_action_hash_drift_warnings(
+    gate: Mapping[str, Any],
+    expected_hashes: Sequence[Mapping[str, str]],
+) -> list[Dict[str, Any]]:
+    if not expected_hashes:
+        return []
+    actual_hashes = gate.get("post_fix_required_completion_action_hashes")
+    if not isinstance(actual_hashes, (list, tuple)):
+        return []
+    actual_by_id = {
         item.get("id"): item.get("required_completion_actions_sha256")
         for item in actual_hashes
         if isinstance(item, Mapping) and _specific_text(item.get("id"))
     }
-    state_by_id = (
-        {
-            item.get("id"): item
-            for item in actual_states
-            if isinstance(item, Mapping) and _specific_text(item.get("id"))
-        }
-        if isinstance(actual_states, (list, tuple))
-        else {}
-    )
-    empty_hash = _required_completion_actions_sha256([])
-    for expected_hash in expected_hashes:
-        entry_id = expected_hash.get("id") if isinstance(expected_hash, Mapping) else None
-        if entry_id not in actual_hash_by_id:
-            return False
-        if actual_hash_by_id[entry_id] == expected_hash.get("required_completion_actions_sha256"):
+    warnings: list[Dict[str, Any]] = []
+    for expected in expected_hashes:
+        entry_id = expected.get("id") if isinstance(expected, Mapping) else None
+        if not _specific_text(entry_id) or entry_id not in actual_by_id:
             continue
-        state = state_by_id.get(entry_id)
-        if not (
-            isinstance(state, Mapping)
-            and state.get("post_fix_status") == "proof_complete"
-            and actual_hash_by_id[entry_id] == empty_hash
-        ):
-            return False
-    return len(actual_hash_by_id) == len(expected_hashes)
+        actual_hash = actual_by_id.get(entry_id)
+        expected_hash = expected.get("required_completion_actions_sha256")
+        if actual_hash == expected_hash:
+            continue
+        warnings.append(
+            {
+                "status": "warning",
+                "kind": "phase3_post_fix_gate_required_action_hash_drift",
+                "lane_number": gate.get("lane_number", MISSING_SENTINEL),
+                "lane_id": gate.get("lane_id", MISSING_SENTINEL),
+                "id": entry_id,
+                "expected_required_completion_actions_sha256": expected_hash,
+                "actual_required_completion_actions_sha256": actual_hash,
+                "message": (
+                    "required_completion_actions sha256 drifted; structural gate "
+                    "passed, refresh the snapshot only after semantic review"
+                ),
+            }
+        )
+    return warnings
 
 
 def _proof_complete_progress_allowed(spec: Phase3PostFixGateSpec) -> bool:
@@ -2381,15 +2421,13 @@ def _post_fix_index_checks(
         actual_action_hashes = gate.get("post_fix_required_completion_action_hashes")
         if expected_action_hashes:
             checks.append(
-                _ok("phase3_post_fix_gate_required_action_hashes_expected", **details)
-                if _post_fix_action_hashes_match_expected_or_progress(
-                    spec,
-                    gate.get("post_fix_entry_states"),
+                _ok("phase3_post_fix_gate_required_action_hashes_structural", **details)
+                if _post_fix_action_hashes_structurally_match(
                     actual_action_hashes,
                     expected_action_hashes,
                 )
                 else _failed(
-                    "phase3_post_fix_gate_required_action_hashes_expected",
+                    "phase3_post_fix_gate_required_action_hashes_structural",
                     expected=expected_action_hashes,
                     actual=actual_action_hashes,
                     **details,
@@ -2735,6 +2773,27 @@ def _post_fix_index_checks(
             )
         )
     return checks
+
+
+def _post_fix_index_warnings(
+    specs: Sequence[Phase3PostFixGateSpec],
+    gates: Sequence[Any],
+) -> list[Dict[str, Any]]:
+    specs_by_lane_id = {spec.lane_id: spec for spec in specs}
+    warnings: list[Dict[str, Any]] = []
+    for gate in gates:
+        if not isinstance(gate, Mapping):
+            continue
+        spec = specs_by_lane_id.get(str(gate.get("lane_id") or ""))
+        if spec is None:
+            continue
+        warnings.extend(
+            _post_fix_action_hash_drift_warnings(
+                gate,
+                _normalized_expected_required_action_hashes(spec),
+            )
+        )
+    return warnings
 
 
 def _gate_spec_rows_from_specs(specs: Sequence[Phase3PostFixGateSpec]) -> list[Dict[str, Any]]:
@@ -3358,9 +3417,11 @@ def phase3_post_fix_gate_index_text_summary(manifest: Mapping[str, Any]) -> str:
     ready = manifest.get("phase3_post_fix_gates_ready", MISSING_SENTINEL)
     status_counts = manifest.get("post_fix_status_counts")
     obligation_counts = manifest.get("post_fix_obligation_counts")
+    warnings = manifest.get("warnings")
+    warning_count = len(warnings) if isinstance(warnings, (list, tuple)) else 0
     lines = [
         "Phase 3 post-fix gate summary",
-        f"ready={ready} failed_checks={failed}",
+        f"ready={ready} failed_checks={failed} warnings={warning_count}",
         f"post_fix_status_counts={_format_count_mapping(status_counts)}",
         f"post_fix_obligation_counts={_format_count_mapping(obligation_counts)}",
         "lanes:",

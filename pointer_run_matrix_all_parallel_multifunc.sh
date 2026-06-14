@@ -511,7 +511,11 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
         --function-summary
         --function-name "$TARGET_FUNC"
         --elapsed-seconds "$func_elapsed_seconds"
+        --summary-level "${VALIDATION_SUMMARY_LEVEL:-compact}"
     )
+    if [[ -n "${VALIDATION_SUMMARY_MAX_ITEMS:-}" ]]; then
+        FUNCTION_SUMMARY_ARGS+=(--summary-max-items "$VALIDATION_SUMMARY_MAX_ITEMS")
+    fi
     if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
         FUNCTION_SUMMARY_ARGS+=(--before-dir "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}")
     fi
@@ -536,7 +540,15 @@ SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
 mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
 
-OVERALL_SUMMARY_ARGS=(--overall-summary)
+OVERALL_SUMMARY_ARGS=(
+    --overall-summary
+    --summary-level "${VALIDATION_SUMMARY_LEVEL:-compact}"
+    --health-summary-json "${OUTPUT_BASE_DIR}/run_health_summary.json"
+    --health-summary-text "${OUTPUT_BASE_DIR}/run_health_summary.txt"
+)
+if [[ -n "${VALIDATION_SUMMARY_MAX_ITEMS:-}" ]]; then
+    OVERALL_SUMMARY_ARGS+=(--summary-max-items "$VALIDATION_SUMMARY_MAX_ITEMS")
+fi
 if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
     OVERALL_SUMMARY_ARGS+=(--before-dir "$VALIDATION_BEFORE_DIR")
 fi

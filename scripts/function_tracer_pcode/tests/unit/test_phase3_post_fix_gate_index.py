@@ -1780,17 +1780,76 @@ def test_phase3_post_fix_gate_index_rejects_required_action_content_drift_with_s
     manifest = json.loads(path.read_text())
     summary = manifest["gates"][0]["post_fix_obligation_summary"]
 
-    assert manifest["phase3_post_fix_gates_ready"] is False
+    assert manifest["phase3_post_fix_gates_ready"] is True
     assert summary["retired_invalid_required_actions"] == []
     assert manifest["gates"][0]["post_fix_entry_states"][0][
         "required_completion_action_count"
     ] == 1
-    assert "phase3_post_fix_gate_required_action_hashes_expected" in manifest["summary"][
+    assert manifest["summary"]["failed"] == 0
+    assert manifest["summary"]["warnings"] == 1
+    assert manifest["warnings"][0]["kind"] == "phase3_post_fix_gate_required_action_hash_drift"
+    validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
+
+
+def test_phase3_post_fix_gate_index_still_rejects_missing_required_action_identity(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    expected_action = _retired_transfer_action()
+    spec = Phase3PostFixGateSpec(
+        lane_number=1,
+        lane_id="lane_one",
+        gate_relpath="logs/lane_one/gate.json",
+        manifest_kind="lane_one_post_fix_gate",
+        ready_key="ready",
+        validator=_validator,
+        expected_entry_count=1,
+        allowed_post_fix_statuses=("retired_to_return_coverage_gap",),
+        expected_post_fix_status_counts={"retired_to_return_coverage_gap": 1},
+        expected_post_fix_obligation_counts={
+            "pending_proof_entry_count": 0,
+            "pending_proof_obligation_count": 0,
+            "pending_retry_entry_count": 0,
+            "pending_retry_obligation_count": 0,
+        },
+        expected_post_fix_entry_states=(
+            {
+                "id": "lane_one-entry",
+                "function": "function_one",
+                "binary_pair": "B1_B2",
+                "post_fix_status": "retired_to_return_coverage_gap",
+                "pending_proof_obligation_count": 0,
+                "pending_retry_obligation_count": 0,
+                "required_completion_action_count": 1,
+            },
+        ),
+        expected_required_completion_action_hashes=(
+            {
+                "id": "lane_one-entry",
+                "required_completion_actions_sha256": _actions_sha256([expected_action]),
+            },
+        ),
+    )
+    _write_gate(repo, spec, post_fix_status="retired_to_return_coverage_gap")
+    gate_path = repo / spec.gate_relpath
+    gate = json.loads(gate_path.read_text())
+    gate["entries"][0]["id"] = "different-entry"
+    gate_path.write_text(json.dumps(gate, sort_keys=True))
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_post_fix_gates_ready"] is False
+    assert "phase3_post_fix_gate_required_action_hashes_structural" in manifest["summary"][
         "failed_kinds"
     ]
     with pytest.raises(
         ValueError,
-        match="phase3_post_fix_gate_required_action_hashes_expected",
+        match="phase3_post_fix_gate_required_action_hashes_structural",
     ):
         validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
 

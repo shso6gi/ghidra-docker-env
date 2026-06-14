@@ -438,6 +438,8 @@ def format_validation_unknown_summary(
     summary: UnknownValidationSummary,
     *,
     indent: str = "",
+    compact: bool = False,
+    max_items: Optional[int] = None,
 ) -> str:
     lines = [
         f"{indent}UNKNOWN validation summary:",
@@ -445,68 +447,80 @@ def format_validation_unknown_summary(
         f"{indent}  Unknown results: {summary.unknown_results}",
         f"{indent}  Unknown units  : {summary.unknown_units}",
     ]
-    _append_count_block(lines, "Final results", summary.final_result_counts, indent)
+    max_items = _summary_max_items(compact=compact, max_items=max_items)
+    _append_count_block(lines, "Final results", summary.final_result_counts, indent, max_items=max_items)
     _append_count_block(
         lines,
         "Validation UNKNOWN unit tuples",
         summary.validation_unknown_unit_multiset,
         indent,
+        max_items=max_items,
     )
-    _append_count_block(
-        lines,
-        "Reason record tuples",
-        summary.reason_record_multiset,
-        indent,
-    )
-    _append_count_block(
-        lines,
-        "Proof action tuples",
-        summary.proof_action_multiset,
-        indent,
-    )
-    _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent)
+    if not compact:
+        _append_count_block(
+            lines,
+            "Reason record tuples",
+            summary.reason_record_multiset,
+            indent,
+            max_items=max_items,
+        )
+        _append_count_block(
+            lines,
+            "Proof action tuples",
+            summary.proof_action_multiset,
+            indent,
+            max_items=max_items,
+        )
+    _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent, max_items=max_items)
     _append_count_block(
         lines,
         "UNKNOWN by decision_effect",
         summary.unknown_by_decision_effect,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "UNKNOWN by reason_scope",
         summary.unknown_by_reason_scope,
         indent,
+        max_items=max_items,
     )
-    _append_count_block(lines, "Proof backlog by reason", summary.proof_backlog_by_reason, indent)
+    _append_count_block(lines, "Proof backlog by reason", summary.proof_backlog_by_reason, indent, max_items=max_items)
     _append_count_block(
         lines,
         "Proof backlog by proof_kind",
         summary.proof_backlog_by_proof_kind,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by recovery_action",
         summary.proof_backlog_by_recovery_action,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by action_status",
         summary.proof_backlog_by_action_status,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Operational UNKNOWN by reason",
         summary.operational_unknown_by_reason,
         indent,
+        max_items=max_items,
     )
-    _append_correspondence_diagnostics(
-        lines,
-        diagnose_unknown_reason_correspondence(summary),
-        indent,
-    )
+    if not compact:
+        _append_correspondence_diagnostics(
+            lines,
+            diagnose_unknown_reason_correspondence(summary),
+            indent,
+        )
     return "\n".join(lines)
 
 
@@ -514,79 +528,94 @@ def format_validation_unknown_diff(
     diff: UnknownValidationDiff,
     *,
     indent: str = "",
+    compact: bool = False,
+    max_items: Optional[int] = None,
 ) -> str:
     lines = [
         f"{indent}UNKNOWN validation before/after delta:",
         f"{indent}  Unknown results delta: {_format_delta(diff.delta_unknown_results)}",
         f"{indent}  Unknown units delta  : {_format_delta(diff.delta_unknown_units)}",
     ]
-    _append_count_block(lines, "Final results delta", diff.final_result_counts_delta, indent)
+    max_items = _summary_max_items(compact=compact, max_items=max_items)
+    _append_count_block(lines, "Final results delta", diff.final_result_counts_delta, indent, max_items=max_items)
     _append_count_block(
         lines,
         "Validation UNKNOWN unit tuple delta",
         diff.validation_unknown_unit_multiset_delta,
         indent,
+        max_items=max_items,
     )
-    _append_count_block(
-        lines,
-        "Reason record tuple delta",
-        diff.reason_record_multiset_delta,
-        indent,
-    )
-    _append_count_block(
-        lines,
-        "Proof action tuple delta",
-        diff.proof_action_multiset_delta,
-        indent,
-    )
-    _append_count_block(lines, "UNKNOWN by reason delta", diff.unknown_by_reason_delta, indent)
+    if not compact:
+        _append_count_block(
+            lines,
+            "Reason record tuple delta",
+            diff.reason_record_multiset_delta,
+            indent,
+            max_items=max_items,
+        )
+        _append_count_block(
+            lines,
+            "Proof action tuple delta",
+            diff.proof_action_multiset_delta,
+            indent,
+            max_items=max_items,
+        )
+    _append_count_block(lines, "UNKNOWN by reason delta", diff.unknown_by_reason_delta, indent, max_items=max_items)
     _append_count_block(
         lines,
         "UNKNOWN by decision_effect delta",
         diff.unknown_by_decision_effect_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "UNKNOWN by reason_scope delta",
         diff.unknown_by_reason_scope_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by reason delta",
         diff.proof_backlog_by_reason_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by proof_kind delta",
         diff.proof_backlog_by_proof_kind_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by recovery_action delta",
         diff.proof_backlog_by_recovery_action_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Proof backlog by action_status delta",
         diff.proof_backlog_by_action_status_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Operational UNKNOWN by reason delta",
         diff.operational_unknown_by_reason_delta,
         indent,
+        max_items=max_items,
     )
     _append_count_block(
         lines,
         "Operational UNKNOWN by class delta",
         diff.operational_unknown_by_class_delta,
         indent,
+        max_items=max_items,
     )
     return "\n".join(lines)
 
@@ -1035,17 +1064,30 @@ def _format_tuple_value(value: Any) -> str:
 def _append_count_block(
     lines: list,
     title: str,
-    counts: Mapping[str, int],
+    counts: Mapping[Any, int],
     indent: str,
     *,
     empty_label: str = "(none)",
+    max_items: Optional[int] = None,
 ) -> None:
     lines.append(f"{indent}  {title}:")
     if not counts:
         lines.append(f"{indent}    {empty_label}")
         return
-    for key in sorted(counts):
+    sorted_keys = sorted(counts, key=lambda key: (-abs(int(counts[key])), str(key)))
+    shown_keys = sorted_keys[:max_items] if max_items is not None and max_items >= 0 else sorted_keys
+    for key in shown_keys:
         lines.append(f"{indent}    - {key}: {counts[key]}")
+    if len(shown_keys) < len(sorted_keys):
+        hidden = len(sorted_keys) - len(shown_keys)
+        hidden_total = sum(int(counts[key]) for key in sorted_keys[len(shown_keys):])
+        lines.append(f"{indent}    - ... {hidden} more entries (sum={hidden_total})")
+
+
+def _summary_max_items(*, compact: bool, max_items: Optional[int]) -> Optional[int]:
+    if max_items is not None:
+        return max_items
+    return 20 if compact else None
 
 
 def _append_correspondence_diagnostics(

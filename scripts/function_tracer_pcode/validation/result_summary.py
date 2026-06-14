@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
@@ -350,6 +351,8 @@ def format_function_results_summary(
     include_unknown_reason_summary: bool = True,
     before_log_paths: Sequence[Any] = (),
     baseline_match_scope: str = BASELINE_MATCH_SCOPE_ALL,
+    compact: bool = False,
+    max_items: Optional[int] = None,
 ) -> str:
     lines = [f"--- Results for {function_name} ---"]
     lines.append(f"  Total pairs     : {aggregate.total_pairs}")
@@ -367,7 +370,14 @@ def format_function_results_summary(
         payloads = _payloads_from_records(aggregate.records)
         unknown_summary = summarize_validation_unknowns(payloads)
         lines.append("")
-        lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
+        lines.append(
+            format_validation_unknown_summary(
+                unknown_summary,
+                indent="  ",
+                compact=compact,
+                max_items=max_items,
+            )
+        )
         lines.append("")
         if before_log_paths:
             before_records = aggregate_validation_logs(before_log_paths).records
@@ -381,18 +391,21 @@ def format_function_results_summary(
                 format_validation_unknown_diff(
                     compare_validation_unknowns(before_payloads, payloads),
                     indent="  ",
+                    compact=compact,
+                    max_items=max_items,
                 )
             )
-            lines.append("")
-            lines.append(
-                format_validation_baseline_comparison(
-                    compare_validation_baseline_records(
-                        before_records,
-                        aggregate.records,
-                    ),
-                    indent="  ",
+            if not compact:
+                lines.append("")
+                lines.append(
+                    format_validation_baseline_comparison(
+                        compare_validation_baseline_records(
+                            before_records,
+                            aggregate.records,
+                        ),
+                        indent="  ",
+                    )
                 )
-            )
         else:
             lines.append(format_validation_unknown_diff_unavailable(unknown_summary, indent="  "))
     lines.append("")
@@ -405,6 +418,8 @@ def format_overall_results_summary(
     function_wall_times: Optional[Mapping[str, float]] = None,
     before_log_paths: Sequence[Any] = (),
     baseline_match_scope: str = BASELINE_MATCH_SCOPE_ALL,
+    compact: bool = False,
+    max_items: Optional[int] = None,
 ) -> str:
     function_wall_times = function_wall_times or {}
     lines = [
@@ -443,7 +458,14 @@ def format_overall_results_summary(
     payloads = _payloads_from_records(summary.overall.records)
     unknown_summary = summarize_validation_unknowns(payloads)
     lines.append("")
-    lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
+    lines.append(
+        format_validation_unknown_summary(
+            unknown_summary,
+            indent="  ",
+            compact=compact,
+            max_items=max_items,
+        )
+    )
     lines.append("")
     if before_log_paths:
         before_records = aggregate_validation_logs(before_log_paths).records
@@ -457,18 +479,21 @@ def format_overall_results_summary(
             format_validation_unknown_diff(
                 compare_validation_unknowns(before_payloads, payloads),
                 indent="  ",
+                compact=compact,
+                max_items=max_items,
             )
         )
-        lines.append("")
-        lines.append(
-            format_validation_baseline_comparison(
-                compare_validation_baseline_records(
-                    before_records,
-                    summary.overall.records,
-                ),
-                indent="  ",
+        if not compact:
+            lines.append("")
+            lines.append(
+                format_validation_baseline_comparison(
+                    compare_validation_baseline_records(
+                        before_records,
+                        summary.overall.records,
+                    ),
+                    indent="  ",
+                )
             )
-        )
     else:
         lines.append(format_validation_unknown_diff_unavailable(unknown_summary, indent="  "))
     lines.append("============================================================")
@@ -617,8 +642,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=None,
         help="function=seconds; may be repeated for overall summaries",
     )
+    parser.add_argument(
+        "--summary-level",
+        choices=("compact", "normal", "verbose"),
+        default=os.environ.get("VALIDATION_SUMMARY_LEVEL", "normal"),
+        help="summary verbosity; compact suppresses large tuple sections",
+    )
+    parser.add_argument(
+        "--summary-max-items",
+        type=int,
+        default=_env_int("VALIDATION_SUMMARY_MAX_ITEMS"),
+        help="maximum entries per count block; compact defaults to 20",
+    )
+    parser.add_argument(
+        "--health-summary-json",
+        default=os.environ.get("VALIDATION_HEALTH_SUMMARY_JSON"),
+        help="optional path for a compact machine-readable run health summary",
+    )
+    parser.add_argument(
+        "--health-summary-text",
+        default=os.environ.get("VALIDATION_HEALTH_SUMMARY_TEXT"),
+        help="optional path for a compact human-readable run health summary",
+    )
     parser.add_argument("logs", nargs="*")
     args = parser.parse_args(argv)
+    compact = args.summary_level == "compact"
 
     if args.function_summary:
         aggregate = aggregate_validation_logs(args.logs)
@@ -631,6 +679,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elapsed_seconds=args.elapsed_seconds,
             before_log_paths=before_logs,
             baseline_match_scope=args.baseline_match_scope,
+            compact=compact,
+            max_items=args.summary_max_items,
         )
         print(output)
         _require_baseline_match(
@@ -651,8 +701,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         function_wall_times=_parse_function_wall_times(args.function_wall_time or ()),
         before_log_paths=before_logs,
         baseline_match_scope=args.baseline_match_scope,
+        compact=compact,
+        max_items=args.summary_max_items,
     )
     print(output)
+    if args.health_summary_json or args.health_summary_text:
+        before_records = aggregate_validation_logs(before_logs).records if before_logs else ()
+        health = build_run_health_summary(
+            overall,
+            before_records=before_records,
+            baseline_match_scope=args.baseline_match_scope,
+        )
+        if args.health_summary_json:
+            _write_json_file(Path(args.health_summary_json), health)
+        if args.health_summary_text:
+            _write_text_file(Path(args.health_summary_text), format_run_health_summary(health))
     _require_baseline_match(
         before_logs,
         overall.overall.records,
@@ -661,6 +724,99 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.baseline_match_level,
     )
     return 0
+
+
+def build_run_health_summary(
+    summary: OverallValidationSummary,
+    *,
+    before_records: Sequence[ValidationLogRecord] = (),
+    baseline_match_scope: str = BASELINE_MATCH_SCOPE_ALL,
+) -> Dict[str, Any]:
+    payloads = _payloads_from_records(summary.overall.records)
+    unknown_summary = summarize_validation_unknowns(payloads)
+    health: Dict[str, Any] = {
+        "total_results": summary.overall.total_pairs,
+        "final_result_counts": {status: summary.overall.count(status) for status in STATUS_ORDER},
+        "unknown_results": unknown_summary.unknown_results,
+        "unknown_units": unknown_summary.unknown_units,
+        "unknown_by_reason": dict(unknown_summary.unknown_by_reason),
+        "proof_backlog_by_reason": dict(unknown_summary.proof_backlog_by_reason),
+        "proof_backlog_by_proof_kind": dict(unknown_summary.proof_backlog_by_proof_kind),
+        "operational_unknown_by_reason": dict(unknown_summary.operational_unknown_by_reason),
+        "functions": {
+            function_name: {
+                "total": aggregate.total_pairs,
+                STATUS_EQ: aggregate.count(STATUS_EQ),
+                STATUS_NOT_EQ: aggregate.count(STATUS_NOT_EQ),
+                STATUS_ERROR: aggregate.count(STATUS_ERROR),
+                STATUS_UNKNOWN: aggregate.count(STATUS_UNKNOWN),
+                STATUS_TIMEOUT: aggregate.count(STATUS_TIMEOUT),
+                STATUS_INCOMPLETE: aggregate.count(STATUS_INCOMPLETE),
+            }
+            for function_name, aggregate in summary.function_summaries.items()
+        },
+    }
+    if before_records:
+        scoped_before = _apply_baseline_match_scope(
+            before_records,
+            summary.overall.records,
+            baseline_match_scope,
+        )
+        comparison = compare_validation_baseline_records(scoped_before, summary.overall.records)
+        health["baseline_comparison"] = {
+            "before_total_results": comparison.before_total_results,
+            "after_total_results": comparison.after_total_results,
+            "final_result_counts_delta": dict(comparison.final_result_counts_delta),
+            "unknown_final_results_delta": comparison.unknown_final_results_delta,
+            "timeout_final_results_delta": comparison.timeout_final_results_delta,
+            "missing_pair_identity_count": len(comparison.missing_pair_identities),
+            "added_pair_identity_count": len(comparison.added_pair_identities),
+        }
+    return health
+
+
+def format_run_health_summary(health: Mapping[str, Any]) -> str:
+    counts = health.get("final_result_counts") if isinstance(health, Mapping) else {}
+    if not isinstance(counts, Mapping):
+        counts = {}
+    lines = [
+        "Run health summary:",
+        f"  total_results: {health.get('total_results', 0)}",
+        (
+            "  final_results: "
+            f"EQ={counts.get(STATUS_EQ, 0)} "
+            f"NOT_EQ={counts.get(STATUS_NOT_EQ, 0)} "
+            f"UNKNOWN={counts.get(STATUS_UNKNOWN, 0)} "
+            f"TIMEOUT={counts.get(STATUS_TIMEOUT, 0)} "
+            f"ERROR={counts.get(STATUS_ERROR, 0)} "
+            f"INCOMPLETE={counts.get(STATUS_INCOMPLETE, 0)}"
+        ),
+        f"  unknown_units: {health.get('unknown_units', 0)}",
+    ]
+    baseline = health.get("baseline_comparison")
+    if isinstance(baseline, Mapping):
+        lines.extend(
+            [
+                "  baseline_delta:",
+                f"    UNKNOWN final results: {_format_delta(int(baseline.get('unknown_final_results_delta', 0)))}",
+                f"    TIMEOUT final results: {_format_delta(int(baseline.get('timeout_final_results_delta', 0)))}",
+                f"    missing pairs: {baseline.get('missing_pair_identity_count', 0)}",
+                f"    added pairs: {baseline.get('added_pair_identity_count', 0)}",
+            ]
+        )
+    for title in (
+        "unknown_by_reason",
+        "proof_backlog_by_reason",
+        "operational_unknown_by_reason",
+    ):
+        values = health.get(title)
+        lines.append(f"  {title}:")
+        if not isinstance(values, Mapping) or not values:
+            lines.append("    (none)")
+            continue
+        for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
+            lines.append(f"    - {name}: {count}")
+    return "\n".join(lines)
 
 
 def _require_before_logs(before_logs: Sequence[Any], require_before_dir: bool) -> None:
@@ -695,6 +851,26 @@ def _require_baseline_match(
             "baseline comparison mismatch\n"
             + format_validation_baseline_movement_summary(comparison)
         )
+
+
+def _env_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from None
+
+
+def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n")
 
 
 def _apply_baseline_match_scope(

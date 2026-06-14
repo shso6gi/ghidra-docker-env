@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
@@ -28,12 +29,19 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     compare_validation_baseline_records,
     format_function_results_summary,
     format_overall_results_summary,
+    format_run_health_summary,
     format_validation_baseline_comparison,
 )
 from scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight import (
     main as risk_preflight_main,
     select_risk_pair_infos,
     select_risk_pairs,
+)
+from scripts.function_tracer_pcode.validation.run_health_summary import (
+    parse_overall_summary_health,
+)
+from scripts.function_tracer_pcode.validation.validation_transfer_bundle import (
+    build_validation_transfer_bundle,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
@@ -201,6 +209,183 @@ def test_function_and_overall_summary_share_aggregator_invariant(tmp_path):
     assert "Overall totals" in overall_text
     assert "UNKNOWN by reason:" in overall_text
     assert "UNKNOWN validation before/after delta:" in overall_text
+
+
+def test_overall_summary_compact_suppresses_large_tuple_sections(tmp_path):
+    logs = [
+        _write_log(
+            tmp_path,
+            "fc_read_after_void/fc_read_after_void_B1_B2.log",
+            "Result: UNKNOWN",
+            _payload(
+                "fc_read_after_void",
+                None,
+                unknown_reasons=[
+                    make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP).to_dict()
+                ],
+            ),
+        )
+    ]
+    overall = aggregate_validation_logs_by_function(logs)
+
+    text = format_overall_results_summary(overall, compact=True, max_items=1)
+
+    assert "UNKNOWN by reason:" in text
+    assert "Reason record tuples:" not in text
+    assert "Proof action tuples:" not in text
+    assert "Canonical baseline comparison:" not in text
+
+
+def test_result_summary_cli_writes_health_summary_artifacts(tmp_path):
+    log_path = _write_log(
+        tmp_path,
+        "after/fc_read_after_void/fc_read_after_void_B1_B2.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_read_after_void",
+            None,
+            unknown_reasons=[
+                make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING).to_dict()
+            ],
+        ),
+    )
+    health_json = tmp_path / "health.json"
+    health_text = tmp_path / "health.txt"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--overall-summary",
+            "--summary-level",
+            "compact",
+            "--health-summary-json",
+            str(health_json),
+            "--health-summary-text",
+            str(health_text),
+            str(log_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(health_json.read_text())
+    assert "Reason record tuples:" not in result.stdout
+    assert payload["final_result_counts"]["UNKNOWN"] == 1
+    assert payload["unknown_units"] == 1
+    assert "Run health summary:" in health_text.read_text()
+    assert "return_width_bridge_missing" in format_run_health_summary(payload)
+
+
+def test_run_health_summary_parses_overall_summary_without_pair_logs(tmp_path):
+    overall_summary = tmp_path / "overall_summary.txt"
+    overall_summary.write_text(
+        "\n".join(
+            [
+                "============================================================",
+                "  All functions processed: 1 function(s)",
+                "============================================================",
+                "  fc_demo                       : TOTAL=  2, EQ=  1, NOT_EQ=  0, ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0, WALL=1.000s",
+                "",
+                "  Overall totals              : TOTAL=  2, EQ=  1, NOT_EQ=  0, ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0",
+                "",
+                "  UNKNOWN validation summary:",
+                "    Total results : 2",
+                "    Unknown results: 1",
+                "    Unknown units  : 3",
+                "    UNKNOWN by reason:",
+                "      - unresolved_expression: 2",
+                "      - sat_unsafety: 1",
+                "    Proof backlog by reason:",
+                "      - unresolved_expression: 2",
+                "    Operational UNKNOWN by reason:",
+                "      (none)",
+            ]
+        )
+    )
+
+    health = parse_overall_summary_health(overall_summary)
+
+    assert health["source"] == "overall_summary_txt"
+    assert health["total_results"] == 2
+    assert health["final_result_counts"]["UNKNOWN"] == 1
+    assert health["unknown_units"] == 3
+    assert health["functions"]["fc_demo"]["EQ"] == 1
+    assert health["unknown_by_reason"] == {"unresolved_expression": 2, "sat_unsafety": 1}
+
+
+def test_validation_transfer_bundle_excludes_large_pair_logs(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    source_root = tmp_path / "logs" / "equivalence_all"
+    run_dir = source_root / "function_call_current"
+    run_dir.mkdir(parents=True)
+    index_dir = source_root / "phase3_post_fix_gate_index"
+    index_dir.mkdir()
+    gate_dir = source_root / "function_call_current" / "phase3_large_gate"
+    gate_dir.mkdir()
+    (run_dir / "overall_summary.txt").write_text("Overall totals : TOTAL=  1, EQ=  1, NOT_EQ=  0, ERROR=  0, UNKNOWN=  0, TIMEOUT=  0, INCOMPLETE=  0\n")
+    (run_dir / "run_health_summary.txt").write_text("Run health summary:\n")
+    (index_dir / "phase3_post_fix_gate_index.json").write_text(
+        json.dumps({"manifest_kind": "phase3_post_fix_gate_index"})
+    )
+    (gate_dir / "large_gate.json").write_text(json.dumps({"payload": "x" * 512}))
+    pair_log = run_dir / "fc_demo_B1_B2.log"
+    pair_log.write_text("large pair log\n" * 100)
+    stdout_log = source_root / "phase3_source_stdout.log"
+    stdout_log.write_text("\n".join(f"line {index}" for index in range(10)))
+    root_stdout_log = repo_root / "phase2_full_rerun_stdout.log"
+    root_stdout_log.write_text("\n".join(f"root line {index}" for index in range(10)))
+    output = tmp_path / "bundle.tar.gz"
+
+    build_validation_transfer_bundle(
+        source_root=source_root,
+        output_path=output,
+        stdout_roots=(repo_root,),
+        max_stdout_tail_lines=3,
+        max_direct_file_bytes=128,
+    )
+
+    with tarfile.open(output, "r:gz") as archive:
+        names = set(archive.getnames())
+        manifest = json.load(archive.extractfile("bundle_manifest.json"))
+        source_stdout_tail = archive.extractfile(
+            "stdout_tail/phase3_source_stdout.log.tail.txt"
+        ).read().decode("utf-8")
+        root_stdout_tail = archive.extractfile(
+            "stdout_tail/phase2_full_rerun_stdout.log.tail.txt"
+        ).read().decode("utf-8")
+        readme = archive.extractfile("README.txt").read().decode("utf-8")
+
+    assert "artifacts/function_call_current/overall_summary.txt" in names
+    assert "artifacts/function_call_current/run_health_summary.txt" in names
+    assert "artifacts/phase3_post_fix_gate_index/phase3_post_fix_gate_index.json" in names
+    assert "oversized/function_call_current/phase3_large_gate/large_gate.json.skipped.txt" in names
+    assert not any(name.endswith("fc_demo_B1_B2.log") for name in names)
+    assert source_stdout_tail == "line 7\nline 8\nline 9\n"
+    assert root_stdout_tail == "root line 7\nroot line 8\nroot line 9\n"
+    assert "Oversized gate/index JSON files" in readme
+    assert manifest["entry_count"] == 6
+
+
+def test_matrix_wrappers_do_not_force_summary_max_items_default():
+    repo_root = Path(__file__).resolve().parents[4]
+    wrappers = [
+        "copy_run_matrix_all_parallel_multifunc.sh",
+        "func_call_run_matrix_all_parallel_multifunc.sh",
+        "loop_run_matrix_all_parallel_multifunc.sh",
+        "mem_run_matrix_all_parallel_multifunc.sh",
+        "pointer_run_matrix_all_parallel_multifunc.sh",
+        "run_matrix_all_parallel_multifunc.sh",
+    ]
+
+    for wrapper in wrappers:
+        text = (repo_root / wrapper).read_text()
+        assert "VALIDATION_SUMMARY_MAX_ITEMS:-20" not in text
+        assert '[[ -n "${VALIDATION_SUMMARY_MAX_ITEMS:-}" ]]' in text
+        assert '--summary-level "${VALIDATION_SUMMARY_LEVEL:-compact}"' in text
 
 
 def test_result_summary_module_accepts_function_wall_time_option():

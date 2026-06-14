@@ -34,6 +34,8 @@ VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-0}"
 VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-0}"
 RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL="${RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL:-0}"
 RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES="${RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES:-1}"
+RERUN_FULL_ANALYSIS_CREATE_TRANSFER_BUNDLE="${RERUN_FULL_ANALYSIS_CREATE_TRANSFER_BUNDLE:-1}"
+VALIDATION_TRANSFER_BUNDLE_OUTPUT="${VALIDATION_TRANSFER_BUNDLE_OUTPUT:-logs/equivalence_all/validation_transfer_bundle.tar.gz}"
 
 export PYTHON_BIN
 export PARALLEL_JOBS
@@ -41,9 +43,12 @@ export VALIDATION_SKIP_COMPLETED
 export VALIDATION_AUTO_BEFORE_SNAPSHOT
 export RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL
 export RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES
+export RERUN_FULL_ANALYSIS_CREATE_TRANSFER_BUNDLE
+export VALIDATION_TRANSFER_BUNDLE_OUTPUT
 
 EXPECTED_LANE1_SHA256="eec876a6473ac4ac344d846bdffb93d7bbcf23d55559d0c6d58ee890304e6f5a"
 LANE1_MANIFEST="artifacts/baselines/observed-v0@0a53352/audit/phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json"
+TRANSFER_BUNDLE_CREATED=0
 
 run_and_log() {
     local log_file="$1"
@@ -65,6 +70,29 @@ require_file() {
         exit 1
     fi
 }
+
+create_transfer_bundle_once() {
+    local exit_code=$?
+    if [[ "$RERUN_FULL_ANALYSIS_CREATE_TRANSFER_BUNDLE" != "1" ]]; then
+        return "$exit_code"
+    fi
+    if [[ "$TRANSFER_BUNDLE_CREATED" == "1" ]]; then
+        return "$exit_code"
+    fi
+    TRANSFER_BUNDLE_CREATED=1
+    echo ""
+    echo "============================================================"
+    echo "Creating validation transfer bundle: $VALIDATION_TRANSFER_BUNDLE_OUTPUT"
+    echo "============================================================"
+    if ./create_validation_transfer_bundle.sh "$VALIDATION_TRANSFER_BUNDLE_OUTPUT"; then
+        ls -lh "$VALIDATION_TRANSFER_BUNDLE_OUTPUT" || true
+    else
+        echo "Warning: failed to create validation transfer bundle." >&2
+    fi
+    return "$exit_code"
+}
+
+trap create_transfer_bundle_once EXIT
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Error: PYTHON_BIN was not found: $PYTHON_BIN" >&2
@@ -93,6 +121,8 @@ echo "Validation skip completed: $VALIDATION_SKIP_COMPLETED"
 echo "Validation auto before snapshot: $VALIDATION_AUTO_BEFORE_SNAPSHOT"
 echo "Skip normal full matrix: $RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL"
 echo "Precheck representatives before full matrix: $RERUN_FULL_ANALYSIS_PRECHECK_REPRESENTATIVES"
+echo "Create transfer bundle: $RERUN_FULL_ANALYSIS_CREATE_TRANSFER_BUNDLE"
+echo "Transfer bundle output: $VALIDATION_TRANSFER_BUNDLE_OUTPUT"
 
 echo ""
 echo "Phase 3 audit manifests:"
@@ -186,4 +216,5 @@ run_and_log phase3_post_fix_gate_index_stdout.log \
 
 echo ""
 echo "Full rerun finished."
-echo "Copy back *_stdout.log, unit_tests_stdout.log, and logs/equivalence_all/."
+echo "Copy back $VALIDATION_TRANSFER_BUNDLE_OUTPUT for compact triage."
+echo "Copy full logs/equivalence_all/ only when detailed pair logs are needed."
