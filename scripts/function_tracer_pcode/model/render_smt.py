@@ -90,6 +90,8 @@ _SUPPORTED_UNARY_OPERATORS = {
     "INT_NEGATE",
     "INT_2COMP",
     "BOOL_NEGATE",
+    "FLOAT_NEG",
+    "FLOAT_ABS",
 }
 
 
@@ -485,6 +487,20 @@ def _float_predicate_to_smt(
         smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(operator, operator.lower())
         return f"({smt_name} {left_smt} {right_smt})"
     return f"({fp_op} {left_fp} {right_fp})"
+
+
+def _float_unary_to_bitvec_smt(operator: str, operand_smt: str, bits: int) -> Optional[str]:
+    """Lower bit-preserving unary FP operations emitted by Ghidra."""
+    bits = int(bits or 0)
+    if bits <= 0:
+        return None
+    sign_mask = 1 << (bits - 1)
+    if operator == "FLOAT_NEG":
+        return f"(bvxor {operand_smt} (_ bv{sign_mask} {bits}))"
+    if operator == "FLOAT_ABS":
+        abs_mask = sign_mask - 1
+        return f"(bvand {operand_smt} (_ bv{abs_mask} {bits}))"
+    return None
 
 
 def _rewrite_ambiguous_negative_constant(expr, expr_smt: str, target_bits: int, prefer_sign_extension: bool) -> str:
@@ -1311,6 +1327,18 @@ def _to_smt_internal(
 
         if expr.operator == "BOOL_NEGATE":
             return f"(not {_coerce_expr_to_bool(operand, operand_smt)})"
+
+        fp_unary_smt = _float_unary_to_bitvec_smt(
+            expr.operator,
+            _coerce_smt_bitvec_width(
+                operand_smt,
+                operand_bits,
+                expression_smt_bit_width(expr) or operand_bits,
+            ),
+            expression_smt_bit_width(expr) or operand_bits,
+        )
+        if fp_unary_smt is not None:
+            return fp_unary_smt
 
         op = expr._get_smt_operator(expr.operator)
         return f"({op} {operand_smt})"

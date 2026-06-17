@@ -527,6 +527,119 @@ def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_posi
     assert resolved.operands[1].value == 1
 
 
+def test_memory_resolver_concretizes_direct_readonly_constant_address_in_value_position():
+    address = Expression.constant(0x00113090, 8)
+    address.runtime_ref = AddressValueRef(
+        address_offset=0x00113090,
+        display_hint="DAT_00113090",
+        symbol_name="DAT_00113090",
+        is_initialized=True,
+        can_read=True,
+        can_write=False,
+        is_volatile=False,
+    )
+    expr = Expression.binary_op(
+        "INT_XOR",
+        Expression.parameter("param_1", index=0, size=8),
+        address,
+    )
+
+    table = {
+        0x00113090: 0x8000000000000000,
+    }
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "BINARY_OP"
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 0x8000000000000000
+
+
+def test_memory_resolver_does_not_concretize_plain_integer_constant_in_value_position():
+    expr = Expression.binary_op(
+        "INT_XOR",
+        Expression.parameter("param_1", index=0, size=8),
+        Expression.constant(0x00113090, 8),
+    )
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda _addr, _size: 0x8000000000000000,
+        debug=False,
+    )
+
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 0x00113090
+
+
+def test_memory_resolver_does_not_concretize_writable_constant_address_in_value_position():
+    address = Expression.constant(0x00113090, 8)
+    address.runtime_ref = AddressValueRef(
+        address_offset=0x00113090,
+        display_hint="global_00113090",
+        symbol_name="global_00113090",
+        is_initialized=True,
+        can_read=True,
+        can_write=True,
+        is_volatile=False,
+    )
+    expr = Expression.binary_op(
+        "INT_XOR",
+        Expression.parameter("param_1", index=0, size=8),
+        address,
+    )
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda _addr, _size: 0x8000000000000000,
+        debug=False,
+    )
+
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 0x00113090
+
+
+def test_memory_resolver_does_not_concretize_constant_offset_literal_address():
+    address = Expression.constant(0x00113090, 8)
+    address.runtime_ref = AddressValueRef(
+        address_offset=0x00113090,
+        source="constant_offset",
+        display_hint="DAT_00113090",
+        symbol_name="DAT_00113090",
+        is_initialized=True,
+        can_read=True,
+        can_write=False,
+        is_volatile=False,
+    )
+    expr = Expression.binary_op(
+        "INT_XOR",
+        Expression.parameter("param_1", index=0, size=8),
+        address,
+    )
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda _addr, _size: 0x8000000000000000,
+        debug=False,
+    )
+
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 0x00113090
+    assert resolved.operands[1].runtime_ref.source == "constant_offset"
+
+
 def test_memory_resolver_concretizes_direct_unknown_symbol_when_readable():
     expr = Expression.binary_op(
         "INT_ADD",

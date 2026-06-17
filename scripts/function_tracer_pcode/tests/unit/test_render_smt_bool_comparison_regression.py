@@ -6,6 +6,7 @@ from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_float_predicate_smt_declarations,
+    expression_contains_unsupported_smt_ops,
     expression_uses_smt_uf,
     expression_to_smt,
     smt_logic_name,
@@ -83,6 +84,36 @@ def test_float_notequal_uses_ieee754_not_fp_eq_in_fp_mode():
     smt = expression_to_smt(expr, float_mode="fp")
 
     assert smt == "(not (fp.eq ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1)))"
+
+
+def test_float_neg_lowers_to_bit_preserving_sign_flip():
+    expr = Expression.unary_op("FLOAT_NEG", _param("param_1", size=8, data_type="double"))
+    expr.size = 8
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt == "(bvxor param_1 (_ bv9223372036854775808 64))"
+    assert "float_neg" not in smt
+
+
+def test_float_abs_lowers_to_bit_preserving_sign_clear():
+    expr = Expression.unary_op("FLOAT_ABS", _param("param_1", size=4, data_type="float"))
+    expr.size = 4
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt == "(bvand param_1 (_ bv2147483647 32))"
+    assert "float_abs" not in smt
+
+
+def test_float_unary_ops_are_supported_by_smt_gate():
+    neg_expr = Expression.unary_op("FLOAT_NEG", _param("param_1", size=8, data_type="double"))
+    neg_expr.size = 8
+    abs_expr = Expression.unary_op("FLOAT_ABS", _param("param_2", size=4, data_type="float"))
+    abs_expr.size = 4
+
+    assert expression_contains_unsupported_smt_ops(neg_expr) is False
+    assert expression_contains_unsupported_smt_ops(abs_expr) is False
 
 
 def test_expression_to_smt_coerces_bool_before_integer_twos_complement():

@@ -242,6 +242,25 @@ def _try_resolve_direct_readonly_scalar(
     if address_context:
         return None
 
+    runtime_ref = _coerce_address_runtime_ref(expr)
+    if (
+        expr.expr_type == ExpressionType.CONSTANT
+        and runtime_ref is not None
+        and runtime_ref.has_concrete_address()
+        and runtime_ref.is_readonly_memory()
+        and runtime_ref.source != "constant_offset"
+    ):
+        load_size = expr.size if expr.size else 8
+        mem_value = read_memory_value(runtime_ref.address_offset, load_size)
+        if mem_value is None:
+            return None
+        if debug:
+            print(
+                "[MemoryResolver] concretized direct readonly constant address "
+                f"addr=0x{runtime_ref.address_offset:x} size={load_size} -> 0x{mem_value:x}"
+            )
+        return Expression.constant(mem_value, load_size)
+
     if (
         expr.expr_type == ExpressionType.BINARY_OP
         and expr.operator == "INDIRECT"
