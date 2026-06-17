@@ -175,6 +175,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="completed recovery proof を結果へ反映しない（Phase 2 producer 検証用）",
     )
     parser.add_argument(
+        "--assume-fp-non-nan",
+        action="store_true",
+        help=(
+            "float/double引数がNaNでない前提で等価性を判定する（明示前提つきEQ用）。"
+            " 現状は32bit/64bit浮動小数点引数にのみ適用されます（例: long doubleなどは対象外）。"
+        ),
+    )
+    parser.add_argument(
         "--no-rewrite",
         action="store_true",
         help="式のリライトを無効にする（デフォルト: 有効）",

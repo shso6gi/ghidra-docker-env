@@ -87,6 +87,12 @@ def run_equivalence_check(args):
             "  Completed recovery proofs: "
             f"{'disabled' if getattr(args, 'no_completed_recovery_proofs', False) else 'enabled'}"
         )
+        print(
+            "  FP non-NaN assumption: "
+            f"{'enabled' if getattr(args, 'assume_fp_non_nan', False) else 'disabled'}"
+        )
+        if getattr(args, "assume_fp_non_nan", False):
+            print("  FP non-NaN scope: 32bit/64bit float args only")
         print()
 
     start_headless_pyghidra(
@@ -124,6 +130,7 @@ def run_equivalence_check(args):
         enable_fact_normalization=enable_fact_normalization,
         enable_template_abstraction=enable_template_abstraction,
         enable_completed_recovery_proofs=not getattr(args, "no_completed_recovery_proofs", False),
+        assume_fp_non_nan=getattr(args, "assume_fp_non_nan", False),
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

@@ -53,6 +53,9 @@ _FLOAT_PREDICATE_SMT_NAMES = {
     "FLOAT_LESS": "float_less",
     "FLOAT_LESSEQUAL": "float_lessequal",
 }
+_FLOAT_UNARY_PREDICATE_SMT_NAMES = {
+    "FLOAT_NAN": "float_nan",
+}
 _FLOAT_PREDICATE_FP_OPS = {
     "FLOAT_EQUAL": "fp.eq",
     "FLOAT_LESS": "fp.lt",
@@ -92,6 +95,7 @@ _SUPPORTED_UNARY_OPERATORS = {
     "BOOL_NEGATE",
     "FLOAT_NEG",
     "FLOAT_ABS",
+    "FLOAT_NAN",
 }
 
 
@@ -121,7 +125,7 @@ def expression_returns_bool(expr) -> bool:
         return expr.operator in _BOOLEAN_BINARY_OPERATORS
 
     if expr_type == expr_kind.UNARY_OP:
-        return expr.operator == "BOOL_NEGATE"
+        return expr.operator in {"BOOL_NEGATE", "FLOAT_NAN"}
 
     if expr_type == expr_kind.PHI:
         branches = expr.value or []
@@ -345,19 +349,31 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
         if node is None or getattr(node, "expr_type", None) is None:
             continue
         expr_kind = node.expr_type.__class__
-        if node.expr_type != expr_kind.BINARY_OP:
+        if node.expr_type == expr_kind.BINARY_OP:
+            smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
+            if smt_name is None:
+                continue
+            operands = getattr(node, "operands", None) or []
+            if len(operands) != 2:
+                continue
+            left_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+            right_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+            if float_mode == "fp" and _float_predicate_can_use_fp_theory(node, left_bits, right_bits):
+                continue
+            decl = f"(declare-fun {smt_name} ((_ BitVec {left_bits}) (_ BitVec {right_bits})) Bool)"
+        elif node.expr_type == expr_kind.UNARY_OP:
+            smt_name = _FLOAT_UNARY_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
+            if smt_name is None:
+                continue
+            operands = getattr(node, "operands", None) or []
+            if len(operands) != 1:
+                continue
+            operand_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+            if float_mode == "fp" and operand_bits in _FLOAT_BV_WIDTH_TO_SORT:
+                continue
+            decl = f"(declare-fun {smt_name} ((_ BitVec {operand_bits})) Bool)"
+        else:
             continue
-        smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
-        if smt_name is None:
-            continue
-        operands = getattr(node, "operands", None) or []
-        if len(operands) != 2:
-            continue
-        left_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
-        right_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
-        if float_mode == "fp" and _float_predicate_can_use_fp_theory(node, left_bits, right_bits):
-            continue
-        decl = f"(declare-fun {smt_name} ((_ BitVec {left_bits}) (_ BitVec {right_bits})) Bool)"
         if decl in seen:
             continue
         seen.add(decl)
@@ -371,17 +387,20 @@ def expression_uses_smt_float_theory(expr) -> bool:
         if node is None or getattr(node, "expr_type", None) is None:
             continue
         expr_kind = node.expr_type.__class__
-        if node.expr_type != expr_kind.BINARY_OP:
-            continue
-        operands = getattr(node, "operands", None) or []
-        if len(operands) != 2:
-            continue
-        if _float_predicate_can_use_fp_theory(
-            node,
-            expression_smt_bit_width(operands[0]),
-            expression_smt_bit_width(operands[1]),
-        ):
-            return True
+        if node.expr_type == expr_kind.BINARY_OP:
+            operands = getattr(node, "operands", None) or []
+            if len(operands) != 2:
+                continue
+            if _float_predicate_can_use_fp_theory(
+                node,
+                expression_smt_bit_width(operands[0]),
+                expression_smt_bit_width(operands[1]),
+            ):
+                return True
+        elif node.expr_type == expr_kind.UNARY_OP and getattr(node, "operator", None) == "FLOAT_NAN":
+            operands = getattr(node, "operands", None) or []
+            if len(operands) == 1 and int(expression_smt_bit_width(operands[0]) or 0) in _FLOAT_BV_WIDTH_TO_SORT:
+                return True
     return False
 
 
@@ -501,6 +520,22 @@ def _float_unary_to_bitvec_smt(operator: str, operand_smt: str, bits: int) -> Op
         abs_mask = sign_mask - 1
         return f"(bvand {operand_smt} (_ bv{abs_mask} {bits}))"
     return None
+
+
+def _float_unary_predicate_to_smt(
+    operator: str,
+    operand_smt: str,
+    bits: int,
+    *,
+    float_mode: str,
+) -> Optional[str]:
+    smt_name = _FLOAT_UNARY_PREDICATE_SMT_NAMES.get(operator)
+    if smt_name is None:
+        return None
+    bits = int(bits or 0)
+    if float_mode == "fp" and bits in _FLOAT_BV_WIDTH_TO_SORT:
+        return f"(fp.isNaN {_bitvec_to_fp_smt(operand_smt, bits)})"
+    return f"({smt_name} {operand_smt})"
 
 
 def _rewrite_ambiguous_negative_constant(expr, expr_smt: str, target_bits: int, prefer_sign_extension: bool) -> str:
@@ -1327,6 +1362,15 @@ def _to_smt_internal(
 
         if expr.operator == "BOOL_NEGATE":
             return f"(not {_coerce_expr_to_bool(operand, operand_smt)})"
+
+        fp_unary_predicate_smt = _float_unary_predicate_to_smt(
+            expr.operator,
+            operand_smt,
+            operand_bits,
+            float_mode=float_mode,
+        )
+        if fp_unary_predicate_smt is not None:
+            return fp_unary_predicate_smt
 
         fp_unary_smt = _float_unary_to_bitvec_smt(
             expr.operator,

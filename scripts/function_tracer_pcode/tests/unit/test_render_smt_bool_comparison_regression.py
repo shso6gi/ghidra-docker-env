@@ -111,9 +111,37 @@ def test_float_unary_ops_are_supported_by_smt_gate():
     neg_expr.size = 8
     abs_expr = Expression.unary_op("FLOAT_ABS", _param("param_2", size=4, data_type="float"))
     abs_expr.size = 4
+    nan_expr = Expression.unary_op("FLOAT_NAN", _param("param_3", size=8, data_type="double"))
+    nan_expr.size = 1
 
     assert expression_contains_unsupported_smt_ops(neg_expr) is False
     assert expression_contains_unsupported_smt_ops(abs_expr) is False
+    assert expression_contains_unsupported_smt_ops(nan_expr) is False
+
+
+def test_float_nan_uses_ieee754_fp_theory_in_fp_mode():
+    expr = Expression.unary_op("FLOAT_NAN", _param("param_1", size=8, data_type="double"))
+    expr.size = 1
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(fp.isNaN ((_ to_fp 11 53) param_1))"
+    assert declarations == []
+
+
+def test_float_nan_uses_declared_uf_for_ufbv_queries():
+    expr = Expression.unary_op("FLOAT_NAN", _param("param_1", size=10))
+    expr.size = 1
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_nan param_1)"
+    assert declarations == [
+        "(declare-fun float_nan ((_ BitVec 80)) Bool)",
+    ]
+    assert expression_uses_smt_uf(expr, float_mode="fp") is True
 
 
 def test_expression_to_smt_coerces_bool_before_integer_twos_complement():

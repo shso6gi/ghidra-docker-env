@@ -861,6 +861,65 @@ def test_return_extension_surface_alignment_rejects_64bit_high_bit_difference():
     assert "source" not in right_surface.evidence
 
 
+def test_return_extension_surface_alignment_accepts_high_zero_piece_to_64bit_surface():
+    low_value = _param("param_1", 8, index=0)
+    wide_zero_piece = _binary("PIECE", _const(0, 8), low_value, 16)
+    left = FunctionReturnAnalysis(
+        function_name="wide_zero_piece_return",
+        entry_point="0x5000",
+        parameters=[{"name": "param_1", "data_type": "double", "size": 8, "index": 0}],
+        returns=[
+            ReturnInfo(address="0x5000", value=wide_zero_piece),
+            ReturnInfo(address="0x5004", value=_binary("PIECE", _const(0, 8), _unary("FLOAT_NEG", low_value, 8), 16)),
+        ],
+        return_type="undefined1[16]",
+    )
+    right = FunctionReturnAnalysis(
+        function_name="narrow_double_return",
+        entry_point="0x6000",
+        parameters=[{"name": "param_1", "data_type": "double", "size": 8, "index": 0}],
+        returns=[
+            ReturnInfo(address="0x6000", value=low_value),
+            ReturnInfo(address="0x6004", value=_unary("FLOAT_NEG", low_value, 8)),
+        ],
+        return_type="double",
+    )
+
+    aligned_left, aligned_right = align_return_value_extension_surfaces(left, right)
+
+    left_surface = aligned_left.get_comparison_surface()
+    right_surface = aligned_right.get_comparison_surface()
+    assert left_surface.explicit_bit_width == 64
+    assert right_surface.explicit_bit_width == 64
+    assert left_surface.evidence["source"] == "cross_side_return_extension_surface"
+    assert left_surface.evidence["extension_surface_extension_kind"] == "INT_ZEXT"
+    assert left_surface.evidence["extension_surface_source_bit_widths"] == (64,)
+
+
+def test_return_extension_surface_alignment_rejects_nonzero_high_piece():
+    low_value = _param("param_1", 8, index=0)
+    left = FunctionReturnAnalysis(
+        function_name="wide_nonzero_piece_return",
+        entry_point="0x5000",
+        parameters=[{"name": "param_1", "data_type": "double", "size": 8, "index": 0}],
+        returns=[ReturnInfo(address="0x5000", value=_binary("PIECE", _const(1, 8), low_value, 16))],
+        return_type="undefined1[16]",
+    )
+    right = FunctionReturnAnalysis(
+        function_name="narrow_double_return",
+        entry_point="0x6000",
+        parameters=[{"name": "param_1", "data_type": "double", "size": 8, "index": 0}],
+        returns=[ReturnInfo(address="0x6000", value=low_value)],
+        return_type="double",
+    )
+
+    aligned_left, aligned_right = align_return_value_extension_surfaces(left, right)
+
+    assert aligned_left.get_comparison_surface().explicit_bit_width == 128
+    assert aligned_right.get_comparison_surface().explicit_bit_width == 64
+    assert "source" not in aligned_left.get_comparison_surface().evidence
+
+
 def test_return_extension_surface_alignment_refuses_mixed_zext_sext_evidence():
     left = FunctionReturnAnalysis(
         function_name="wide_zext_readonly_sum",

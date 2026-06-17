@@ -75,6 +75,7 @@ class EquivalenceChecker:
         enable_fact_normalization: bool = False,
         enable_template_abstraction: bool = False,
         enable_completed_recovery_proofs: bool = True,
+        assume_fp_non_nan: bool = False,
     ):
         """
         Args:
@@ -95,11 +96,15 @@ class EquivalenceChecker:
         self.enable_fact_normalization = enable_fact_normalization
         self.enable_template_abstraction = enable_template_abstraction
         self.enable_completed_recovery_proofs = enable_completed_recovery_proofs
+        self.assume_fp_non_nan = assume_fp_non_nan
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
             enable_fact_normalization,
         )
-        self.formula_builder = FormulaBuilder(debug=debug)
+        self.formula_builder = FormulaBuilder(
+            debug=debug,
+            assume_fp_non_nan=assume_fp_non_nan,
+        )
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
         self.phase_handler = PhaseHandler(self.type_fixer_config, debug=debug)
         

@@ -61,7 +61,7 @@ UNSIGNED_COMPARE_REWRITE_MAP = {
     "INT_SLESSEQUAL": "INT_LESSEQUAL",
 }
 SIGNEDNESS_KINDS = frozenset({"signed", "unsigned"})
-RETURN_EXTENSION_SURFACE_CANDIDATE_BITS = (32, 16, 8)
+RETURN_EXTENSION_SURFACE_CANDIDATE_BITS = (64, 32, 16, 8)
 RETURN_VALUE_EXTENSION_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
 RETURN_EXTENSION_SURFACE_SOURCE = "cross_side_return_extension_surface"
 RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
@@ -871,6 +871,10 @@ def _return_expr_supports_extension_surface(
             return True, ((str(getattr(expr, "operator", "")).upper(), int(operand_bits)),)
         return False, ()
 
+    high_zero_piece = _return_piece_zero_extension_profile(expr, candidate_bits)
+    if high_zero_piece is not None:
+        return True, (high_zero_piece,)
+
     if expr_bits == candidate_bits:
         return True, (("EXACT_WIDTH", int(candidate_bits)),)
     if 0 < expr_bits < candidate_bits:
@@ -881,6 +885,36 @@ def _return_expr_supports_extension_surface(
         return readonly_evidence
 
     return False, ()
+
+
+def _return_piece_zero_extension_profile(
+    expr: Expression,
+    candidate_bits: int,
+) -> Optional[Tuple[str, int]]:
+    if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+        return None
+    if str(getattr(expr, "operator", "") or "").upper() != "PIECE":
+        return None
+    operands = list(getattr(expr, "operands", None) or [])
+    if len(operands) != 2:
+        return None
+    high, low = operands
+    expr_bits = _expression_bit_width(expr)
+    low_bits = _expression_bit_width(low)
+    high_bits = _expression_bit_width(high)
+    if expr_bits <= candidate_bits or low_bits != candidate_bits or high_bits <= 0:
+        return None
+    if expr_bits != high_bits + low_bits:
+        return None
+    if getattr(high, "expr_type", None) != ExpressionType.CONSTANT:
+        return None
+    try:
+        high_value = int(getattr(high, "value", None))
+    except (TypeError, ValueError):
+        return None
+    if high_value != 0:
+        return None
+    return "INT_ZEXT", int(candidate_bits)
 
 
 def _readonly_reduction_supports_extension_surface(

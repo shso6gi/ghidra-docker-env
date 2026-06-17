@@ -2,6 +2,7 @@
 """SMT式構築モジュール"""
 
 import hashlib
+import re
 from typing import List, Dict, Optional, Tuple, Set, Any
 
 from ...model import (
@@ -12,6 +13,7 @@ from ...model import (
     ReadonlyReductionRef,
     loop_summary_method_b_key,
 )
+from ...model.signature import is_floating_data_type
 from ...model.render_smt import (
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
@@ -294,14 +296,21 @@ def _rewrite_parameter_leaf_for_smt(
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
-    def __init__(self, debug: bool = False, exclude_ub: bool = True):
+    def __init__(
+        self,
+        debug: bool = False,
+        exclude_ub: bool = True,
+        assume_fp_non_nan: bool = False,
+    ):
         """
         Args:
             debug: デバッグ出力を有効にする
             exclude_ub: UB（未定義動作）除外制約を追加する
+            assume_fp_non_nan: FP引数がNaNでないことを明示前提として追加する
         """
         self.debug = debug
         self.exclude_ub = exclude_ub
+        self.assume_fp_non_nan = assume_fp_non_nan
         self.variable_analyzer = VariableAnalyzer(debug=debug)
         self.ub_constraint_builder = UbConstraintBuilder(debug=debug)
     
@@ -551,6 +560,18 @@ class FormulaBuilder:
         smt_logic: str,
         header_lines: List[str],
     ) -> str:
+        if any("fp.isNaN" in str(line) for line in header_lines or []):
+            has_uf = any(
+                str(line).lstrip().startswith("(declare-fun ")
+                for line in header_lines or []
+            )
+            if has_uf:
+                if smt_logic in {"QF_AUFBV", "QF_AUFBVFP"}:
+                    return "QF_AUFBVFP"
+                return "QF_UFFPBV"
+            if smt_logic == "QF_AUFBV":
+                return "QF_AUFBVFP"
+            return "QF_FPBV"
         if not any(str(line).lstrip().startswith("(declare-fun ") for line in header_lines or []):
             return smt_logic
         if smt_logic == "QF_BV":
@@ -689,7 +710,113 @@ class FormulaBuilder:
             if ub_lines:
                 lines.extend(ub_lines)
 
+        fp_non_nan_lines = self._build_fp_non_nan_assumptions_section(
+            analysis1,
+            analysis2,
+            params1,
+            params2,
+        )
+        if fp_non_nan_lines:
+            lines.extend(fp_non_nan_lines)
+
         return lines, runtime_unknown_decls, constrained_fragments, param_fragment_constrained
+
+    def _build_fp_non_nan_assumptions_section(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo],
+    ) -> List[str]:
+        if not self.assume_fp_non_nan:
+            return []
+        lines: List[str] = [
+            "",
+            "; " + "-" * 40,
+            "; Explicit FP input-domain assumptions",
+            "; Enabled by --assume-fp-non-nan; this is conditional equivalence.",
+            "; " + "-" * 40,
+        ]
+        for side_label, analysis, params in (
+            ("function1", analysis1, params1),
+            ("function2", analysis2, params2),
+        ):
+            descriptors = self._parameter_descriptors_by_identity(analysis)
+            for param in params:
+                descriptor = descriptors.get(("index", param.index)) or descriptors.get(
+                    ("name", param.original_name)
+                )
+                if not self._parameter_descriptor_is_fp(descriptor):
+                    continue
+                fp_sort = self._fp_sort_for_bit_width(param.bit_width)
+                if fp_sort is None:
+                    # Skip unsupported precision-width parameters so this section only
+                    # adds concrete assumptions that can be rendered as SMT-LIB fp.isNaN.
+                    continue
+                ebits, sbits = fp_sort
+                lines.append(
+                    f"; {side_label}:{param.original_name} is assumed non-NaN"
+                )
+                lines.append(
+                    f"(assert (not (fp.isNaN ((_ to_fp {ebits} {sbits}) {param.smt_name}))))"
+                )
+
+        if not any(line.strip().startswith("(assert ") for line in lines):
+            return []
+        lines.append("")
+        return lines
+
+    @staticmethod
+    def _parameter_descriptors_by_identity(
+        analysis: FunctionReturnAnalysis,
+    ) -> Dict[Tuple[str, Any], Dict[str, Any]]:
+        descriptors: Dict[Tuple[str, Any], Dict[str, Any]] = {}
+        for raw in getattr(analysis, "parameters", ()) or ():
+            if not isinstance(raw, dict):
+                continue
+            descriptor = dict(raw)
+            index = descriptor.get("index")
+            if isinstance(index, int) and index >= 0:
+                descriptors[("index", index)] = descriptor
+            name = descriptor.get("name")
+            if isinstance(name, str) and name:
+                descriptors[("name", name)] = descriptor
+        return descriptors
+
+    @staticmethod
+    def _parameter_descriptor_is_fp(descriptor: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(descriptor, dict):
+            return False
+        data_type_obj = descriptor.get("data_type_obj")
+        data_type_name = str(descriptor.get("data_type") or "")
+
+        if is_floating_data_type(data_type_obj, data_type_name):
+            return True
+
+        data_type = str(descriptor.get("data_type") or "").lower()
+        if data_type in {"float", "double"}:
+            return True
+
+        # Fallback for alias/normalized forms and typedef-like spellings when
+        # runtime type objects are not available.
+        return bool(
+            re.search(r"(?:^|[\s_])(?:float|double|_float16|_float32|_float64)(?:$|[\s_])", data_type)
+            or re.search(r"\blong\s*double\b", data_type)
+        )
+
+    @staticmethod
+    def _fp_sort_for_bit_width(bit_width: int) -> Optional[Tuple[int, int]]:
+        try:
+            bits = int(bit_width)
+        except (TypeError, ValueError):
+            return None
+        # FP precondition mode currently supports fp.isNaN assertions only for
+        # 32/64bit floating-point parameters where SMT translation is direct.
+        if bits == 32:
+            return 8, 24
+        if bits == 64:
+            return 11, 53
+        return None
     
     # ============================================
     # NEW: UB制約セクション構築

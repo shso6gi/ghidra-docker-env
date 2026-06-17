@@ -147,6 +147,110 @@ def test_formula_builder_does_not_hide_nan_only_float_difference():
     assert solver_result.status == SolverStatus.SAT
 
 
+def test_formula_builder_can_explicitly_assume_fp_inputs_are_non_nan():
+    result = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_equivalence_formula_extended(
+        _max_with_less_analysis(),
+        _max_with_lessequal_analysis(),
+    )
+
+    assert "(set-logic QF_FPBV)" in result.formula
+    assert "; Explicit FP input-domain assumptions" in result.formula
+    assert result.formula.count("fp.isNaN") == 4
+
+    solver_result = Z3Solver(timeout=2).check_equivalence_direct(result.formula)
+
+    assert solver_result.status == SolverStatus.UNSAT
+
+
+def test_formula_builder_skips_fp_non_nan_section_when_no_supported_fp_params_exist():
+    result = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_equivalence_formula_extended(
+        _simple_analysis("left", "param_1", size=4),
+        _simple_analysis("right", "param_1", size=4),
+    )
+
+    assert "Explicit FP input-domain assumptions" not in result.formula
+    assert "fp.isNaN" not in result.formula
+
+
+def test_formula_builder_applies_fp_non_nan_to_typedeffed_float_parameters():
+    float_obj = resolve_mock_data_type("double")
+    analysis = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x00401000",
+        parameters=[
+            {
+                "name": "x",
+                "size": 8,
+                "index": 0,
+                "data_type": "_FloatAlias",
+                "data_type_obj": float_obj,
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x00401000",
+                conditions=[],
+                value=Expression.parameter("x", index=0, data_type="_FloatAlias", data_type_obj=float_obj, size=8),
+            )
+        ],
+    )
+    result = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_equivalence_formula_extended(
+        analysis,
+        analysis,
+    )
+
+    assert "Explicit FP input-domain assumptions" in result.formula
+    assert result.formula.count("fp.isNaN") == 2
+
+
+def test_formula_builder_ignores_unsupported_float_width_for_fp_non_nan_assumptions():
+    unsupported_float_analysis = FunctionReturnAnalysis(
+        function_name="float80_left",
+        entry_point="0x00401000",
+        parameters=[
+            {
+                "name": "x",
+                "size": 10,
+                "index": 0,
+                "data_type": "long double",
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x00401000",
+                conditions=[],
+                value=Expression.constant(1, size=4),
+            )
+        ],
+    )
+    result = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_equivalence_formula_extended(
+        unsupported_float_analysis,
+        unsupported_float_analysis,
+    )
+
+    assert "Explicit FP input-domain assumptions" not in result.formula
+    assert "fp.isNaN" not in result.formula
+
+
+def test_parameter_descriptor_is_fp_accepts_float_alias_type_strings():
+    assert FormulaBuilder._parameter_descriptor_is_fp({"data_type": "_Float16"}) is True
+    assert FormulaBuilder._parameter_descriptor_is_fp({"data_type": "long double"}) is True
+
+
+def test_fp_non_nan_sort_support_is_limited_to_32_and_64_bits():
+    assert FormulaBuilder._fp_sort_for_bit_width(32) == (8, 24)
+    assert FormulaBuilder._fp_sort_for_bit_width(64) == (11, 53)
+    assert FormulaBuilder._fp_sort_for_bit_width(80) is None
+
+
 def test_formula_builder_selects_uf_logic_for_intrinsic_declarations():
     analysis1 = FunctionReturnAnalysis(
         function_name="sum_left",
