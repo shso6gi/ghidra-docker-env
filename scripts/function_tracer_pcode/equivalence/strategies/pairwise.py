@@ -22,9 +22,13 @@ from ...model import (
 from ...model.runtime_refs import _loop_summary_term_at_index
 from ...analysis.effect_summary import canonicalize_location
 from ...model.render_smt import (
+    collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
+    expression_uses_smt_float_theory,
+    expression_uses_smt_uf,
     expression_smt_bit_width,
+    smt_logic_name,
 )
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
@@ -294,10 +298,12 @@ class PairwiseStrategy(CheckStrategy):
         symbol_replace_fn1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
+            float_mode="fp",
         )
         symbol_replace_fn2 = build_symbol_replacer(
             base_ctx["params2"],
             base_ctx.get("extra_vars2", []),
+            float_mode="fp",
         )
 
         if self.debug:
@@ -4822,7 +4828,7 @@ class PairwiseStrategy(CheckStrategy):
         parameters: Sequence[Dict[str, Any]],
         width_bits: int,
     ) -> Optional[str]:
-        declarations = ["(set-logic QF_BV)"]
+        declarations = [f"(set-logic {self._auxiliary_smt_logic([expr], conditions)})"]
         symbol_infos = self._build_auxiliary_parameter_infos(parameters)
         for symbol in symbol_infos:
             declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
@@ -4833,6 +4839,7 @@ class PairwiseStrategy(CheckStrategy):
                 if declaration not in intrinsic_declarations:
                     intrinsic_declarations.append(declaration)
         declarations.extend(intrinsic_declarations)
+        declarations.extend(self._collect_auxiliary_float_declarations([expr], conditions))
 
         assertions = []
         for condition in conditions or []:
@@ -4960,7 +4967,7 @@ class PairwiseStrategy(CheckStrategy):
     ) -> Optional[str]:
         if left is None or right is None:
             return None
-        declarations = ["(set-logic QF_BV)"]
+        declarations = [f"(set-logic {self._auxiliary_smt_logic([left, right], conditions)})"]
         symbol_infos = self._build_auxiliary_parameter_infos(parameters)
         for symbol in symbol_infos:
             declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
@@ -4977,6 +4984,7 @@ class PairwiseStrategy(CheckStrategy):
                 if declaration not in intrinsic_declarations:
                     intrinsic_declarations.append(declaration)
         declarations.extend(intrinsic_declarations)
+        declarations.extend(self._collect_auxiliary_float_declarations([left, right], conditions))
 
         assertions = []
         for condition in conditions or []:
@@ -5049,14 +5057,48 @@ class PairwiseStrategy(CheckStrategy):
             )
             if cloned_expr is None:
                 return None
-            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
+            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt(float_mode="fp")
         if isinstance(node, Expression):
             cloned_expr = self._clone_auxiliary_expression_for_smt(
                 node,
                 identity_to_spec,
             )
-            return cloned_expr.to_smt() if cloned_expr is not None else None
+            return cloned_expr.to_smt(float_mode="fp") if cloned_expr is not None else None
         return None
+
+    def _auxiliary_smt_logic(
+        self,
+        expressions: Sequence[Optional[Expression]],
+        conditions: Sequence[Condition],
+    ) -> str:
+        uses_float_theory = any(expression_uses_smt_float_theory(expr) for expr in expressions if expr is not None)
+        uses_uf = any(expression_uses_smt_uf(expr, float_mode="fp") for expr in expressions if expr is not None)
+        for condition in conditions or []:
+            if condition is not None and expression_uses_smt_float_theory(condition.expression):
+                uses_float_theory = True
+            if condition is not None and expression_uses_smt_uf(condition.expression, float_mode="fp"):
+                uses_uf = True
+            if uses_float_theory and uses_uf:
+                break
+        return smt_logic_name(uses_float_theory=uses_float_theory, uses_uf=uses_uf)
+
+    def _collect_auxiliary_float_declarations(
+        self,
+        expressions: Sequence[Optional[Expression]],
+        conditions: Sequence[Condition],
+    ) -> List[str]:
+        declarations: List[str] = []
+        for expr in expressions:
+            for declaration in collect_float_predicate_smt_declarations(expr, float_mode="fp"):
+                if declaration not in declarations:
+                    declarations.append(declaration)
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            for declaration in collect_float_predicate_smt_declarations(condition.expression, float_mode="fp"):
+                if declaration not in declarations:
+                    declarations.append(declaration)
+        return declarations
 
     def _clone_auxiliary_expression_for_smt(
         self,
@@ -7028,7 +7070,7 @@ class PairwiseStrategy(CheckStrategy):
                 return None
             unmatched_right.remove(candidates[0])
             assertions.append(
-                f"(assert (= {left_expr.to_smt()} {right_expr.to_smt()}))"
+                f"(assert (= {left_expr.to_smt(float_mode='fp')} {right_expr.to_smt(float_mode='fp')}))"
             )
             lowered_left_unknown_keys.append(self._expression_runtime_object_key(left_expr))
             lowered_right_unknown_keys.append(self._expression_runtime_object_key(right_expr))

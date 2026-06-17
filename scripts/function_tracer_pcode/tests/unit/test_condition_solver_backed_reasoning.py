@@ -70,6 +70,54 @@ def test_solver_backed_constraint_set_skips_recursive_context_reduction(monkeypa
     assert constraint_set.is_contradictory is True
 
 
+def test_smt_oracle_declares_float_predicates_for_condition_queries():
+    cond_expr = Expression.binary_op(
+        "FLOAT_LESS",
+        _indexed_param("param_2", 1, size=8),
+        _indexed_param("param_1", 0, size=8),
+    )
+    conditions = [
+        Condition(cond_expr, False),
+        Condition(cond_expr, True),
+    ]
+
+    usable, script = ConditionSMTOracle._build_script(conditions)
+
+    assert usable is True
+    assert script is not None
+    assert "(set-logic QF_AUFBVFP)" in script
+    assert "fp.lt" in script
+    assert "float_less" not in script
+    assert "Floating-point predicate axioms" not in script
+    assert ConditionSMTOracle.conjunction_is_unsat(conditions) is True
+
+
+def test_smt_oracle_does_not_assume_ordered_float_complement():
+    less_expr = Expression.binary_op(
+        "FLOAT_LESS",
+        _indexed_param("param_1", 0, size=8),
+        _indexed_param("param_2", 1, size=8),
+    )
+    le_expr = Expression.binary_op(
+        "FLOAT_LESSEQUAL",
+        _indexed_param("param_2", 1, size=8),
+        _indexed_param("param_1", 0, size=8),
+    )
+    conditions = [
+        Condition(less_expr, True),
+        Condition(le_expr, True),
+    ]
+
+    usable, script = ConditionSMTOracle._build_script(conditions)
+
+    assert usable is True
+    assert script is not None
+    assert "(assert (= " not in script
+    assert "fp.lt" in script
+    assert "fp.leq" in script
+    assert ConditionSMTOracle.conjunction_is_unsat(conditions) is False
+
+
 def test_solver_backed_implication_handles_phi_with_unknown_branch():
     selector = Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(0))
     selected_branch = _deep_selected_branch()

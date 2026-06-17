@@ -317,7 +317,7 @@ class ExpressionSafetyChecker:
             f"; Expression safety reachability: {query_label}",
             "; " + "=" * 60,
             "",
-            "(set-logic QF_BV)",
+            f"(set-logic {self.base_ctx.get('smt_logic', 'QF_BV')})",
             "",
         ]
         lines.extend(self.base_ctx.get("header_lines", []))
@@ -365,16 +365,16 @@ class ExpressionSafetyChecker:
         if condition is None:
             return None
         if render_fn is None:
-            return condition.to_smt()
+            return condition.to_smt(float_mode="fp")
         try:
             rendered = render_fn(condition)
         except TypeError:
-            rendered = render_fn(condition.to_smt())
+            rendered = render_fn(condition.to_smt(float_mode="fp"))
 
         if isinstance(rendered, str):
             return rendered
 
         to_smt = getattr(rendered, "to_smt", None)
         if callable(to_smt):
-            return to_smt()
+            return to_smt(float_mode="fp")
         return str(rendered)

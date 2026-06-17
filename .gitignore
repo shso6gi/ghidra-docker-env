@@ -24,6 +24,7 @@ targets/**/*-mips64-clang-O*
 targets/**/*.sh
 !targets/**/compile_all.sh
 targets/cate1/loop_recursion_test/
+targets/EqBench/*
 # 不要なソルバーのファイルを除外
 solver_boolector.py
 solver_yices2.py

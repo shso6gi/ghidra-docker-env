@@ -82,6 +82,7 @@ class FormulaBuildContext:
     param_pairs: List[ParameterPair]
     return_size1: int
     return_size2: int
+    smt_logic: str
     header_lines: List[str]
     runtime_unknown_declarations: List[Tuple[str, int]]
     constrained_fragments: List[str]

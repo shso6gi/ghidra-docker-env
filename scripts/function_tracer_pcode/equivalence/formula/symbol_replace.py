@@ -8,7 +8,9 @@ from ...model import Condition, Expression
 
 def build_symbol_replacer(
     params_info: List,
-    extra_vars_info: List
+    extra_vars_info: List,
+    *,
+    float_mode: str = "uf",
 ) -> Callable[[Any], str]:
     """パラメータ名 → SMT名の最終置換関数を構築する。
 
@@ -18,7 +20,7 @@ def build_symbol_replacer(
 
     def replacer(node: object) -> str:
         if isinstance(node, (Expression, Condition)):
-            return node.to_smt(symbol_name_mapping=mapping)
+            return node.to_smt(symbol_name_mapping=mapping, float_mode=float_mode)
         if isinstance(node, str):
             return _replace_symbol_text(node, mapping)
         return _replace_symbol_text(str(node), mapping)

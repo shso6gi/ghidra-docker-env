@@ -432,6 +432,7 @@ def build_condition_only_query(
         f"; Pairwise Query (Conditions Only): Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
@@ -450,6 +451,7 @@ def build_single_case_condition_query(
     lines = _build_query_header(
         f"; Single Case Reachability: {label}[{case.index}]",
         f"; {label}[{case.index}]: {case.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case, param_replace_fn, label))
@@ -470,6 +472,7 @@ def build_pair_query(
         f"; Pairwise Query: Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
@@ -536,6 +539,7 @@ def build_return_width_bridge_narrow_query(
         f"; Return Width Bridge Narrow Query: Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
@@ -605,8 +609,15 @@ def build_return_width_bridge_high_bit_query(
     if wide_bits <= narrow_bits:
         return None
 
-    extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
     wide_expr_bits = int(expression_smt_bit_width(wide_case.value_expr) or 0)
+    if _return_case_value_is_zero_extended_piece(
+        wide_case,
+        narrow_bits=narrow_bits,
+        wide_bits=wide_bits,
+    ):
+        extension_op = "zero_extend"
+    else:
+        extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
     if wide_expr_bits < wide_bits:
         has_object_extension = _return_case_has_object_extension_to_width(
             wide_case,
@@ -636,6 +647,7 @@ def build_return_width_bridge_high_bit_query(
         f"; Return Width Bridge High-Bit Query: Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
@@ -657,6 +669,37 @@ def build_return_width_bridge_high_bit_query(
         ]
     )
     return "\n".join(lines)
+
+
+def _return_case_value_is_zero_extended_piece(
+    return_case: ReturnCase,
+    *,
+    narrow_bits: int,
+    wide_bits: int,
+) -> bool:
+    expr = getattr(return_case, "value_expr", None)
+    if expr is None or getattr(expr, "expr_type", None) is None:
+        return False
+    if expr.expr_type != ExpressionType.BINARY_OP or getattr(expr, "operator", None) != "PIECE":
+        return False
+    operands = getattr(expr, "operands", None) or []
+    if len(operands) != 2:
+        return False
+    high_expr, low_expr = operands
+    if getattr(high_expr, "expr_type", None) != ExpressionType.CONSTANT:
+        return False
+    try:
+        high_value = int(getattr(high_expr, "value", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if high_value != 0:
+        return False
+    high_bits = int(expression_smt_bit_width(high_expr) or 0)
+    low_bits = int(expression_smt_bit_width(low_expr) or 0)
+    return (
+        high_bits == int(wide_bits) - int(narrow_bits)
+        and low_bits == int(narrow_bits)
+    )
 
 
 def _return_case_has_object_extension_to_width(
@@ -750,6 +793,7 @@ def build_normalized_inequality_query(
     lines = _build_query_header(
         f"; Normalized Inequality Query: Pair {pair_id}",
         "; Check if normalized values are equivalent under base constraints",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
     )
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
@@ -831,13 +875,13 @@ def save_unknown_query(debug_print, query: str, pair_id: str, stage: str, output
         debug_print(f"  Failed to save unknown query: {exc}")
 
 
-def _build_query_header(*comment_lines: str) -> List[str]:
+def _build_query_header(*comment_lines: str, logic: str = "QF_BV") -> List[str]:
     lines = []
     lines.append("; " + "=" * 60)
     lines.extend(comment_lines)
     lines.append("; " + "=" * 60)
     lines.append("")
-    lines.append("(set-logic QF_BV)")
+    lines.append(f"(set-logic {logic})")
     lines.append("")
     return lines
 

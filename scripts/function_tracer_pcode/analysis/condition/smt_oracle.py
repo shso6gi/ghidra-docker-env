@@ -9,11 +9,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from ...model import Condition
 from ...model.structural import condition_key, key_contains_placeholder
 from ...model.render_smt import (
+    collect_float_predicate_smt_declarations,
     collect_unknown_smt_declarations,
+    expression_uses_smt_float_theory,
     normalize_call_symbol_name,
     expression_contains_unsupported_smt_ops,
     expression_returns_bool,
     expression_smt_bit_width,
+    smt_logic_name,
 )
 
 
@@ -123,6 +126,8 @@ class ConditionSMTOracle:
         var_widths: Dict[str, int] = {}
         memory_widths = set()
         unknown_decls = set()
+        float_predicate_decls = set()
+        uses_float_theory = False
         call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
         symbol_names: Dict[Tuple[Any, ...], str] = {}
 
@@ -170,8 +175,13 @@ class ConditionSMTOracle:
 
             for decl in collect_unknown_smt_declarations(expr):
                 unknown_decls.add(decl)
+            uses_float_theory = uses_float_theory or expression_uses_smt_float_theory(expr)
+            for decl in collect_float_predicate_smt_declarations(expr, float_mode="fp"):
+                float_predicate_decls.add(decl)
 
-        lines: List[str] = ["(set-logic QF_AUFBV)"]
+        lines: List[str] = [
+            f"(set-logic {smt_logic_name(uses_float_theory=uses_float_theory, uses_arrays=True, uses_uf=bool(float_predicate_decls))})"
+        ]
         for name, bit_width in sorted(var_widths.items()):
             lines.append(f"(declare-const {name} (_ BitVec {bit_width}))")
         for mem_bits in sorted(memory_widths):
@@ -180,6 +190,7 @@ class ConditionSMTOracle:
             )
         for symbol_name, bit_width in sorted(unknown_decls):
             lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
+        lines.extend(sorted(float_predicate_decls))
         for call_name, (arg_sorts, ret_bits) in sorted(call_declarations.items()):
             args = " ".join(f"(_ BitVec {bits})" for bits in arg_sorts)
             lines.append(
@@ -390,7 +401,7 @@ class ConditionSMTOracle:
             expr,
             symbol_names,
         )
-        condition_smt = rewritten.to_smt()
+        condition_smt = rewritten.to_smt(float_mode="fp")
         if getattr(condition, "negated", False):
             return f"(not {condition_smt})"
         return condition_smt

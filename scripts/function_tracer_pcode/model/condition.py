@@ -33,11 +33,13 @@ class Condition:
         self,
         *,
         symbol_name_mapping: Optional[Mapping[str, str]] = None,
+        float_mode: str = "uf",
     ) -> str:
         from .render_smt import _coerce_expr_to_bool
 
         expr_smt = self.expression.to_smt(
             symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
         )
         expr_smt = _coerce_expr_to_bool(self.expression, expr_smt)
         if self.negated:

@@ -4,7 +4,12 @@ from typing import Optional
 
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
-from scripts.function_tracer_pcode.model.render_smt import expression_to_smt
+from scripts.function_tracer_pcode.model.render_smt import (
+    collect_float_predicate_smt_declarations,
+    expression_uses_smt_uf,
+    expression_to_smt,
+    smt_logic_name,
+)
 
 
 def _param(name: str, size: int = 4, data_type: Optional[str] = None) -> Expression:
@@ -33,6 +38,51 @@ def test_expression_to_smt_coerces_bool_vs_bitvector_equality_without_sort_error
     assert "((_ zero_extend 31) (bvslt" not in smt
     assert "(ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32))" in smt
     assert smt == "(= (ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32)) (_ bv0 32))"
+
+
+def test_float_predicate_smt_declarations_are_collected_for_ufbv_queries():
+    expr = _binary("FLOAT_LESS", _param("param_2", size=8), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr)
+    declarations = collect_float_predicate_smt_declarations(expr)
+
+    assert smt == "(float_less param_2 param_1)"
+    assert declarations == [
+        "(declare-fun float_less ((_ BitVec 64) (_ BitVec 64)) Bool)",
+    ]
+
+
+def test_float_predicate_can_render_with_ieee754_fp_theory():
+    expr = _binary("FLOAT_LESS", _param("param_2", size=8), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(fp.lt ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1))"
+    assert declarations == []
+
+
+def test_unsupported_float_width_keeps_uf_logic_visible():
+    expr = _binary("FLOAT_LESS", _param("param_2", size=10), _param("param_1", size=10))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_less param_2 param_1)"
+    assert declarations == [
+        "(declare-fun float_less ((_ BitVec 80) (_ BitVec 80)) Bool)",
+    ]
+    assert expression_uses_smt_uf(expr, float_mode="fp") is True
+    assert smt_logic_name(uses_uf=True) == "QF_UFBV"
+    assert smt_logic_name(uses_float_theory=True, uses_uf=True) == "QF_UFFPBV"
+
+
+def test_float_notequal_uses_ieee754_not_fp_eq_in_fp_mode():
+    expr = _binary("FLOAT_NOTEQUAL", _param("param_2", size=8), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt == "(not (fp.eq ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1)))"
 
 
 def test_expression_to_smt_coerces_bool_before_integer_twos_complement():

@@ -355,7 +355,7 @@ def _exprs_match(left: Expression, right: Expression) -> bool:
 
 def _exact_expr_key(expr: Expression) -> str:
     try:
-        return expr.to_smt()
+        return expr.to_smt(float_mode="fp")
     except Exception:
         structural_key = getattr(expr, "structural_key", None)
         if callable(structural_key):
@@ -365,7 +365,7 @@ def _exact_expr_key(expr: Expression) -> str:
 
 def _expr_signature(expr: Expression) -> object:
     try:
-        return expr.to_smt()
+        return expr.to_smt(float_mode="fp")
     except Exception:
         structural_key = getattr(expr, "structural_key", None)
         if callable(structural_key):
@@ -435,7 +435,7 @@ def _build_rewrite_proof_query(
         f"; Solver-proven rewrite proof: {label}",
         "; ============================================================",
         "",
-        "(set-logic QF_BV)",
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
         "",
     ]
     lines.extend(base_ctx["header_lines"])
@@ -512,15 +512,15 @@ def _render_expression_smt(
     use_sign_extension: bool,
 ) -> str:
     if param_replace_fn is None:
-        rendered = expr.to_smt()
+        rendered = expr.to_smt(float_mode="fp")
     else:
         try:
             rendered = param_replace_fn(expr)
         except TypeError:
-            rendered = param_replace_fn(expr.to_smt())
+            rendered = param_replace_fn(expr.to_smt(float_mode="fp"))
     if not isinstance(rendered, str):
         to_smt = getattr(rendered, "to_smt", None)
-        rendered = to_smt() if callable(to_smt) else str(rendered)
+        rendered = to_smt(float_mode="fp") if callable(to_smt) else str(rendered)
     return coerce_value_to_bitvec_width(
         expr,
         rendered,

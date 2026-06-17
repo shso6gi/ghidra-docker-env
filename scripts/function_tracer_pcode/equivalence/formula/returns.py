@@ -655,7 +655,10 @@ def build_return_definition(
         if raw_conditions:
             cond_parts = []
             for condition in raw_conditions:
-                cond_smt = condition.to_smt(symbol_name_mapping=symbol_name_mapping)
+                cond_smt = condition.to_smt(
+                    symbol_name_mapping=symbol_name_mapping,
+                    float_mode="fp",
+                )
                 cond_parts.append(cond_smt)
             cond_str = cond_parts[0] if len(cond_parts) == 1 else f"(and {' '.join(cond_parts)})"
         else:
@@ -676,7 +679,10 @@ def build_return_definition(
             if lowered_value is not None:
                 rendered_value = lowered_value
 
-        value_smt = rendered_value.to_smt(symbol_name_mapping=symbol_name_mapping)
+        value_smt = rendered_value.to_smt(
+            symbol_name_mapping=symbol_name_mapping,
+            float_mode="fp",
+        )
         surface_override = getattr(comparison_surface, "use_sign_extension", None)
         if surface_override is not None:
             use_sign_extension = bool(surface_override)

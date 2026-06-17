@@ -77,10 +77,12 @@ class MonolithicStrategy(CheckStrategy):
         replace1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
+            float_mode="fp",
         )
         replace2 = build_symbol_replacer(
             base_ctx["params2"],
             base_ctx.get("extra_vars2", []),
+            float_mode="fp",
         )
         return validate_counterexample_globally(
             self,
@@ -139,10 +141,12 @@ class MonolithicStrategy(CheckStrategy):
         replace1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
+            float_mode="fp",
         )
         replace2 = build_symbol_replacer(
             base_ctx["params2"],
             base_ctx.get("extra_vars2", []),
+            float_mode="fp",
         )
         reasons = self._collect_return_coverage_unsafety_reasons(
             base_ctx,

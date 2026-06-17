@@ -1879,6 +1879,54 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
     assert "_64_64_32" not in captured["value_smt"]
 
 
+def test_monolithic_counterexample_validation_replacer_uses_fp_mode(monkeypatch):
+    left_param = Expression.parameter("x", index=0, data_type="double", size=8)
+    right_param = Expression.parameter("x", index=0, data_type="double", size=8)
+    left_guard = Condition(Expression.binary_op("FLOAT_LESS", left_param, Expression.constant(0, size=8)))
+    right_guard = Condition(Expression.binary_op("FLOAT_LESS", right_param, Expression.constant(0, size=8)))
+    left_analysis = create_mock_analysis(
+        "left",
+        parameters=[{"name": "x", "size": 8, "index": 0, "data_type": "double"}],
+        returns=[ReturnInfo(address="0x1000", value=left_param, conditions=[left_guard], branch_index=0)],
+    )
+    right_analysis = create_mock_analysis(
+        "right",
+        parameters=[{"name": "x", "size": 8, "index": 0, "data_type": "double"}],
+        returns=[ReturnInfo(address="0x2000", value=right_param, conditions=[right_guard], branch_index=0)],
+    )
+    captured = {}
+
+    class _FormulaBuilder:
+        def build_base_context(self, _analysis1, _analysis2):
+            return {
+                "header_lines": [],
+                "params1": [ParameterInfo("x", "x_1", 64, 0)],
+                "params2": [ParameterInfo("x", "x_2", 64, 0)],
+                "extra_vars1": [],
+                "extra_vars2": [],
+                "runtime_unknown_declarations": [],
+                "return_size1": 64,
+                "return_size2": 64,
+                "smt_logic": "QF_FPBV",
+            }
+
+    def _capture_validate(_strategy, _base_ctx, cases1, _cases2, replace1, *_args):
+        captured["condition_smt"] = replace1(cases1[0].conditions[0])
+        return True
+
+    monkeypatch.setattr(monolithic_module, "validate_counterexample_globally", _capture_validate)
+
+    strategy = MonolithicStrategy(_FormulaBuilder(), solver_runner=Mock(), debug=False)
+
+    assert strategy._counterexample_is_decisive_across_case_split(
+        left_analysis,
+        right_analysis,
+        {"x_1": 0},
+    )
+    assert "fp.lt" in captured["condition_smt"]
+    assert "float_less" not in captured["condition_smt"]
+
+
 def test_tracer_promotes_unresolved_direct_call_to_deferred_call_runtime_object():
     class _FakeVarnode:
         def __init__(self, name):

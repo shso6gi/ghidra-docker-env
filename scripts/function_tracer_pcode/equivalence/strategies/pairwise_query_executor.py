@@ -850,7 +850,7 @@ def _build_single_case_model_validation_query(
     model_assertions: Sequence[str],
 ) -> str:
     lines: List[str] = [
-        "(set-logic QF_BV)",
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
         "",
     ]
     lines.extend(base_ctx["header_lines"])
@@ -912,7 +912,7 @@ def _build_same_side_case_equality_validation_query(
     )
 
     lines: List[str] = [
-        "(set-logic QF_BV)",
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
         "",
     ]
     lines.extend(base_ctx["header_lines"])
@@ -954,7 +954,7 @@ def _build_model_validation_query(
     )
 
     lines: List[str] = [
-        "(set-logic QF_BV)",
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
         "",
     ]
     lines.extend(base_ctx["header_lines"])

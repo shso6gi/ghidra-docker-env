@@ -8,6 +8,8 @@ from scripts.function_tracer_pcode.equivalence.formula.returns import (
     _order_return_defs_by_specificity,
     compare_readonly_summary_values_by_priority,
 )
+from scripts.function_tracer_pcode.smt import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.model import (
     Condition,
@@ -38,6 +40,56 @@ def _simple_analysis(func_name: str, param_name: str, size: int = 4) -> Function
                 value=Expression(ExpressionType.PARAMETER, name=param_name, size=size),
             )
         ],
+    )
+
+
+def _double_param(name: str, index: int) -> Expression:
+    return Expression.parameter(
+        name,
+        index=index,
+        data_type="double",
+        data_type_obj=resolve_mock_data_type("double"),
+        size=8,
+    )
+
+
+def _max_with_less_analysis() -> FunctionReturnAnalysis:
+    a = _double_param("a", 0)
+    b = _double_param("b", 1)
+    less = Expression.binary_op("FLOAT_LESS", b, a)
+    return FunctionReturnAnalysis(
+        function_name="max_less",
+        entry_point="0x00401000",
+        parameters=[
+            {"name": "a", "size": 8, "index": 0, "data_type": "double", "data_type_obj": resolve_mock_data_type("double")},
+            {"name": "b", "size": 8, "index": 1, "data_type": "double", "data_type_obj": resolve_mock_data_type("double")},
+        ],
+        returns=[
+            ReturnInfo(address="0x00401000", conditions=[Condition(less, False)], value=a),
+            ReturnInfo(address="0x00401004", conditions=[Condition(less, True)], value=b),
+        ],
+        return_type="double",
+        return_type_obj=resolve_mock_data_type("double"),
+    )
+
+
+def _max_with_lessequal_analysis() -> FunctionReturnAnalysis:
+    a = _double_param("a", 0)
+    b = _double_param("b", 1)
+    le = Expression.binary_op("FLOAT_LESSEQUAL", a, b)
+    return FunctionReturnAnalysis(
+        function_name="max_lessequal",
+        entry_point="0x00402000",
+        parameters=[
+            {"name": "a", "size": 8, "index": 0, "data_type": "double", "data_type_obj": resolve_mock_data_type("double")},
+            {"name": "b", "size": 8, "index": 1, "data_type": "double", "data_type_obj": resolve_mock_data_type("double")},
+        ],
+        returns=[
+            ReturnInfo(address="0x00402000", conditions=[Condition(le, False)], value=b),
+            ReturnInfo(address="0x00402004", conditions=[Condition(le, True)], value=a),
+        ],
+        return_type="double",
+        return_type_obj=resolve_mock_data_type("double"),
     )
 
 
@@ -77,6 +129,79 @@ def _readonly_loop_summary_expr() -> Expression:
         ),
         opcode=READONLY_SUM_OPCODE,
     )
+
+
+def test_formula_builder_does_not_hide_nan_only_float_difference():
+    result = FormulaBuilder().build_equivalence_formula_extended(
+        _max_with_less_analysis(),
+        _max_with_lessequal_analysis(),
+    )
+
+    assert "(set-logic QF_FPBV)" in result.formula
+    assert "fp.lt" in result.formula
+    assert "fp.leq" in result.formula
+    assert "fp.isNaN" not in result.formula
+
+    solver_result = Z3Solver(timeout=2).check_equivalence_direct(result.formula)
+
+    assert solver_result.status == SolverStatus.SAT
+
+
+def test_formula_builder_selects_uf_logic_for_intrinsic_declarations():
+    analysis1 = FunctionReturnAnalysis(
+        function_name="sum_left",
+        entry_point="0x00401000",
+        parameters=[
+            {"name": "base", "size": 8, "index": 0, "data_type": "int *"},
+            {"name": "count", "size": 4, "index": 1, "data_type": "int"},
+        ],
+        returns=[ReturnInfo(address="0x00401000", conditions=[], value=_readonly_loop_summary_expr())],
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="sum_right",
+        entry_point="0x00402000",
+        parameters=[
+            {"name": "base", "size": 8, "index": 0, "data_type": "int *"},
+            {"name": "count", "size": 4, "index": 1, "data_type": "int"},
+        ],
+        returns=[ReturnInfo(address="0x00402000", conditions=[], value=_readonly_loop_summary_expr())],
+    )
+
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2)
+
+    assert "(set-logic QF_AUFBV)" in result.formula
+    assert "(declare-fun" in result.formula
+    assert "READONLY_SUM" in result.formula
+
+
+def test_formula_builder_selects_uf_logic_for_unsupported_float_predicate_width():
+    x = Expression.parameter("x", index=0, data_type="long double", size=10)
+    y = Expression.parameter("y", index=1, data_type="long double", size=10)
+    guard = Condition(Expression.binary_op("FLOAT_LESS", x, y))
+    analysis1 = FunctionReturnAnalysis(
+        function_name="float80_left",
+        entry_point="0x00401000",
+        parameters=[
+            {"name": "x", "size": 10, "index": 0, "data_type": "long double"},
+            {"name": "y", "size": 10, "index": 1, "data_type": "long double"},
+        ],
+        returns=[ReturnInfo(address="0x00401000", conditions=[guard], value=Expression.constant(1, size=4))],
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="float80_right",
+        entry_point="0x00402000",
+        parameters=[
+            {"name": "x", "size": 10, "index": 0, "data_type": "long double"},
+            {"name": "y", "size": 10, "index": 1, "data_type": "long double"},
+        ],
+        returns=[ReturnInfo(address="0x00402000", conditions=[guard], value=Expression.constant(1, size=4))],
+    )
+
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2)
+
+    assert "(set-logic QF_UFBV)" in result.formula
+    assert "(declare-fun float_less ((_ BitVec 80) (_ BitVec 80)) Bool)" in result.formula
+    assert "fp.lt" not in result.formula
 
 
 def _readonly_return_ordering_expr(

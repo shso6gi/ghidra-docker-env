@@ -7,7 +7,13 @@ from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies import pairwise_models as pairwise_models_module
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.expression_safety import (
+    ConditionBinding,
+    ExpressionSafetyChecker,
+)
+from scripts.function_tracer_pcode.equivalence.normalize.guard_prover import prove_guard_condition
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
     COUNTED_LOOP_SUM_OPCODE,
@@ -328,6 +334,183 @@ def test_pairwise_intrinsic_auxiliary_query_refuses_unresolved_variable_symbol()
     )
 
     assert query is None
+
+
+def test_pairwise_auxiliary_query_uses_fp_logic_for_float_guards():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    a = Expression.parameter("a", index=0, data_type="double", size=8)
+    b = Expression.parameter("b", index=1, data_type="double", size=8)
+    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+
+    query = strategy._build_intrinsic_equivalence_query(
+        a,
+        a,
+        [condition],
+        [
+            {"name": "a", "index": 0, "size": 8, "data_type": "double", "identity": ("parameter_index", 0), "aux_name": "aux_param_0", "aux_index": 0},
+            {"name": "b", "index": 1, "size": 8, "data_type": "double", "identity": ("parameter_index", 1), "aux_name": "aux_param_1", "aux_index": 1},
+        ],
+    )
+
+    assert query is not None
+    assert "(set-logic QF_FPBV)" in query
+    assert "fp.lt" in query
+    assert "float_less" not in query
+    assert "fp.isNaN" not in query
+
+
+def test_return_case_smt_cache_is_scoped_by_renderer_float_mode():
+    a = Expression.parameter("a", index=0, data_type="double", size=8)
+    b = Expression.parameter("b", index=1, data_type="double", size=8)
+    comparison = Expression.binary_op("FLOAT_LESS", a, b)
+    condition = Condition(comparison, False)
+    case = ReturnCase(0, [condition], comparison, ReturnInfo("float_case", comparison))
+
+    uf_renderer = lambda node: node.to_smt()
+    fp_renderer = lambda node: node.to_smt(float_mode="fp")
+
+    uf_conditions = case.get_conditions_smt(uf_renderer)
+    fp_conditions = case.get_conditions_smt(fp_renderer)
+    uf_value = case.get_value_smt(uf_renderer)
+    fp_value = case.get_value_smt(fp_renderer)
+
+    assert "float_less" in uf_conditions[0]
+    assert "fp.lt" in fp_conditions[0]
+    assert "float_less" not in fp_conditions[0]
+    assert "float_less" in uf_value
+    assert "fp.lt" in fp_value
+    assert "float_less" not in fp_value
+
+
+def test_return_case_fallback_rendering_keeps_fp_mode_for_object_renderers():
+    a = Expression.parameter("a", index=0, data_type="double", size=8)
+    b = Expression.parameter("b", index=1, data_type="double", size=8)
+    comparison = Expression.binary_op("FLOAT_LESS", a, b)
+    condition = Condition(comparison, False)
+    case = ReturnCase(0, [condition], comparison, ReturnInfo("float_case", comparison))
+
+    def object_renderer(node):
+        return node
+
+    conditions = case.get_conditions_smt(object_renderer)
+    value = case.get_value_smt(object_renderer)
+
+    assert "fp.lt" in conditions[0]
+    assert "float_less" not in conditions[0]
+    assert "fp.lt" in value
+    assert "float_less" not in value
+
+
+def test_return_case_typeerror_fallback_uses_fp_mode_string_input():
+    a = Expression.parameter("a", index=0, data_type="double", size=8)
+    b = Expression.parameter("b", index=1, data_type="double", size=8)
+    comparison = Expression.binary_op("FLOAT_LESS", a, b)
+    condition = Condition(comparison, False)
+    case = ReturnCase(0, [condition], comparison, ReturnInfo("float_case", comparison))
+
+    def string_only_renderer(node):
+        if not isinstance(node, str):
+            raise TypeError("string input only")
+        return node
+
+    conditions = case.get_conditions_smt(string_only_renderer)
+    value = case.get_value_smt(string_only_renderer)
+
+    assert "fp.lt" in conditions[0]
+    assert "float_less" not in conditions[0]
+    assert "fp.lt" in value
+    assert "float_less" not in value
+
+
+def test_return_case_update_conditions_clears_condition_dependent_value_cache(monkeypatch):
+    value = Expression.parameter("post", index=0, size=4)
+    first_condition = Condition(Expression.binary_op("INT_EQUAL", _param("x", size=4), _const(0, size=4)))
+    second_condition = Condition(Expression.binary_op("INT_EQUAL", _param("x", size=4), _const(1, size=4)))
+    case = ReturnCase(
+        0,
+        [first_condition],
+        value,
+        ReturnInfo("post_case", value),
+        effect_summary=Mock(effects=[object()]),
+    )
+
+    def fake_lower(_value_expr, conditions, _effects, _parameters):
+        return Expression.constant(len(conditions), size=4)
+
+    monkeypatch.setattr(
+        pairwise_models_module,
+        "lower_post_state_expression_for_smt_if_needed",
+        fake_lower,
+    )
+
+    before = case.get_value_smt(lambda expr: expr.to_smt(float_mode="fp"))
+    case.update_conditions([first_condition, second_condition])
+    after = case.get_value_smt(lambda expr: expr.to_smt(float_mode="fp"))
+
+    assert before == "(_ bv1 32)"
+    assert after == "(_ bv2 32)"
+
+
+def test_expression_safety_reachability_query_uses_base_fp_logic():
+    captured = {}
+
+    class FakeRunner:
+        def run_sequential(self, query, timeout=None):
+            captured["query"] = query
+            return Mock(is_equivalent=False, results=[])
+
+    a = Expression.parameter("a", index=0, data_type="double", size=8)
+    b = Expression.parameter("b", index=1, data_type="double", size=8)
+    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+    checker = ExpressionSafetyChecker(
+        solver_runner=FakeRunner(),
+        debug_print=lambda *_args, **_kwargs: None,
+        per_query_timeout=1,
+        base_ctx={
+            "smt_logic": "QF_FPBV",
+            "header_lines": [
+                "(declare-const a (_ BitVec 64))",
+                "(declare-const b (_ BitVec 64))",
+            ],
+        },
+    )
+
+    assert checker._query_bindings_feasibility(
+        [ConditionBinding(condition, None)],
+        query_label="fp-guard",
+    ) is True
+
+    assert "(set-logic QF_FPBV)" in captured["query"]
+    assert "fp.lt" in captured["query"]
+    assert "float_less" not in captured["query"]
+
+
+def test_guard_prover_uses_base_fp_logic_for_float_guards():
+    captured = {}
+
+    class FakeRunner:
+        def run_sequential(self, query, timeout=None):
+            captured["query"] = query
+            return Mock(is_equivalent=True, results=[])
+
+    proven, error = prove_guard_condition(
+        {
+            "smt_logic": "QF_FPBV",
+            "header_lines": [
+                "(declare-const a (_ BitVec 64))",
+                "(declare-const b (_ BitVec 64))",
+            ],
+        },
+        [],
+        [],
+        "(fp.lt ((_ to_fp 11 53) a) ((_ to_fp 11 53) b))",
+        FakeRunner(),
+    )
+
+    assert proven is True
+    assert error == ""
+    assert "(set-logic QF_FPBV)" in captured["query"]
+    assert "fp.lt" in captured["query"]
 
 
 def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_signedness_differs():

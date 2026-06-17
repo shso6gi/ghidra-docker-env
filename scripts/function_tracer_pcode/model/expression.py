@@ -458,19 +458,26 @@ class Expression:
         self,
         *,
         symbol_name_mapping: Optional[Mapping[str, str]] = None,
+        float_mode: str = "uf",
     ) -> str:
         """SMT ソルバー用の式に変換"""
         return expression_to_smt(
             self,
             symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
         )
     
     def _to_smt_internal(
         self,
         *,
         symbol_name_mapping: Optional[Mapping[str, str]] = None,
+        float_mode: str = "uf",
     ) -> str:
-        return expression_to_smt(self, symbol_name_mapping=symbol_name_mapping)
+        return expression_to_smt(
+            self,
+            symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
+        )
 
     def _get_smt_operator(self, operator: Optional[str] = None) -> str:
         return get_smt_operator(operator)

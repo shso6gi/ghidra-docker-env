@@ -38,7 +38,7 @@ def prove_guard_condition(
     lines = []
     
     lines.append("; Guard condition proof")
-    lines.append("(set-logic QF_BV)")
+    lines.append(f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})")
     lines.append("")
     
     # 共通部分（param宣言・制約）

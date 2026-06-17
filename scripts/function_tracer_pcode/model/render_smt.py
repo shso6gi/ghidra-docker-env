@@ -3,7 +3,7 @@
 
 import hashlib
 import re
-from typing import Any, List, Mapping, Optional, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
     COUNTED_LOOP_SUM_OPCODE,
@@ -47,6 +47,22 @@ _SIGNED_COMPARISON_OPERATORS = {
     "INT_SLESSEQUAL",
 }
 
+_FLOAT_PREDICATE_SMT_NAMES = {
+    "FLOAT_EQUAL": "float_equal",
+    "FLOAT_NOTEQUAL": "float_notequal",
+    "FLOAT_LESS": "float_less",
+    "FLOAT_LESSEQUAL": "float_lessequal",
+}
+_FLOAT_PREDICATE_FP_OPS = {
+    "FLOAT_EQUAL": "fp.eq",
+    "FLOAT_LESS": "fp.lt",
+    "FLOAT_LESSEQUAL": "fp.leq",
+}
+_FLOAT_BV_WIDTH_TO_SORT = {
+    32: (8, 24),
+    64: (11, 53),
+}
+
 _MEMORY_ARRAY_WIDTHS = {8, 16, 32, 64}
 _SMT_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ARITHMETIC_BINARY_OPERATORS = {
@@ -81,9 +97,14 @@ def expression_to_smt(
     expr,
     *,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
 ) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
-    return _to_smt_internal(expr, symbol_name_mapping=symbol_name_mapping)
+    return _to_smt_internal(
+        expr,
+        symbol_name_mapping=symbol_name_mapping,
+        float_mode=float_mode,
+    )
 
 
 def expression_returns_bool(expr) -> bool:
@@ -314,6 +335,87 @@ def collect_intrinsic_smt_declarations(expr) -> List[str]:
     return declarations
 
 
+def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") -> List[str]:
+    """Collect declarations for P-code FLOAT_* predicates lowered as UFBV predicates."""
+    declarations: List[str] = []
+    seen = set()
+    for node in _iter_expression_nodes(expr):
+        if node is None or getattr(node, "expr_type", None) is None:
+            continue
+        expr_kind = node.expr_type.__class__
+        if node.expr_type != expr_kind.BINARY_OP:
+            continue
+        smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
+        if smt_name is None:
+            continue
+        operands = getattr(node, "operands", None) or []
+        if len(operands) != 2:
+            continue
+        left_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+        right_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+        if float_mode == "fp" and _float_predicate_can_use_fp_theory(node, left_bits, right_bits):
+            continue
+        decl = f"(declare-fun {smt_name} ((_ BitVec {left_bits}) (_ BitVec {right_bits})) Bool)"
+        if decl in seen:
+            continue
+        seen.add(decl)
+        declarations.append(decl)
+    return declarations
+
+
+def expression_uses_smt_float_theory(expr) -> bool:
+    """Return True when expr contains FLOAT_* predicates renderable with SMT FP theory."""
+    for node in _iter_expression_nodes(expr):
+        if node is None or getattr(node, "expr_type", None) is None:
+            continue
+        expr_kind = node.expr_type.__class__
+        if node.expr_type != expr_kind.BINARY_OP:
+            continue
+        operands = getattr(node, "operands", None) or []
+        if len(operands) != 2:
+            continue
+        if _float_predicate_can_use_fp_theory(
+            node,
+            expression_smt_bit_width(operands[0]),
+            expression_smt_bit_width(operands[1]),
+        ):
+            return True
+    return False
+
+
+def expressions_use_smt_float_theory(expressions: Iterable[Any]) -> bool:
+    return any(expression_uses_smt_float_theory(expr) for expr in expressions if expr is not None)
+
+
+def expression_uses_smt_uf(expr, *, float_mode: str = "fp") -> bool:
+    """Return True when expr needs uninterpreted SMT functions."""
+    if expr is None:
+        return False
+    return bool(
+        collect_intrinsic_smt_declarations(expr)
+        or collect_float_predicate_smt_declarations(expr, float_mode=float_mode)
+    )
+
+
+def smt_logic_name(
+    *,
+    uses_float_theory: bool = False,
+    uses_arrays: bool = False,
+    uses_uf: bool = False,
+) -> str:
+    if uses_float_theory and uses_arrays:
+        return "QF_AUFBVFP"
+    if uses_float_theory and uses_uf:
+        return "QF_UFFPBV"
+    if uses_float_theory:
+        return "QF_FPBV"
+    if uses_arrays:
+        return "QF_AUFBV"
+    if uses_uf:
+        return "QF_UFBV"
+    return "QF_BV"
+
+
 def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     """Bool sort の式を 0/1 の bitvector へ変換する。"""
     if bits <= 0 or not expression_returns_bool(expr):
@@ -353,6 +455,36 @@ def _coerce_smt_bitvec_width(
         op = "sign_extend" if prefer_sign_extension else "zero_extend"
         return f"((_ {op} {target_bits - source_bits}) {expr_smt})"
     return f"((_ extract {target_bits - 1} 0) {expr_smt})"
+
+
+def _float_predicate_can_use_fp_theory(expr, left_bits: int, right_bits: int) -> bool:
+    if getattr(expr, "operator", None) not in _FLOAT_PREDICATE_SMT_NAMES:
+        return False
+    left_bits = int(left_bits or 0)
+    right_bits = int(right_bits or 0)
+    return left_bits == right_bits and left_bits in _FLOAT_BV_WIDTH_TO_SORT
+
+
+def _bitvec_to_fp_smt(expr_smt: str, bits: int) -> str:
+    ebits, sbits = _FLOAT_BV_WIDTH_TO_SORT[int(bits)]
+    return f"((_ to_fp {ebits} {sbits}) {expr_smt})"
+
+
+def _float_predicate_to_smt(
+    operator: str,
+    left_smt: str,
+    right_smt: str,
+    bits: int,
+) -> str:
+    left_fp = _bitvec_to_fp_smt(left_smt, bits)
+    right_fp = _bitvec_to_fp_smt(right_smt, bits)
+    if operator == "FLOAT_NOTEQUAL":
+        return f"(not (fp.eq {left_fp} {right_fp}))"
+    fp_op = _FLOAT_PREDICATE_FP_OPS.get(operator)
+    if fp_op is None:
+        smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(operator, operator.lower())
+        return f"({smt_name} {left_smt} {right_smt})"
+    return f"({fp_op} {left_fp} {right_fp})"
 
 
 def _rewrite_ambiguous_negative_constant(expr, expr_smt: str, target_bits: int, prefer_sign_extension: bool) -> str:
@@ -930,6 +1062,7 @@ def _to_smt_internal(
     prefer_signed_arithmetic: bool = False,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     address_context: bool = False,
+    float_mode: str = "uf",
 ) -> str:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
@@ -967,6 +1100,7 @@ def _to_smt_internal(
             prefer_signed_arithmetic=prefer_signed_arithmetic,
             symbol_name_mapping=symbol_name_mapping,
             address_context=address_context,
+            float_mode=float_mode,
         )
 
     if expr_type == expr_kind.BINARY_OP:
@@ -978,8 +1112,8 @@ def _to_smt_internal(
             right_bits = expression_smt_bit_width(right)
             concat_smt = (
                 f"(concat "
-                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context)} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)})"
+                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)} "
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)})"
             )
             return _coerce_smt_bitvec_width(
                 concat_smt,
@@ -993,6 +1127,7 @@ def _to_smt_internal(
                 prefer_signed_arithmetic,
                 symbol_name_mapping,
                 address_context,
+                float_mode,
             )
             right_kind = right.expr_type.__class__
             if right.expr_type == right_kind.CONSTANT:
@@ -1003,13 +1138,20 @@ def _to_smt_internal(
                 return f"((_ extract {high_bit} {low_bit}) {source_smt})"
             return (
                 f"(subpiece {source_smt} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)})"
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)})"
             )
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)
-        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context)
-        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)
+        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)
+        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)
+
+        if (
+            float_mode == "fp"
+            and expr.operator in _FLOAT_PREDICATE_SMT_NAMES
+            and _float_predicate_can_use_fp_theory(expr, left_bits, right_bits)
+        ):
+            return _float_predicate_to_smt(expr.operator, left_smt, right_smt, left_bits)
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
@@ -1076,8 +1218,8 @@ def _to_smt_internal(
             prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
             left_is_bool = expression_returns_bool(left)
             right_is_bool = expression_returns_bool(right)
-            left_smt = _to_smt_internal(left, False, symbol_name_mapping, address_context)
-            right_smt = _to_smt_internal(right, False, symbol_name_mapping, address_context)
+            left_smt = _to_smt_internal(left, False, symbol_name_mapping, address_context, float_mode)
+            right_smt = _to_smt_internal(right, False, symbol_name_mapping, address_context, float_mode)
 
             # Bool sort を含む比較は、そのまま zero/sign-extend すると
             # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
@@ -1131,6 +1273,7 @@ def _to_smt_internal(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         operand_bits = expression_smt_bit_width(operand)
 
@@ -1179,6 +1322,7 @@ def _to_smt_internal(
                 prefer_signed_arithmetic,
                 symbol_name_mapping,
                 address_context,
+                float_mode,
             )
             for operand in expr.operands
         )
@@ -1205,6 +1349,7 @@ def _to_smt_internal(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             True,
+            float_mode,
         )
         addr_smt = _coerce_expr_to_bitvec_width(
             addr_expr,
@@ -1230,6 +1375,7 @@ def _to_smt_internal(
                     prefer_sign_extension,
                     symbol_name_mapping,
                     address_context,
+                    float_mode,
                 )
             else:
                 branch_smt = str(branch_expr)
@@ -1255,9 +1401,10 @@ def _to_smt_internal(
                     prefer_sign_extension,
                     symbol_name_mapping,
                     address_context,
+                    float_mode,
                 )
             elif cond is not None and hasattr(cond, "to_smt"):
-                cond_str = cond.to_smt(symbol_name_mapping=symbol_name_mapping)
+                cond_str = cond.to_smt(symbol_name_mapping=symbol_name_mapping, float_mode=float_mode)
             else:
                 cond_str = "true"
 
@@ -1289,6 +1436,7 @@ def _lower_intrinsic_to_smt(
     prefer_signed_arithmetic: bool,
     symbol_name_mapping: Optional[Mapping[str, str]],
     address_context: bool,
+    float_mode: str = "uf",
 ) -> str:
     opcode = getattr(expr, "opcode", None)
     mnemonic = getattr(expr, "name", None) or ""
@@ -1304,18 +1452,21 @@ def _lower_intrinsic_to_smt(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             True,
+            float_mode,
         )
         index_smt = _to_smt_internal(
             index,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         elem_smt = _to_smt_internal(
             element_size,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         target_bits = max(
             result_bits,
@@ -1338,12 +1489,14 @@ def _lower_intrinsic_to_smt(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             True,
+            float_mode,
         )
         offset_smt = _to_smt_internal(
             offset,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         target_bits = max(
             result_bits,
@@ -1366,12 +1519,14 @@ def _lower_intrinsic_to_smt(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             True,
+            float_mode,
         )
         count_smt = _to_smt_internal(
             count,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
         count_smt = _coerce_expr_to_bitvec_width(
@@ -1394,18 +1549,21 @@ def _lower_intrinsic_to_smt(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         start_smt = _to_smt_internal(
             start,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         limit_smt = _to_smt_internal(
             limit,
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
         start_smt = _coerce_expr_to_bitvec_width(
@@ -1444,6 +1602,7 @@ def _lower_intrinsic_to_smt(
             prefer_signed_arithmetic,
             symbol_name_mapping,
             address_context,
+            float_mode,
         )
         state_smt = _coerce_expr_to_bitvec_width(
             state,

@@ -13,9 +13,13 @@ from ...model import (
     loop_summary_method_b_key,
 )
 from ...model.render_smt import (
+    collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
+    expression_uses_smt_uf,
+    expression_uses_smt_float_theory,
     expression_smt_bit_width,
+    smt_logic_name,
 )
 from .params import (
     build_fragment_backed_parameter_constraint,
@@ -369,7 +373,7 @@ class FormulaBuilder:
         lines.append(f"; Function 2: {analysis2.function_name}")
         lines.append("; " + "=" * 60)
         lines.append("")
-        lines.append("(set-logic QF_BV)")
+        lines.append(f"(set-logic {context.smt_logic})")
         lines.append("")
         lines.extend(context.header_lines)
         
@@ -476,6 +480,11 @@ class FormulaBuilder:
             func1_suffix,
             func2_suffix,
         )
+        smt_logic = self._select_smt_logic(analysis1, analysis2)
+        smt_logic = self._upgrade_smt_logic_for_header_declarations(
+            smt_logic,
+            header_lines,
+        )
 
         return FormulaBuildContext(
             params1=params1,
@@ -487,6 +496,7 @@ class FormulaBuilder:
             param_pairs=param_pairs,
             return_size1=return_size1,
             return_size2=return_size2,
+            smt_logic=smt_logic,
             header_lines=header_lines,
             runtime_unknown_declarations=runtime_unknown_declarations,
             constrained_fragments=constrained_fragments,
@@ -505,6 +515,49 @@ class FormulaBuilder:
         normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
         normalized1, normalized2 = align_return_value_extension_surfaces(normalized1, normalized2)
         return normalized1, normalized2, hints1, hints2
+
+    def _select_smt_logic(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> str:
+        analyses = [analysis for analysis in analyses if analysis is not None]
+        uses_arrays = any(collect_memory_bit_widths_from_analysis(analysis) for analysis in analyses)
+        uses_float_theory = False
+        uses_uf = False
+        for analysis in analyses:
+            for expr, guards in self._iter_analysis_expressions_with_guards(analysis):
+                if expression_uses_smt_float_theory(expr):
+                    uses_float_theory = True
+                if expression_uses_smt_uf(expr, float_mode="fp"):
+                    uses_uf = True
+                for guard in guards or ():
+                    guard_expr = getattr(guard, "expression", guard)
+                    if expression_uses_smt_float_theory(guard_expr):
+                        uses_float_theory = True
+                    if expression_uses_smt_uf(guard_expr, float_mode="fp"):
+                        uses_uf = True
+                if uses_float_theory and uses_uf:
+                    break
+            if uses_float_theory and uses_uf:
+                break
+        return smt_logic_name(
+            uses_float_theory=uses_float_theory,
+            uses_arrays=uses_arrays,
+            uses_uf=uses_uf,
+        )
+
+    def _upgrade_smt_logic_for_header_declarations(
+        self,
+        smt_logic: str,
+        header_lines: List[str],
+    ) -> str:
+        if not any(str(line).lstrip().startswith("(declare-fun ") for line in header_lines or []):
+            return smt_logic
+        if smt_logic == "QF_BV":
+            return "QF_UFBV"
+        if smt_logic == "QF_FPBV":
+            return "QF_UFFPBV"
+        return smt_logic
 
     def _build_base_header_lines(
         self,
@@ -569,6 +622,12 @@ class FormulaBuilder:
         )
         if intrinsic_decls:
             lines.extend(self._build_intrinsic_smt_declarations(intrinsic_decls))
+
+        float_predicate_decls = self._collect_float_predicate_smt_declarations(
+            *declaration_analyses,
+        )
+        if float_predicate_decls:
+            lines.extend(self._build_float_predicate_smt_declarations(float_predicate_decls))
 
         loop_summary_notes = self._collect_loop_summary_smt_notes(
             *declaration_analyses,
@@ -833,6 +892,19 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
+    def _build_float_predicate_smt_declarations(
+        self,
+        declarations: List[str],
+    ) -> List[str]:
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Floating-point predicate declarations")
+        lines.append("; Unsupported FLOAT_* widths fall back to uninterpreted Bool predicates.")
+        lines.append("; " + "-" * 40)
+        lines.extend(declarations)
+        lines.append("")
+        return lines
+
     def _build_loop_summary_smt_notes(
         self,
         notes: List[str],
@@ -949,9 +1021,9 @@ class FormulaBuilder:
         result_size = max(1, (result_bits + 7) // 8)
         count_bits = max(1, int(expression_smt_bit_width(count_expr) or 0))
         base_bits = max(1, int(expression_smt_bit_width(base_expr) or 0))
-        function_application = expr.to_smt(symbol_name_mapping=symbol_name_mapping)
-        count_smt = count_expr.to_smt(symbol_name_mapping=symbol_name_mapping)
-        base_smt = base_expr.to_smt(symbol_name_mapping=symbol_name_mapping)
+        function_application = expr.to_smt(symbol_name_mapping=symbol_name_mapping, float_mode="fp")
+        count_smt = count_expr.to_smt(symbol_name_mapping=symbol_name_mapping, float_mode="fp")
+        base_smt = base_expr.to_smt(symbol_name_mapping=symbol_name_mapping, float_mode="fp")
         base_addr_smt = self._coerce_smt_bitvec_width(base_smt, base_bits, 64)
         proof_guards = tuple(getattr(proof, "guard_constraints", ()) or ())
         loop_summary = getattr(reduction_ref, "loop_summary", None)
@@ -1027,7 +1099,7 @@ class FormulaBuilder:
         to_smt = getattr(guard, "to_smt", None)
         if callable(to_smt):
             try:
-                return str(to_smt(symbol_name_mapping=symbol_name_mapping))
+                return str(to_smt(symbol_name_mapping=symbol_name_mapping, float_mode="fp"))
             except (AttributeError, TypeError, ValueError):
                 return None
         expression = getattr(guard, "expression", None)
@@ -1371,6 +1443,45 @@ class FormulaBuilder:
                 for effect in getattr(effect_summary, "effects", []) or []:
                     extend_from_expression(getattr(effect, "value", None))
                     extend_from_conditions(getattr(effect, "conditions", None))
+
+        return declarations
+
+    def _collect_float_predicate_smt_declarations(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[str]:
+        declarations: List[str] = []
+        seen = set()
+
+        def extend_from_expression(expr) -> None:
+            for decl in collect_float_predicate_smt_declarations(expr, float_mode="fp"):
+                if decl in seen:
+                    continue
+                seen.add(decl)
+                declarations.append(decl)
+
+        def extend_from_conditions(conditions) -> None:
+            for condition in conditions or []:
+                extend_from_expression(getattr(condition, "expression", None))
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for ret in getattr(analysis, "returns", []) or []:
+                extend_from_expression(getattr(ret, "value", None))
+                extend_from_conditions(getattr(ret, "conditions", None))
+
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                extend_from_expression(getattr(effect_summary, "synthetic_expr", None))
+                for effect in getattr(effect_summary, "effects", []) or []:
+                    extend_from_expression(getattr(effect, "value", None))
+                    extend_from_conditions(getattr(effect, "conditions", None))
+
+            for deferred in (getattr(analysis, "deferred_calls", None) or {}).values():
+                extend_from_expression(getattr(deferred, "call_target_expr", None))
+                for arg in getattr(deferred, "arguments", []) or []:
+                    extend_from_expression(arg)
 
         return declarations
 
@@ -1818,10 +1929,11 @@ class FormulaBuilder:
                 'params2': List[ParameterInfo],
                 'extra_vars1': List[ExtraVariableInfo],
                 'extra_vars2': List[ExtraVariableInfo],
-                'constrained_fragments': List[str],
-                'return_size1': int,
-                'return_size2': int,
-            }
+            'constrained_fragments': List[str],
+            'return_size1': int,
+            'return_size2': int,
+            'smt_logic': str,
+        }
         """
         analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
         context = self._prepare_formula_context(
@@ -1838,4 +1950,5 @@ class FormulaBuilder:
             'constrained_fragments': context.constrained_fragments,
             'return_size1': context.return_size1,
             'return_size2': context.return_size2,
+            'smt_logic': context.smt_logic,
         }

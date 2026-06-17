@@ -43,7 +43,7 @@ class ReturnCase:
         self.effect_summary = effect_summary
         self.comparison_surface = comparison_surface
         self.program_is_big_endian = program_is_big_endian
-        self.conditions_smt: Optional[List[str]] = None
+        self._conditions_smt_cache: Dict[tuple, List[str]] = {}
         self._value_smt_cache: Dict[tuple, str] = {}
 
     def update_conditions(
@@ -54,7 +54,8 @@ class ReturnCase:
     ) -> None:
         self.conditions = list(conditions or [])
         self.summary_conditions = list(summary_conditions or self.conditions)
-        self.conditions_smt = None
+        self._conditions_smt_cache.clear()
+        self._value_smt_cache.clear()
 
     @staticmethod
     def _coerce_rendered_smt(rendered) -> str:
@@ -62,22 +63,37 @@ class ReturnCase:
             return rendered
         to_smt = getattr(rendered, "to_smt", None)
         if callable(to_smt):
-            return to_smt()
+            return to_smt(float_mode="fp")
         return str(rendered)
 
+    @staticmethod
+    def _renderer_cache_key(param_replace_fn) -> tuple:
+        if param_replace_fn is None:
+            return ("default", None)
+        try:
+            hash(param_replace_fn)
+        except TypeError:
+            return ("renderer_repr", repr(param_replace_fn))
+        return ("renderer", param_replace_fn)
+
     def get_conditions_smt(self, param_replace_fn) -> List[str]:
-        if self.conditions_smt is None:
-            self.conditions_smt = []
-            for cond in self.conditions:
-                if param_replace_fn is None:
-                    cond_str = cond.to_smt()
-                else:
-                    try:
-                        cond_str = param_replace_fn(cond)
-                    except TypeError:
-                        cond_str = param_replace_fn(cond.to_smt())
-                self.conditions_smt.append(self._coerce_rendered_smt(cond_str))
-        return self.conditions_smt
+        cache_key = self._renderer_cache_key(param_replace_fn)
+        cached = self._conditions_smt_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        rendered_conditions: List[str] = []
+        for cond in self.conditions:
+            if param_replace_fn is None:
+                cond_str = cond.to_smt(float_mode="fp")
+            else:
+                try:
+                    cond_str = param_replace_fn(cond)
+                except TypeError:
+                    cond_str = param_replace_fn(cond.to_smt(float_mode="fp"))
+            rendered_conditions.append(self._coerce_rendered_smt(cond_str))
+        self._conditions_smt_cache[cache_key] = rendered_conditions
+        return rendered_conditions
 
     def get_value_smt(
         self,
@@ -87,7 +103,11 @@ class ReturnCase:
     ) -> str:
         if use_sign_extension is None:
             use_sign_extension = self.should_sign_extend_value()
-        cache_key = (target_bits, bool(use_sign_extension))
+        cache_key = (
+            self._renderer_cache_key(param_replace_fn),
+            target_bits,
+            bool(use_sign_extension),
+        )
         result = self._value_smt_cache.get(cache_key)
         if result is not None:
             return result
@@ -107,12 +127,12 @@ class ReturnCase:
                 rendered_expr = lowered_expr
 
         if param_replace_fn is None:
-            result = rendered_expr.to_smt()
+            result = rendered_expr.to_smt(float_mode="fp")
         else:
             try:
                 result = param_replace_fn(rendered_expr)
             except TypeError:
-                result = param_replace_fn(rendered_expr.to_smt())
+                result = param_replace_fn(rendered_expr.to_smt(float_mode="fp"))
             result = self._coerce_rendered_smt(result)
         if target_bits is not None:
             result = coerce_value_to_bitvec_width(
