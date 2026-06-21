@@ -93,6 +93,14 @@ def run_equivalence_check(args):
         )
         if getattr(args, "assume_fp_non_nan", False):
             print("  FP non-NaN scope: 32bit/64bit float args only")
+        print(
+            "  errno observation: "
+            f"{'enabled' if getattr(args, 'observe_errno', False) else 'disabled'}"
+        )
+        print(
+            "  fenv observation: "
+            f"{'enabled' if getattr(args, 'observe_fenv', False) else 'disabled'}"
+        )
         print()
 
     start_headless_pyghidra(
@@ -131,6 +139,8 @@ def run_equivalence_check(args):
         enable_template_abstraction=enable_template_abstraction,
         enable_completed_recovery_proofs=not getattr(args, "no_completed_recovery_proofs", False),
         assume_fp_non_nan=getattr(args, "assume_fp_non_nan", False),
+        observes_errno=getattr(args, "observe_errno", False),
+        observes_fenv=getattr(args, "observe_fenv", False),
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

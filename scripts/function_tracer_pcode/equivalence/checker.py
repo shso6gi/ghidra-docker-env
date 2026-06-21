@@ -76,6 +76,8 @@ class EquivalenceChecker:
         enable_template_abstraction: bool = False,
         enable_completed_recovery_proofs: bool = True,
         assume_fp_non_nan: bool = False,
+        observes_errno: bool = False,
+        observes_fenv: bool = False,
     ):
         """
         Args:
@@ -97,6 +99,8 @@ class EquivalenceChecker:
         self.enable_template_abstraction = enable_template_abstraction
         self.enable_completed_recovery_proofs = enable_completed_recovery_proofs
         self.assume_fp_non_nan = assume_fp_non_nan
+        self.observes_errno = observes_errno
+        self.observes_fenv = observes_fenv
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
             enable_fact_normalization,
@@ -834,6 +838,9 @@ class EquivalenceChecker:
         abstraction = abstract_recursive_calls(
             analysis1,
             analysis2,
+            assume_fp_non_nan=self.assume_fp_non_nan,
+            observes_errno=self.observes_errno,
+            observes_fenv=self.observes_fenv,
             debug=self.debug,
         )
         if not abstraction.applied:
@@ -841,8 +848,8 @@ class EquivalenceChecker:
             return None
 
         self._debug_print(
-            "Recursive abstraction fallback: matched "
-            f"{len(abstraction.matches)} deferred recursive call(s)"
+            "Deferred call abstraction fallback: matched "
+            f"{len(abstraction.matches)} deferred call(s)"
         )
         return self.check(
             abstraction.analysis1,

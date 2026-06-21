@@ -183,6 +183,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--observe-errno",
+        action="store_true",
+        help="errno の変更を観測対象に含める（pure libm call abstraction は無効化されます）",
+    )
+    parser.add_argument(
+        "--observe-fenv",
+        action="store_true",
+        help="floating-point environment の変更を観測対象に含める（pure libm call abstraction は無効化されます）",
+    )
+    parser.add_argument(
         "--no-rewrite",
         action="store_true",
         help="式のリライトを無効にする（デフォルト: 有効）",

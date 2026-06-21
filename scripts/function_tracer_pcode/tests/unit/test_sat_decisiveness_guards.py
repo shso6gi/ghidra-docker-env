@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
 from copy import deepcopy
+from typing import Tuple
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.effect_summary import (
@@ -16,6 +18,7 @@ from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBui
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.base import ReturnCoverageCheckResult
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import (
     QueryResult,
     ReturnCase,
@@ -257,6 +260,7 @@ def _analysis_with_unknown_indirect_call_effect(
     target_param_index: int = 0,
     argument_indices=(1, 2),
     target_expr_missing: bool = False,
+    reason: str = "target_identity_unavailable",
 ) -> FunctionReturnAnalysis:
     parameters = [
         _param("fp", index=0, size=8),
@@ -298,7 +302,7 @@ def _analysis_with_unknown_indirect_call_effect(
         target_ref=None,
         target_expr=target_expr,
         arguments=arguments,
-        reason="target_identity_unavailable",
+        reason=reason,
         order_key=9,
     )
     return FunctionReturnAnalysis(
@@ -316,6 +320,45 @@ def _analysis_with_unknown_indirect_call_effect(
             unsupported_call_sites=(site,),
         ),
     )
+
+
+def _analysis_with_known_unsupported_call_effect(
+    *,
+    function_name: str,
+    binary_id: str,
+    entry: int,
+    argument_indices=(1, 2),
+    target_expr_missing: bool = False,
+    reason: str = "callee_unsupported_call_may_expose_parameter_memory",
+) -> FunctionReturnAnalysis:
+    analysis = _analysis_with_unknown_indirect_call_effect(
+        function_name=function_name,
+        binary_id=binary_id,
+        entry=entry,
+        argument_indices=argument_indices,
+        target_expr_missing=target_expr_missing,
+        reason=reason,
+    )
+    if not analysis.effect_summary.unsupported_call_sites:
+        return analysis
+
+    target_ref = CallTargetRef.from_code_address(
+        entry + 0x20,
+        program_id=entry,
+        display_hint="known_callee",
+    )
+    site = analysis.effect_summary.unsupported_call_sites[0]
+    analysis.effect_summary.unsupported_call_sites = (
+        UnsupportedCallEffectRef(
+            pcode_op_ref=site.pcode_op_ref,
+            target_ref=target_ref,
+            target_expr=site.target_expr,
+            arguments=site.arguments,
+            reason=site.reason,
+            order_key=site.order_key,
+        ),
+    )
+    return analysis
 
 
 def _analysis_with_deferred_call_argument_blocker(
@@ -500,6 +543,87 @@ def _analysis_with_effect_call_argument_evidence() -> FunctionReturnAnalysis:
     )
 
 
+def _analysis_with_two_effect_call_argument_evidences() -> Tuple[
+    FunctionReturnAnalysis,
+    PcodeOpRef,
+    PcodeOpRef,
+]:
+    target_ref = CallTargetRef.from_name("callee", program_id=1, entry_offset=0x2000)
+    incomplete_pcode_ref = PcodeOpRef(
+        address_offset=0x1020,
+        seq_time=5,
+        seq_order=1,
+        block_index=0,
+        mnemonic="CALL",
+        input_sizes=(8, 4),
+        binary_id="B1",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1020,
+        opcode=7,
+        local_op_ordinal=2,
+    )
+    complete_pcode_ref = PcodeOpRef(
+        address_offset=0x1030,
+        seq_time=7,
+        seq_order=2,
+        block_index=0,
+        mnemonic="CALL",
+        input_sizes=(8, 4),
+        binary_id="B1",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1030,
+        opcode=7,
+        local_op_ordinal=3,
+    )
+    incomplete_evidence = CallArgumentEvidence(
+        pcode_op_ref=incomplete_pcode_ref,
+        target_ref=target_ref,
+        callee_param_identities=(
+            ("parameter", 0),
+        ),
+        arguments=(Expression.parameter("x", 0, size=4),),
+        sources=("reaching_def",),
+        path_conditions=((),),
+        coverage_complete=False,
+    )
+    complete_evidence = CallArgumentEvidence(
+        pcode_op_ref=complete_pcode_ref,
+        target_ref=target_ref,
+        callee_param_identities=(
+            ("parameter", 0),
+        ),
+        arguments=(Expression.parameter("x", 0, size=4),),
+        sources=("reaching_def",),
+        path_conditions=((),),
+        coverage_complete=True,
+    )
+    return (
+        FunctionReturnAnalysis(
+            function_name="func1",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                call_argument_evidence={
+                    incomplete_pcode_ref.stable_key(): incomplete_evidence,
+                    complete_pcode_ref.stable_key(): complete_evidence,
+                },
+            ),
+            binary_id="B1",
+        ),
+        incomplete_pcode_ref,
+        complete_pcode_ref,
+    )
+
+
 def _analysis_with_effect_call_target_resolution_evidence() -> FunctionReturnAnalysis:
     pcode_ref = PcodeOpRef(
         address_offset=0x1030,
@@ -677,6 +801,14 @@ def _call_effect_summary_proof_content(object_target_key):
                 else None
             ),
         },
+        "compatibility_policy": (
+            PairwiseStrategy._unsupported_call_effect_compatibility_policy_evidence(
+                object_target_key,
+                peer_object_target_key,
+            )
+            if kind == "unsupported_call_effect"
+            else None
+        ),
     }
 
 
@@ -740,16 +872,39 @@ def _expected_call_effect_summary_proof_id(evidence):
     )
 
 
-def _return_coverage_completion_evidence(action, **overrides):
+def _return_coverage_completion_evidence(
+    action,
+    reason_id: UnknownReasonId = UnknownReasonId.RETURN_COVERAGE_GAP,
+    **overrides,
+):
     evidence = {
         "object_derived": True,
         "status": "complete",
-        "reason_id": UnknownReasonId.RETURN_COVERAGE_GAP.value,
+        "reason_id": reason_id.value,
         "recovery_proof_kind": UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
         "proof_stage": action.proof_stage,
         "evidence_kind": action.evidence_kind,
         "object_target_key": action.object_target_key,
         "proof_obligation_id": action.proof_obligation_id,
+        "proof_content": {
+            "case_guard_disjunction": {
+                "status": "complete",
+                "query_cases": ("(true)",),
+                "case_count": 1,
+            },
+            "normalized_guard_formula": {
+                "status": "complete",
+                "query": "(or true)",
+            },
+            "coverage_guard_evidence": {
+                "status": "complete",
+                "guard_source": "return_partition_guard_set",
+                "coverage_status": "covered",
+                "coverage_proof_method": "test_fixture",
+                "case_count": 1,
+                "normalized_guard_formula_sha256": hashlib.sha256(b"(or true)").hexdigest(),
+            },
+        },
     }
     evidence.update(overrides)
     return evidence
@@ -1955,7 +2110,7 @@ def test_pairwise_disabled_completed_proofs_do_not_create_new_return_gap_without
     monkeypatch.setattr(
         strategy,
         "_check_return_case_coverage_gap",
-        lambda *_args, **_kwargs: ("covered", None),
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult("covered"),
     )
 
     reasons = strategy._collect_return_coverage_unsafety_reasons(
@@ -1973,7 +2128,7 @@ def test_pairwise_disabled_completed_proofs_do_not_create_new_return_gap_without
     assert analysis2.completed_recovery_proof_evidence == ()
 
 
-def test_pairwise_disabled_completed_proofs_keep_summary_dependent_return_gap(monkeypatch):
+def test_pairwise_disabled_completed_proofs_ignore_stale_summary_dependency_note(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -1990,7 +2145,7 @@ def test_pairwise_disabled_completed_proofs_keep_summary_dependent_return_gap(mo
     monkeypatch.setattr(
         strategy,
         "_check_return_case_coverage_gap",
-        lambda *_args, **_kwargs: ("covered", None),
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult("covered"),
     )
 
     reasons = strategy._collect_return_coverage_unsafety_reasons(
@@ -2003,9 +2158,41 @@ def test_pairwise_disabled_completed_proofs_keep_summary_dependent_return_gap(mo
         analysis2,
     )
 
-    assert reasons == ["function2:return_coverage_gap"]
+    assert reasons == []
     assert analysis1.completed_recovery_proof_evidence == ()
     assert analysis2.completed_recovery_proof_evidence == ()
+
+
+def test_pairwise_collect_return_coverage_reason_uses_current_coverage_check_when_notes_are_stale(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(
+        formula_builder,
+        solver_runner,
+        debug=False,
+        enable_completed_recovery_proofs=False,
+    )
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.analysis_notes = ["return_case_coverage_inconclusive"]
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult("covered"),
+    )
+
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [],
+        [],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons == []
 
 
 def test_pairwise_disabled_completed_proofs_do_not_block_switch_or_control_region_recovery(monkeypatch):
@@ -2028,7 +2215,7 @@ def test_pairwise_disabled_completed_proofs_do_not_block_switch_or_control_regio
     monkeypatch.setattr(
         strategy,
         "_check_return_case_coverage_gap",
-        lambda *_args, **_kwargs: ("covered", None),
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult("covered"),
     )
 
     reasons = strategy._collect_return_coverage_unsafety_reasons(
@@ -2106,6 +2293,97 @@ def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypa
     assert result.unknown_pairs == 0
 
 
+def test_return_coverage_proof_content_requires_disjunction_and_normalized_guard():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    proof_stage_actions = build_unknown_recovery_actions([pending_reason])
+    action = proof_stage_actions[0]
+    evidence = _return_coverage_completion_evidence(action, reason_id=UnknownReasonId.RETURN_COVERAGE_GAP)
+    assert strategy._return_coverage_proof_content_is_complete(
+        evidence,
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+    )
+
+    invalid_empty_cases = dict(evidence)
+    invalid_empty_cases["proof_content"] = {
+        "case_guard_disjunction": {
+            "status": "complete",
+            "query_cases": ("(true)",),
+        },
+        "normalized_guard_formula": {
+            "status": "complete",
+            "query": "(or true)",
+        },
+    }
+    assert not strategy._return_coverage_proof_content_is_complete(
+        invalid_empty_cases,
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+    )
+
+    valid_guard_evidence = deepcopy(invalid_empty_cases)
+    valid_guard_evidence["proof_content"]["coverage_guard_evidence"] = {
+        "status": "complete",
+        "guard_source": "return_partition_guard_set",
+        "coverage_status": "covered",
+        "case_count": 0,
+        "normalized_guard_formula_sha256": hashlib.sha256(b"(or true)").hexdigest(),
+    }
+    assert strategy._return_coverage_proof_content_is_complete(
+        valid_guard_evidence,
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+    )
+
+
+def test_return_coverage_proof_completion_rejects_empty_case_guard_disjunction(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})
+        ]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([pending_reason])
+    analysis1.completed_recovery_proof_evidence = (
+        _return_coverage_completion_evidence(
+            actions[0],
+            reason_id=UnknownReasonId.RETURN_COVERAGE_GAP,
+            proof_content={
+                "case_guard_disjunction": {
+                    "status": "complete",
+                    "query_cases": (),
+                },
+                "normalized_guard_formula": {
+                    "status": "complete",
+                    "query": "(or true)",
+                },
+            },
+        ),
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+
+
 def test_pairwise_return_coverage_gap_wrong_completed_proof_id_does_not_recover(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
@@ -2170,6 +2448,416 @@ def test_pairwise_return_coverage_gap_missing_completed_proof_id_does_not_recove
     assert result.is_equivalent is None
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+
+
+def test_pairwise_return_coverage_inconclusive_unknown_does_not_complete_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    for label, analysis in (("function1", analysis1), ("function2", analysis2)):
+        blocking_reason = f"{label}:return_coverage_inconclusive"
+        reason = strategy._make_blocking_unsafety_unknown_reason(
+            blocking_reason,
+            analysis1,
+            analysis2,
+            stage="S_PAIRWISE",
+        )
+        actions = build_unknown_recovery_actions([reason])
+        analysis.completed_recovery_proof_evidence = tuple(
+            _return_coverage_completion_evidence(
+                action,
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+            )
+            for action in actions
+        )
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult(
+            status="inconclusive",
+            reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        ),
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert [reason.reason_id for reason in result.unknown_reasons] == [
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,
+    ]
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
+def test_pairwise_return_coverage_inconclusive_query_unknown_records_recovery_proof(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult(
+            status="inconclusive",
+            reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+            can_record_completion_proof=True,
+            detail="function1 return-case coverage query was inconclusive",
+        ),
+    )
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [case1],
+        [case2],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_inconclusive",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([reason])
+    assert actions
+    assert analysis1.completed_recovery_proof_evidence == ()
+
+
+def test_pairwise_return_coverage_inconclusive_unresolved_expression_does_not_auto_complete(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    case1 = ReturnCase(
+        index=0,
+        conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult(
+            status="inconclusive",
+            reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+            detail=(
+                "function1 return-case coverage query skipped:"
+                " unresolved condition expression"
+            ),
+        ),
+    )
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [case1],
+        [case2],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
+    assert analysis1.completed_recovery_proof_evidence == ()
+
+
+def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_recorded(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    case1 = ReturnCase(
+        index=0,
+        conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ReturnCoverageCheckResult(
+            status="inconclusive",
+            reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+            can_record_completion_proof=True,
+            detail="function1 return-case coverage query was inconclusive",
+        ),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_return_coverage_inconclusive_proof_content",
+        lambda **_kwargs: {},
+    )
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [case1],
+        [case2],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
+    assert analysis1.completed_recovery_proof_evidence == ()
+
+
+def test_unsupported_call_effect_reason_group_is_used_for_signature_matching():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert strategy._unsupported_call_effect_reason_is_compatible(
+        "target_identity_unavailable",
+        "callee_unsupported_call_may_expose_parameter_memory",
+    )
+    assert not strategy._unsupported_call_effect_reason_is_compatible(
+        "target_identity_unavailable",
+        "return_storage_missing_identity",
+    )
+    signature = strategy._unsupported_call_effect_reason_signature(
+        "target_identity_unavailable",
+    )
+    assert "target_identity_unavailable" in signature
+    assert "callee_unsupported_call_may_expose_parameter_memory" in signature
+
+
+def test_unsupported_call_effect_semantics_respects_compatible_reason_groups():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    left = (
+        "unsupported_call_effect",
+        "function1",
+        "analysis-1",
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "A")))),
+            ("typed_target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        (
+            "callsite_storage",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "A")))),
+            ("target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        ("effect_ordinal", 0),
+        "target_identity_unavailable",
+    )
+    right = (
+        "unsupported_call_effect",
+        "function2",
+        "analysis-2",
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("callee_identity", ("unknown", "B2", ("target_expression", ("target", "A")))),
+            ("typed_target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        (
+            "callsite_storage",
+            ("callee_identity", ("unknown", "B2", ("target_expression", ("target", "A")))),
+            ("target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        ("effect_ordinal", 0),
+        "callee_unsupported_call_may_expose_parameter_memory",
+    )
+    assert strategy._unsupported_call_effects_semantically_match(left, right)
+
+    different_target = (
+        right[0],
+        right[1],
+        right[2],
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("callee_identity", ("unknown", "B2", ("target_expression", ("target", "B")))),
+            ("typed_target_expression", ("target", "B")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        (
+            "callsite_storage",
+            ("callee_identity", ("unknown", "B2", ("target_expression", ("target", "B")))),
+            ("target_expression", ("target", "B")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        right[5],
+        right[6],
+    )
+    assert not strategy._unsupported_call_effects_semantically_match(left, different_target)
+
+    right = tuple(list(right[:-1]) + ["return_storage_missing_identity"])
+    assert not strategy._unsupported_call_effects_semantically_match(left, right)
+
+
+def test_unsupported_call_effect_completed_proof_requires_compatibility_policy():
+    evidence = _complete_call_effect_summary_proof_evidence(
+        _call_effect_summary_proof_evidence()["object_target_key"]
+    )
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence)
+    evidence["proof_content"].pop("compatibility_policy")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_effect_blocker_completed_proof_revalidates_selected_candidate_policy():
+    selected_candidate = _call_effect_summary_proof_evidence()["object_target_key"]
+    object_target_key = (
+        "call_effect_blocker",
+        "function1",
+        ("function_ref", ("function", "B1", 0x1000)),
+        "unsupported_call_effect_summary",
+        "unsupported_call_effect_summary",
+        (selected_candidate,),
+        (),
+        (),
+        (),
+    )
+    selected_content = _call_effect_summary_proof_content(selected_candidate)
+    expected_refs = PairwiseStrategy._expected_call_effect_proof_content_refs(
+        object_target_key,
+        candidate=selected_candidate,
+    )
+    assert expected_refs is not None
+    runtime_ref, callsite_storage = expected_refs
+    proof_content = {
+        "object_derived": True,
+        "status": "complete",
+        "proof_rule": "call_effect_blocker_resolution",
+        "object_target_key": object_target_key,
+        "selected_candidate_key": selected_candidate,
+        "selected_candidate_kind": "unsupported_call_effect",
+        "selected_candidate_proof_content": selected_content,
+        "peer_object_target_key": selected_content["peer_object_target_key"],
+        "call_effect_summary": {
+            "status": "complete",
+            "summary_source": ("effect_summary", "call_effect_blocker"),
+            "evidence_kind": "call_effect_summary",
+            "object_target_key": object_target_key,
+        },
+        "runtime_ref": {
+            "status": "complete",
+            "runtime_ref": runtime_ref,
+        },
+        "callsite_storage": {
+            "status": "complete",
+            "callsite_storage": callsite_storage,
+        },
+    }
+    evidence = _call_effect_summary_proof_evidence(object_target_key=object_target_key)
+    evidence["proof_content"] = proof_content
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence)
+
+    incomplete = deepcopy(evidence)
+    incomplete["proof_content"]["selected_candidate_proof_content"].pop(
+        "compatibility_policy"
+    )
+
+    assert _completed_proof_ids_for_call_effect_evidence(incomplete) == ()
+
+
+def test_unsupported_call_effect_semantics_requires_exact_target_expression_match_for_same_reason():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    left = (
+        "unsupported_call_effect",
+        "function1",
+        "analysis-1",
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "A")))),
+            ("typed_target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        (
+            "callsite_storage",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "A")))),
+            ("target_expression", ("target", "A")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        ("effect_ordinal", 0),
+        "target_identity_unavailable",
+    )
+    right = (
+        "unsupported_call_effect",
+        "function1",
+        "analysis-1",
+        (
+            "runtime_ref",
+            "unsupported_call_effect",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "B")))),
+            ("typed_target_expression", ("target", "B")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        (
+            "callsite_storage",
+            ("callee_identity", ("unknown", "B1", ("target_expression", ("target", "B")))),
+            ("target_expression", ("target", "B")),
+            ("argument_keys", (("argument", 0, ("arg", 0)),)),
+        ),
+        ("effect_ordinal", 0),
+        "target_identity_unavailable",
+    )
+
+    assert not strategy._unsupported_call_effects_semantically_match(left, right)
 
 
 def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summary(monkeypatch):
@@ -3431,6 +4119,116 @@ def test_pairwise_unknown_indirect_argument_mismatch_does_not_auto_proof(monkeyp
 
     assert result.is_equivalent is None
     assert len(result.unknown_reasons) == 2
+
+
+def test_pairwise_matched_parameter_exposure_unsupported_call_effect_recovers(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        reason="callee_unsupported_call_may_expose_parameter_memory",
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        reason="callee_unsupported_call_may_expose_parameter_memory",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    for analysis in (analysis1, analysis2):
+        evidence = [
+            item
+            for item in analysis.completed_recovery_proof_evidence
+            if item.get("proof_source")
+            == "matched_unsupported_call_parameter_exposure_no_store_call_effect"
+        ]
+        assert len(evidence) == 1
+        content = evidence[0]["proof_content"]
+        assert content["proof_rule"] == "matched_unsupported_call_parameter_exposure_no_store_call_effect"
+        assert (
+            content["call_effect_summary"]["unsupported_reason"]
+            == "callee_unsupported_call_may_expose_parameter_memory"
+        )
+
+
+def test_pairwise_mixed_unsupported_call_reason_is_compatible_recovers(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        reason="callee_unsupported_call_may_expose_parameter_memory",
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        reason="target_identity_unavailable",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert len([
+        item
+        for analysis in (analysis1, analysis2)
+        for item in analysis.completed_recovery_proof_evidence
+        if item.get("proof_source") == "matched_unknown_indirect_no_store_call_effect"
+    ]) == 2
+
+
+def test_pairwise_incompatible_unsupported_call_reason_keeps_unknown(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func1",
+        binary_id="B10",
+        entry=0x1000,
+        reason="target_identity_unavailable",
+    )
+    analysis2 = _analysis_with_unknown_indirect_call_effect(
+        function_name="func2",
+        binary_id="B11",
+        entry=0x2000,
+        reason="callee_effect_summary_incomplete",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert len(result.unknown_reasons) == 2
+    assert all(
+        not [
+            item
+            for item in analysis.completed_recovery_proof_evidence
+            if item.get("proof_source")
+            in (
+                "matched_unknown_indirect_no_store_call_effect",
+                "matched_unsupported_call_parameter_exposure_no_store_call_effect",
+            )
+        ]
+        for analysis in (analysis1, analysis2)
+    )
 
 
 def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
@@ -6025,6 +6823,48 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
     assert _nested_contains(reason.object_target_key, pcode_ref.stable_key())
 
 
+def test_pairwise_strategy_records_recoverable_candidate_for_call_effect_blocker():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, incomplete_pcode_ref, complete_pcode_ref = (
+        _analysis_with_two_effect_call_argument_evidences()
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+
+    assert reason.object_target_key[0] == "call_effect_blocker"
+    assert _nested_contains(reason.object_target_key, incomplete_pcode_ref.stable_key())
+    assert _nested_contains(reason.object_target_key, complete_pcode_ref.stable_key())
+
+    strategy._record_completed_call_effect_summary_proof_if_safe(reason, analysis1, analysis2)
+
+    proofs = [
+        item
+        for item in getattr(analysis1, "completed_recovery_proof_evidence", ())
+        if item.get("proof_obligation_id") == reason.proof_obligation_id
+    ]
+    assert len(proofs) == 1
+    proof_content = proofs[0].get("proof_content") if proofs else None
+    assert proof_content is not None
+    assert proof_content.get("selected_candidate_key") is not None
+    assert proof_content.get("selected_candidate_kind") == "call_argument_evidence"
+    assert isinstance(proof_content.get("selected_candidate_proof_content"), dict)
+    runtime_ref = proof_content.get("runtime_ref", {})
+    assert _nested_contains(runtime_ref, complete_pcode_ref.stable_key())
+    assert not _nested_contains(runtime_ref, incomplete_pcode_ref.stable_key())
+
+
 def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_proof():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
@@ -6875,6 +7715,75 @@ def test_blocking_unsafety_reason_mapping_accepts_detail_suffix_for_return_cover
     )
 
 
+def test_call_effect_blocker_candidate_score_prefers_complete_call_argument_evidence():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    incomplete = (
+        "call_argument_evidence",
+        "function1",
+        "a",
+        "b",
+        "c",
+        "d",
+        False,
+        "incomplete",
+    )
+    complete = (
+        "call_argument_evidence",
+        "function1",
+        "a",
+        "b",
+        "c",
+        "d",
+        True,
+        "complete",
+    )
+    unsupported = (
+        "unsupported_call_effect",
+        "function1",
+        "a",
+        "b",
+        "c",
+        "d",
+        ("foo",),
+    )
+
+    assert strategy._call_effect_blocker_candidate_score(complete) > strategy._call_effect_blocker_candidate_score(incomplete)
+    assert strategy._call_effect_blocker_candidate_score(complete) > strategy._call_effect_blocker_candidate_score(unsupported)
+
+
+def test_analysis_requires_completed_return_coverage_proof_uses_reason_kind_for_suffixes():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    class _Analysis:
+        def get_decisive_sat_unsafety_reasons(self):
+            return (
+                "return_case_coverage_inconclusive:branch=exit",
+                "effect_summary_path_coverage_incomplete",
+            )
+
+    analysis = _Analysis()
+    assert (
+        strategy._analysis_requires_completed_return_coverage_proof(
+            analysis,
+            ignored_reason_ids=(),
+        )
+        is not None
+    )
+    assert (
+        strategy._analysis_requires_completed_return_coverage_proof(
+            analysis,
+            ignored_reason_ids=(UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,),
+        )
+        == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+    )
+    assert (
+        strategy._unknown_reason_id_for_blocking_unsafety(
+            "function1:effect_summary_path_coverage_incomplete"
+        )
+        == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+    )
+
+
 def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
@@ -6934,6 +7843,62 @@ def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
         "return_partition_extraction",
         UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
         "missing_return_guard",
+        reason.object_target_key,
+    )
+
+
+def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_backlog():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    x = Expression.parameter("x", 0, size=4)
+    return_ref = PcodeOpRef(
+        address_offset=0x401020,
+        seq_time=0x401020,
+        seq_order=3,
+        block_index=1,
+        mnemonic="RETURN",
+        input_sizes=(8, 4),
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x401000",
+        parameters=[_param("x")],
+        returns=[
+            ReturnInfo(
+                address="0x401020",
+                value=_const(1),
+                conditions=[_eq(x, _const(0))],
+                pcode_op_ref=return_ref,
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x402000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x402020", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_inconclusive",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([reason])
+
+    assert reason.reason_id == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value
+    assert reason.recovery_action == "return_coverage_proof_required"
+    assert [action.proof_stage for action in actions] == [
+        "return_coverage_smt_disambiguation",
+    ]
+    assert actions[0].evidence_kind == "case_guard_disjunction"
+    assert actions[0].proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        "return_coverage_smt_disambiguation",
+        UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+        "case_guard_disjunction",
         reason.object_target_key,
     )
 

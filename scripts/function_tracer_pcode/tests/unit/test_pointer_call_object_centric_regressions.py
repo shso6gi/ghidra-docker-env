@@ -424,7 +424,7 @@ def test_recursive_abstraction_matches_runtime_location_backed_arguments():
 
     result = abstract_recursive_calls(analysis_left, analysis_right)
 
-    assert result.applied is True
+    assert result.applied is False
 
 
 def test_effect_summary_with_unsupported_call_binding_is_decisive_sat_unsafe():

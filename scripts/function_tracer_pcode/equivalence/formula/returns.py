@@ -21,6 +21,7 @@ from ...model.render_smt import (
     expression_contains_unsupported_smt_ops,
     expression_contains_signed_comparison,
     expression_returns_bool,
+    expression_renders_as_fp_sort,
     expression_smt_bit_width,
 )
 from ...analysis.condition.normalizer import ConditionNormalizer
@@ -157,9 +158,11 @@ def coerce_return_value_to_bitvec(
     return_size: int,
 ) -> str:
     """Bool sort の戻り値を bitvector 0/1 に正規化する。"""
-    if not is_boolean_return_expr(expr):
-        return value_smt
-    return f"(ite {value_smt} (_ bv1 {return_size}) (_ bv0 {return_size}))"
+    if is_boolean_return_expr(expr):
+        return f"(ite {value_smt} (_ bv1 {return_size}) (_ bv0 {return_size}))"
+    if expression_renders_as_fp_sort(expr, float_mode="fp"):
+        return f"((_ fp.to_ieee_bv) {value_smt})"
+    return value_smt
 
 
 def should_sign_extend_to_return_size(analysis: FunctionReturnAnalysis) -> bool:

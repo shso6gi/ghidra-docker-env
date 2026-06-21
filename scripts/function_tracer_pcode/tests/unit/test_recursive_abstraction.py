@@ -28,8 +28,39 @@ def _const(value: int, size: int = 4):
     return Expression.constant(value, size=size)
 
 
+def _external_sqrt_target():
+    return CallTargetRef.from_name("sqrt", is_external=True, library_name="libm")
+
+
 def _deferred_unknown(info: DeferredCallInfo):
     return Expression.unknown(info.placeholder_name, runtime_ref=info.unknown_ref)
+
+
+def _analysis_with_deferred_value(
+    function_name: str,
+    info: DeferredCallInfo,
+    *,
+    parameters=None,
+    condition=None,
+    value_size: int = 8,
+):
+    conditions = [] if condition is None else [condition]
+    value = Expression.unknown(
+        info.placeholder_name,
+        runtime_ref=info.unknown_ref,
+    )
+    value.size = value_size
+    return create_mock_analysis(
+        function_name,
+        parameters=parameters or [{"name": "x", "index": 0, "data_type": "double", "size": 8}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=value,
+                conditions=conditions,
+            )
+        ],
+    )
 
 
 def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_shared_params():
@@ -149,7 +180,7 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
     assert left_value.name == right_value.name
 
 
-def test_recursive_abstraction_matches_unknown_targets_via_call_target_expression():
+def test_recursive_abstraction_rejects_unknown_targets_via_call_target_expression():
     callback1 = _param("callback", 0, size=8)
     callback2 = _param("fn", 0, size=8)
     placeholder1 = "call_out_of_scope:left#0"
@@ -192,13 +223,8 @@ def test_recursive_abstraction_matches_unknown_targets_via_call_target_expressio
 
     result = abstract_recursive_calls(analysis1, analysis2, debug=False)
 
-    assert result.applied is True
-    assert len(result.matches) == 1
-    left_value = result.analysis1.returns[0].value
-    right_value = result.analysis2.returns[0].value
-    assert left_value.expr_type == ExpressionType.PARAMETER
-    assert right_value.expr_type == ExpressionType.PARAMETER
-    assert left_value.name == right_value.name
+    assert result.applied is False
+    assert result.matches == []
 
 
 def test_recursive_abstraction_rewrites_deferred_unknowns_inside_return_guards_only():
@@ -319,8 +345,229 @@ def test_recursive_abstraction_debug_reports_argument_mismatch_for_shared_target
 
     assert result.applied is False
     output = capsys.readouterr().out
-    assert "shared_targets=1" in output
-    assert "target-only match with argument mismatch" in output
+    assert "shared_targets=0" in output
+
+
+def test_deferred_call_abstraction_rewrites_matching_sqrt_returns_to_summary_call_params():
+    x1 = _param("x", 0, size=8)
+    x2 = _param("y", 0, size=8)
+    info1 = DeferredCallInfo(
+        "sqrt@0x1000",
+        CallTargetRef.from_name("sqrt", is_external=True, library_name="libm"),
+        [x1],
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        "sqrt@0x2000",
+        CallTargetRef.from_name("sqrt", is_external=True, library_name="libm"),
+        [x2],
+        sequence=0,
+    )
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(
+        analysis1,
+        analysis2,
+        assume_fp_non_nan=True,
+        debug=False,
+    )
+
+    assert result.applied is True
+    assert len(result.matches) == 1
+    assert result.matches[0].summary_name.startswith("summary_call_")
+    left_value = result.analysis1.returns[0].value
+    right_value = result.analysis2.returns[0].value
+    assert left_value.expr_type == ExpressionType.PARAMETER
+    assert right_value.expr_type == ExpressionType.PARAMETER
+    assert left_value.name == right_value.name
+    assert any(param.get("synthetic_pure_call_summary") for param in result.analysis1.parameters)
+    evidence = result.matches[0].match_evidence["left"]
+    assert evidence["effect_class"] == "pure_return"
+    assert evidence["domain_policy"]["fp_non_nan"] is True
+    assert evidence["abi_return_width_bits"] == 64
+    assert evidence["abi_return_type_policy"] == "fp64"
+    assert evidence["callee_identity_policy"]["status"] == "external_library_function"
+
+
+def test_deferred_call_abstraction_requires_fp_non_nan_domain_for_sqrt():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=False)
+
+    assert result.applied is False
+
+
+def test_deferred_call_abstraction_rejects_name_only_sqrt_without_library_provenance():
+    info1 = DeferredCallInfo("sqrt@0x1000", CallTargetRef.from_name("sqrt"), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", CallTargetRef.from_name("sqrt"), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+    assert info1.effect_class == "unknown_effect"
+
+
+def test_deferred_call_abstraction_rejects_sqrt_when_errno_or_fenv_is_observed():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    errno_result = abstract_recursive_calls(
+        analysis1,
+        analysis2,
+        assume_fp_non_nan=True,
+        observes_errno=True,
+    )
+    fenv_result = abstract_recursive_calls(
+        analysis1,
+        analysis2,
+        assume_fp_non_nan=True,
+        observes_fenv=True,
+    )
+
+    assert errno_result.applied is False
+    assert fenv_result.applied is False
+
+
+def test_deferred_call_abstraction_rejects_local_sqrt_replacement_target():
+    target = CallTargetRef.from_name("sqrt", entry_offset=0x5000, is_external=False)
+    info1 = DeferredCallInfo("sqrt@0x1000", target, [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", target, [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+    assert info1.effect_class == "unknown_effect"
+
+
+def test_deferred_call_abstraction_allows_external_sqrt_thunk_target():
+    target = CallTargetRef.from_name(
+        "sqrt",
+        entry_offset=0x5000,
+        is_external=False,
+        is_thunk=True,
+        thunked_is_external=True,
+        thunked_library_name="libm",
+    )
+    info1 = DeferredCallInfo("sqrt@0x1000", target, [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", target, [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is True
+    assert result.matches[0].match_evidence["left"]["callee_identity_policy"]["status"] == "external_library_thunk"
+
+
+def test_deferred_call_abstraction_rejects_sqrt_different_same_typed_parameter_ordinal():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 1, size=8)], sequence=0)
+    parameters = [
+        {"name": "x", "index": 0, "data_type": "double", "size": 8},
+        {"name": "y", "index": 1, "data_type": "double", "size": 8},
+    ]
+    analysis1 = _analysis_with_deferred_value("left", info1, parameters=parameters)
+    analysis2 = _analysis_with_deferred_value("right", info2, parameters=parameters)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+
+
+def test_deferred_call_abstraction_uses_policy_width_for_unknown_sqrt_usage_width():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1, value_size=0)
+    analysis2 = _analysis_with_deferred_value("right", info2, value_size=0)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is True
+    assert result.matches[0].summary_size == 8
+    assert result.analysis1.returns[0].value.size == 8
+
+
+def test_deferred_call_abstraction_rejects_side_effecting_printf():
+    info1 = DeferredCallInfo("printf@0x1000", CallTargetRef.from_name("printf"), [_param("fmt", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("printf@0x2000", CallTargetRef.from_name("printf"), [_param("fmt2", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1, value_size=4)
+    analysis2 = _analysis_with_deferred_value("right", info2, value_size=4)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+    assert info1.effect_class == "side_effecting"
+
+
+def test_deferred_call_abstraction_rejects_sqrt_abi_width_mismatch():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1, value_size=8)
+    analysis2 = _analysis_with_deferred_value("right", info2, value_size=4)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+
+
+def test_deferred_call_abstraction_rejects_sqrt_guard_mismatch():
+    guard1 = Condition(Expression.binary_op("INT_EQUAL", _param("flag", 1), _const(1)))
+    guard2 = Condition(Expression.binary_op("INT_EQUAL", _param("flag", 1), _const(2)))
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1, condition=guard1)
+    analysis2 = _analysis_with_deferred_value("right", info2, condition=guard2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+
+
+def test_deferred_call_abstraction_rejects_one_sided_deferred_call():
+    info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[{"name": "y", "index": 0, "data_type": "double", "size": 8}],
+        returns=[ReturnInfo(address="0x2000", value=_param("y", 0, size=8), conditions=[])],
+    )
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
 
 
 def test_checker_uses_recursive_abstraction_stage_after_pairwise_unknown():

@@ -5897,6 +5897,12 @@ class ReturnAnalyzer:
                     "call_argument_recovery_reason",
                     None,
                 ),
+                effect_class=getattr(info, "effect_class", None),
+                match_evidence=getattr(info, "match_evidence", None),
+                domain_policy=getattr(info, "domain_policy", None),
+                abi_return_width_bits=getattr(info, "abi_return_width_bits", None),
+                abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
+                call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
             )
             specialized_deferred_calls[info.deferred_call_ref.stable_key()] = specialized_info
             original_to_specialized[info.deferred_call_ref.stable_key()] = specialized_info
@@ -6022,6 +6028,12 @@ class ReturnAnalyzer:
                         "call_argument_recovery_reason",
                         None,
                     ),
+                    effect_class=getattr(info, "effect_class", None),
+                    match_evidence=getattr(info, "match_evidence", None),
+                    domain_policy=getattr(info, "domain_policy", None),
+                    abi_return_width_bits=getattr(info, "abi_return_width_bits", None),
+                    abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
+                    call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
                 )
 
     @staticmethod

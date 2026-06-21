@@ -83,6 +83,12 @@ class DeferredCallInfo:
     display_hint: Optional[str]
     call_argument_recovery_status: str = "inconclusive"
     call_argument_recovery_reason: Optional[str] = None
+    effect_class: str = "unknown_effect"
+    match_evidence: Dict[str, Any] = field(default_factory=dict)
+    domain_policy: Dict[str, Any] = field(default_factory=dict)
+    abi_return_width_bits: Optional[int] = None
+    abi_return_type_policy: Optional[str] = None
+    call_site_multiplicity: Optional[int] = None
 
     _VALID_CALL_ARGUMENT_RECOVERY_STATUSES = {
         "complete",
@@ -100,6 +106,12 @@ class DeferredCallInfo:
         deferred_call_ref: Optional[DeferredCallRef] = None,
         call_argument_recovery_status: Optional[str] = None,
         call_argument_recovery_reason: Optional[str] = None,
+        effect_class: Optional[str] = None,
+        match_evidence: Optional[Dict[str, Any]] = None,
+        domain_policy: Optional[Dict[str, Any]] = None,
+        abi_return_width_bits: Optional[int] = None,
+        abi_return_type_policy: Optional[str] = None,
+        call_site_multiplicity: Optional[int] = None,
     ) -> None:
         if call_argument_recovery_status is None:
             call_argument_recovery_status = "inconclusive"
@@ -116,6 +128,20 @@ class DeferredCallInfo:
             call_argument_recovery_status
         )
         self.call_argument_recovery_reason = call_argument_recovery_reason
+        self.effect_class = effect_class or _classify_deferred_call_effect(normalized)
+        self.domain_policy = dict(domain_policy or {})
+        self.abi_return_width_bits = (
+            int(abi_return_width_bits)
+            if abi_return_width_bits is not None
+            else None
+        )
+        self.abi_return_type_policy = abi_return_type_policy
+        self.call_site_multiplicity = (
+            int(call_site_multiplicity)
+            if call_site_multiplicity is not None
+            else None
+        )
+        self.match_evidence = self._build_match_evidence(match_evidence)
 
     @property
     def placeholder_name(self) -> str:
@@ -183,6 +209,36 @@ class DeferredCallInfo:
             argument_key,
         )
 
+    def _build_match_evidence(
+        self,
+        extra_evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        target_expr_key = (
+            self.call_target_expr.structural_key()
+            if self.call_target_expr is not None
+            else None
+        )
+        argument_key = tuple(
+            arg.structural_key() if arg is not None else ("none",)
+            for arg in (self.arguments or [])
+        )
+        evidence: Dict[str, Any] = {
+            "callee_identity": self.target_ref.stable_key(),
+            "callee_name": self.target_ref.display_name(),
+            "argument_expression_key": argument_key,
+            "call_target_expression_key": target_expr_key,
+            "active_guard_key": None,
+            "return_case_guard_key": None,
+            "abi_return_width_bits": self.abi_return_width_bits,
+            "abi_return_type_policy": self.abi_return_type_policy,
+            "call_site_multiplicity": self.call_site_multiplicity,
+            "effect_class": self.effect_class,
+            "domain_policy": dict(self.domain_policy),
+        }
+        if extra_evidence:
+            evidence.update(extra_evidence)
+        return evidence
+
     @property
     def unknown_ref(self) -> UnknownValueRef:
         return UnknownValueRef.deferred_call(
@@ -200,10 +256,48 @@ class DeferredCallInfo:
             "arguments": [arg.to_dict() for arg in self.arguments],
             "call_argument_recovery_status": self.call_argument_recovery_status,
             "call_argument_recovery_reason": self.call_argument_recovery_reason,
+            "effect_class": self.effect_class,
+            "match_evidence": _jsonable_nested_tuple(self.match_evidence),
+            "domain_policy": _jsonable_nested_tuple(self.domain_policy),
+            "abi_return_width_bits": self.abi_return_width_bits,
+            "abi_return_type_policy": self.abi_return_type_policy,
+            "call_site_multiplicity": self.call_site_multiplicity,
         }
         if self.call_target_expr is not None:
             result["call_target_expr"] = self.call_target_expr.to_dict()
         return result
+
+
+def _classify_deferred_call_effect(target_ref: CallTargetRef) -> str:
+    if target_ref is None or target_ref.is_unknown():
+        return "unresolved_target"
+    name = _normalized_deferred_call_name(target_ref.display_name())
+    if name in {"printf", "fprintf", "sprintf", "snprintf", "puts", "putchar", "fputs"}:
+        return "side_effecting"
+    if name in {"sqrt", "sqrtf"} and _target_ref_has_external_library_provenance(target_ref):
+        return "pure_return"
+    return "unknown_effect"
+
+
+def _target_ref_has_external_library_provenance(target_ref: CallTargetRef) -> bool:
+    if target_ref is None or not target_ref.is_function():
+        return False
+    if getattr(target_ref, "is_external", None) is True:
+        return True
+    if getattr(target_ref, "is_thunk", None) is True and getattr(target_ref, "thunked_is_external", None) is True:
+        return True
+    return False
+
+
+def _normalized_deferred_call_name(name: Optional[str]) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    raw = raw.split("@", 1)[0]
+    raw = raw.rsplit(".", 1)[-1] if "." in raw else raw
+    while raw.startswith("_"):
+        raw = raw[1:]
+    return raw.lower()
 
 @dataclass
 class SignednessResult:

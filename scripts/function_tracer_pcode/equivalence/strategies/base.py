@@ -51,6 +51,14 @@ class StrategyResult:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
 
 
+@dataclass(frozen=True)
+class ReturnCoverageCheckResult:
+    status: str
+    reason_id: Optional[UnknownReasonId] = None
+    detail: Optional[str] = None
+    can_record_completion_proof: bool = False
+
+
 class CheckStrategy(ABC):
     """等価性判定戦略の基底クラス"""
 
@@ -78,7 +86,24 @@ class CheckStrategy(ABC):
         "call_target_resolution_evidence",
         "deferred_call",
         "unsupported_call_effect",
+        "call_effect_blocker",
     }
+    _UNSUPPORTED_CALL_EFFECT_REASON_COMPATIBILITY_GROUPS = (
+        frozenset(
+            {
+                "target_identity_unavailable",
+                "callee_unsupported_call_may_expose_parameter_memory",
+            }
+        ),
+    )
+    _UNSUPPORTED_CALL_EFFECT_COMPATIBILITY_REQUIRED_FLAGS = (
+        "reason_signature_match",
+        "target_expression_match",
+        "argument_keys_match",
+        "callee_identity_category_match",
+        "callee_identity_reachable",
+        "unsupported_fact_evidence_complete",
+    )
     _RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS = {
         ("abi_relation_proof", "abi_relation"): (
             "calling_convention",
@@ -101,6 +126,15 @@ class CheckStrategy(ABC):
         ("guard_partition_completion", "method_b_guard_partition"): (
             "guard_partition",
             ("guard_partition", "partition_coverage_proof"),
+        ),
+    }
+    _RETURN_COVERAGE_COMPLETION_REQUIREMENTS = {
+        UnknownReasonId.RETURN_COVERAGE_GAP: (
+            ("return_partition_extraction", "missing_return_guard"),
+            ("return_guard_coverage", "case_guard_disjunction"),
+        ),
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE: (
+            ("return_coverage_smt_disambiguation", "case_guard_disjunction"),
         ),
     }
     
@@ -219,58 +253,120 @@ class CheckStrategy(ABC):
             ("function1", cases1, param_replace_fn1, analysis1),
             ("function2", cases2, param_replace_fn2, analysis2),
         ):
-            status, detail = self._check_return_case_coverage_gap(
+            coverage_result = self._check_return_case_coverage_gap(
                 base_ctx,
                 cases,
                 replace_fn,
                 label,
             )
-            if status == "gap":
+            if coverage_result.status == "gap":
                 reasons.append(f"{label}:return_coverage_gap")
-            elif status == "inconclusive":
-                reasons.append(f"{label}:return_coverage_inconclusive")
+            elif coverage_result.status == "inconclusive":
+                blocker_reason = coverage_result.reason_id or UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+                reasons.append(f"{label}:{blocker_reason.value}")
+                if (
+                    coverage_result.reason_id == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+                    and self.enable_completed_recovery_proofs
+                    and analysis is not None
+                    and coverage_result.can_record_completion_proof
+                    and self._return_coverage_proof_content_can_discharge_inconclusive(
+                        self._return_coverage_inconclusive_proof_content(
+                            base_ctx=base_ctx,
+                            label=label,
+                            cases=cases,
+                            replace_fn=replace_fn,
+                        )
+                    )
+                ):
+                    self._record_completed_return_coverage_proof(
+                        label,
+                        blocker_reason,
+                        analysis,
+                        analysis1,
+                        analysis2,
+                        proof_content=self._return_coverage_inconclusive_proof_content(
+                            base_ctx=base_ctx,
+                            label=label,
+                            cases=cases,
+                            replace_fn=replace_fn,
+                        ),
+                    )
             elif (
-                status == "covered"
+                coverage_result.status == "covered"
                 and analysis1 is not None
                 and analysis2 is not None
                 and analysis is not None
             ):
-                if self.enable_completed_recovery_proofs:
+                blocker_reason = self._analysis_requires_completed_return_coverage_proof(
+                    analysis,
+                    ignored_reason_ids=(coverage_result.reason_id,),
+                )
+                if blocker_reason is None and self.enable_completed_recovery_proofs:
+                    blocker_reason = UnknownReasonId.RETURN_COVERAGE_GAP
+                if blocker_reason is not None and self.enable_completed_recovery_proofs:
+                    proof_content = self._return_coverage_covered_proof_content(
+                        base_ctx=base_ctx,
+                        label=label,
+                        cases=cases,
+                        replace_fn=replace_fn,
+                    )
                     self._record_completed_return_coverage_proof(
                         label,
+                        blocker_reason,
                         analysis,
                         analysis1,
                         analysis2,
+                        proof_content=proof_content,
                     )
-                elif self._analysis_requires_completed_return_coverage_proof(analysis):
-                    reasons.append(f"{label}:return_coverage_gap")
-            if detail:
-                self._debug_print(detail)
+                    if blocker_reason in {
+                        UnknownReasonId.RETURN_COVERAGE_GAP,
+                        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                    }:
+                        reason_record = self._make_blocking_unsafety_unknown_reason(
+                            f"{label}:{blocker_reason.value}",
+                            analysis1,
+                            analysis2,
+                            stage="S_RETURN_COVERAGE_CHECK",
+                        )
+                        if not self._return_coverage_proof_is_complete(
+                            reason_record,
+                            analysis1,
+                            analysis2,
+                        ):
+                            reasons.append(f"{label}:{blocker_reason.value}")
+                elif blocker_reason is not None:
+                    reasons.append(f"{label}:{blocker_reason.value}")
+                if coverage_result.detail:
+                    self._debug_print(coverage_result.detail)
         return reasons
 
     def _record_completed_return_coverage_proof(
         self,
         label: str,
+        reason_id: UnknownReasonId,
         analysis: FunctionReturnAnalysis,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        proof_content: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if not self.enable_completed_recovery_proofs:
             return
-        if self._analysis_has_active_return_coverage_blockers(analysis):
+        if self._analysis_has_active_return_coverage_blockers(
+            analysis,
+            ignored_reason_ids=(reason_id,),
+        ):
+            return
+        requirements = self._RETURN_COVERAGE_COMPLETION_REQUIREMENTS.get(reason_id)
+        if not requirements:
             return
         object_target_key = self._return_coverage_object_target_key(
-            f"{label}:return_coverage_gap",
+            f"{label}:{reason_id.value}",
             analysis1,
             analysis2,
         )
         if object_target_key is None:
             return
         proof_kind = UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value
-        stages = (
-            ("return_partition_extraction", "missing_return_guard"),
-            ("return_guard_coverage", "case_guard_disjunction"),
-        )
         existing_ids = {
             self._normalize_nested_tuple(item.get("proof_obligation_id"))
             for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
@@ -281,9 +377,20 @@ class CheckStrategy(ABC):
             for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
             if isinstance(item, Mapping)
         ]
-        for proof_stage, evidence_kind in stages:
+        proof_content_map = dict(proof_content) if isinstance(proof_content, Mapping) else {}
+        prototype = {
+            "status": "complete",
+            "reason_id": reason_id.value,
+            "proof_content": proof_content_map,
+        }
+        if not self._return_coverage_proof_content_is_complete(
+            prototype,
+            reason_id=reason_id,
+        ):
+            return
+        for proof_stage, evidence_kind in requirements:
             proof_id = build_proof_obligation_id(
-                UnknownReasonId.RETURN_COVERAGE_GAP.value,
+                reason_id.value,
                 proof_stage,
                 proof_kind,
                 evidence_kind,
@@ -291,22 +398,150 @@ class CheckStrategy(ABC):
             )
             if proof_id in existing_ids:
                 continue
-            records.append(
-                {
-                    "object_derived": True,
-                    "status": "complete",
-                    "reason_id": UnknownReasonId.RETURN_COVERAGE_GAP.value,
-                    "recovery_proof_kind": proof_kind,
-                    "proof_stage": proof_stage,
-                    "evidence_kind": evidence_kind,
-                    "object_target_key": object_target_key,
-                    "proof_obligation_id": proof_id,
-                    "proof_source": "return_case_coverage_check",
-                    "coverage_status": "covered",
-                }
-            )
+            candidate = {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": reason_id.value,
+                "recovery_proof_kind": proof_kind,
+                "proof_stage": proof_stage,
+                "evidence_kind": evidence_kind,
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_id,
+                "proof_source": "return_case_coverage_check",
+                "coverage_status": "covered",
+                "required_evidence": (evidence_kind,),
+                "proof_content": proof_content_map,
+            }
+            if self._return_coverage_proof_id_from_evidence(candidate) is None:
+                continue
+            records.append(candidate)
             existing_ids.add(proof_id)
         analysis.completed_recovery_proof_evidence = tuple(records)
+
+    @staticmethod
+    def _return_case_smt_disjunctions(
+        cases: Sequence[Any],
+        replace_fn,
+    ) -> Optional[Tuple[str, ...]]:
+        disjuncts: List[str] = []
+        for case in cases:
+            if not getattr(case, "conditions", None):
+                disjuncts.append("true")
+                continue
+            conditions = list(case.get_conditions_smt(replace_fn))
+            if not conditions:
+                return None
+            if len(conditions) == 1:
+                disjuncts.append(conditions[0])
+            else:
+                disjuncts.append(f"(and {' '.join(conditions)})")
+        return tuple(disjuncts)
+
+
+    def _return_coverage_covered_proof_content(
+        self,
+        base_ctx: Dict[str, Any],
+        label: str,
+        cases: Sequence[Any],
+        replace_fn,
+    ) -> Dict[str, Any]:
+        disjuncts = self._return_case_smt_disjunctions(cases, replace_fn)
+        query = self._build_return_case_coverage_query(
+            base_ctx,
+            cases,
+            replace_fn,
+            label,
+        )
+        normalized_query = self._normalize_query(query) if query is not None else None
+        if normalized_query is None and disjuncts:
+            normalized_query = "(or " + " ".join(disjuncts) + ")"
+        normalized_query_status = (
+            "complete" if normalized_query is not None else "missing"
+        )
+        return {
+            "case_guard_disjunction": {
+                "status": "complete",
+                "query_cases": tuple(disjuncts or ()),
+                "case_count": len(tuple(disjuncts or ())),
+                "status_scope": "function-local",
+            },
+            "normalized_guard_formula": {
+                "status": normalized_query_status,
+                "query": normalized_query if normalized_query is not None else query,
+            },
+            "coverage_guard_evidence": {
+                "status": normalized_query_status,
+                "guard_source": "return_partition_guard_set",
+                "coverage_status": "covered",
+                "coverage_proof_method": "return_case_coverage_check",
+                "case_count": len(tuple(disjuncts or ())),
+                "normalized_guard_formula_sha256": (
+                    hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
+                    if isinstance(normalized_query, str) and normalized_query
+                    else None
+                ),
+            },
+            "coverage_status": {
+                "status": "complete",
+                "result": "covered",
+                "proof_source": "return_case_coverage_check",
+            },
+        }
+
+    def _return_coverage_inconclusive_proof_content(
+        self,
+        base_ctx: Dict[str, Any],
+        label: str,
+        cases: Sequence[Any],
+        replace_fn,
+    ) -> Dict[str, Any]:
+        disjuncts = self._return_case_smt_disjunctions(cases, replace_fn)
+        query = self._build_return_case_coverage_query(
+            base_ctx,
+            cases,
+            replace_fn,
+            label,
+        )
+        normalized_query = self._normalize_query(query) if query is not None else None
+        if normalized_query is None and disjuncts:
+            normalized_query = "(or " + " ".join(disjuncts) + ")"
+        normalized_query_status = (
+            "complete" if normalized_query is not None else "missing"
+        )
+        return {
+            "case_guard_disjunction": {
+                "status": "complete",
+                "query_cases": tuple(disjuncts or ()),
+                "case_count": len(tuple(disjuncts or ())),
+                "status_scope": "function-local",
+            },
+            "normalized_guard_formula": {
+                "status": normalized_query_status,
+                "query": normalized_query if normalized_query is not None else query,
+            },
+            "coverage_guard_evidence": {
+                "status": normalized_query_status,
+                "guard_source": "case_guard_disjunction",
+                "case_count": len(tuple(disjuncts or ())),
+                "normalized_guard_formula_sha256": (
+                    hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
+                    if isinstance(normalized_query, str) and normalized_query
+                    else None
+                ),
+            },
+            "solver_model_or_timeout": {
+                "status": "unknown",
+                "detail": "coverage query returned UNKNOWN/timeout",
+            },
+        }
+
+    @staticmethod
+    def _normalize_query(query: Optional[str]) -> Optional[str]:
+        if not query or not isinstance(query, str):
+            return None
+        lines = [line.strip() for line in query.splitlines() if line.strip()]
+        normalized = [line for line in lines if not line.startswith("; Return coverage")]
+        return "\n".join(normalized)
 
     def _record_completed_call_effect_summary_proof_if_safe(
         self,
@@ -337,11 +572,24 @@ class CheckStrategy(ABC):
                 object_target_key,
                 analysis,
             )
+            or self._call_effect_blocker_proof_content(
+                object_target_key,
+                analysis,
+                analysis1,
+                analysis2,
+            )
             or self._matched_unknown_indirect_call_effect_proof_content(
                 object_target_key,
                 analysis,
                 analysis1,
                 analysis2,
+            )
+            or self._matched_unsupported_call_effect_no_store_parameter_exposure_proof_content(
+                object_target_key,
+                analysis,
+                analysis1,
+                analysis2,
+                reason="callee_unsupported_call_may_expose_parameter_memory",
             )
             or self._matched_deferred_call_argument_proof_content(
                 object_target_key,
@@ -379,6 +627,8 @@ class CheckStrategy(ABC):
             if proof_rule == "matched_deferred_call_argument_evidence"
             else "matched_unknown_indirect_no_store_call_effect"
             if proof_rule == "matched_unknown_indirect_no_store_call_effect"
+            else "matched_unsupported_call_parameter_exposure_no_store_call_effect"
+            if proof_rule == "matched_unsupported_call_parameter_exposure_no_store_call_effect"
             else "call_effect_summary_proof"
         )
         records.append(
@@ -397,6 +647,235 @@ class CheckStrategy(ABC):
         )
         analysis.completed_recovery_proof_evidence = tuple(records)
 
+    @classmethod
+    def _iter_call_effect_blocker_candidates(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Tuple[Tuple[Any, ...], ...]:
+        if not isinstance(object_target_key, tuple) or len(object_target_key) < 9:
+            return ()
+
+        candidate_keys: List[Tuple[Any, ...]] = []
+        for group in object_target_key[5:9]:
+            if not isinstance(group, tuple) or not group:
+                continue
+            for candidate in group:
+                candidate_tuple = cls._normalize_nested_tuple(candidate)
+                if isinstance(candidate_tuple, tuple):
+                    candidate_keys.append(candidate_tuple)
+        return tuple(candidate_keys)
+
+
+    @classmethod
+    def _select_call_effect_blocker_candidate(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        candidates = cls._iter_call_effect_blocker_candidates(object_target_key)
+        if not candidates:
+            return None
+        return max(candidates, key=cls._call_effect_blocker_candidate_score)
+
+    def _call_effect_blocker_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(object_target_key, tuple) or object_target_key[0] != "call_effect_blocker":
+            return None
+        best_candidate: Optional[Tuple[Tuple[Any, ...], Dict[str, Any]]] = None
+        for candidate in self._iter_call_effect_blocker_candidates(object_target_key):
+            if not candidate:
+                continue
+            candidate = self._normalize_nested_tuple(candidate)
+            if not isinstance(candidate, tuple):
+                continue
+            candidate_kind = self._normalize_nested_tuple(candidate[0])
+            if candidate_kind is None:
+                continue
+
+            candidate_content: Optional[Dict[str, Any]] = None
+            if candidate_kind == "call_argument_evidence":
+                candidate_content = self._call_argument_evidence_call_effect_proof_content(
+                    candidate,
+                    analysis,
+                )
+            elif candidate_kind == "unsupported_call_effect":
+                candidate_content = (
+                    self._self_recursive_no_store_call_effect_proof_content(
+                        candidate,
+                        analysis,
+                    )
+                    or self._matched_unknown_indirect_call_effect_proof_content(
+                        candidate,
+                        analysis,
+                        analysis1,
+                        analysis2,
+                    )
+                    or self._matched_unsupported_call_effect_no_store_parameter_exposure_proof_content(
+                        candidate,
+                        analysis,
+                        analysis1,
+                        analysis2,
+                        reason="callee_unsupported_call_may_expose_parameter_memory",
+                    )
+                )
+            elif candidate_kind == "deferred_call":
+                candidate_content = self._matched_deferred_call_argument_proof_content(
+                    candidate,
+                    analysis,
+                    analysis1,
+                    analysis2,
+                )
+            if candidate_content is None:
+                continue
+
+            expected_refs = self._expected_call_effect_proof_content_refs(
+                object_target_key,
+                candidate=candidate,
+            )
+            if expected_refs is None:
+                continue
+
+            runtime_ref, callsite_storage = expected_refs
+            candidate_content_dict = {
+                "object_derived": True,
+                "status": "complete",
+                "proof_rule": self._evidence_text(candidate_content, "proof_rule")
+                or "call_effect_blocker_resolution",
+                "object_target_key": object_target_key,
+                "selected_candidate_key": self._normalize_nested_tuple(candidate),
+                "selected_candidate_kind": candidate_kind,
+                "selected_candidate_proof_content": candidate_content,
+                "peer_object_target_key": self._evidence_get(
+                    candidate_content,
+                    "peer_object_target_key",
+                ),
+                "call_effect_summary": {
+                    "object_derived": True,
+                    "status": "complete",
+                    "summary_source": ("effect_summary", "call_effect_blocker"),
+                    "evidence_kind": "call_effect_summary",
+                    "object_target_key": object_target_key,
+                    "coverage_complete": True,
+                    "recovery_status": "complete",
+                },
+                "runtime_ref": {
+                    "status": "complete",
+                    "runtime_ref": runtime_ref,
+                },
+                "callsite_storage": {
+                    "status": "complete",
+                    "callsite_storage": callsite_storage,
+                },
+            }
+            score = self._call_effect_blocker_candidate_score(candidate)
+            if best_candidate is None or score > best_candidate[0]:
+                best_candidate = (score, candidate_content_dict)
+        return None if best_candidate is None else best_candidate[1]
+
+    @classmethod
+    def _call_effect_blocker_candidate_score(cls, candidate: Any) -> Tuple[Any, ...]:
+        normalized = cls._normalize_nested_tuple(candidate)
+        if not isinstance(normalized, tuple) or not normalized:
+            return (0, 0, 0, 0, ())
+        candidate_kind = normalized[0]
+        priority = cls._call_effect_blocker_candidate_priority(candidate_kind)
+        if candidate_kind == "call_argument_evidence":
+            coverage_complete = bool(normalized[6]) if len(normalized) >= 7 else False
+            recovery_status = str(normalized[7]) if len(normalized) >= 8 else ""
+            return (
+                priority,
+                3,
+                1 if coverage_complete else 0,
+                1 if recovery_status == "complete" else 0,
+                cls._call_effect_blocker_semantic_tie_break(normalized),
+            )
+        if candidate_kind == "unsupported_call_effect":
+            return (
+                priority,
+                2,
+                1,
+                1,
+                cls._call_effect_blocker_semantic_tie_break(normalized),
+            )
+        if candidate_kind == "deferred_call":
+            recovery_status = str(normalized[-1]) if normalized else ""
+            return (
+                priority,
+                1,
+                1 if recovery_status == "complete" else 0,
+                0,
+                cls._call_effect_blocker_semantic_tie_break(normalized),
+            )
+        return (
+            priority,
+            1,
+            1,
+            0,
+            cls._call_effect_blocker_semantic_tie_break(normalized),
+        )
+
+    @classmethod
+    def _call_effect_blocker_semantic_tie_break(cls, candidate: Tuple[Any, ...]) -> Tuple[Any, ...]:
+        candidate_kind = candidate[0] if candidate else None
+        if candidate_kind == "call_argument_evidence":
+            return (
+                "call_argument_evidence",
+                cls._call_effect_blocker_sort_token(candidate[3] if len(candidate) > 3 else None),
+                cls._call_effect_blocker_sort_token(candidate[4] if len(candidate) > 4 else None),
+                cls._call_effect_blocker_sort_token(candidate[5] if len(candidate) > 5 else None),
+            )
+        if candidate_kind == "unsupported_call_effect":
+            return (
+                "unsupported_call_effect",
+                cls._unsupported_call_effect_reason_signature(candidate[6] if len(candidate) > 6 else None),
+                cls._call_effect_blocker_sort_token(
+                    cls._unsupported_call_effect_argument_keys(candidate)
+                ),
+                cls._call_effect_blocker_sort_token(
+                    cls._unsupported_call_effect_target_expression_key(candidate)
+                ),
+            )
+        if candidate_kind == "deferred_call":
+            return (
+                "deferred_call",
+                cls._call_effect_blocker_sort_token(
+                    cls._deferred_call_argument_keys(candidate)
+                ),
+                cls._call_effect_blocker_sort_token(
+                    cls._deferred_call_target_expression_key(candidate)
+                ),
+                str(candidate[-1]) if candidate else "",
+            )
+        return (str(candidate_kind), cls._call_effect_blocker_sort_token(candidate))
+
+    @classmethod
+    def _call_effect_blocker_sort_token(cls, value: Any) -> Tuple[Any, ...]:
+        if value is None:
+            return (0, "")
+        if isinstance(value, bool):
+            return (1, int(value))
+        if isinstance(value, int):
+            return (2, int(value))
+        if isinstance(value, str):
+            return (3, value)
+        if isinstance(value, tuple):
+            return (4, tuple(cls._call_effect_blocker_sort_token(item) for item in value))
+        return (5, str(value))
+
+    @classmethod
+    def _call_effect_blocker_candidate_priority(cls, candidate_kind: Any) -> int:
+        if candidate_kind == "call_argument_evidence":
+            return 3
+        if candidate_kind == "unsupported_call_effect":
+            return 2
+        if candidate_kind == "deferred_call":
+            return 1
+        return 0
+
     @staticmethod
     def _analysis_for_call_effect_object_target(
         object_target_key: Tuple[Any, ...],
@@ -410,6 +889,7 @@ class CheckStrategy(ABC):
             "call_argument_evidence",
             "call_target_resolution_evidence",
             "deferred_call",
+            "call_effect_blocker",
         }:
             return None
         side_label = object_target_key[1]
@@ -433,6 +913,10 @@ class CheckStrategy(ABC):
         matching_evidence = None
         for evidence in getattr(effect_summary, "call_argument_evidence", {}).values():
             if evidence is None or not getattr(evidence, "is_usable", lambda: False)():
+                continue
+            if not bool(getattr(evidence, "coverage_complete", False)):
+                continue
+            if str(getattr(evidence, "recovery_status", "")) != "complete":
                 continue
             evidence_key = self._normalize_nested_tuple(
                 self._call_argument_evidence_object_key(
@@ -565,8 +1049,13 @@ class CheckStrategy(ABC):
 
         if len(object_target_key) < 7 or object_target_key[0] != "unsupported_call_effect":
             return None
-        if object_target_key[-1] != "target_identity_unavailable":
+        if not self._unsupported_call_effect_reason_is_compatible(
+            object_target_key[-1],
+            "target_identity_unavailable",
+        ):
             return None
+        local_reason = object_target_key[6] if len(object_target_key) > 6 else None
+        peer_compatible_reason = "target_identity_unavailable"
         effect_summary = getattr(analysis, "effect_summary", None)
         if effect_summary is None:
             return reject("missing local effect summary")
@@ -635,6 +1124,17 @@ class CheckStrategy(ABC):
                 f"{len(matches)}"
             )
         peer_object_target_key = self._normalize_nested_tuple(matches[0])
+        peer_reason = peer_object_target_key[6] if len(peer_object_target_key) > 6 else None
+        if (
+            local_reason == "callee_unsupported_call_may_expose_parameter_memory"
+            and peer_reason != peer_compatible_reason
+        ):
+            return reject(
+                "parameter-exposure specific unsupported-call reason pair handled by "
+                "parameter-exposure proof path"
+            )
+        if not self._unsupported_call_effect_reason_is_compatible(local_reason, peer_reason):
+            return reject("mixed unsupported-call reason pair not supported by unknown-indirect proof")
         target_expression_key = self._cross_binary_call_effect_component_key(
             self._unsupported_call_effect_target_expression_key(object_target_key)
         )
@@ -655,7 +1155,9 @@ class CheckStrategy(ABC):
                 "evidence_kind": "call_effect_summary",
                 "object_target_key": object_target_key,
                 "peer_object_target_key": peer_object_target_key,
-                "unsupported_reason": "target_identity_unavailable",
+                "unsupported_reason": object_target_key[6]
+                if len(object_target_key) > 6
+                else "target_identity_unavailable",
                 "local_store_effect_count": 0,
                 "unsupported_call_site_count": len(
                     tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
@@ -678,6 +1180,150 @@ class CheckStrategy(ABC):
                 "peer_callsite_storage": peer_object_target_key[4],
                 "matched_argument_keys": argument_keys,
             },
+            "compatibility_policy": self._unsupported_call_effect_compatibility_policy_evidence(
+                object_target_key,
+                peer_object_target_key,
+            ),
+        }
+
+    def _matched_unsupported_call_effect_no_store_parameter_exposure_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        def reject(reason_text: str) -> Optional[Dict[str, Any]]:
+            self._debug_print(
+                "matched unsupported-call parameter-exposure proof unavailable: "
+                f"{reason_text}"
+            )
+            return None
+
+        if len(object_target_key) < 7 or object_target_key[0] != "unsupported_call_effect":
+            return None
+        if object_target_key[-1] != reason:
+            return None
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            return reject("missing local effect summary")
+        if getattr(effect_summary, "effects", None):
+            return reject("local store effects are present")
+        if getattr(effect_summary, "incomplete_reasons", None):
+            return reject(
+                "local effect summary is incomplete: "
+                f"{tuple(getattr(effect_summary, 'incomplete_reasons', ()) or ())}"
+            )
+        peer_analysis = analysis2 if analysis is analysis1 else analysis1 if analysis is analysis2 else None
+        if peer_analysis is None:
+            return reject("object target side did not map to either analysis")
+        peer_summary = getattr(peer_analysis, "effect_summary", None)
+        if peer_summary is None:
+            return reject("missing peer effect summary")
+        if getattr(peer_summary, "effects", None):
+            return reject("peer store effects are present")
+        if getattr(peer_summary, "incomplete_reasons", None):
+            return reject(
+                "peer effect summary is incomplete: "
+                f"{tuple(getattr(peer_summary, 'incomplete_reasons', ()) or ())}"
+            )
+
+        local_label = "function1" if analysis is analysis1 else "function2"
+        local_matches = [
+            self._unsupported_call_effect_object_key(
+                local_site,
+                analysis=analysis,
+                side_label=local_label,
+            )
+            for local_site in getattr(effect_summary, "unsupported_call_sites", ()) or ()
+            if self._unsupported_call_effects_semantically_match(
+                object_target_key,
+                self._unsupported_call_effect_object_key(
+                    local_site,
+                    analysis=analysis,
+                    side_label=local_label,
+                ),
+            )
+        ]
+        if len(local_matches) != 1:
+            return reject(
+                "local unsupported call effect match count is "
+                f"{len(local_matches)}"
+            )
+        peer_label = "function2" if analysis is analysis1 else "function1"
+        matches = [
+            self._unsupported_call_effect_object_key(
+                peer_site,
+                analysis=peer_analysis,
+                side_label=peer_label,
+            )
+            for peer_site in getattr(peer_summary, "unsupported_call_sites", ()) or ()
+            if self._unsupported_call_effects_semantically_match(
+                object_target_key,
+                self._unsupported_call_effect_object_key(
+                    peer_site,
+                    analysis=peer_analysis,
+                    side_label=peer_label,
+                ),
+            )
+        ]
+        if len(matches) != 1:
+            return reject(
+                "peer unsupported call effect match count is "
+                f"{len(matches)}"
+            )
+        peer_object_target_key = self._normalize_nested_tuple(matches[0])
+        target_expression_key = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_target_expression_key(object_target_key)
+        )
+        if not self._call_effect_target_expression_key_is_present(target_expression_key):
+            return reject("missing local target expression key")
+        argument_keys = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_argument_keys(object_target_key)
+        )
+        if not self._call_effect_argument_keys_are_present(argument_keys):
+            return reject("missing local argument keys")
+        return {
+            "object_derived": True,
+            "status": "complete",
+            "proof_rule": "matched_unsupported_call_parameter_exposure_no_store_call_effect",
+            "object_target_key": object_target_key,
+            "peer_object_target_key": peer_object_target_key,
+            "call_effect_summary": {
+                "status": "complete",
+                "summary_source": ("effect_summary", "unsupported_call_effect"),
+                "evidence_kind": "call_effect_summary",
+                "object_target_key": object_target_key,
+                "peer_object_target_key": peer_object_target_key,
+                "unsupported_reason": reason,
+                "local_store_effect_count": 0,
+                "unsupported_call_site_count": len(
+                    tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
+                ),
+                "peer_unsupported_call_site_count": len(
+                    tuple(getattr(peer_summary, "unsupported_call_sites", ()) or ())
+                ),
+                "matching_local_unsupported_call_site_count": len(local_matches),
+                "matching_peer_unsupported_call_site_count": len(matches),
+            },
+            "runtime_ref": {
+                "status": "complete",
+                "runtime_ref": object_target_key[3],
+                "peer_runtime_ref": peer_object_target_key[3],
+                "matched_target_expression_key": target_expression_key,
+            },
+            "callsite_storage": {
+                "status": "complete",
+                "callsite_storage": object_target_key[4],
+                "peer_callsite_storage": peer_object_target_key[4],
+                "matched_argument_keys": argument_keys,
+            },
+            "compatibility_policy": self._unsupported_call_effect_compatibility_policy_evidence(
+                object_target_key,
+                peer_object_target_key,
+            ),
         }
 
     def _matched_deferred_call_argument_proof_content(
@@ -830,8 +1476,9 @@ class CheckStrategy(ABC):
             and len(left) >= 7
             and len(right) >= 7
             and left[0] == right[0] == "unsupported_call_effect"
-            and left[-1] == right[-1] == "target_identity_unavailable"
         ):
+            return False
+        if not self._unsupported_call_effect_reason_is_compatible(left[-1], right[-1]):
             return False
         left_target = self._cross_binary_call_effect_component_key(
             self._unsupported_call_effect_target_expression_key(left)
@@ -844,15 +1491,176 @@ class CheckStrategy(ABC):
             and self._call_effect_target_expression_key_is_present(right_target)
         ):
             return False
-        return (
-            left_target == right_target
-            and self._cross_binary_call_effect_component_key(
-                self._unsupported_call_effect_argument_keys(left)
-            )
-            == self._cross_binary_call_effect_component_key(
-                self._unsupported_call_effect_argument_keys(right)
-            )
+
+        left_argument_keys = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_argument_keys(left)
         )
+        right_argument_keys = self._cross_binary_call_effect_component_key(
+            self._unsupported_call_effect_argument_keys(right)
+        )
+        if not (
+            self._unsupported_call_effect_argument_evidence_is_complete(left_argument_keys)
+            and self._unsupported_call_effect_argument_evidence_is_complete(right_argument_keys)
+        ):
+            return False
+
+        policy = self._unsupported_call_effect_compatibility_policy_evidence(left, right)
+        return self._unsupported_call_effect_compatibility_policy_is_complete(policy)
+
+    @classmethod
+    def _unsupported_call_effect_requires_exact_target_expression_match(
+        cls,
+        object_target_key: Any,
+        peer_object_target_key: Any,
+    ) -> bool:
+        return True
+
+    @classmethod
+    def _unsupported_call_effect_callee_identity_key(cls, object_target_key: Any) -> Any:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5:
+            return None
+        for section in (target[3], target[4]):
+            if not isinstance(section, tuple):
+                continue
+            for item in section:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "callee_identity":
+                    return cls._normalize_nested_tuple(item[1])
+        return None
+
+    @classmethod
+    def _unsupported_call_effect_callee_identity_category(cls, object_target_key: Any) -> Optional[str]:
+        identity = cls._unsupported_call_effect_callee_identity_key(object_target_key)
+        if isinstance(identity, tuple) and identity:
+            return str(identity[0])
+        if identity is None:
+            return None
+        return str(identity)
+
+    @classmethod
+    def _unsupported_call_effect_callee_identity_is_reachable(cls, object_target_key: Any) -> bool:
+        identity = cls._unsupported_call_effect_callee_identity_key(object_target_key)
+        if not isinstance(identity, tuple) or not identity:
+            return False
+        category = str(identity[0])
+        if category == "unknown":
+            return cls._call_effect_target_expression_key_is_present(
+                cls._cross_binary_call_effect_component_key(
+                    cls._unsupported_call_effect_target_expression_key(object_target_key)
+                )
+            )
+        return category not in {"missing", "none", "unavailable"}
+
+    @classmethod
+    def _unsupported_call_effect_compatibility_policy_evidence(
+        cls,
+        object_target_key: Any,
+        peer_object_target_key: Any,
+    ) -> Dict[str, Any]:
+        left = cls._normalize_nested_tuple(object_target_key)
+        right = cls._normalize_nested_tuple(peer_object_target_key)
+        if not (
+            isinstance(left, tuple)
+            and isinstance(right, tuple)
+            and len(left) >= 7
+            and len(right) >= 7
+            and left[0] == right[0] == "unsupported_call_effect"
+        ):
+            return {
+                "status": "incomplete",
+                "reason": "unsupported_call_effect_object_target_key_missing",
+            }
+        left_target = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_target_expression_key(left)
+        )
+        right_target = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_target_expression_key(right)
+        )
+        left_arguments = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_argument_keys(left)
+        )
+        right_arguments = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_argument_keys(right)
+        )
+        left_callee_category = cls._unsupported_call_effect_callee_identity_category(left)
+        right_callee_category = cls._unsupported_call_effect_callee_identity_category(right)
+        reason_signature_match = cls._unsupported_call_effect_reason_is_compatible(left[-1], right[-1])
+        target_expression_match = (
+            cls._call_effect_target_expression_key_is_present(left_target)
+            and cls._call_effect_target_expression_key_is_present(right_target)
+            and left_target == right_target
+        )
+        argument_keys_match = (
+            cls._unsupported_call_effect_argument_evidence_is_complete(left_arguments)
+            and cls._unsupported_call_effect_argument_evidence_is_complete(right_arguments)
+            and left_arguments == right_arguments
+        )
+        callee_identity_category_match = (
+            left_callee_category is not None
+            and left_callee_category == right_callee_category
+        )
+        callee_identity_reachable = (
+            cls._unsupported_call_effect_callee_identity_is_reachable(left)
+            and cls._unsupported_call_effect_callee_identity_is_reachable(right)
+        )
+        unsupported_fact_evidence_complete = (
+            cls._call_effect_target_expression_key_is_present(left_target)
+            and cls._call_effect_target_expression_key_is_present(right_target)
+            and cls._unsupported_call_effect_argument_evidence_is_complete(left_arguments)
+            and cls._unsupported_call_effect_argument_evidence_is_complete(right_arguments)
+            and left[-1] is not None
+            and right[-1] is not None
+        )
+        flags = {
+            "reason_signature_match": reason_signature_match,
+            "target_expression_match": target_expression_match,
+            "argument_keys_match": argument_keys_match,
+            "callee_identity_category_match": callee_identity_category_match,
+            "callee_identity_reachable": callee_identity_reachable,
+            "unsupported_fact_evidence_complete": unsupported_fact_evidence_complete,
+        }
+        return {
+            "status": "complete" if all(flags.values()) else "incomplete",
+            "reason_signature": cls._unsupported_call_effect_reason_signature(left[-1]),
+            "peer_reason_signature": cls._unsupported_call_effect_reason_signature(right[-1]),
+            "left_callee_identity_category": left_callee_category,
+            "right_callee_identity_category": right_callee_category,
+            "left_target_expression_key": left_target,
+            "right_target_expression_key": right_target,
+            "left_argument_keys": left_arguments,
+            "right_argument_keys": right_arguments,
+            **flags,
+        }
+
+    @classmethod
+    def _unsupported_call_effect_compatibility_policy_is_complete(
+        cls,
+        policy: Any,
+    ) -> bool:
+        if not isinstance(policy, Mapping):
+            return False
+        if cls._evidence_text(policy, "status") not in {"complete", "completed", "proven"}:
+            return False
+        return all(
+            bool(policy.get(flag))
+            for flag in cls._UNSUPPORTED_CALL_EFFECT_COMPATIBILITY_REQUIRED_FLAGS
+        )
+
+    @classmethod
+    def _unsupported_call_effect_callee_identity_is_unknown(cls, object_target_key: Any) -> bool:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 4:
+            return False
+        runtime_ref = target[3]
+        if not isinstance(runtime_ref, tuple):
+            return False
+        for item in runtime_ref:
+            if not (isinstance(item, tuple) and len(item) == 2 and item[0] == "callee_identity"):
+                continue
+            callee_identity = item[1]
+            normalized = cls._normalize_nested_tuple(callee_identity)
+            return isinstance(normalized, tuple) and normalized and normalized[0] == "unknown"
+        return False
 
     def _deferred_calls_semantically_match(
         self,
@@ -953,6 +1761,15 @@ class CheckStrategy(ABC):
         return ()
 
     @classmethod
+    def _unsupported_call_effect_argument_evidence_is_complete(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if not isinstance(normalized, tuple):
+            return False
+        if not normalized:
+            return True
+        return cls._call_effect_argument_keys_are_present(normalized)
+
+    @classmethod
     def _call_effect_argument_keys_are_present(cls, value: Any) -> bool:
         normalized = cls._normalize_nested_tuple(value)
         if not isinstance(normalized, tuple) or not normalized:
@@ -1049,31 +1866,67 @@ class CheckStrategy(ABC):
     def _analysis_has_active_return_coverage_blockers(
         self,
         analysis: FunctionReturnAnalysis,
+        *,
+        ignored_reason_ids: Sequence[Optional[UnknownReasonId]],
     ) -> bool:
-        return any(
-            str(note)
-            in {
-                "return_case_coverage_gap",
-                "return_case_coverage_inconclusive",
-            }
-            for note in getattr(analysis, "analysis_notes", ()) or ()
+        return (
+            self._analysis_requires_completed_return_coverage_proof(
+                analysis,
+                ignored_reason_ids=ignored_reason_ids,
+            )
+            is not None
         )
 
     def _analysis_requires_completed_return_coverage_proof(
         self,
         analysis: FunctionReturnAnalysis,
-    ) -> bool:
-        if self._analysis_has_active_return_coverage_blockers(analysis):
-            return True
-        proof_dependent_notes = {
-            "call_wrapper_return_recovery",
-            "counted_scalar_loop_summary",
-            "pre_return_counted_loop_summary",
-            "state_transition_loop_summary",
+        *,
+        ignored_reason_ids: Sequence[Optional[UnknownReasonId]],
+    ) -> Optional[UnknownReasonId]:
+        ignored_reason_kinds = {
+            self._blocking_reason_kind(reason.value)
+            for reason in ignored_reason_ids
+            if reason is not None
         }
-        return any(
-            str(note) in proof_dependent_notes
-            for note in getattr(analysis, "analysis_notes", ()) or ()
+        for reason in (
+            getattr(analysis, "get_decisive_sat_unsafety_reasons", lambda: ())()
+        ):
+            reason_text = str(reason)
+            reason_kind = self._blocking_reason_kind(reason_text)
+            if reason_kind in {
+                "return_case_coverage_gap",
+                "return_case_coverage_inconclusive",
+            }:
+                continue
+            if reason_kind in ignored_reason_kinds:
+                continue
+            if reason_kind == "return_coverage_gap":
+                return UnknownReasonId.RETURN_COVERAGE_GAP
+            if reason_kind == "return_coverage_inconclusive":
+                return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+            return self._unknown_reason_id_for_blocking_unsafety(reason_text)
+        return None
+
+    @classmethod
+    def _unsupported_call_effect_reason_compatibility_group(cls, reason: Any) -> Tuple[str, ...]:
+        reason_text = str(reason)
+        for group in cls._UNSUPPORTED_CALL_EFFECT_REASON_COMPATIBILITY_GROUPS:
+            if reason_text in group:
+                return tuple(sorted(group))
+        return (reason_text,)
+
+    @classmethod
+    def _unsupported_call_effect_reason_signature(cls, reason: Any) -> str:
+        return "|".join(cls._unsupported_call_effect_reason_compatibility_group(reason))
+
+    @classmethod
+    def _unsupported_call_effect_reason_is_compatible(
+        cls,
+        left_reason: Any,
+        right_reason: Any,
+    ) -> bool:
+        return cls._unsupported_call_effect_reason_signature(left_reason) == cls._unsupported_call_effect_reason_signature(
+            right_reason
         )
 
     def _unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
@@ -1398,7 +2251,10 @@ class CheckStrategy(ABC):
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
     ) -> bool:
-        if reason_record.reason_id != UnknownReasonId.RETURN_COVERAGE_GAP.value:
+        if reason_record.reason_id not in (
+            UnknownReasonId.RETURN_COVERAGE_GAP.value,
+            UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,
+        ):
             return False
         completed = set(self._completed_recovery_proof_ids(analysis1, analysis2))
         required_ids = tuple(
@@ -1856,7 +2712,18 @@ class CheckStrategy(ABC):
             object_target_key,
         ):
             return False
-        expected_refs = cls._expected_call_effect_proof_content_refs(object_target_key)
+        selected_candidate = None
+        if str(object_target_key[0]) == "call_effect_blocker":
+            selected_candidate = cls._validated_call_effect_blocker_selected_candidate(
+                proof_content,
+                object_target_key,
+            )
+            if selected_candidate is None:
+                return False
+        expected_refs = cls._expected_call_effect_proof_content_refs(
+            object_target_key,
+            candidate=selected_candidate,
+        )
         if expected_refs is None:
             return False
         expected_runtime_ref, expected_callsite_storage = expected_refs
@@ -1891,6 +2758,35 @@ class CheckStrategy(ABC):
         return True
 
     @classmethod
+    def _validated_call_effect_blocker_selected_candidate(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        selected_candidate = cls._normalize_nested_tuple(
+            proof_content.get("selected_candidate_key")
+        )
+        if not isinstance(selected_candidate, tuple) or not selected_candidate:
+            return None
+        if not any(
+            selected_candidate == candidate
+            for candidate in cls._iter_call_effect_blocker_candidates(object_target_key)
+        ):
+            return None
+        selected_kind = str(selected_candidate[0])
+        if cls._evidence_text(proof_content, "selected_candidate_kind") != selected_kind:
+            return None
+        selected_content = proof_content.get("selected_candidate_proof_content")
+        if not isinstance(selected_content, Mapping):
+            return None
+        if not cls._call_effect_summary_proof_content_is_complete(
+            selected_content,
+            selected_candidate,
+        ):
+            return None
+        return selected_candidate
+
+    @classmethod
     def _call_effect_summary_section_matches(
         cls,
         section: Any,
@@ -1916,11 +2812,15 @@ class CheckStrategy(ABC):
     def _expected_call_effect_proof_content_refs(
         cls,
         object_target_key: Tuple[Any, ...],
+        candidate: Optional[Tuple[Any, ...]] = None,
+        default_missing: Optional[Tuple[Any, ...]] = None,
     ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...]]]:
+        # Keep None as the sentinel for "missing references": callers must guard
+        # before unpacking to avoid ValueError on empty tuples.
         target_kind = str(object_target_key[0]) if object_target_key else ""
         if target_kind == "call_argument_evidence":
             if len(object_target_key) < 6:
-                return None
+                return default_missing
             return (
                 (
                     "runtime_ref",
@@ -1936,22 +2836,31 @@ class CheckStrategy(ABC):
             )
         if target_kind == "call_target_resolution_evidence":
             if len(object_target_key) < 5:
-                return None
+                return default_missing
             runtime_ref = cls._normalize_nested_tuple(object_target_key[3])
             callsite_storage = cls._normalize_nested_tuple(object_target_key[4])
             if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
-                return None
+                return default_missing
             return runtime_ref, callsite_storage
         if target_kind == "unsupported_call_effect":
             if len(object_target_key) < 5:
-                return None
+                return default_missing
             runtime_ref = cls._normalize_nested_tuple(object_target_key[3])
             callsite_storage = cls._normalize_nested_tuple(object_target_key[4])
             if not isinstance(runtime_ref, tuple) or not isinstance(callsite_storage, tuple):
-                return None
+                return default_missing
             return runtime_ref, callsite_storage
         if target_kind == "deferred_call":
             return cls._expected_deferred_call_proof_content_refs(object_target_key)
+        if target_kind == "call_effect_blocker":
+            if candidate is None:
+                candidate = cls._select_call_effect_blocker_candidate(object_target_key)
+            if candidate is None:
+                return default_missing
+            return cls._expected_call_effect_proof_content_refs(
+                candidate,
+                default_missing=default_missing,
+            )
         return None
 
     @classmethod
@@ -2011,71 +2920,112 @@ class CheckStrategy(ABC):
             if proof_content.get("recursive_call_effect") != "no_memory_effects_by_induction":
                 return False
             return True
-        if proof_rule != "matched_unknown_indirect_no_store_call_effect":
-            return False
-        peer_object_target_key = cls._normalize_nested_tuple(
-            proof_content.get("peer_object_target_key")
-        )
-        if not (
-            isinstance(peer_object_target_key, tuple)
-            and len(peer_object_target_key) >= 7
-            and peer_object_target_key[0] == "unsupported_call_effect"
-            and peer_object_target_key[-1] == "target_identity_unavailable"
-        ):
-            return False
-        call_effect_summary = proof_content.get("call_effect_summary")
-        if not isinstance(call_effect_summary, Mapping):
-            return False
-        if cls._normalize_nested_tuple(
-            call_effect_summary.get("peer_object_target_key")
-        ) != peer_object_target_key:
-            return False
-        if call_effect_summary.get("unsupported_reason") != "target_identity_unavailable":
-            return False
-        if call_effect_summary.get("local_store_effect_count") != 0:
-            return False
-        if call_effect_summary.get("matching_local_unsupported_call_site_count") != 1:
-            return False
-        if call_effect_summary.get("matching_peer_unsupported_call_site_count") != 1:
-            return False
-        runtime_ref = proof_content.get("runtime_ref")
-        callsite_storage = proof_content.get("callsite_storage")
-        if not isinstance(runtime_ref, Mapping) or not isinstance(callsite_storage, Mapping):
-            return False
-        if not cls._completed_proof_section_is_clean(runtime_ref):
-            return False
-        if not cls._completed_proof_section_is_clean(callsite_storage):
-            return False
-        if cls._normalize_nested_tuple(runtime_ref.get("peer_runtime_ref")) != peer_object_target_key[3]:
-            return False
-        if cls._normalize_nested_tuple(callsite_storage.get("peer_callsite_storage")) != peer_object_target_key[4]:
-            return False
-        target_expression_key = cls._cross_binary_call_effect_component_key(
-            cls._unsupported_call_effect_target_expression_key(object_target_key)
-        )
-        peer_target_expression_key = cls._cross_binary_call_effect_component_key(
-            cls._unsupported_call_effect_target_expression_key(peer_object_target_key)
-        )
-        if not (
-            cls._call_effect_target_expression_key_is_present(target_expression_key)
-            and cls._call_effect_target_expression_key_is_present(peer_target_expression_key)
-        ):
-            return False
-        argument_keys = cls._cross_binary_call_effect_component_key(
-            cls._unsupported_call_effect_argument_keys(object_target_key)
-        )
-        peer_argument_keys = cls._cross_binary_call_effect_component_key(
-            cls._unsupported_call_effect_argument_keys(peer_object_target_key)
-        )
-        if target_expression_key != peer_target_expression_key:
-            return False
-        if argument_keys != peer_argument_keys:
-            return False
-        if cls._normalize_nested_tuple(runtime_ref.get("matched_target_expression_key")) != target_expression_key:
-            return False
-        if cls._normalize_nested_tuple(callsite_storage.get("matched_argument_keys")) != argument_keys:
-            return False
-        return True
+        if proof_rule in {"matched_unknown_indirect_no_store_call_effect", "matched_unsupported_call_parameter_exposure_no_store_call_effect"}:
+            unsupported_reason_signature = cls._unsupported_call_effect_reason_signature(
+                object_target_key[6] if len(object_target_key) >= 7 else None
+            )
+
+            peer_object_target_key = cls._normalize_nested_tuple(
+                proof_content.get("peer_object_target_key")
+            )
+            if not (
+                isinstance(peer_object_target_key, tuple)
+                and len(peer_object_target_key) >= 7
+                and peer_object_target_key[0] == "unsupported_call_effect"
+                and cls._unsupported_call_effect_reason_signature(
+                    peer_object_target_key[6]
+                )
+                == unsupported_reason_signature
+            ):
+                return False
+
+            call_effect_summary = proof_content.get("call_effect_summary")
+            if not isinstance(call_effect_summary, Mapping):
+                return False
+            if cls._normalize_nested_tuple(
+                call_effect_summary.get("peer_object_target_key")
+            ) != peer_object_target_key:
+                return False
+            if cls._unsupported_call_effect_reason_signature(
+                call_effect_summary.get("unsupported_reason")
+            ) != unsupported_reason_signature:
+                return False
+            if call_effect_summary.get("local_store_effect_count") != 0:
+                return False
+            if call_effect_summary.get("matching_local_unsupported_call_site_count") != 1:
+                return False
+            if call_effect_summary.get("matching_peer_unsupported_call_site_count") != 1:
+                return False
+
+            runtime_ref = proof_content.get("runtime_ref")
+            callsite_storage = proof_content.get("callsite_storage")
+            if not isinstance(runtime_ref, Mapping) or not isinstance(callsite_storage, Mapping):
+                return False
+            if not cls._completed_proof_section_is_clean(runtime_ref):
+                return False
+            if not cls._completed_proof_section_is_clean(callsite_storage):
+                return False
+            if cls._normalize_nested_tuple(runtime_ref.get("peer_runtime_ref")) != peer_object_target_key[3]:
+                return False
+            if cls._normalize_nested_tuple(callsite_storage.get("peer_callsite_storage")) != peer_object_target_key[4]:
+                return False
+
+            target_expression_key = cls._cross_binary_call_effect_component_key(
+                cls._unsupported_call_effect_target_expression_key(object_target_key)
+            )
+            peer_target_expression_key = cls._cross_binary_call_effect_component_key(
+                cls._unsupported_call_effect_target_expression_key(peer_object_target_key)
+            )
+            if not (
+                cls._call_effect_target_expression_key_is_present(target_expression_key)
+                and cls._call_effect_target_expression_key_is_present(peer_target_expression_key)
+            ):
+                return False
+
+            argument_keys = cls._cross_binary_call_effect_component_key(
+                cls._unsupported_call_effect_argument_keys(object_target_key)
+            )
+            peer_argument_keys = cls._cross_binary_call_effect_component_key(
+                cls._unsupported_call_effect_argument_keys(peer_object_target_key)
+            )
+            if cls._unsupported_call_effect_requires_exact_target_expression_match(
+                object_target_key,
+                peer_object_target_key,
+            ) and target_expression_key != peer_target_expression_key:
+                return False
+            if argument_keys != peer_argument_keys:
+                return False
+
+            expected_policy = cls._unsupported_call_effect_compatibility_policy_evidence(
+                object_target_key,
+                peer_object_target_key,
+            )
+            if not cls._unsupported_call_effect_compatibility_policy_is_complete(expected_policy):
+                return False
+            provided_policy = proof_content.get("compatibility_policy")
+            if not cls._unsupported_call_effect_compatibility_policy_is_complete(provided_policy):
+                return False
+            for key in (
+                "reason_signature",
+                "peer_reason_signature",
+                "left_callee_identity_category",
+                "right_callee_identity_category",
+                "left_target_expression_key",
+                "right_target_expression_key",
+                "left_argument_keys",
+                "right_argument_keys",
+            ):
+                if cls._normalize_nested_tuple(provided_policy.get(key)) != cls._normalize_nested_tuple(
+                    expected_policy.get(key)
+                ):
+                    return False
+
+            if cls._normalize_nested_tuple(runtime_ref.get("matched_target_expression_key")) != target_expression_key:
+                return False
+            if cls._normalize_nested_tuple(callsite_storage.get("matched_argument_keys")) != argument_keys:
+                return False
+            return True
+        return False
 
     @classmethod
     def _deferred_call_proof_content_is_complete(
@@ -3821,7 +4771,9 @@ class CheckStrategy(ABC):
         name = expression_key[1]
         index = expression_key[2]
         size_bytes = expression_key[3]
-        if not isinstance(name, str) or not name.startswith("summary_rec_"):
+        if not isinstance(name, str) or not (
+            name.startswith("summary_rec_") or name.startswith("summary_call_")
+        ):
             return None
         index_value = index[1] if isinstance(index, tuple) and len(index) == 2 else index
         try:
@@ -3945,18 +4897,129 @@ class CheckStrategy(ABC):
         return False
 
     @classmethod
+    def _query_cases_are_nonempty(cls, value: Any) -> bool:
+        return (
+            isinstance(value, tuple)
+            and len(value) > 0
+            and all(isinstance(item, str) for item in value)
+        )
+
+
+    @classmethod
+    def _return_coverage_proof_content_can_discharge_inconclusive(
+        cls,
+        proof_content: Any,
+    ) -> bool:
+        if not isinstance(proof_content, Mapping):
+            return False
+        solver_evidence = proof_content.get("solver_model_or_timeout")
+        if solver_evidence is None:
+            return False
+        if not isinstance(solver_evidence, Mapping):
+            return False
+        status = cls._evidence_text(solver_evidence, "status")
+        return status in {"complete", "completed", "proven", "unsat", "discharged"}
+
+    @classmethod
+    def _return_coverage_guard_evidence_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+        normalized_query: str,
+    ) -> bool:
+        guard_evidence = proof_content.get("coverage_guard_evidence")
+        if not isinstance(guard_evidence, Mapping):
+            return False
+        if cls._evidence_text(guard_evidence, "status") not in {"complete", "completed", "proven"}:
+            return False
+        guard_source = cls._evidence_text(guard_evidence, "guard_source")
+        if guard_source not in {
+            "case_guard_disjunction",
+            "normalized_guard_formula",
+            "return_partition_guard_set",
+        }:
+            return False
+        if guard_source != "case_guard_disjunction" and cls._evidence_text(
+            guard_evidence,
+            "coverage_status",
+        ) != "covered":
+            return False
+        case_count = guard_evidence.get("case_count")
+        if not isinstance(case_count, int) or case_count < 0:
+            return False
+        expected_hash = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
+        return guard_evidence.get("normalized_guard_formula_sha256") == expected_hash
+
+    @classmethod
+    def _return_coverage_proof_content_is_complete(
+        cls,
+        evidence: Mapping[str, Any],
+        reason_id: Optional[UnknownReasonId] = None,
+    ) -> bool:
+        if reason_id is not None:
+            evidence_reason_id = cls._evidence_text(evidence, "reason_id")
+            if evidence_reason_id != reason_id.value:
+                return False
+        proof_content = cls._evidence_get(evidence, "proof_content")
+        if not isinstance(proof_content, Mapping):
+            return False
+        case_guard_disjunction = proof_content.get("case_guard_disjunction")
+        if not isinstance(case_guard_disjunction, Mapping):
+            return False
+        status = cls._evidence_text(case_guard_disjunction, "status")
+        if status not in {"complete", "completed", "proven"}:
+            return False
+        normalized_guard_formula = proof_content.get("normalized_guard_formula")
+        if not isinstance(normalized_guard_formula, Mapping):
+            return False
+        normalized_status = cls._evidence_text(normalized_guard_formula, "status")
+        if normalized_status not in {"complete", "completed", "proven"}:
+            return False
+        normalized_query = normalized_guard_formula.get("query")
+        if not isinstance(normalized_query, str) or not normalized_query:
+            return False
+        if not cls._return_coverage_guard_evidence_is_complete(proof_content, normalized_query):
+            return False
+        if reason_id == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE:
+            if not cls._return_coverage_proof_content_can_discharge_inconclusive(proof_content):
+                return False
+        else:
+            solver_evidence = proof_content.get("solver_model_or_timeout")
+            if isinstance(solver_evidence, Mapping):
+                solver_status = cls._evidence_text(solver_evidence, "status")
+                if solver_status in {"unknown", "timeout", "error", "inconclusive"}:
+                    return False
+        return True
+
+    @classmethod
     def _return_coverage_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
         if not cls._evidence_bool(evidence, "object_derived"):
             return None
         if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
             return None
-        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.RETURN_COVERAGE_GAP.value:
+        reason_id = cls._evidence_text(evidence, "reason_id")
+        if reason_id not in {
+            UnknownReasonId.RETURN_COVERAGE_GAP.value,
+            UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,
+        }:
             return None
+        canonical_reason_id = None
+        try:
+            canonical_reason_id = UnknownReasonId(reason_id)
+        except ValueError:
+            canonical_reason_id = None
         proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
         if proof_kind != UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value:
             return None
         proof_stage = cls._evidence_text(evidence, "proof_stage")
-        if proof_stage not in {"return_partition_extraction", "return_guard_coverage"}:
+        requirements = (
+            cls._RETURN_COVERAGE_COMPLETION_REQUIREMENTS.get(canonical_reason_id)
+            if canonical_reason_id is not None
+            else None
+        )
+        if not requirements:
+            return None
+        allowed_stages = {proof_stage_ for proof_stage_, _ in requirements}
+        if proof_stage not in allowed_stages:
             return None
         evidence_kind = cls._evidence_text(evidence, "evidence_kind")
         if not evidence_kind:
@@ -3967,7 +5030,7 @@ class CheckStrategy(ABC):
         if not isinstance(object_target_key, tuple):
             return None
         proof_id = build_proof_obligation_id(
-            UnknownReasonId.RETURN_COVERAGE_GAP.value,
+            reason_id,
             proof_stage,
             proof_kind,
             evidence_kind,
@@ -3975,6 +5038,8 @@ class CheckStrategy(ABC):
         )
         provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
         if provided_id is None or provided_id != proof_id:
+            return None
+        if not cls._return_coverage_proof_content_is_complete(evidence, canonical_reason_id):
             return None
         return proof_id
 
@@ -3984,11 +5049,15 @@ class CheckStrategy(ABC):
         analysis: FunctionReturnAnalysis,
     ) -> bool:
         decisive_reasons = getattr(analysis, "get_decisive_sat_unsafety_reasons", lambda: ())()
+        recoverable_call_effect_kinds = {
+            cls._blocking_reason_kind(reason)
+            for reason in cls._CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS
+        }
         for reason in decisive_reasons:
-            if str(reason) not in cls._CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS:
+            if cls._blocking_reason_kind(str(reason)) not in recoverable_call_effect_kinds:
                 return True
         for note in getattr(analysis, "analysis_notes", ()) or ():
-            if str(note) in {
+            if cls._blocking_reason_kind(str(note)) in {
                 "return_case_coverage_gap",
                 "return_case_coverage_inconclusive",
             }:
@@ -5330,20 +6399,25 @@ class CheckStrategy(ABC):
         cases: Sequence[Any],
         param_replace_fn,
         label: str,
-    ) -> tuple[str, Optional[str]]:
+    ) -> ReturnCoverageCheckResult:
         if not cases:
-            return "gap", f"{label} has no return cases after extraction"
+            return ReturnCoverageCheckResult(
+                status="gap",
+                detail=f"{label} has no return cases after extraction",
+            )
         if any(not getattr(case, "conditions", None) for case in cases):
-            return "covered", None
+            return ReturnCoverageCheckResult(status="covered")
         object_centric_status = self._return_cases_have_object_centric_total_coverage(
             cases
         )
         if object_centric_status is True:
-            return "covered", None
+            return ReturnCoverageCheckResult(status="covered")
         if object_centric_status is False:
-            return (
-                "gap",
-                f"{label} object-centric return-case coverage check found uncovered region",
+            return ReturnCoverageCheckResult(
+                status="gap",
+                detail=(
+                    f"{label} object-centric return-case coverage check found uncovered region"
+                ),
             )
         if object_centric_status is None:
             case_conditions = [
@@ -5352,14 +6426,23 @@ class CheckStrategy(ABC):
                 for cond in (getattr(case, "conditions", None) or ())
             ]
             if not ConditionSMTOracle.has_object_identity_support(case_conditions):
-                return (
-                    "inconclusive",
-                    f"{label} return-case object-centric coverage check was inconclusive",
+                return ReturnCoverageCheckResult(
+                    status="inconclusive",
+                    reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                    detail=f"{label} return-case object-centric coverage check was inconclusive",
                 )
         if not base_ctx.get("header_lines"):
-            return "inconclusive", f"{label} return-case coverage query skipped: base context has no declarations"
+            return ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                detail=f"{label} return-case coverage query skipped: base context has no declarations",
+            )
         if any(self._case_conditions_contain_unresolved_expression(case) for case in cases):
-            return "inconclusive", f"{label} return-case coverage query skipped: unresolved condition expression"
+            return ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                detail=f"{label} return-case coverage query skipped: unresolved condition expression",
+            )
 
         query = self._build_return_case_coverage_query(
             base_ctx,
@@ -5368,7 +6451,11 @@ class CheckStrategy(ABC):
             label,
         )
         if query is None:
-            return "inconclusive", f"{label} return-case coverage query could not be built"
+            return ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                detail=f"{label} return-case coverage query could not be built",
+            )
 
         result = self.solver_runner.run_sequential(query)
         if result.is_equivalent is False:
@@ -5376,10 +6463,15 @@ class CheckStrategy(ABC):
             detail = f"{label} has uncovered return-condition region"
             if model:
                 detail += f" under model {model}"
-            return "gap", detail
+            return ReturnCoverageCheckResult(status="gap", detail=detail)
         if result.is_equivalent is None:
-            return "inconclusive", f"{label} return-case coverage query was inconclusive"
-        return "covered", None
+            return ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                detail=f"{label} return-case coverage query was inconclusive",
+                can_record_completion_proof=True,
+            )
+        return ReturnCoverageCheckResult(status="covered")
 
     def _return_cases_have_object_centric_total_coverage(
         self,

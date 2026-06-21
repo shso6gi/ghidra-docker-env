@@ -47,6 +47,57 @@ def _safe_program_id(owner: Any) -> Optional[int]:
     return None
 
 
+def _safe_bool_method(owner: Any, method_name: str) -> Optional[bool]:
+    method = getattr(owner, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        return bool(method())
+    except Exception:
+        return None
+
+
+def _safe_external_library_name(function: Any) -> Optional[str]:
+    if function is None:
+        return None
+    get_external_location = getattr(function, "getExternalLocation", None)
+    if not callable(get_external_location):
+        return None
+    try:
+        external_location = get_external_location()
+    except Exception:
+        return None
+    if external_location is None:
+        return None
+    for method_name in ("getLibraryName", "getOriginalImportedName"):
+        method = getattr(external_location, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            value = method()
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _safe_thunked_function(function: Any) -> Any:
+    if function is None:
+        return None
+    method = getattr(function, "getThunkedFunction", None)
+    if not callable(method):
+        return None
+    for args in ((True,), (False,), ()):
+        try:
+            thunked = method(*args)
+        except Exception:
+            continue
+        if thunked is not None and thunked is not function:
+            return thunked
+    return None
+
+
 @dataclass(frozen=True)
 class CallTargetRef:
     """Stable call target identity for runtime analysis."""
@@ -57,6 +108,11 @@ class CallTargetRef:
     entry_offset: Optional[int] = None
     address_offset: Optional[int] = None
     display_hint: Optional[str] = None
+    is_external: Optional[bool] = None
+    library_name: Optional[str] = None
+    is_thunk: Optional[bool] = None
+    thunked_is_external: Optional[bool] = None
+    thunked_library_name: Optional[str] = None
     function_obj: Any = field(default=None, compare=False, hash=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -81,6 +137,12 @@ class CallTargetRef:
                     entry_offset = _safe_offset(get_entry())
                 except Exception:
                     entry_offset = None
+        is_external = _safe_bool_method(function, "isExternal")
+        library_name = _safe_external_library_name(function)
+        is_thunk = _safe_bool_method(function, "isThunk")
+        thunked = _safe_thunked_function(function)
+        thunked_is_external = _safe_bool_method(thunked, "isExternal") if thunked is not None else None
+        thunked_library_name = _safe_external_library_name(thunked) if thunked is not None else None
         return cls(
             kind="function",
             function_name=name,
@@ -88,6 +150,11 @@ class CallTargetRef:
             entry_offset=entry_offset,
             address_offset=entry_offset,
             display_hint=name,
+            is_external=is_external,
+            library_name=library_name,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+            thunked_library_name=thunked_library_name,
             function_obj=function,
         )
 
@@ -114,6 +181,11 @@ class CallTargetRef:
         *,
         program_id: Optional[int] = None,
         entry_offset: Optional[int] = None,
+        is_external: Optional[bool] = None,
+        library_name: Optional[str] = None,
+        is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
+        thunked_library_name: Optional[str] = None,
         function_obj: Any = None,
     ) -> "CallTargetRef":
         return cls(
@@ -123,6 +195,11 @@ class CallTargetRef:
             entry_offset=_safe_offset(entry_offset),
             address_offset=_safe_offset(entry_offset),
             display_hint=function_name or None,
+            is_external=is_external,
+            library_name=library_name,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+            thunked_library_name=thunked_library_name,
             function_obj=function_obj,
         )
 
@@ -180,6 +257,16 @@ class CallTargetRef:
             result["entry_offset"] = self.entry_offset
         if self.address_offset is not None:
             result["address_offset"] = self.address_offset
+        if self.is_external is not None:
+            result["is_external"] = self.is_external
+        if self.library_name:
+            result["library_name"] = self.library_name
+        if self.is_thunk is not None:
+            result["is_thunk"] = self.is_thunk
+        if self.thunked_is_external is not None:
+            result["thunked_is_external"] = self.thunked_is_external
+        if self.thunked_library_name:
+            result["thunked_library_name"] = self.thunked_library_name
         return result
 
 

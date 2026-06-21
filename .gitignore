@@ -48,3 +48,6 @@ artifacts/baselines/*/raw/logs/
 !artifacts/baselines/*/raw/workspace_state/*.json
 !artifacts/baselines/*/raw/workspace_state/*.txt
 !artifacts/baselines/*/raw/workspace_state/*.patch
+LoopSCC Towards Summarizing Multi-branch Loops within Determinate Cycles.pdf
+airy_Eq_new.sh
+targets/EqBench/

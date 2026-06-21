@@ -448,7 +448,7 @@ def test_object_centric_coverage_falls_back_to_legacy_query_on_solver_inconclusi
         lambda conditions, cache_key=None: None,
     )
 
-    status, detail = strategy._check_return_case_coverage_gap(
+    result = strategy._check_return_case_coverage_gap(
         {
             "header_lines": ["(set-logic QF_AUFBV)"],
             "params1": [],
@@ -462,8 +462,8 @@ def test_object_centric_coverage_falls_back_to_legacy_query_on_solver_inconclusi
         "function1",
     )
 
-    assert status == "inconclusive"
-    assert detail == "function1 return-case coverage query was inconclusive"
+    assert result.status == "inconclusive"
+    assert result.detail == "function1 return-case coverage query was inconclusive"
     strategy._build_return_case_coverage_query.assert_called_once()
     strategy.solver_runner.run_sequential.assert_called_once()
 
@@ -480,7 +480,7 @@ def test_object_centric_identity_unsafe_keeps_object_coverage_path_inconclusive(
         side_effect=AssertionError("legacy coverage query must not be used when object identity is unsafe")
     )
 
-    status, detail = strategy._check_return_case_coverage_gap(
+    result = strategy._check_return_case_coverage_gap(
         {
             "header_lines": ["(set-logic QF_AUFBV)"],
             "params1": [],
@@ -494,8 +494,8 @@ def test_object_centric_identity_unsafe_keeps_object_coverage_path_inconclusive(
         "function1",
     )
 
-    assert status == "inconclusive"
-    assert detail == "function1 return-case object-centric coverage check was inconclusive"
+    assert result.status == "inconclusive"
+    assert result.detail == "function1 return-case object-centric coverage check was inconclusive"
     strategy._build_return_case_coverage_query.assert_not_called()
 
 
@@ -520,7 +520,7 @@ def test_object_centric_coverage_gap_is_used_directly():
     strategy._build_return_case_coverage_query = Mock(
         side_effect=AssertionError("gap from object-centric oracle must short-circuit before legacy coverage")
     )
-    status, detail = strategy._check_return_case_coverage_gap(
+    result = strategy._check_return_case_coverage_gap(
         {
             "header_lines": ["(set-logic QF_AUFBV)"],
             "params1": [],
@@ -534,9 +534,10 @@ def test_object_centric_coverage_gap_is_used_directly():
         "function1",
     )
 
-    assert status == "gap"
-    assert detail == "function1 object-centric return-case coverage check found uncovered region"
+    assert result.status == "gap"
+    assert result.detail == "function1 object-centric return-case coverage check found uncovered region"
     strategy._build_return_case_coverage_query.assert_not_called()
+
 
 
 def _path_sensitive_readonly_ref(proof: ReductionAccumulatorProof) -> ReadonlyReductionRef:

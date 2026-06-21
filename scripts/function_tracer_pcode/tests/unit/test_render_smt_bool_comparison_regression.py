@@ -4,10 +4,12 @@ from typing import Optional
 
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.equivalence.formula.returns import coerce_return_value_to_bitvec
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_float_predicate_smt_declarations,
     expression_contains_unsupported_smt_ops,
     expression_uses_smt_uf,
+    expression_smt_sort_kind,
     expression_to_smt,
     smt_logic_name,
 )
@@ -41,6 +43,32 @@ def test_expression_to_smt_coerces_bool_vs_bitvector_equality_without_sort_error
     assert smt == "(= (ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32)) (_ bv0 32))"
 
 
+def test_float_binary_arithmetic_is_supported_by_smt_gate():
+    expr = _binary(
+        "FLOAT_ADD",
+        _binary("FLOAT_MULT", _param("param_1", size=8), _param("param_1", size=8)),
+        _binary("FLOAT_SUB", _param("param_2", size=8), _param("param_3", size=8)),
+    )
+
+    assert expression_contains_unsupported_smt_ops(expr) is False
+    smt = expression_to_smt(expr, float_mode="fp")
+    assert "(fp.add RNE" in smt
+    assert "(fp.mul RNE" in smt
+    assert "(fp.sub RNE" in smt
+
+
+def test_float_binary_arithmetic_declares_uninterpreted_function_for_non_fp_width():
+    expr = _binary("FLOAT_MULT", _param("param_2", size=10), _param("param_1", size=10))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_mult param_2 param_1)"
+    assert declarations == [
+        "(declare-fun float_mult ((_ BitVec 80) (_ BitVec 80)) (_ BitVec 80))",
+    ]
+
+
 def test_float_predicate_smt_declarations_are_collected_for_ufbv_queries():
     expr = _binary("FLOAT_LESS", _param("param_2", size=8), _param("param_1", size=8))
 
@@ -61,6 +89,53 @@ def test_float_predicate_can_render_with_ieee754_fp_theory():
 
     assert smt == "(fp.lt ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1))"
     assert declarations == []
+
+
+def test_float_mixed_width_binary_skips_fp_arithmetic_path():
+    expr = _binary("FLOAT_ADD", _param("param_2", size=10), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_add param_2 param_1)"
+    assert declarations == [
+        "(declare-fun float_add ((_ BitVec 80) (_ BitVec 64)) (_ BitVec 80))",
+    ]
+
+
+def test_float_signed_division_uses_fp_theory_for_non_exceptional_widths():
+    expr = _binary("FLOAT_SDIV", _param("param_2", size=8), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(fp.div RNE ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1))"
+    assert declarations == []
+
+
+def test_float_signed_division_known_zero_divisor_falls_back_to_ufbv():
+    expr = _binary("FLOAT_SDIV", _param("param_2", size=8), _const(0, size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_div param_2 (_ bv0 64))"
+    assert declarations == [
+        "(declare-fun float_div ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 64))",
+    ]
+    assert expression_uses_smt_uf(expr, float_mode="fp") is True
+
+
+def test_float_signed_remainder_known_nan_operand_falls_back_to_ufbv():
+    expr = _binary("FLOAT_SREM", _const(0x7FF8000000000000, size=8), _param("param_1", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+    declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
+
+    assert smt == "(float_rem (_ bv9221120237041090560 64) param_1)"
+    assert declarations == [
+        "(declare-fun float_rem ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 64))",
+    ]
 
 
 def test_unsupported_float_width_keeps_uf_logic_visible():
@@ -357,3 +432,59 @@ def test_expression_to_smt_coerces_bitvector_operand_inside_bool_and():
     smt = expression_to_smt(expr)
 
     assert smt == "(and (not (= flag (_ bv0 8))) (= param_1 (_ bv0 64)))"
+
+
+def test_float_phi_mixed_fp_and_bitvec_branches_returns_bitvec_ite():
+    cond = Condition(_binary("INT_EQUAL", _param("selector", size=4), _const(0, size=4)))
+    updated = _binary("FLOAT_ADD", _param("acc", size=8), _param("delta", size=8))
+    phi = Expression.phi([(cond, updated), (None, _param("acc", size=8))])
+    phi.size = 8
+
+    smt = expression_to_smt(phi, float_mode="fp")
+
+    assert "((_ fp.to_ieee_bv) (fp.add RNE" in smt
+    assert "(ite " in smt
+    assert "(ite " in smt and " acc)" in smt
+
+
+def test_float_phi_uf_mode_does_not_wrap_bitvector_float_uf_with_fp_to_bv():
+    cond = Condition(_binary("INT_EQUAL", _param("selector", size=4), _const(0, size=4)))
+    updated = _binary("FLOAT_ADD", _param("acc", size=8), _param("delta", size=8))
+    phi = Expression.phi([(cond, updated), (None, _param("acc", size=8))])
+    phi.size = 8
+
+    smt = expression_to_smt(phi)
+
+    assert "fp.to_ieee_bv" not in smt
+    assert smt == "(ite (= selector (_ bv0 32)) (float_add acc delta) acc)"
+
+
+def test_float_phi_all_fp_branches_returns_bitvec_ite_without_double_fp_to_bv():
+    cond = Condition(_binary("INT_EQUAL", _param("selector", size=4), _const(0, size=4)))
+    left = _binary("FLOAT_ADD", _param("acc", size=8), _param("delta", size=8))
+    right = _binary("FLOAT_SUB", _param("acc", size=8), _param("delta", size=8))
+    phi = Expression.phi([(cond, left), (None, right)])
+    phi.size = 8
+
+    smt = expression_to_smt(phi, float_mode="fp")
+
+    assert smt.startswith("(ite ")
+    assert smt.count("((_ fp.to_ieee_bv) (fp.") == 2
+    assert "((_ fp.to_ieee_bv) (ite" not in smt
+
+
+def test_float_phi_all_fp_branches_return_boundary_does_not_double_convert():
+    cond = Condition(_binary("INT_EQUAL", _param("selector", size=4), _const(0, size=4)))
+    left = _binary("FLOAT_ADD", _param("acc", size=8), _param("delta", size=8))
+    right = _binary("FLOAT_SUB", _param("acc", size=8), _param("delta", size=8))
+    phi = Expression.phi([(cond, left), (None, right)])
+    phi.size = 8
+
+    expr_smt = expression_to_smt(phi, float_mode="fp")
+    return_smt = coerce_return_value_to_bitvec(phi, expr_smt, 64)
+
+    assert expression_smt_sort_kind(phi, float_mode="fp") == "BV"
+    assert expr_smt.startswith("(ite ")
+    assert expr_smt.count("((_ fp.to_ieee_bv) (fp.") == 2
+    assert return_smt == expr_smt
+    assert "((_ fp.to_ieee_bv) (ite" not in return_smt

@@ -61,6 +61,33 @@ _FLOAT_PREDICATE_FP_OPS = {
     "FLOAT_LESS": "fp.lt",
     "FLOAT_LESSEQUAL": "fp.leq",
 }
+_FLOAT_ARITHMETIC_SMT_NAMES = {
+    "FLOAT_ADD": "float_add",
+    "FLOAT_SUB": "float_sub",
+    "FLOAT_MULT": "float_mult",
+    "FLOAT_DIV": "float_div",
+    "FLOAT_SDIV": "float_div",
+    "FLOAT_REM": "float_rem",
+    "FLOAT_SREM": "float_rem",
+}
+_FLOAT_ARITHMETIC_FP_OPS = {
+    "FLOAT_ADD": "fp.add",
+    "FLOAT_SUB": "fp.sub",
+    "FLOAT_MULT": "fp.mul",
+    "FLOAT_DIV": "fp.div",
+    "FLOAT_SDIV": "fp.div",
+    "FLOAT_REM": "fp.rem",
+    "FLOAT_SREM": "fp.rem",
+}
+_FLOAT_ARITHMETIC_FP_SPECS = {
+    "FLOAT_ADD": {"fp_op": "fp.add", "rounding": True, "guard_known_exceptional_operands": False},
+    "FLOAT_SUB": {"fp_op": "fp.sub", "rounding": True, "guard_known_exceptional_operands": False},
+    "FLOAT_MULT": {"fp_op": "fp.mul", "rounding": True, "guard_known_exceptional_operands": False},
+    "FLOAT_DIV": {"fp_op": "fp.div", "rounding": True, "guard_known_exceptional_operands": False},
+    "FLOAT_REM": {"fp_op": "fp.rem", "rounding": False, "guard_known_exceptional_operands": False},
+    "FLOAT_SDIV": {"fp_op": "fp.div", "rounding": True, "guard_known_exceptional_operands": True},
+    "FLOAT_SREM": {"fp_op": "fp.rem", "rounding": False, "guard_known_exceptional_operands": True},
+}
 _FLOAT_BV_WIDTH_TO_SORT = {
     32: (8, 24),
     64: (11, 53),
@@ -85,6 +112,7 @@ _BITWISE_BINARY_OPERATORS = {"INT_AND", "INT_OR", "INT_XOR"}
 _SUPPORTED_BINARY_OPERATORS = (
     _ARITHMETIC_BINARY_OPERATORS
     | _BOOLEAN_BINARY_OPERATORS
+    | set(_FLOAT_ARITHMETIC_SMT_NAMES.keys())
     | {"PIECE", "SUBPIECE", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}
 )
 _SUPPORTED_UNARY_OPERATORS = {
@@ -350,7 +378,12 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
             continue
         expr_kind = node.expr_type.__class__
         if node.expr_type == expr_kind.BINARY_OP:
-            smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
+            op = getattr(node, "operator", None)
+            smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(op)
+            is_predicate = smt_name is not None
+            if smt_name is None:
+                smt_name = _FLOAT_ARITHMETIC_SMT_NAMES.get(op)
+                is_predicate = False
             if smt_name is None:
                 continue
             operands = getattr(node, "operands", None) or []
@@ -358,9 +391,29 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
                 continue
             left_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
             right_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
-            if float_mode == "fp" and _float_predicate_can_use_fp_theory(node, left_bits, right_bits):
+            result_bits = expression_smt_bit_width(node) or max(left_bits, right_bits)
+            if result_bits <= 0:
+                result_bits = 1
+            if is_predicate and float_mode == "fp" and _float_predicate_can_use_fp_theory(
+                node,
+                left_bits,
+                right_bits,
+            ):
                 continue
-            decl = f"(declare-fun {smt_name} ((_ BitVec {left_bits}) (_ BitVec {right_bits})) Bool)"
+            if (not is_predicate and float_mode == "fp" and
+                _float_binary_can_use_fp_theory(node, left_bits, right_bits)
+                and left_bits == right_bits == result_bits):
+                continue
+            if is_predicate:
+                decl = f"(declare-fun {smt_name} ((_ BitVec {left_bits}) (_ BitVec {right_bits})) Bool)"
+            else:
+                left_bits = int(left_bits)
+                right_bits = int(right_bits)
+                decl = (
+                    f"(declare-fun {smt_name} "
+                    f"((_ BitVec {left_bits}) (_ BitVec {right_bits})) "
+                    f"(_ BitVec {result_bits}))"
+                )
         elif node.expr_type == expr_kind.UNARY_OP:
             smt_name = _FLOAT_UNARY_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
             if smt_name is None:
@@ -392,6 +445,12 @@ def expression_uses_smt_float_theory(expr) -> bool:
             if len(operands) != 2:
                 continue
             if _float_predicate_can_use_fp_theory(
+                node,
+                expression_smt_bit_width(operands[0]),
+                expression_smt_bit_width(operands[1]),
+            ):
+                return True
+            if _float_binary_can_use_fp_theory(
                 node,
                 expression_smt_bit_width(operands[0]),
                 expression_smt_bit_width(operands[1]),
@@ -495,10 +554,14 @@ def _float_predicate_to_smt(
     operator: str,
     left_smt: str,
     right_smt: str,
+    left_expr,
+    right_expr,
     bits: int,
+    *,
+    float_mode: str,
 ) -> str:
-    left_fp = _bitvec_to_fp_smt(left_smt, bits)
-    right_fp = _bitvec_to_fp_smt(right_smt, bits)
+    left_fp = _normalize_to_fp_expr(left_smt, left_expr, bits, float_mode=float_mode)
+    right_fp = _normalize_to_fp_expr(right_smt, right_expr, bits, float_mode=float_mode)
     if operator == "FLOAT_NOTEQUAL":
         return f"(not (fp.eq {left_fp} {right_fp}))"
     fp_op = _FLOAT_PREDICATE_FP_OPS.get(operator)
@@ -506,6 +569,215 @@ def _float_predicate_to_smt(
         smt_name = _FLOAT_PREDICATE_SMT_NAMES.get(operator, operator.lower())
         return f"({smt_name} {left_smt} {right_smt})"
     return f"({fp_op} {left_fp} {right_fp})"
+
+
+def _is_float_rendered_expr(expr) -> bool:
+    if expr is None:
+        return False
+    expr_type = getattr(expr, "expr_type", None)
+    if expr_type is None:
+        return False
+    expr_kind = expr_type.__class__
+    if expr_type == expr_kind.BINARY_OP:
+        return (
+            getattr(expr, "operator", None) in _FLOAT_ARITHMETIC_SMT_NAMES
+            and _float_binary_can_use_fp_theory(
+                expr,
+                expression_smt_bit_width(expr.operands[0]) if expr.operands else 0,
+                expression_smt_bit_width(expr.operands[1]) if expr.operands else 0,
+            )
+        )
+    if expr_type == expr_kind.PHI:
+        # Keep this classifier in lockstep with the PHI renderer below. PHI
+        # branches are normalized through _coerce_expr_to_bitvec_width before
+        # the ITE is built, so the emitted PHI term is always BitVec even when
+        # every source branch started as an FP-theory expression.
+        return False
+    return False
+
+
+
+def expression_smt_sort_kind(expr, *, float_mode: str = "uf") -> str:
+    """Classify the SMT sort emitted for an expression: Bool, FP, or BV."""
+    if expression_returns_bool(expr):
+        return "Bool"
+    if float_mode == "fp" and _is_float_rendered_expr(expr):
+        return "FP"
+    return "BV"
+
+
+def expression_renders_as_fp_sort(expr, *, float_mode: str = "uf") -> bool:
+    """Return True when expression_to_smt returns an SMT FP-sort term."""
+    return expression_smt_sort_kind(expr, float_mode=float_mode) == "FP"
+
+def _looks_like_fp_expr(expr_smt: str) -> bool:
+    expr_smt = expr_smt.strip()
+    return expr_smt.startswith("(fp.") or expr_smt.startswith("((_ to_fp ")
+
+
+def _normalize_to_fp_expr(
+    expr_smt: str,
+    expr,
+    bits: int,
+    *,
+    float_mode: str,
+) -> str:
+    bits = int(bits or 0)
+    if float_mode != "fp" or bits <= 0 or bits not in _FLOAT_BV_WIDTH_TO_SORT:
+        return expr_smt
+    if _looks_like_fp_expr(expr_smt):
+        return expr_smt
+    if _is_float_rendered_expr(expr):
+        return expr_smt
+    try:
+        return _bitvec_to_fp_smt(expr_smt, bits)
+    except KeyError:
+        # 非対応幅が混在した場合は原則 bit-vector 経由へフォールバックし、
+        # 生成器側での非対応幅誤用を避ける。
+        return expr_smt
+
+
+def _float_binary_can_use_fp_theory(expr, left_bits: int, right_bits: int) -> bool:
+    if not _float_binary_can_use_fp_theory_for_operator(
+        getattr(expr, "operator", None),
+        left_bits,
+        right_bits,
+    ):
+        return False
+    operator = getattr(expr, "operator", None)
+    operands = getattr(expr, "operands", None) or []
+    if len(operands) != 2:
+        return False
+    return not _float_binary_has_known_exceptional_operand(
+        operator,
+        operands[0],
+        operands[1],
+        int(left_bits or 0),
+    )
+
+
+def _float_binary_to_smt(
+    operator: str,
+    left_expr,
+    right_expr,
+    left_smt: str,
+    right_smt: str,
+    left_bits: int,
+    right_bits: int,
+    result_bits: int,
+    *,
+    float_mode: str,
+) -> Optional[str]:
+    fp_spec = _FLOAT_ARITHMETIC_FP_SPECS.get(operator)
+    fp_op = fp_spec.get("fp_op") if fp_spec else None
+    left_bits = int(left_bits or 0)
+    right_bits = int(right_bits or 0)
+    result_bits = int(result_bits or 0)
+    if fp_op is not None and float_mode == "fp" and _float_binary_can_use_fp_theory_for_operator(
+        operator,
+        left_bits,
+        right_bits,
+    ) and not _float_binary_has_known_exceptional_operand(
+        operator,
+        left_expr,
+        right_expr,
+        left_bits,
+    ):
+        if not result_bits:
+            result_bits = max(1, max(left_bits, right_bits))
+        # FP 演算は演算結果幅とオペランド幅を揃えた時だけ採用する。
+        if result_bits == left_bits == right_bits:
+            left_fp = _normalize_to_fp_expr(
+                left_smt,
+                left_expr,
+                left_bits,
+                float_mode=float_mode,
+            )
+            right_fp = _normalize_to_fp_expr(
+                right_smt,
+                right_expr,
+                right_bits,
+                float_mode=float_mode,
+            )
+        else:
+            left_fp = None
+            right_fp = None
+        if left_fp is not None and right_fp is not None:
+            if not fp_spec.get("rounding", False):
+                return f"({fp_op} {left_fp} {right_fp})"
+            return f"({fp_op} RNE {left_fp} {right_fp})"
+        return None
+
+    if fp_op is not None:
+        smt_name = _FLOAT_ARITHMETIC_SMT_NAMES.get(operator, operator.lower())
+        return f"({smt_name} {left_smt} {right_smt})"
+
+    return None
+
+
+def _float_binary_can_use_fp_theory_for_operator(
+    operator: str,
+    left_bits: int,
+    right_bits: int,
+) -> bool:
+    if operator not in _FLOAT_ARITHMETIC_FP_SPECS:
+        return False
+    left_bits = int(left_bits or 0)
+    right_bits = int(right_bits or 0)
+    return left_bits == right_bits and left_bits in _FLOAT_BV_WIDTH_TO_SORT
+
+
+def _float_binary_has_known_exceptional_operand(
+    operator: str,
+    left_expr,
+    right_expr,
+    bits: int,
+) -> bool:
+    spec = _FLOAT_ARITHMETIC_FP_SPECS.get(operator)
+    if not spec or not spec.get("guard_known_exceptional_operands"):
+        return False
+    bits = int(bits or 0)
+    if bits not in _FLOAT_BV_WIDTH_TO_SORT:
+        return True
+    return (
+        _expr_is_known_nan_or_inf_bitpattern(left_expr, bits)
+        or _expr_is_known_nan_or_inf_bitpattern(right_expr, bits)
+        or _expr_is_known_zero_bitpattern(right_expr, bits)
+    )
+
+
+def _expr_constant_int(expr) -> Optional[int]:
+    expr_type = getattr(expr, "expr_type", None)
+    if expr_type is None:
+        return None
+    expr_kind = expr_type.__class__
+    if expr_type != expr_kind.CONSTANT:
+        return None
+    try:
+        return int(getattr(expr, "value", 0) or 0)
+    except Exception:
+        return None
+
+
+def _expr_is_known_zero_bitpattern(expr, bits: int) -> bool:
+    value = _expr_constant_int(expr)
+    if value is None:
+        return False
+    mask = (1 << int(bits)) - 1
+    return (value & mask) in {0, 1 << (int(bits) - 1)}
+
+
+def _expr_is_known_nan_or_inf_bitpattern(expr, bits: int) -> bool:
+    value = _expr_constant_int(expr)
+    if value is None or bits not in _FLOAT_BV_WIDTH_TO_SORT:
+        return False
+    bits = int(bits)
+    value &= (1 << bits) - 1
+    ebits, sbits = _FLOAT_BV_WIDTH_TO_SORT[bits]
+    fraction_bits = sbits - 1
+    exponent_mask = ((1 << ebits) - 1) << fraction_bits
+    exponent = value & exponent_mask
+    return exponent == exponent_mask
 
 
 def _float_unary_to_bitvec_smt(operator: str, operand_smt: str, bits: int) -> Optional[str]:
@@ -524,6 +796,7 @@ def _float_unary_to_bitvec_smt(operator: str, operand_smt: str, bits: int) -> Op
 
 def _float_unary_predicate_to_smt(
     operator: str,
+    operand,
     operand_smt: str,
     bits: int,
     *,
@@ -534,7 +807,7 @@ def _float_unary_predicate_to_smt(
         return None
     bits = int(bits or 0)
     if float_mode == "fp" and bits in _FLOAT_BV_WIDTH_TO_SORT:
-        return f"(fp.isNaN {_bitvec_to_fp_smt(operand_smt, bits)})"
+        return f"(fp.isNaN {_normalize_to_fp_expr(operand_smt, operand, bits, float_mode=float_mode)})"
     return f"({smt_name} {operand_smt})"
 
 
@@ -564,10 +837,22 @@ def _coerce_expr_to_bitvec_width(
     expr_smt: str,
     target_bits: int,
     prefer_sign_extension: bool = False,
+    *,
+    float_mode: str = "uf",
 ) -> str:
     """式を target_bits 幅の bitvector に揃える。"""
     if target_bits <= 0:
         return expr_smt
+
+    if float_mode == "fp" and expression_renders_as_fp_sort(expr, float_mode=float_mode):
+        expr_bits = expression_smt_bit_width(expr) or target_bits
+        expr_smt = f"((_ fp.to_ieee_bv) {expr_smt})"
+        return _coerce_smt_bitvec_width(
+            expr_smt,
+            expr_bits,
+            target_bits,
+            prefer_sign_extension=prefer_sign_extension,
+        )
 
     expr_smt = _coerce_bool_to_bitvec(expr, expr_smt, target_bits)
     if expression_returns_bool(expr):
@@ -921,6 +1206,7 @@ def _smt_extend_to_width(expr, expr_smt: str, target_bits: int, *, signed: bool)
         expr_smt,
         target_bits,
         prefer_sign_extension=signed,
+        float_mode="uf",
     )
 
 
@@ -1202,7 +1488,30 @@ def _to_smt_internal(
             and expr.operator in _FLOAT_PREDICATE_SMT_NAMES
             and _float_predicate_can_use_fp_theory(expr, left_bits, right_bits)
         ):
-            return _float_predicate_to_smt(expr.operator, left_smt, right_smt, left_bits)
+            return _float_predicate_to_smt(
+                expr.operator,
+                left_smt,
+                right_smt,
+                left,
+                right,
+                left_bits,
+                float_mode=float_mode,
+            )
+
+        if expr.operator in _FLOAT_ARITHMETIC_SMT_NAMES:
+            float_arith_smt = _float_binary_to_smt(
+                expr.operator,
+                left,
+                right,
+                left_smt,
+                right_smt,
+                left_bits,
+                right_bits,
+                expression_smt_bit_width(expr) or max(left_bits, right_bits),
+                float_mode=float_mode,
+            )
+            if float_arith_smt is not None:
+                return float_arith_smt
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
@@ -1240,6 +1549,7 @@ def _to_smt_internal(
                         left_smt,
                         target_bits,
                         prefer_sign_extension=False,
+                        float_mode=float_mode,
                     )
                 if right_bits < target_bits:
                     right_extend = (
@@ -1254,6 +1564,7 @@ def _to_smt_internal(
                         right_smt,
                         target_bits,
                         prefer_sign_extension=False,
+                        float_mode=float_mode,
                     )
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
@@ -1288,12 +1599,14 @@ def _to_smt_internal(
                         left_smt,
                         target_bits,
                         prefer_sign_extension=prefer_sign_extension,
+                        float_mode=float_mode,
                     )
                     right_smt = _coerce_expr_to_bitvec_width(
                         right,
                         right_smt,
                         target_bits,
                         prefer_sign_extension=prefer_sign_extension,
+                        float_mode=float_mode,
                     )
             elif left_bits != right_bits:
                 target_bits = max(left_bits, right_bits)
@@ -1365,6 +1678,7 @@ def _to_smt_internal(
 
         fp_unary_predicate_smt = _float_unary_predicate_to_smt(
             expr.operator,
+            operand,
             operand_smt,
             operand_bits,
             float_mode=float_mode,
@@ -1428,6 +1742,7 @@ def _to_smt_internal(
             addr_smt,
             64,
             prefer_sign_extension=False,
+            float_mode=float_mode,
         )
         return f"(select mem{mem_bits} {addr_smt})"
 
@@ -1460,6 +1775,7 @@ def _to_smt_internal(
                 branch_smt,
                 target_bits,
                 prefer_sign_extension=prefer_sign_extension,
+                float_mode=float_mode,
             )
 
         last_val = branches[-1][1]
@@ -1547,9 +1863,9 @@ def _lower_intrinsic_to_smt(
             expression_smt_bit_width(element_size),
             1,
         )
-        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits)
-        index_smt = _coerce_expr_to_bitvec_width(index, index_smt, target_bits)
-        elem_smt = _coerce_expr_to_bitvec_width(element_size, elem_smt, target_bits)
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits, float_mode=float_mode)
+        index_smt = _coerce_expr_to_bitvec_width(index, index_smt, target_bits, float_mode=float_mode)
+        elem_smt = _coerce_expr_to_bitvec_width(element_size, elem_smt, target_bits, float_mode=float_mode)
         return f"(bvadd {base_smt} (bvmul {index_smt} {elem_smt}))"
 
     if opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB":
@@ -1576,8 +1892,8 @@ def _lower_intrinsic_to_smt(
             expression_smt_bit_width(offset),
             1,
         )
-        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits)
-        offset_smt = _coerce_expr_to_bitvec_width(offset, offset_smt, target_bits)
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits, float_mode=float_mode)
+        offset_smt = _coerce_expr_to_bitvec_width(offset, offset_smt, target_bits, float_mode=float_mode)
         return f"(bvadd {base_smt} {offset_smt})"
 
     if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
@@ -1600,12 +1916,13 @@ def _lower_intrinsic_to_smt(
             address_context,
             float_mode,
         )
-        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits, float_mode=float_mode)
         count_smt = _coerce_expr_to_bitvec_width(
             count,
             count_smt,
             count_bits,
             prefer_sign_extension=_expr_prefers_signed_extension(count),
+            float_mode=float_mode,
         )
         return f"({_readonly_sum_function_name(expr)} {base_smt} {count_smt})"
 
@@ -1637,18 +1954,20 @@ def _lower_intrinsic_to_smt(
             address_context,
             float_mode,
         )
-        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits, float_mode=float_mode)
         start_smt = _coerce_expr_to_bitvec_width(
             start,
             start_smt,
             start_bits,
             prefer_sign_extension=_expr_prefers_signed_extension(start),
+            float_mode=float_mode,
         )
         limit_smt = _coerce_expr_to_bitvec_width(
             limit,
             limit_smt,
             limit_bits,
             prefer_sign_extension=_expr_prefers_signed_extension(limit),
+            float_mode=float_mode,
         )
         exact_smt = _counted_loop_sum_exact_smt(
             expr,
@@ -1681,6 +2000,7 @@ def _lower_intrinsic_to_smt(
             state_smt,
             state_bits,
             prefer_sign_extension=_expr_prefers_signed_extension(state),
+            float_mode=float_mode,
         )
         return f"({_state_transition_loop_count_function_name(expr)} {state_smt})"
 
