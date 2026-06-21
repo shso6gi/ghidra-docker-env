@@ -415,7 +415,7 @@ def _build_object_centric_condition_signature(conditions) -> Tuple[tuple, ...]:
         if condition is None:
             continue
         signature.append(condition.structural_key(budget=256))
-    signature.sort()
+    signature.sort(key=repr)
     return tuple(signature)
 
 

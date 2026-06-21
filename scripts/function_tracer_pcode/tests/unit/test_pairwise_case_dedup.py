@@ -13,6 +13,7 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+    _build_object_centric_condition_signature,
     build_normalized_inequality_query,
     build_pair_query,
     extract_return_cases,
@@ -107,6 +108,33 @@ def _analysis(returns) -> FunctionReturnAnalysis:
         parameters=[],
         returns=returns,
         return_type="long",
+    )
+
+
+def test_object_centric_condition_signature_sorts_mixed_none_and_int_keys():
+    class _Condition:
+        def __init__(self, key):
+            self._key = key
+
+        def structural_key(self, *, budget: int = 256):
+            assert budget == 256
+            return self._key
+
+    signature = _build_object_centric_condition_signature(
+        [
+            _Condition(("condition", ("runtime_ref", None), 1)),
+            _Condition(("condition", ("runtime_ref", 7), 1)),
+        ]
+    )
+
+    assert signature == tuple(
+        sorted(
+            [
+                ("condition", ("runtime_ref", None), 1),
+                ("condition", ("runtime_ref", 7), 1),
+            ],
+            key=repr,
+        )
     )
 
 
