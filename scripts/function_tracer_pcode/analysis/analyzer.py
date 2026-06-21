@@ -6475,6 +6475,27 @@ class ReturnAnalyzer:
             list(conditions) for conditions in blocked_path_conditions
         ]
         try:
+            if return_type_obj is not None and self._is_void_type(return_type_obj):
+                fallback_condition_sets = list(all_valid_path_conditions or [])
+                if not fallback_condition_sets:
+                    fallback_condition_sets = [list(path_conditions)]
+                fallback_returns: List[ReturnInfo] = []
+                for path_idx, candidate_conditions in enumerate(fallback_condition_sets):
+                    simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                        list(candidate_conditions)
+                    )
+                    fallback_returns.append(
+                        self._make_return_info(
+                            address=address,
+                            value=Expression.unknown("void"),
+                            conditions=simplified_conds,
+                            branch_index=return_index * 1000 + path_idx,
+                            site_metadata=site_metadata,
+                        )
+                    )
+                return self._merge_equivalent_return_infos(
+                    self._prune_less_precise_return_infos(fallback_returns)
+                )
             if num_inputs >= 2:
                 return_varnode = return_op.getInput(1)
                 return self._analyze_return_value(
@@ -6506,25 +6527,23 @@ class ReturnAnalyzer:
                 )
                 if implicit_results is not None:
                     return implicit_results
-                fallback_condition_sets = list(all_valid_path_conditions or [])
-                if not fallback_condition_sets:
-                    fallback_condition_sets = [list(path_conditions)]
-                fallback_returns: List[ReturnInfo] = []
-                for path_idx, candidate_conditions in enumerate(fallback_condition_sets):
-                    simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
-                        list(candidate_conditions)
-                    )
-                    fallback_returns.append(
-                        self._make_return_info(
-                            address=address,
-                            value=Expression.unknown("void"),
-                            conditions=simplified_conds,
-                            branch_index=return_index * 1000 + path_idx,
-                            site_metadata=site_metadata,
-                        )
-                    )
                 return self._merge_equivalent_return_infos(
-                    self._prune_less_precise_return_infos(fallback_returns)
+                    self._prune_less_precise_return_infos(
+                        [
+                            self._make_return_info(
+                                address=address,
+                                value=Expression.unknown("void"),
+                                conditions=ConditionSimplifier.simplify_conditions_object_centric(
+                                    list(candidate_conditions)
+                                ),
+                                branch_index=return_index * 1000 + path_idx,
+                                site_metadata=site_metadata,
+                            )
+                            for path_idx, candidate_conditions in enumerate(
+                                list(all_valid_path_conditions or []) or [list(path_conditions)]
+                            )
+                        ]
+                    )
                 )
         finally:
             self._current_blocked_return_path_conditions = previous_blocked

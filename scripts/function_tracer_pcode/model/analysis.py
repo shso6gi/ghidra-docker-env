@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .signature import SignatureHypothesis, FunctionSignature
 from .signature import (
     get_data_type_display_name,
+    is_void_data_type,
     is_unsigned_data_type,
     parameters_without_runtime_objects,
 )
@@ -1000,11 +1001,26 @@ class FunctionReturnAnalysis:
         updated_hypotheses.append(hypothesis.to_dict())
 
         updated_returns = list(self.returns or [])
+        updated_return_type_name = str(updated_signature.return_type or "").strip().lower()
+        return_overridden_to_void = return_changed and (
+            is_void_data_type(
+                updated_signature.return_type_obj,
+                updated_signature.return_type,
+            )
+            or updated_return_type_name == "void"
+        )
+        if return_overridden_to_void:
+            from .expression import Expression
+
+            updated_returns = [
+                replace(info, value=Expression.unknown("void"))
+                for info in (self.returns or [])
+            ]
         param_overrides = _build_param_override_by_index(
             list(self.parameters or []),
             list(updated_signature.parameters or []),
         )
-        if param_overrides:
+        if param_overrides and not return_overridden_to_void:
             rewritten_returns: List[ReturnInfo] = []
             returns_changed = False
             for info in self.returns or []:
@@ -1036,6 +1052,7 @@ class FunctionReturnAnalysis:
             return_type_obj=updated_signature.return_type_obj,
             parameters=updated_signature.parameters or [],
             returns=updated_returns,
+            comparison_surface=None if return_changed else self.comparison_surface,
             analysis_notes=updated_notes,
             signature_hypotheses=updated_hypotheses,
         )

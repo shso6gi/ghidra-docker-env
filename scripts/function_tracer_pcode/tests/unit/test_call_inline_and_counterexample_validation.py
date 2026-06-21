@@ -2335,6 +2335,43 @@ def test_return_analyzer_preserves_all_declared_void_return_path_conditions():
     }
 
 
+def test_return_analyzer_ignores_explicit_return_operand_when_declared_void():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    return_op = Mock()
+    return_op.getNumInputs.return_value = 2
+    return_op.getParent.return_value = Mock()
+    return_op.getInput.side_effect = AssertionError(
+        "declared void return must not trace explicit RETURN operand"
+    )
+    condition_tracker = Mock()
+    condition = _cond_eq(_param_expr("param_2", 1), Expression.constant(0, 4))
+    path_entries = [([Mock(index=1)], [condition])]
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = path_entries
+
+    with (
+        patch.object(analyzer, "_filter_noreturn_return_path_entries", return_value=(path_entries, [])),
+        patch.object(
+            analyzer,
+            "_analyze_return_value",
+            side_effect=AssertionError("declared void return must not analyze return value"),
+        ),
+    ):
+        result = analyzer._analyze_return_op(
+            return_op,
+            Mock(),
+            condition_tracker,
+            0,
+            current_function=Mock(),
+            active_functions=set(),
+            return_type_obj=resolve_mock_data_type("void"),
+        )
+
+    assert len(result) == 1
+    assert getattr(result[0].value, "expr_type", None) == ExpressionType.UNKNOWN
+    assert result[0].value.name == "void"
+    assert [cond.to_string() for cond in result[0].conditions] == [condition.to_string()]
+
+
 def test_return_analyzer_prefers_phi_input_for_actual_predecessor_path():
     class _FakeBlock:
         def __init__(self, index):

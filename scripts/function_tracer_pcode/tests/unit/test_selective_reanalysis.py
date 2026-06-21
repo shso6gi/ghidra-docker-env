@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer
 from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseResult, PhaseID
-from scripts.function_tracer_pcode.model import SignatureHypothesis
+from scripts.function_tracer_pcode.model import Expression, ReturnInfo, SignatureHypothesis
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 # ★ conftest から MockProgram、create_mock_analysis、create_mock_result をインポート
@@ -78,6 +78,7 @@ class TestSelectiveReanalysis:
             
             phase_handler.execute_phase.return_value = phase_result_p1
             # ★ 修正: Phase 0 後は True, Phase 1 後は False
+
             phase_handler.should_retry.side_effect = [True, False]
             phase_handler.get_retry_reason.side_effect = ["UNKNOWN", "UNKNOWN"]
             # ★ 修正: Phase 4-B が呼ばれないように None を明示
@@ -130,6 +131,36 @@ class TestSelectiveReanalysis:
             f"binary1 should be reanalyzed once after the initial analysis, but was {analyze_call_count['binary1']}"
         assert analyze_call_count["binary2"] == 1, \
             f"binary2 should be reused without reanalysis, but was {analyze_call_count['binary2']}"
+
+    def test_void_return_hypothesis_rewrites_artifact_return_values(self):
+        analysis = create_mock_analysis(
+            "sphbes",
+            return_type="ulong",
+            returns=[
+                ReturnInfo(
+                    address="0x1000",
+                    value=Expression.parameter("param_2", index=1, size=8),
+                    conditions=[],
+                ),
+                ReturnInfo(
+                    address="0x1004",
+                    value=Expression.variable("poststate_0_8", size=8),
+                    conditions=[],
+                ),
+            ],
+        )
+
+        rewritten = analysis.with_signature_hypothesis(
+            SignatureHypothesis(
+                return_type_override="void",
+                phase="P2_PATTERN_INT",
+                reason="counterpart void return surface",
+            )
+        )
+
+        assert rewritten.return_type == "void"
+        assert [ret.value.name for ret in rewritten.returns] == ["void", "void"]
+        assert all(getattr(ret.value.expr_type, "name", None) == "UNKNOWN" for ret in rewritten.returns)
     
     def test_both_binaries_changed_should_reanalyze_both(
         self, checker, mock_program_x86, monkeypatch

@@ -265,6 +265,164 @@ class TestPhaseTransitionPolicy:
         assert ctx.type_fix_result.return_type_fixed_binary2 is True
         type_fixer2.fix_function_signature_by_name.assert_called_once()
         assert type_fixer2.fix_function_signature_by_name.call_args.kwargs["override_return_type_name"] == "int"
+
+    def test_phase2_forces_nonvoid_artifact_return_to_counterpart_void(self, mock_program_x86):
+        config = TypeFixerConfig()
+        handler = PhaseHandler(config, debug=True)
+
+        void_analysis = create_mock_analysis(
+            function_name="sphbes",
+            return_type="void",
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression.unknown("void"),
+                )
+            ],
+        )
+        nonvoid_artifact = create_mock_analysis(
+            function_name="sphbes",
+            return_type="ulong",
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression.parameter("param_2", index=1, size=8),
+                )
+            ],
+        )
+
+        assert handler.should_fix_return_type(nonvoid_artifact, void_analysis) is True
+
+        type_fixer1 = Mock()
+        type_fixer1.fix_function_signature_by_name = Mock(return_value=(False, False))
+        type_fixer2 = Mock()
+        type_fixer2.fix_function_signature_by_name = Mock(return_value=(True, False))
+
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="sphbes",
+            function_name2="sphbes",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=void_analysis,
+            analysis2=nonvoid_artifact,
+        )
+
+        applied, changed1, changed2 = handler.run_phase2_return_type_fix(
+            ctx,
+            type_fixer1,
+            type_fixer2,
+        )
+
+        assert applied is True
+        assert changed1 is False
+        assert changed2 is True
+        type_fixer2.fix_function_signature_by_name.assert_called_once()
+        assert type_fixer2.fix_function_signature_by_name.call_args.kwargs["override_return_type_name"] == "void"
+
+    def test_phase2_does_not_force_nonvoid_to_suspicious_counterpart_void(self, mock_program_x86):
+        config = TypeFixerConfig()
+        handler = PhaseHandler(config, debug=True)
+
+        suspicious_void = create_mock_analysis(
+            function_name="sphbes",
+            return_type="void",
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression.unknown("void"),
+                )
+            ],
+        )
+        suspicious_void.unknown_event_count = 1
+        suspicious_void.unknown_event_reasons = ["call_out_of_scope"]
+
+        concrete_analysis = create_mock_analysis(
+            function_name="sphbes",
+            return_type="int",
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression.constant(1, 4),
+                )
+            ],
+        )
+
+        assert handler.should_fix_return_type(concrete_analysis, suspicious_void, program=mock_program_x86) is False
+        assert handler.should_fix_return_type(suspicious_void, concrete_analysis, program=mock_program_x86) is True
+
+        type_fixer1 = Mock()
+        type_fixer1.fix_function_signature_by_name = Mock(return_value=(True, False))
+        type_fixer2 = Mock()
+        type_fixer2.fix_function_signature_by_name = Mock(return_value=(True, False))
+
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="sphbes",
+            function_name2="sphbes",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=suspicious_void,
+            analysis2=concrete_analysis,
+        )
+
+        applied, changed1, changed2 = handler.run_phase2_return_type_fix(
+            ctx,
+            type_fixer1,
+            type_fixer2,
+        )
+
+        assert applied is True
+        assert changed1 is True
+        assert changed2 is False
+        type_fixer1.fix_function_signature_by_name.assert_called_once()
+        assert type_fixer1.fix_function_signature_by_name.call_args.kwargs["override_return_type_name"] == "int"
+        type_fixer2.fix_function_signature_by_name.assert_not_called()
+
+    def test_phase2_does_not_force_counterpart_void_across_different_function_names(self, mock_program_x86):
+        config = TypeFixerConfig()
+        handler = PhaseHandler(config, debug=True)
+
+        void_analysis = create_mock_analysis(
+            function_name="void_func",
+            return_type="void",
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression.unknown("void"),
+                )
+            ],
+        )
+        nonvoid_analysis = create_mock_analysis(
+            function_name="returns_value",
+            return_type="ulong",
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression.parameter("param_1", index=0, size=8),
+                )
+            ],
+        )
+
+        assert handler.should_fix_return_type(nonvoid_analysis, void_analysis, program=mock_program_x86) is False
     
     def test_phase4a_mips64_condition(self, mock_program_mips64, mock_program_x86):
         """Phase 4-A: MIPS64バイナリが含まれる場合のみ実行"""

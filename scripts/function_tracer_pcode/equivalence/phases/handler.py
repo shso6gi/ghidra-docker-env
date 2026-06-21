@@ -327,6 +327,18 @@ class PhaseHandler:
                 f"will force '{suspicious_override.type_name}'"
             )
             return True
+
+        counterpart_void_override = self._get_counterpart_void_return_override_spec(
+            analysis,
+            program,
+            counterpart_analysis,
+        )
+        if counterpart_void_override is not None:
+            self._debug_print(
+                f"Return type '{type_str}' conflicts with counterpart void "
+                f"surface; will force '{counterpart_void_override.type_name}'"
+            )
+            return True
         
         return False
 
@@ -401,6 +413,86 @@ class PhaseHandler:
             program=program,
             fallback_size=self.type_fixer_config.default_integral_size_bytes,
             signed=True,
+        )
+
+    def _get_counterpart_void_return_override_spec(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+        program: Any,
+        counterpart_analysis: Optional[FunctionReturnAnalysis],
+    ) -> Optional[ResolvedTypeSpec]:
+        if analysis is None or counterpart_analysis is None:
+            return None
+
+        type_str = get_data_type_display_name(
+            getattr(analysis, "return_type_obj", None),
+            analysis.return_type,
+        )
+        if (
+            not type_str
+            or is_void_data_type(getattr(analysis, "return_type_obj", None), type_str)
+            or self.type_fixer_config.is_suspicious_data_type(
+                getattr(analysis, "return_type_obj", None)
+            )
+        ):
+            return None
+
+        counterpart_type = get_data_type_display_name(
+            getattr(counterpart_analysis, "return_type_obj", None),
+            counterpart_analysis.return_type,
+        )
+        if not is_void_data_type(
+            getattr(counterpart_analysis, "return_type_obj", None),
+            counterpart_type,
+        ):
+            return None
+        if self._analysis_has_unknown_events(counterpart_analysis):
+            return None
+
+        if (
+            analysis.function_name
+            and counterpart_analysis.function_name
+            and analysis.function_name != counterpart_analysis.function_name
+        ):
+            return None
+
+        if not counterpart_analysis.returns or any(
+            not self._return_info_is_void_placeholder(ret)
+            for ret in counterpart_analysis.returns
+        ):
+            return None
+
+        if not analysis.returns:
+            return None
+
+        resolved = resolve_type_spec("void", program=program, fallback_signed=True)
+        if resolved is not None:
+            return resolved
+        return ResolvedTypeSpec(
+            type_name="void",
+            size_bytes=0,
+            source="counterpart_void_return_surface",
+        )
+
+    @staticmethod
+    def _analysis_has_unknown_events(analysis: Optional[FunctionReturnAnalysis]) -> bool:
+        if analysis is None:
+            return False
+        try:
+            unknown_event_count = int(getattr(analysis, "unknown_event_count", 0) or 0)
+        except (TypeError, ValueError):
+            unknown_event_count = 0
+        return unknown_event_count > 0 or bool(
+            getattr(analysis, "unknown_event_reasons", None)
+        )
+
+    @staticmethod
+    def _return_info_is_void_placeholder(ret) -> bool:
+        value = getattr(ret, "value", None)
+        expr_type = getattr(value, "expr_type", None)
+        return (
+            getattr(expr_type, "name", None) == "UNKNOWN"
+            and str(getattr(value, "name", "") or "").lower() == "void"
         )
 
     def _infer_explicit_integral_return_type_spec(
@@ -724,11 +816,23 @@ class PhaseHandler:
             ctx.program1,
             ctx.analysis2,
         )
+        if override_return_type1 is None:
+            override_return_type1 = self._get_counterpart_void_return_override_spec(
+                ctx.analysis1,
+                ctx.program1,
+                ctx.analysis2,
+            )
         override_return_type2 = self._get_suspicious_void_return_override_spec(
             ctx.analysis2,
             ctx.program2,
             ctx.analysis1,
         )
+        if override_return_type2 is None:
+            override_return_type2 = self._get_counterpart_void_return_override_spec(
+                ctx.analysis2,
+                ctx.program2,
+                ctx.analysis1,
+            )
 
         ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1, ctx.analysis2, program=ctx.program1)
         ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2, ctx.analysis1, program=ctx.program2)
