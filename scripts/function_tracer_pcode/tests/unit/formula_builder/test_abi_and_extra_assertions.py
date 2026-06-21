@@ -7,6 +7,8 @@ from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBui
 from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.equivalence.formula.params import (
     build_fragment_backed_parameter_constraint,
+    build_parameter_pairs,
+    collect_param_info,
 )
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo, ParameterPair
 from scripts.function_tracer_pcode.equivalence.formula.variable import (
@@ -94,6 +96,130 @@ class TestExtraAssertions:
 
 class TestABIConstraints:
     """ABI制約生成のテスト"""
+
+    def test_parameter_pairs_keep_ordinal_for_type_set_only_order_difference(self):
+        params1 = [
+            ParameterInfo("param_1", "param_1_1", 32, 0, is_signed=True, type_class="int"),
+            ParameterInfo("param_2", "param_2_1", 64, 1, is_signed=True, type_class="fp"),
+        ]
+        params2 = [
+            ParameterInfo("param_1", "param_1_2", 64, 0, is_signed=True, type_class="fp"),
+            ParameterInfo("param_2", "param_2_2", 32, 1, is_signed=True, type_class="int"),
+        ]
+
+        pairs = build_parameter_pairs(params1, params2)
+
+        assert [(pair.param1.smt_name, pair.param2.smt_name) for pair in pairs] == [
+            ("param_1_1", "param_1_2"),
+            ("param_2_1", "param_2_2"),
+        ]
+
+    def test_parameter_pairs_use_type_role_when_mips64_register_bank_artifact_is_visible(self):
+        params1 = collect_param_info(
+            [
+                {
+                    "name": "param_1",
+                    "data_type": "int",
+                    "size": 4,
+                    "index": 0,
+                    "is_signed": True,
+                    "storage": {"space_name": "register", "register_name": "a0_lo", "size": 4},
+                },
+                {
+                    "name": "param_2",
+                    "data_type": "double",
+                    "size": 8,
+                    "index": 1,
+                    "is_signed": True,
+                    "storage": {"space_name": "register", "register_name": "f13", "size": 8},
+                },
+            ],
+            "_1",
+        )
+        params2 = collect_param_info(
+            [
+                {
+                    "name": "param_1",
+                    "data_type": "double",
+                    "size": 8,
+                    "index": 0,
+                    "is_signed": True,
+                    "storage": {"space_name": "register", "register_name": "d0", "size": 8},
+                },
+                {
+                    "name": "param_2",
+                    "data_type": "int",
+                    "size": 4,
+                    "index": 1,
+                    "is_signed": True,
+                    "storage": {"space_name": "register", "register_name": "w0", "size": 4},
+                },
+            ],
+            "_2",
+        )
+
+        pairs = build_parameter_pairs(params1, params2)
+
+        assert [(pair.param1.smt_name, pair.param2.smt_name) for pair in pairs] == [
+            ("param_1_1", "param_2_2"),
+            ("param_2_1", "param_1_2"),
+        ]
+
+    def test_parameter_pairs_keep_ordinal_for_ambiguous_same_typed_parameters(self):
+        params1 = [
+            ParameterInfo("param_1", "param_1_1", 32, 0, is_signed=True, type_class="int"),
+            ParameterInfo("param_2", "param_2_1", 32, 1, is_signed=True, type_class="int"),
+        ]
+        params2 = [
+            ParameterInfo("param_1", "param_1_2", 32, 0, is_signed=True, type_class="int"),
+            ParameterInfo("param_2", "param_2_2", 32, 1, is_signed=True, type_class="int"),
+        ]
+
+        pairs = build_parameter_pairs(params1, params2)
+
+        assert [(pair.param1.smt_name, pair.param2.smt_name) for pair in pairs] == [
+            ("param_1_1", "param_1_2"),
+            ("param_2_1", "param_2_2"),
+        ]
+
+    def test_parameter_pairs_do_not_match_pointer_to_scalar_fp_by_type_role(self):
+        params1 = collect_param_info(
+            [
+                {"name": "param_1", "data_type": "double *", "size": 8, "index": 0, "is_signed": False},
+                {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
+            ],
+            "_1",
+        )
+        params2 = collect_param_info(
+            [
+                {"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True},
+                {"name": "param_2", "data_type": "double", "size": 8, "index": 1, "is_signed": True},
+            ],
+            "_2",
+        )
+
+        pairs = build_parameter_pairs(params1, params2)
+
+        assert params1[0].type_class == "pointer"
+        assert params2[1].type_class == "fp"
+        assert ("param_1_1", "param_2_2") not in [
+            (
+                pair.param1.smt_name if pair.param1 is not None else None,
+                pair.param2.smt_name if pair.param2 is not None else None,
+            )
+            for pair in pairs
+        ]
+
+    def test_parameter_type_class_treats_intptr_typedef_names_as_integral(self):
+        params = collect_param_info(
+            [
+                {"name": "param_1", "data_type": "intptr_t", "size": 8, "index": 0, "is_signed": True},
+                {"name": "param_2", "data_type": "uintptr_t", "size": 8, "index": 1, "is_signed": False},
+            ],
+            "_1",
+        )
+
+        assert [param.type_class for param in params] == ["int", "int"]
 
     def test_abi_constraint_generation(self):
         builder = FormulaBuilder(debug=False)

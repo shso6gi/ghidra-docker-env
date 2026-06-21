@@ -20,6 +20,10 @@ class ParameterInfo:
     is_signed: bool = True
     semantic_narrow_bits: Optional[int] = None
     semantic_signedness: Optional[str] = None
+    type_class: Optional[str] = None
+    abi_register_name: Optional[str] = None
+    abi_bank: Optional[str] = None
+    abi_bank_ordinal: Optional[int] = None
 
 
 @dataclass

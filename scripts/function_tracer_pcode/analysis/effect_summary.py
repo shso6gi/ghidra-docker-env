@@ -2353,6 +2353,16 @@ def _select_aligned_explicit_call_arguments(
     if dependency_tail_aligned is not None:
         return dependency_tail_aligned
 
+    fixed_prefix_aligned = _select_explicit_call_arguments_by_fixed_prefix(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit,
+        caller_parameters,
+    )
+    if fixed_prefix_aligned is not None:
+        return fixed_prefix_aligned
+
     preferred_args = [
         _recover_preferred_call_argument_expression(
             call_op,
@@ -2387,6 +2397,171 @@ def _select_aligned_explicit_call_arguments(
         used_indexes.add(matches[0])
         selected.append(explicit[matches[0]])
     return selected
+
+
+def _select_explicit_call_arguments_by_fixed_prefix(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+    caller_parameters: Sequence[Dict],
+) -> Optional[List[Expression]]:
+    callee_count = len(callee_parameters or ())
+    if callee_count <= 0 or len(explicit_args or ()) <= callee_count:
+        return None
+    format_spec = _fixed_prefix_format_recovery_spec(call_op, tracer, callee_parameters)
+    if format_spec is None:
+        return None
+    fixed_prefix_len, _format_index = format_spec
+    if callee_count != fixed_prefix_len:
+        return None
+
+    selected = list(explicit_args[:callee_count])
+    if not _fixed_prefix_argument_window_has_evidence(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit_args,
+        selected,
+        _format_index,
+    ):
+        return None
+    for expr, callee_param in zip(selected, callee_parameters):
+        if expr is None:
+            return None
+        effective_size = int(getattr(expr, "size", 0) or callee_param.get("size") or 0)
+        if effective_size <= 0:
+            effective_size = 8
+        if _should_prefer_explicit_call_argument(
+            expr,
+            caller_parameters,
+            size=effective_size,
+        ):
+            continue
+        return None
+    return selected
+
+
+def _fixed_prefix_argument_window_has_evidence(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+    selected: Sequence[Expression],
+    format_index: int,
+) -> bool:
+    param_storages = [
+        _coerce_storage_info(callee_param.get("storage"))
+        for callee_param in callee_parameters
+    ]
+    input_storages = _call_input_storages_for_explicit_args(call_op, tracer, explicit_args)
+    if input_storages is not None and any(storage is not None for storage in input_storages):
+        if (
+            not any(storage is None for storage in param_storages)
+            and _explicit_call_argument_window_matches_storage(
+                input_storages[:len(selected)],
+                selected,
+                param_storages,
+            )
+        ):
+            return True
+
+    if format_index < 0 or format_index >= len(selected):
+        return False
+    return _expression_has_format_pointer_evidence(selected[format_index], tracer)
+
+
+def _expression_has_format_pointer_evidence(
+    expr: Optional[Expression],
+    tracer=None,
+    seen: Optional[Set[int]] = None,
+) -> bool:
+    if expr is None:
+        return False
+    if seen is None:
+        seen = set()
+    expr_id = id(expr)
+    if expr_id in seen:
+        return False
+    seen.add(expr_id)
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, AddressValueRef):
+        return _address_ref_is_readonly_format_data(runtime_ref)
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        return all(
+            _expression_has_format_pointer_evidence(value, tracer, set(seen))
+            for _condition, value in expr.value
+        )
+    if expr.expr_type != ExpressionType.CONSTANT:
+        return False
+
+    try:
+        address_value = int(expr.value)
+    except Exception:
+        return False
+    resolver = getattr(tracer, "_make_address_runtime_ref_for_offset", None)
+    if not callable(resolver):
+        return False
+    try:
+        resolved_ref = resolver(
+            address_value,
+            display_name=f"format_string_{address_value:x}",
+            require_ghidra_evidence=True,
+        )
+    except Exception:
+        return False
+    return isinstance(resolved_ref, AddressValueRef) and _address_ref_is_readonly_format_data(resolved_ref)
+
+
+def _address_ref_is_readonly_format_data(runtime_ref: AddressValueRef) -> bool:
+    return runtime_ref.is_readonly_memory() and getattr(runtime_ref, "can_execute", None) is False
+
+
+_FIXED_PREFIX_FORMAT_CALL_TARGETS: Dict[str, Tuple[int, int]] = {
+    "printf": (1, 0),
+    "isoc99_printf": (1, 0),
+    "printf_chk": (2, 1),
+    "fprintf": (2, 1),
+    "isoc99_fprintf": (2, 1),
+    "sprintf": (2, 1),
+    "isoc99_sprintf": (2, 1),
+    "snprintf": (3, 2),
+    "isoc99_snprintf": (3, 2),
+    "fprintf_chk": (3, 2),
+    "sprintf_chk": (4, 3),
+    "snprintf_chk": (5, 4),
+}
+
+
+def _fixed_prefix_format_recovery_spec(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+) -> Optional[Tuple[int, int]]:
+    target_name = _normalized_fixed_prefix_target_name(_resolve_call_target_name(tracer, call_op))
+    spec = _FIXED_PREFIX_FORMAT_CALL_TARGETS.get(target_name)
+    if spec is None:
+        return None
+    fixed_prefix_len, format_index = spec
+    if len(callee_parameters or ()) != fixed_prefix_len:
+        return None
+    if format_index < 0 or format_index >= fixed_prefix_len:
+        return None
+    format_param = (callee_parameters or ())[format_index] or {}
+    if not _parameter_descriptor_looks_pointer(format_param):
+        return None
+    return spec
+
+
+def _normalized_fixed_prefix_target_name(target_name: Optional[str]) -> str:
+    if not target_name:
+        return ""
+    normalized = str(target_name).strip().lower()
+    normalized = normalized.split("@", 1)[0]
+    normalized = normalized.rsplit("::", 1)[-1]
+    while normalized.startswith("_"):
+        normalized = normalized[1:]
+    return normalized
 
 
 def _select_explicit_call_arguments_by_input_storage(

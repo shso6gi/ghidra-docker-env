@@ -73,7 +73,20 @@ class MIPS64Handler:
             mips_size = self._get_param_size(mips_param)
             other_size = self._get_param_size(other_param)
 
-            if mips_size > 4 and other_size == 4:
+            if (
+                mips_size > 4
+                and other_size == 4
+                and is_integral_data_type(
+                    mips_param.get("data_type_obj"),
+                    mips_param.get("data_type"),
+                    program=program,
+                )
+                and is_integral_data_type(
+                    other_param.get("data_type_obj"),
+                    other_param.get("data_type"),
+                    program=program,
+                )
+            ):
                 signed = not is_unsigned_data_type(
                     other_param.get("data_type_obj"),
                     other_param.get("data_type"),
