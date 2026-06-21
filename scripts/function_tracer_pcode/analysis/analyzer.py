@@ -990,6 +990,7 @@ class ReturnAnalyzer:
                         i,
                         current_function=function,
                         active_functions=active_functions,
+                        return_type_obj=return_type_obj,
                     )
                     return_infos.extend(infos)
 
@@ -1055,18 +1056,19 @@ class ReturnAnalyzer:
                         },
                     )
 
-                recovered_returns = self._recover_call_wrapper_returns(
-                    results,
-                    result,
-                    function,
-                    tracer,
-                    condition_tracker,
-                    return_ops,
-                    active_functions,
-                )
-                if recovered_returns is not None:
-                    result.returns = recovered_returns
-                    result.analysis_notes.append("call_wrapper_return_recovery")
+                if not (return_type_obj is not None and self._is_void_type(return_type_obj)):
+                    recovered_returns = self._recover_call_wrapper_returns(
+                        results,
+                        result,
+                        function,
+                        tracer,
+                        condition_tracker,
+                        return_ops,
+                        active_functions,
+                    )
+                    if recovered_returns is not None:
+                        result.returns = recovered_returns
+                        result.analysis_notes.append("call_wrapper_return_recovery")
 
                 recovered_switch_returns = self._recover_switch_like_returns_from_pcode(
                     result,
@@ -6425,6 +6427,7 @@ class ReturnAnalyzer:
         return_index: int,
         current_function,
         active_functions: Set[Tuple[Any, ...]],
+        return_type_obj=None,
     ) -> List[ReturnInfo]:
         """単一のRETURNを解析"""
         site_metadata = self._describe_pcode_site(return_op, "unknown")
@@ -6499,19 +6502,30 @@ class ReturnAnalyzer:
                     active_functions=active_functions,
                     current_function=current_function,
                     site_metadata=site_metadata,
+                    return_type_obj=return_type_obj,
                 )
                 if implicit_results is not None:
                     return implicit_results
-                simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
-                    path_conditions
+                fallback_condition_sets = list(all_valid_path_conditions or [])
+                if not fallback_condition_sets:
+                    fallback_condition_sets = [list(path_conditions)]
+                fallback_returns: List[ReturnInfo] = []
+                for path_idx, candidate_conditions in enumerate(fallback_condition_sets):
+                    simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                        list(candidate_conditions)
+                    )
+                    fallback_returns.append(
+                        self._make_return_info(
+                            address=address,
+                            value=Expression.unknown("void"),
+                            conditions=simplified_conds,
+                            branch_index=return_index * 1000 + path_idx,
+                            site_metadata=site_metadata,
+                        )
+                    )
+                return self._merge_equivalent_return_infos(
+                    self._prune_less_precise_return_infos(fallback_returns)
                 )
-                return [self._make_return_info(
-                    address=address,
-                    value=Expression.unknown("void"),
-                    conditions=simplified_conds,
-                    branch_index=return_index,
-                    site_metadata=site_metadata,
-                )]
         finally:
             self._current_blocked_return_path_conditions = previous_blocked
 
@@ -6800,8 +6814,11 @@ class ReturnAnalyzer:
         active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
+        return_type_obj=None,
     ) -> Optional[List[ReturnInfo]]:
         """RETURN オペランドが欠落している場合に、返り値レジスタ由来の値を復元する。"""
+        if return_type_obj is not None and self._is_void_type(return_type_obj):
+            return None
         path_recovered = self._recover_implicit_return_from_block_paths(
             return_op,
             address,

@@ -6412,12 +6412,10 @@ class CheckStrategy(ABC):
         )
         if object_centric_status is True:
             return ReturnCoverageCheckResult(status="covered")
-        if object_centric_status is False:
+        if object_centric_status is False and not self._base_context_has_return_coverage_domain_assumptions(base_ctx):
             return ReturnCoverageCheckResult(
                 status="gap",
-                detail=(
-                    f"{label} object-centric return-case coverage check found uncovered region"
-                ),
+                detail=f"{label} object-centric return-case coverage check found uncovered region",
             )
         if object_centric_status is None:
             case_conditions = [
@@ -6472,6 +6470,15 @@ class CheckStrategy(ABC):
                 can_record_completion_proof=True,
             )
         return ReturnCoverageCheckResult(status="covered")
+
+    @staticmethod
+    def _base_context_has_return_coverage_domain_assumptions(
+        base_ctx: Mapping[str, Any],
+    ) -> bool:
+        assumptions = base_ctx.get("return_coverage_domain_assumptions")
+        if not isinstance(assumptions, Mapping):
+            return False
+        return bool(assumptions.get("fp_non_nan"))
 
     def _return_cases_have_object_centric_total_coverage(
         self,

@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock, patch
 
+from conftest import resolve_mock_data_type
+
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
@@ -2271,6 +2273,66 @@ def test_return_analyzer_uses_abi_fallback_return_storage_when_signature_is_void
 
     assert result == recovered
     assert mock_analyze.call_args.args[0] is source_varnode
+
+
+def test_return_analyzer_skips_abi_fallback_when_return_type_is_declared_void():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    with patch.object(
+        analyzer,
+        "_recover_implicit_return_from_block_paths",
+        side_effect=AssertionError("declared void return must not recover ABI return storage"),
+    ):
+        result = analyzer._analyze_implicit_return_value(
+            Mock(),
+            "0x1000",
+            Mock(),
+            Mock(),
+            [],
+            0,
+            all_path_conditions=[[]],
+            active_functions=set(),
+            current_function=Mock(),
+            return_type_obj=resolve_mock_data_type("void"),
+        )
+
+    assert result is None
+
+
+def test_return_analyzer_preserves_all_declared_void_return_path_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    return_op = Mock()
+    return_op.getNumInputs.return_value = 1
+    return_op.getParent.return_value = Mock()
+    condition_tracker = Mock()
+    first_conditions = [_cond_eq(_param_expr("param_2", 1), Expression.constant(0, 4))]
+    second_conditions = [_cond_ne(_param_expr("param_2", 1), Expression.constant(0, 4))]
+    path_entries = [
+        ([Mock(index=1)], first_conditions),
+        ([Mock(index=2)], second_conditions),
+    ]
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = path_entries
+
+    with patch.object(analyzer, "_filter_noreturn_return_path_entries", return_value=(path_entries, [])):
+        result = analyzer._analyze_return_op(
+            return_op,
+            Mock(),
+            condition_tracker,
+            0,
+            current_function=Mock(),
+            active_functions=set(),
+            return_type_obj=resolve_mock_data_type("void"),
+        )
+
+    assert len(result) == 2
+    condition_operators = {
+        tuple(getattr(getattr(cond, "expression", None), "operator", None) for cond in ret.conditions)
+        for ret in result
+    }
+    assert condition_operators == {
+        ("INT_EQUAL",),
+        ("INT_NOTEQUAL",),
+    }
 
 
 def test_return_analyzer_prefers_phi_input_for_actual_predecessor_path():

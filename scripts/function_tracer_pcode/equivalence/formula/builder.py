@@ -766,6 +766,27 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
+    def _has_fp_non_nan_domain_assumptions(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo],
+    ) -> bool:
+        if not self.assume_fp_non_nan:
+            return False
+        for analysis, params in ((analysis1, params1), (analysis2, params2)):
+            descriptors = self._parameter_descriptors_by_identity(analysis)
+            for param in params:
+                descriptor = descriptors.get(("index", param.index)) or descriptors.get(
+                    ("name", param.original_name)
+                )
+                if not self._parameter_descriptor_is_fp(descriptor):
+                    continue
+                if self._fp_sort_for_bit_width(param.bit_width) is not None:
+                    return True
+        return False
+
     @staticmethod
     def _parameter_descriptors_by_identity(
         analysis: FunctionReturnAnalysis,
@@ -2078,4 +2099,12 @@ class FormulaBuilder:
             'return_size1': context.return_size1,
             'return_size2': context.return_size2,
             'smt_logic': context.smt_logic,
+            'return_coverage_domain_assumptions': {
+                'fp_non_nan': self._has_fp_non_nan_domain_assumptions(
+                    analysis1,
+                    analysis2,
+                    context.params1,
+                    context.params2,
+                ),
+            },
         }

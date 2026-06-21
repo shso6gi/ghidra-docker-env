@@ -55,11 +55,15 @@ class ExpressionSafetyChecker:
         own_bindings = self._bind_conditions(case.conditions, own_render_fn)
         extra_bindings = self._bind_conditions(extra_conditions or [], extra_render_fn)
 
-        if self.expression_contains_unresolved(
-            case.value_expr,
-            render_fn=own_render_fn,
-            context_bindings=own_bindings + extra_bindings,
-            query_label=f"{query_label}:value",
+        value_expr = case.value_expr
+        if (
+            not self._is_void_return_placeholder(value_expr)
+            and self.expression_contains_unresolved(
+                value_expr,
+                render_fn=own_render_fn,
+                context_bindings=own_bindings + extra_bindings,
+                query_label=f"{query_label}:value",
+            )
         ):
             return True
 
@@ -79,6 +83,12 @@ class ExpressionSafetyChecker:
 
         return False
 
+    @staticmethod
+    def _is_void_return_placeholder(expr) -> bool:
+        if getattr(expr, "expr_type", None) != ExpressionType.UNKNOWN:
+            return False
+        return str(getattr(expr, "name", "") or "").lower() == "void"
+
     def value_contains_unresolved(
         self,
         case,
@@ -88,6 +98,8 @@ class ExpressionSafetyChecker:
         extra_render_fn=None,
         query_label: str = "value",
     ) -> bool:
+        if self._is_void_return_placeholder(case.value_expr):
+            return False
         context_bindings = self._bind_conditions(case.conditions, own_render_fn) + self._bind_conditions(
             extra_conditions or [],
             extra_render_fn,

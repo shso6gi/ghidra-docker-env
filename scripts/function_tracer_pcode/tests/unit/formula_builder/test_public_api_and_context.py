@@ -164,6 +164,28 @@ def test_formula_builder_can_explicitly_assume_fp_inputs_are_non_nan():
     assert solver_result.status == SolverStatus.UNSAT
 
 
+def test_build_base_context_records_structured_fp_non_nan_domain_assumption():
+    base_ctx = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_base_context(
+        _max_with_less_analysis(),
+        _max_with_less_analysis(),
+    )
+
+    assert base_ctx["return_coverage_domain_assumptions"] == {"fp_non_nan": True}
+
+
+def test_build_base_context_records_no_fp_domain_assumption_without_supported_fp_params():
+    base_ctx = FormulaBuilder(
+        assume_fp_non_nan=True,
+    ).build_base_context(
+        _simple_analysis("left", "param_1", size=4),
+        _simple_analysis("right", "param_1", size=4),
+    )
+
+    assert base_ctx["return_coverage_domain_assumptions"] == {"fp_non_nan": False}
+
+
 def test_formula_builder_skips_fp_non_nan_section_when_no_supported_fp_params_exist():
     result = FormulaBuilder(
         assume_fp_non_nan=True,
@@ -306,6 +328,41 @@ def test_formula_builder_selects_uf_logic_for_unsupported_float_predicate_width(
     assert "(set-logic QF_UFBV)" in result.formula
     assert "(declare-fun float_less ((_ BitVec 80) (_ BitVec 80)) Bool)" in result.formula
     assert "fp.lt" not in result.formula
+
+
+def test_build_base_context_selects_fp_logic_for_direct_float_sqrt_return():
+    x = _double_param("x", 0)
+    sqrt_x = Expression.unary_op("FLOAT_SQRT", x)
+    sqrt_x.size = 8
+    analysis = FunctionReturnAnalysis(
+        function_name="sqrt_return",
+        entry_point="0x00401000",
+        parameters=[
+            {
+                "name": "x",
+                "size": 8,
+                "index": 0,
+                "data_type": "double",
+                "data_type_obj": resolve_mock_data_type("double"),
+            },
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x00401000",
+                conditions=[],
+                value=sqrt_x,
+            ),
+        ],
+        return_type="double",
+        return_type_obj=resolve_mock_data_type("double"),
+    )
+
+    base_ctx = FormulaBuilder().build_base_context(analysis, analysis)
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis, analysis)
+
+    assert base_ctx["smt_logic"] == "QF_FPBV"
+    assert "(set-logic QF_FPBV)" in result.formula
+    assert "fp.sqrt" in result.formula
 
 
 def _readonly_return_ordering_expr(

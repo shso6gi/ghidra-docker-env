@@ -56,6 +56,9 @@ _FLOAT_PREDICATE_SMT_NAMES = {
 _FLOAT_UNARY_PREDICATE_SMT_NAMES = {
     "FLOAT_NAN": "float_nan",
 }
+_FLOAT_UNARY_VALUE_SMT_NAMES = {
+    "FLOAT_SQRT": "float_sqrt",
+}
 _FLOAT_PREDICATE_FP_OPS = {
     "FLOAT_EQUAL": "fp.eq",
     "FLOAT_LESS": "fp.lt",
@@ -123,6 +126,7 @@ _SUPPORTED_UNARY_OPERATORS = {
     "BOOL_NEGATE",
     "FLOAT_NEG",
     "FLOAT_ABS",
+    "FLOAT_SQRT",
     "FLOAT_NAN",
 }
 
@@ -415,7 +419,12 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
                     f"(_ BitVec {result_bits}))"
                 )
         elif node.expr_type == expr_kind.UNARY_OP:
-            smt_name = _FLOAT_UNARY_PREDICATE_SMT_NAMES.get(getattr(node, "operator", None))
+            op = getattr(node, "operator", None)
+            smt_name = _FLOAT_UNARY_PREDICATE_SMT_NAMES.get(op)
+            is_predicate = smt_name is not None
+            if smt_name is None:
+                smt_name = _FLOAT_UNARY_VALUE_SMT_NAMES.get(op)
+                is_predicate = False
             if smt_name is None:
                 continue
             operands = getattr(node, "operands", None) or []
@@ -424,7 +433,16 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
             operand_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
             if float_mode == "fp" and operand_bits in _FLOAT_BV_WIDTH_TO_SORT:
                 continue
-            decl = f"(declare-fun {smt_name} ((_ BitVec {operand_bits})) Bool)"
+            if is_predicate:
+                decl = f"(declare-fun {smt_name} ((_ BitVec {operand_bits})) Bool)"
+            else:
+                result_bits = expression_smt_bit_width(node) or operand_bits
+                if result_bits <= 0:
+                    result_bits = operand_bits
+                decl = (
+                    f"(declare-fun {smt_name} ((_ BitVec {operand_bits})) "
+                    f"(_ BitVec {result_bits}))"
+                )
         else:
             continue
         if decl in seen:
@@ -457,6 +475,10 @@ def expression_uses_smt_float_theory(expr) -> bool:
             ):
                 return True
         elif node.expr_type == expr_kind.UNARY_OP and getattr(node, "operator", None) == "FLOAT_NAN":
+            operands = getattr(node, "operands", None) or []
+            if len(operands) == 1 and int(expression_smt_bit_width(operands[0]) or 0) in _FLOAT_BV_WIDTH_TO_SORT:
+                return True
+        elif node.expr_type == expr_kind.UNARY_OP and getattr(node, "operator", None) == "FLOAT_SQRT":
             operands = getattr(node, "operands", None) or []
             if len(operands) == 1 and int(expression_smt_bit_width(operands[0]) or 0) in _FLOAT_BV_WIDTH_TO_SORT:
                 return True
@@ -808,6 +830,31 @@ def _float_unary_predicate_to_smt(
     bits = int(bits or 0)
     if float_mode == "fp" and bits in _FLOAT_BV_WIDTH_TO_SORT:
         return f"(fp.isNaN {_normalize_to_fp_expr(operand_smt, operand, bits, float_mode=float_mode)})"
+    return f"({smt_name} {operand_smt})"
+
+
+def _float_unary_value_to_smt(
+    operator: str,
+    operand,
+    operand_smt: str,
+    bits: int,
+    *,
+    float_mode: str,
+) -> Optional[str]:
+    bits = int(bits or 0)
+    if operator != "FLOAT_SQRT":
+        return None
+    if float_mode == "fp" and bits in _FLOAT_BV_WIDTH_TO_SORT:
+        fp_operand = _normalize_to_fp_expr(
+            operand_smt,
+            operand,
+            bits,
+            float_mode=float_mode,
+        )
+        return f"((_ fp.to_ieee_bv) (fp.sqrt RNE {fp_operand}))"
+    smt_name = _FLOAT_UNARY_VALUE_SMT_NAMES.get(operator)
+    if smt_name is None:
+        return None
     return f"({smt_name} {operand_smt})"
 
 
@@ -1685,6 +1732,16 @@ def _to_smt_internal(
         )
         if fp_unary_predicate_smt is not None:
             return fp_unary_predicate_smt
+
+        fp_unary_value_smt = _float_unary_value_to_smt(
+            expr.operator,
+            operand,
+            operand_smt,
+            operand_bits,
+            float_mode=float_mode,
+        )
+        if fp_unary_value_smt is not None:
+            return fp_unary_value_smt
 
         fp_unary_smt = _float_unary_to_bitvec_smt(
             expr.operator,

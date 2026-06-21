@@ -499,7 +499,7 @@ def test_object_centric_identity_unsafe_keeps_object_coverage_path_inconclusive(
     strategy._build_return_case_coverage_query.assert_not_called()
 
 
-def test_object_centric_coverage_gap_is_used_directly():
+def test_object_centric_coverage_gap_uses_rendered_query_before_reporting_gap():
     analysis = _analysis(
         "object_centric_gap",
         [
@@ -517,9 +517,57 @@ def test_object_centric_coverage_gap_is_used_directly():
     )
     cases = extract_return_cases(analysis)
     strategy = _pairwise_strategy()
-    strategy._build_return_case_coverage_query = Mock(
-        side_effect=AssertionError("gap from object-centric oracle must short-circuit before legacy coverage")
+    strategy._build_return_case_coverage_query = Mock(return_value="(check-sat)")
+    strategy.solver_runner = Mock()
+    strategy.solver_runner.run_sequential = Mock(
+        return_value=Mock(is_equivalent=False, get_counterexample=Mock(return_value={"count": 0}))
     )
+    result = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": [
+                "(set-logic QF_AUFBV)",
+                "; function1:param_1 is assumed non-NaN",
+            ],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+            "return_coverage_domain_assumptions": {"fp_non_nan": True},
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert result.status == "gap"
+    assert result.detail == "function1 has uncovered return-condition region under model {'count': 0}"
+    strategy._build_return_case_coverage_query.assert_called_once()
+    strategy.solver_runner.run_sequential.assert_called_once()
+
+
+def test_object_centric_coverage_gap_without_domain_assumptions_is_used_directly():
+    analysis = _analysis(
+        "object_centric_gap_without_domain_assumptions",
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), _count_param()))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _count_param(), _const(0)))],
+            ),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(
+        side_effect=AssertionError("gap without domain assumptions must not fall through to SMT query")
+    )
+
     result = strategy._check_return_case_coverage_gap(
         {
             "header_lines": ["(set-logic QF_AUFBV)"],
@@ -537,6 +585,105 @@ def test_object_centric_coverage_gap_is_used_directly():
     assert result.status == "gap"
     assert result.detail == "function1 object-centric return-case coverage check found uncovered region"
     strategy._build_return_case_coverage_query.assert_not_called()
+
+
+def test_object_centric_coverage_gap_comment_only_does_not_enable_domain_fallback():
+    analysis = _analysis(
+        "object_centric_gap_comment_only",
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), _count_param()))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _count_param(), _const(0)))],
+            ),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(
+        side_effect=AssertionError("comment-only domain marker must not fall through to SMT query")
+    )
+
+    result = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": [
+                "(set-logic QF_AUFBV)",
+                "; function1:param_1 is assumed non-NaN",
+            ],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert result.status == "gap"
+    assert result.detail == "function1 object-centric return-case coverage check found uncovered region"
+    strategy._build_return_case_coverage_query.assert_not_called()
+
+
+def test_object_centric_coverage_gap_can_be_discharged_by_active_smt_assumptions():
+    analysis = _analysis(
+        "object_centric_gap_discharged",
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), _count_param()))],
+            ),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(
+        return_value="\n".join(
+            [
+                "(set-logic QF_BV)",
+                "(declare-const count (_ BitVec 32))",
+                "(assert (bvsgt count (_ bv0 32)))",
+                "(assert (not (bvsgt count (_ bv0 32))))",
+                "(check-sat)",
+            ]
+        )
+    )
+    strategy.solver_runner = Mock()
+    strategy.solver_runner.run_sequential = Mock(
+        return_value=Mock(is_equivalent=True, get_counterexample=Mock(return_value=None))
+    )
+
+    result = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": [
+                "(set-logic QF_BV)",
+                "(declare-const count (_ BitVec 32))",
+                "; function1:param_1 is assumed non-NaN",
+                "(assert (not (fp.isNaN ((_ to_fp 11 53) param_1))))",
+                "(assert (bvsgt count (_ bv0 32)))",
+            ],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+            "return_coverage_domain_assumptions": {"fp_non_nan": True},
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert result.status == "covered"
+    strategy._build_return_case_coverage_query.assert_called_once()
+    strategy.solver_runner.run_sequential.assert_called_once()
 
 
 

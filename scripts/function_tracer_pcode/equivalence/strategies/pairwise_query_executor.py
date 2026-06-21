@@ -13,6 +13,18 @@ from ..formula.returns import (
 from .pairwise_models import QueryResult
 
 
+def _is_void_return_placeholder(expr: Any) -> bool:
+    expr_type = getattr(getattr(expr, "expr_type", None), "name", None)
+    return expr_type == "UNKNOWN" and str(getattr(expr, "name", "") or "").lower() == "void"
+
+
+def _cases_have_void_return_placeholders(case1, case2) -> bool:
+    return (
+        _is_void_return_placeholder(getattr(case1, "value_expr", None))
+        and _is_void_return_placeholder(getattr(case2, "value_expr", None))
+    )
+
+
 def _record_return_width_block(strategy, exc: ReturnWidthMismatchError) -> None:
     stats = getattr(strategy, "_active_normalization_stats", None)
     if stats is None:
@@ -303,6 +315,12 @@ def solve_query_twostage(
         result.pair_stage = "with-ineq-skipped"
         result.blocking_reason = "unresolved_value_expression"
         result.blocking_detail = "value expression contains UNKNOWN or unsupported SMT operation"
+        return result
+
+    if _cases_have_void_return_placeholders(case1, case2):
+        result = QueryResult(is_equivalent=True)
+        result.last_query = cond_query
+        result.pair_stage = "void-return"
         return result
 
     try:
