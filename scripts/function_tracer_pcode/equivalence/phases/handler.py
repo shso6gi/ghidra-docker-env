@@ -78,6 +78,8 @@ class PhaseContext:
     original_signature2: Optional[FunctionSignature]
     binary1_id: Optional[str] = None
     binary2_id: Optional[str] = None
+    declared_return_type1: Optional[str] = None
+    declared_return_type2: Optional[str] = None
     analysis1: Optional[FunctionReturnAnalysis] = None
     analysis2: Optional[FunctionReturnAnalysis] = None
 

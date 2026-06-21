@@ -46,6 +46,7 @@ def run_equivalence_check(args):
     pyghidra = load_pyghidra()
 
     from ...equivalence import EquivalenceChecker, TypeFixerConfig
+    from ...equivalence.source_declarations import infer_adjacent_c_return_type
 
     binary1_path, binary2_path = args.equiv
     binary1_id, binary2_id = _get_binary_ids_arg(args)
@@ -59,6 +60,8 @@ def run_equivalence_check(args):
     else:
         func_name1 = function_names[0]
         func_name2 = function_names[1]
+    declared_return_type1 = infer_adjacent_c_return_type(binary1_path, func_name1)
+    declared_return_type2 = infer_adjacent_c_return_type(binary2_path, func_name2)
 
     retry_with_type_fix = not getattr(args, "no_retry_phases", False)
     strategy = getattr(args, "strategy", "pairwise")
@@ -186,6 +189,8 @@ def run_equivalence_check(args):
                             retry_with_type_fix=retry_with_type_fix,
                             binary1_id=binary1_id,
                             binary2_id=binary2_id,
+                            declared_return_type1=declared_return_type1,
+                            declared_return_type2=declared_return_type2,
                         )
                     finally:
                         _safe_close_context(result2_cm)

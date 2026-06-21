@@ -8,6 +8,7 @@ from ..model import FunctionReturnAnalysis, FunctionSignature, SignatureHypothes
 from .phases.handler import PhaseContext, PhaseResult
 from .result import EquivalenceResult
 from .result_factory import create_context_error_result, create_reanalysis_error
+from .typing.fixer import TypeFixer
 
 
 def analyze_and_check_with_analysis(
@@ -64,6 +65,21 @@ def analyze_and_check_with_analysis(
     if ctx.original_signature2 is None:
         ctx.original_signature2 = FunctionSignature.from_analysis(analysis2)
 
+    analysis1 = _apply_declared_return_type_hypothesis(
+        checker=checker,
+        analysis=analysis1,
+        program=ctx.program1,
+        binary_name=ctx.binary1_name,
+        declared_return_type=ctx.declared_return_type1,
+    )
+    analysis2 = _apply_declared_return_type_hypothesis(
+        checker=checker,
+        analysis=analysis2,
+        program=ctx.program2,
+        binary_name=ctx.binary2_name,
+        declared_return_type=ctx.declared_return_type2,
+    )
+
     checker._debug_print("Running stage plan...")
     result = checker._run_stage_plan(
         analysis1,
@@ -78,6 +94,49 @@ def analyze_and_check_with_analysis(
     )
 
     return analysis1, analysis2, result
+
+
+def _apply_declared_return_type_hypothesis(
+    *,
+    checker,
+    analysis: FunctionReturnAnalysis,
+    program,
+    binary_name: str,
+    declared_return_type: Optional[str],
+) -> FunctionReturnAnalysis:
+    declared = str(declared_return_type or "").strip()
+    if not declared:
+        return analysis
+    if declared != "void":
+        return analysis
+
+    type_fixer = TypeFixer(
+        program,
+        config=getattr(checker, "type_fixer_config", None),
+        debug=getattr(checker, "debug", False),
+    )
+    hypothesis, return_changed, _ = type_fixer.build_signature_hypothesis(
+        FunctionSignature.from_analysis(analysis),
+        fix_return_type=False,
+        fix_param_types=False,
+        override_return_type_name=declared,
+        phase_name="P0_SOURCE_DECLARATION",
+        reason="source-declared return type evidence",
+        evidence={
+            "source": "adjacent_c_declaration",
+            "binary_name": binary_name,
+            "function_name": analysis.function_name,
+            "declared_return_type": declared,
+        },
+    )
+    if not return_changed:
+        return analysis
+
+    checker._debug_print(
+        f"Applying source-declared return type for {binary_name}:{analysis.function_name}: "
+        f"{analysis.return_type} -> {declared}"
+    )
+    return analysis.with_signature_hypothesis(hypothesis)
 
 
 def selective_reanalysis_and_check(
