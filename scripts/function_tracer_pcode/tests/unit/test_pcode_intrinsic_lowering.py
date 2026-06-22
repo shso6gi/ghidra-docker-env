@@ -173,6 +173,60 @@ def test_counted_loop_sum_exact_smt_clamps_no_iteration_span_to_base():
     assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
 
 
+def test_counted_loop_sum_exact_smt_supports_parameter_bias_term():
+    bias = Expression.parameter("bias", index=0, size=4, data_type="int")
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), _const(7, size=4)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, bias),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    smt = expression_to_smt(expr)
+    bias64 = "((_ sign_extend 32) bias)"
+    expected64 = f"(bvadd (bvmul (_ bv7 64) {bias64}) (_ bv105 64))"
+    expected32 = f"((_ extract 31 0) {expected64})"
+    query = "\n".join(
+        [
+            "(set-logic QF_BV)",
+            "(declare-fun bias () (_ BitVec 32))",
+            f"(assert (not (= {smt} {expected32})))",
+            "(check-sat)",
+        ]
+    )
+
+    assert collect_intrinsic_smt_declarations(expr) == []
+    assert "rt_counted_loop_sum_" not in smt
+    assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
+
+
+def test_counted_loop_sum_exact_smt_uses_bias_signedness_for_bias_term_extension():
+    unsigned_bias = Expression.parameter("bias", index=0, size=4, data_type="unsigned int")
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), _const(7, size=4)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, unsigned_bias),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    smt = expression_to_smt(expr)
+
+    assert "((_ zero_extend 32) bias)" in smt
+    assert "((_ sign_extend 32) bias)" not in smt
+
+
 def test_counted_loop_sum_exact_smt_uses_unsigned_clamp_for_unsigned_loop():
     expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",

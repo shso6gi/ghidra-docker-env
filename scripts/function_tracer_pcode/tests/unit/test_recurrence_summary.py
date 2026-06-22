@@ -131,6 +131,38 @@ def _cond(operator: str, left: Expression, right: Expression, negated: bool = Fa
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
 
 
+def test_counted_loop_affine_case_preserves_parameter_bias_expression():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    counter = _param("__loop_iv")
+    bias = _param("param_2")
+    scaled = Expression.binary_op("INT_MULT", Expression.constant(5, size=4), counter)
+    scaled.size = 4
+    delta = Expression.binary_op("INT_ADD", scaled, bias)
+    delta.size = 4
+
+    affine_case = summarizer._extract_affine_loop_case(delta, "__loop_iv")
+
+    assert affine_case is not None
+    affine, bias_expr = affine_case
+    assert affine == (5, 0)
+    assert bias_expr is not None
+    assert bias_expr.structural_key() == bias.structural_key()
+
+
+def test_counted_loop_affine_case_rejects_loop_carried_variable_bias_expression():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    counter = _param("__loop_iv")
+    loop_carried = Expression.variable("__other_loop_state", size=4)
+    scaled = Expression.binary_op("INT_MULT", Expression.constant(5, size=4), counter)
+    scaled.size = 4
+    delta = Expression.binary_op("INT_ADD", scaled, loop_carried)
+    delta.size = 4
+
+    affine_case = summarizer._extract_affine_loop_case(delta, "__loop_iv")
+
+    assert affine_case is None
+
+
 def test_readonly_parameter_helpers_preserve_storage_backed_identity_without_fabricated_index():
     storage = StorageInfo(
         is_register=True,

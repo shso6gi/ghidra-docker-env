@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     build_proof_obligation_id,
     build_unknown_recovery_actions,
 )
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
@@ -801,6 +802,33 @@ def _counted_loop(summary: LoopSummaryRef) -> Expression:
     )
 
 
+def _triangular_closed_form(*, inclusive: bool = False) -> Expression:
+    n64 = Expression.unary_op("INT_ZEXT", _count_param())
+    n64.size = 8
+    neighbor = Expression.binary_op(
+        "INT_ADD" if inclusive else "INT_SUB",
+        n64,
+        Expression.constant(1, size=8),
+    )
+    product = Expression.binary_op("INT_MULT", n64, neighbor)
+    half = Expression.binary_op("INT_RIGHT", product, Expression.constant(1, size=8))
+    low = Expression.binary_op("SUBPIECE", half, Expression.constant(0, size=4))
+    low.size = 4
+    return low
+
+
+def _pure_counted_summary_with_guard() -> LoopSummaryRef:
+    return LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=_count_param(),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(_count_gt(0),),
+        loop_var_unit="element_index",
+    )
+
+
 def _analysis(function_name: str, returns, *, comparison_bits: int = 32) -> FunctionReturnAnalysis:
     return FunctionReturnAnalysis(
         function_name=function_name,
@@ -843,6 +871,11 @@ def _pairwise_strategy() -> PairwiseStrategy:
         "return_size2": 32,
     }
     return strategy
+
+
+def _stub_pair_solver_unsat(strategy: PairwiseStrategy) -> None:
+    result = SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.0)
+    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([result]))
 
 
 def _shared_input_base_context() -> dict:
@@ -2675,6 +2708,325 @@ def test_pure_counted_loop_without_runtime_summary_guards_can_be_closed_by_metho
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_counted_loop_summary_vs_closed_form_is_discharged_by_smt():
+    counted_value = _counted_loop(_pure_counted_summary_with_guard())
+    closed_form = _triangular_closed_form()
+    non_positive = _count_gt(0).negate()
+    strategy = _pairwise_strategy()
+    _stub_pair_solver_unsat(strategy)
+
+    result = strategy.check(
+        _analysis(
+            "barthe_like_counted_summary",
+            [
+                ReturnInfo(address="0x7300", value=counted_value, conditions=[_count_gt(0)]),
+                ReturnInfo(address="0x7308", value=Expression.constant(0, size=4), conditions=[non_positive]),
+            ],
+        ),
+        _analysis(
+            "barthe_like_closed_form",
+            [
+                ReturnInfo(address="0x7304", value=closed_form, conditions=[_count_gt(0)]),
+                ReturnInfo(address="0x730c", value=Expression.constant(0, size=4), conditions=[non_positive]),
+            ],
+        ),
+    )
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 4
+    assert result.unsat_pairs == 4
+    assert result.unknown_pairs == 0
+
+
+def test_counted_loop_summary_vs_shifted_affine_parameter_closed_form_is_discharged():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    non_positive = positive.negate()
+    summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="affine_residue",
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+            loop_summary=summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    n_minus_one = Expression.binary_op("INT_SUB", n, Expression.constant(1, size=4))
+    n_minus_one.size = 4
+    n_minus_two = Expression.binary_op("INT_SUB", n, Expression.constant(2, size=4))
+    n_minus_two.size = 4
+    wide_n_minus_one = Expression.unary_op("INT_ZEXT", n_minus_one)
+    wide_n_minus_one.size = 8
+    wide_n_minus_two = Expression.unary_op("INT_ZEXT", n_minus_two)
+    wide_n_minus_two.size = 8
+    shifted_half = Expression.binary_op(
+        "INT_RIGHT",
+        Expression.binary_op("INT_MULT", wide_n_minus_one, wide_n_minus_two),
+        Expression.constant(1, size=8),
+    )
+    shifted_low = Expression.binary_op("SUBPIECE", shifted_half, Expression.constant(0, size=4))
+    shifted_low.size = 4
+    closed = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op(
+            "INT_ADD",
+            c,
+            Expression.binary_op(
+                "INT_MULT",
+                n_minus_one,
+                Expression.binary_op("INT_ADD", c, Expression.constant(5, size=4)),
+            ),
+        ),
+        Expression.binary_op("INT_MULT", shifted_low, Expression.constant(5, size=4)),
+    )
+    closed.size = 4
+    analysis_left = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(address="0x1000", value=counted, conditions=[positive]),
+            ReturnInfo(address="0x1004", value=Expression.constant(0, size=4), conditions=[non_positive]),
+        ],
+        return_type="int",
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    analysis_right = replace(
+        analysis_left,
+        function_name="right",
+        returns=[
+            ReturnInfo(address="0x2000", value=closed, conditions=[positive]),
+            ReturnInfo(address="0x2004", value=Expression.constant(0, size=4), conditions=[non_positive]),
+        ],
+    )
+    strategy = _pairwise_strategy()
+    _stub_pair_solver_unsat(strategy)
+
+    result = strategy.check(analysis_left, analysis_right)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 4
+    assert result.unsat_pairs == 4
+    assert result.unknown_pairs == 0
+
+
+def _mips64_counted_loop_vs_low32_closed_form_fixture():
+    n = Expression.parameter("param_1", index=0, data_type="long", size=8)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero32 = Expression.constant(0, size=4)
+    zero64 = Expression.constant(0, size=8)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero64, n))
+    summary = LoopSummaryRef(
+        start_expr=zero64,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=8),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="affine_residue",
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero32, zero64, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+            loop_summary=summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    n32 = Expression.binary_op("SUBPIECE", n, Expression.constant(0, size=4))
+    n32.size = 4
+    wide_n = Expression.unary_op("INT_ZEXT", n32)
+    wide_n.size = 8
+    wide_n_minus_one = Expression.binary_op("INT_SUB", wide_n, Expression.constant(1, size=8))
+    wide_n_minus_one.size = 8
+    product = Expression.binary_op("INT_MULT", wide_n, wide_n_minus_one)
+    half = Expression.binary_op("INT_RIGHT", product, Expression.constant(1, size=8))
+    triangular = Expression.binary_op("SUBPIECE", half, Expression.constant(0, size=4))
+    triangular.size = 4
+    scaled = Expression.binary_op("INT_MULT", triangular, Expression.constant(5, size=4))
+    scaled.size = 4
+    c_terms = Expression.binary_op("INT_MULT", n32, c)
+    c_terms.size = 4
+    closed = Expression.binary_op("INT_ADD", scaled, c_terms)
+    closed.size = 4
+    analysis_left = FunctionReturnAnalysis(
+        function_name="mips64_counted",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "long", "size": 8, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=counted, conditions=[positive])],
+        return_type="int",
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    analysis_right = replace(
+        analysis_left,
+        function_name="mips64_closed",
+        returns=[ReturnInfo(address="0x2000", value=closed, conditions=[positive])],
+    )
+    return analysis_left, analysis_right
+
+
+def test_counted_loop_summary_vs_mips64_long_limit_without_semantic_width_stays_proof_missing():
+    analysis_left, analysis_right = _mips64_counted_loop_vs_low32_closed_form_fixture()
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(analysis_left, analysis_right)
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_counted_loop_summary_vs_mips64_long_limit_with_semantic_width_uses_smt():
+    analysis_left, analysis_right = _mips64_counted_loop_vs_low32_closed_form_fixture()
+    strategy = _pairwise_strategy()
+    strategy.formula_builder.build_base_context.return_value["params1"] = [
+        ParameterInfo(
+            original_name="param_1",
+            smt_name="param_1_1",
+            bit_width=64,
+            index=0,
+            is_signed=True,
+            semantic_narrow_bits=32,
+            semantic_signedness="signed",
+        ),
+        ParameterInfo("param_2", "param_2_1", 32, 1, is_signed=True),
+    ]
+    strategy.formula_builder.build_base_context.return_value["params2"] = [
+        ParameterInfo("param_1", "param_1_2", 32, 0, is_signed=True),
+        ParameterInfo("param_2", "param_2_2", 32, 1, is_signed=True),
+    ]
+
+    result = strategy.check(analysis_left, analysis_right)
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_auxiliary_counted_loop_runtime_bias_terms_are_cloned_for_smt():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, 2, 0)),
+            residue_bias_terms=((2, 0, c), (2, 1, c)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    left_case = ReturnCase(
+        0,
+        [positive],
+        counted,
+        ReturnInfo(address="0x1000", value=counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    right_value = Expression.constant(0, size=4)
+    right_case = ReturnCase(
+        0,
+        [positive],
+        right_value,
+        ReturnInfo(address="0x2000", value=right_value, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    strategy = _pairwise_strategy()
+    conditions = strategy._combined_summary_conditions(left_case, right_case)
+    parameter_specs = strategy._collect_intrinsic_parameter_specs(
+        left_case,
+        right_case,
+        counted,
+        right_value,
+        *(condition.expression for condition in conditions),
+    )
+
+    query = strategy._build_intrinsic_equivalence_query(counted, right_value, conditions, parameter_specs)
+
+    assert query is not None
+    assert "(declare-const aux_param_1 (_ BitVec 32))" in query
+    assert "param_2" not in query
+    assert "aux_param_1" in query
+
+
+def test_counted_loop_summary_vs_closed_form_near_miss_stays_proof_missing():
+    counted_value = _counted_loop(_pure_counted_summary_with_guard())
+    off_by_n_closed_form = _triangular_closed_form(inclusive=True)
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis(
+            "barthe_like_counted_summary",
+            [ReturnInfo(address="0x7310", value=counted_value, conditions=[_count_gt(0)])],
+        ),
+        _analysis(
+            "barthe_like_closed_form_near_miss",
+            [ReturnInfo(address="0x7314", value=off_by_n_closed_form, conditions=[_count_gt(0)])],
+        ),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
     strategy.solver_runner.run_sequential.assert_not_called()
 
 

@@ -1283,6 +1283,10 @@ def _counted_loop_sum_exact_smt(
     start_bits: int,
     limit_bits: int,
     result_bits: int,
+    prefer_signed_arithmetic: bool = False,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    address_context: Optional[Mapping[str, Any]] = None,
+    float_mode: str = "real",
 ) -> Optional[str]:
     summary_ref = _counted_loop_sum_ref(expr)
     if summary_ref is None:
@@ -1290,6 +1294,7 @@ def _counted_loop_sum_exact_smt(
 
     induction_step = int(getattr(summary_ref, "induction_step", 0) or 0)
     residue_cases = tuple(getattr(summary_ref, "residue_cases", ()) or ())
+    residue_bias_terms = tuple(getattr(summary_ref, "residue_bias_terms", ()) or ())
     if induction_step == 0 or not residue_cases:
         return None
 
@@ -1322,6 +1327,48 @@ def _counted_loop_sum_exact_smt(
 
     def _distance_le(left_smt: str, right_smt: str) -> str:
         return f"(bvule {left_smt} {right_smt})"
+
+    def _bias_terms_for_case(modulus: int, residue: int) -> Tuple[Any, ...]:
+        return tuple(
+            bias_expr
+            for bias_modulus, bias_residue, bias_expr in residue_bias_terms
+            if int(bias_modulus) == int(modulus) and int(bias_residue) == int(residue)
+        )
+
+    def _render_bias_term(bias_expr) -> Optional[str]:
+        bias_bits = max(1, int(expression_smt_bit_width(bias_expr) or result_bits or 1))
+        try:
+            bias_smt = _to_smt_internal(
+                bias_expr,
+                prefer_signed_arithmetic,
+                symbol_name_mapping,
+                address_context,
+                float_mode,
+            )
+        except Exception:
+            return None
+        bias_smt = _coerce_expr_to_bitvec_width(
+            bias_expr,
+            bias_smt,
+            bias_bits,
+            prefer_sign_extension=_expr_prefers_signed_extension(bias_expr),
+            float_mode=float_mode,
+        )
+        return _smt_extend_to_width(
+            bias_expr,
+            bias_smt,
+            wide_bits,
+            signed=_expr_prefers_signed_extension(bias_expr),
+        )
+
+    def _add_bias_expression_terms(total_smt: str, count_smt: str, modulus: int, residue: int) -> Optional[str]:
+        total_with_terms = total_smt
+        for bias_expr in _bias_terms_for_case(modulus, residue):
+            wide_bias = _render_bias_term(bias_expr)
+            if wide_bias is None:
+                return None
+            total_with_terms = f"(bvadd {total_with_terms} (bvmul {count_smt} {wide_bias}))"
+        return total_with_terms
 
     def _ceil_div_positive(value_smt: str, divisor: int) -> str:
         divisor = int(divisor)
@@ -1368,6 +1415,9 @@ def _counted_loop_sum_exact_smt(
             for term in (coeff_term, bias_term):
                 if term is not None:
                     total = f"(bvadd {total} {term})"
+            total = _add_bias_expression_terms(total, count_expr, modulus, residue)
+            if total is None:
+                return None
         return _smt_low_bits(total, wide_bits, result_bits)
 
     if any(int(modulus) != 1 for modulus, _residue, _coeff, _bias in residue_cases):
@@ -1392,6 +1442,9 @@ def _counted_loop_sum_exact_smt(
         for term in (coeff_term, bias_term):
             if term is not None:
                 total = f"(bvadd {total} {term})"
+        total = _add_bias_expression_terms(total, count_expr, int(_modulus), int(_residue))
+        if total is None:
+            return None
     return _smt_low_bits(total, wide_bits, result_bits)
 
 
@@ -2035,6 +2088,10 @@ def _lower_intrinsic_to_smt(
             start_bits=start_bits,
             limit_bits=limit_bits,
             result_bits=max(1, int(expression_smt_bit_width(expr) or 1)),
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+            float_mode=float_mode,
         )
         if exact_smt is not None:
             return exact_smt

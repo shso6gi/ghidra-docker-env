@@ -148,6 +148,7 @@ class ResidueLoopCase:
     modulus: int
     residue: int
     affine: Tuple[int, int]
+    bias_expr: Optional[Expression] = None
 
 
 @dataclass(frozen=True)
@@ -1053,6 +1054,15 @@ class StructuralRecurrenceSummarizer:
                 )
                 for case in residue_cases
             ),
+            residue_bias_terms=tuple(
+                (
+                    int(case.modulus),
+                    int(case.residue),
+                    case.bias_expr,
+                )
+                for case in residue_cases
+                if case.bias_expr is not None
+            ),
         )
         loop_summary = LoopSummaryRef(
             start_expr=start_expr,
@@ -1071,6 +1081,7 @@ class StructuralRecurrenceSummarizer:
             result_size=max(1, int(result_size or 0)),
             signed_loop=bool(signed_loop),
             residue_cases=term_descriptor.residue_cases,
+            residue_bias_terms=term_descriptor.residue_bias_terms,
             loop_summary=loop_summary,
         )
         intrinsic = Expression.intrinsic(
@@ -2647,6 +2658,8 @@ class StructuralRecurrenceSummarizer:
         for case in residue_cases or ():
             max_coeff = max(max_coeff, abs(int(case.affine[0])))
             max_bias = max(max_bias, abs(int(case.affine[1])))
+            if case.bias_expr is not None:
+                max_bias = max(max_bias, 1)
         target_varnode = accumulator.phi_output or accumulator.update_varnode
         member_count = len(accumulator.member_outputs) or (1 if target_varnode is not None else 0)
         return (
@@ -3366,18 +3379,20 @@ class StructuralRecurrenceSummarizer:
         if not cases:
             return None
         if len(cases) == 1 and not cases[0].conditions:
-            affine = self._extract_affine_term(cases[0].delta_expr, counter_name)
-            if affine is None:
+            affine_case = self._extract_affine_loop_case(cases[0].delta_expr, counter_name)
+            if affine_case is None:
                 return None
-            return (ResidueLoopCase(modulus=1, residue=0, affine=affine),)
+            affine, bias_expr = affine_case
+            return (ResidueLoopCase(modulus=1, residue=0, affine=affine, bias_expr=bias_expr),)
 
         residue_cases: List[ResidueLoopCase] = []
         modulus = None
         seen_residues = set()
         for case in cases:
-            affine = self._extract_affine_term(case.delta_expr, counter_name)
-            if affine is None:
+            affine_case = self._extract_affine_loop_case(case.delta_expr, counter_name)
+            if affine_case is None:
                 return None
+            affine, bias_expr = affine_case
             residue_info = self._extract_exact_residue_case(case.conditions, counter_name)
             if residue_info is None:
                 return None
@@ -3394,11 +3409,49 @@ class StructuralRecurrenceSummarizer:
                     modulus=case_modulus,
                     residue=residue,
                     affine=affine,
+                    bias_expr=bias_expr,
                 )
             )
         if modulus is None or seen_residues != set(range(modulus)):
             return None
         return tuple(sorted(residue_cases, key=lambda item: item.residue))
+
+    def _extract_affine_loop_case(
+        self,
+        expr: Expression,
+        counter_name: str,
+    ) -> Optional[Tuple[Tuple[int, int], Optional[Expression]]]:
+        affine = self._extract_affine_term(expr, counter_name)
+        if affine is not None:
+            return affine, None
+
+        coeff = 0
+        constant_bias = 0
+        bias_terms: List[Expression] = []
+        for sign, term in self._flatten_add_terms(expr):
+            term_affine = self._extract_affine_term(term, counter_name)
+            if term_affine is not None:
+                coeff += int(sign) * int(term_affine[0])
+                constant_bias += int(sign) * int(term_affine[1])
+                continue
+            if any(
+                self._expr_matches_counter_placeholder(node, counter_name)
+                for node in self._iter_expression_nodes(term)
+            ):
+                return None
+            scaled = self._scale_expression(term, int(sign))
+            if scaled is None:
+                continue
+            bias_terms.append(scaled)
+
+        if not bias_terms:
+            return None
+        bias_expr = self._sum_expression_terms(bias_terms)
+        if bias_expr is None or self._expression_is_unresolved(bias_expr):
+            return None
+        if not self._expression_is_loop_invariant_bias(bias_expr):
+            return None
+        return (coeff, constant_bias), bias_expr
 
     def _validate_counted_loop_update_cases(
         self,
@@ -3451,6 +3504,7 @@ class StructuralRecurrenceSummarizer:
                     int(getattr(induction.placeholder, "size", 0) or 0),
                     4,
                 ),
+                bias_expr=residue_case.bias_expr,
             )
             if affine_delta is None:
                 return False
@@ -3496,6 +3550,8 @@ class StructuralRecurrenceSummarizer:
         counter_expr: Expression,
         affine: Tuple[int, int],
         size: int,
+        *,
+        bias_expr: Optional[Expression] = None,
     ) -> Optional[Expression]:
         coeff, bias = int(affine[0]), int(affine[1])
         terms: List[Expression] = []
@@ -3506,6 +3562,8 @@ class StructuralRecurrenceSummarizer:
             terms.append(coeff_term)
         if bias != 0:
             terms.append(Expression.constant(bias, max(1, size)))
+        if bias_expr is not None:
+            terms.append(bias_expr)
         if not terms:
             return Expression.constant(0, max(1, size))
         result = self._sum_expression_terms(terms)
@@ -3630,6 +3688,25 @@ class StructuralRecurrenceSummarizer:
                     return True
             return False
         return any(self._expression_is_unresolved(operand) for operand in getattr(expr, "operands", []) or [])
+
+    def _expression_is_loop_invariant_bias(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type in {ExpressionType.CONSTANT, ExpressionType.PARAMETER}:
+            return True
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if runtime_ref is not None and not (
+            bool(getattr(runtime_ref, "loop_invariant", False))
+            or bool(getattr(runtime_ref, "is_loop_invariant", False))
+        ):
+            return False
+        if expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL, ExpressionType.VARIABLE, ExpressionType.PHI}:
+            return False
+        operands = tuple(getattr(expr, "operands", ()) or ())
+        if not operands:
+            return False
+        return all(self._expression_is_loop_invariant_bias(operand) for operand in operands)
 
     def _safe_expr_text(self, expr: Optional[Expression]) -> str:
         signature = _runtime_expression_signature(expr)

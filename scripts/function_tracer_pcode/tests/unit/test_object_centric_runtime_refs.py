@@ -2775,6 +2775,97 @@ def test_loop_side_effect_profile_requires_effect_proof_for_context_level_unsafe
     assert read_only_pure_profile.requires_effect_proof() is False
 
 
+def test_conditional_loop_guards_are_control_obligations_not_effect_proofs():
+    guard_profile = LoopSideEffectProfileRef(
+        profile="pure_conditional",
+        conditional_guards=True,
+        guard_count=1,
+        effect_count=1,
+        effect_descriptors=(
+            LoopBodyEffectRef(
+                kind="conditional_guard",
+                source="pcode_scan",
+                scope="loop",
+                guard_constraints=("0 < n",),
+                order_key=1,
+            ),
+        ),
+    )
+    context_guard_profile = LoopSideEffectProfileRef(
+        profile="pure",
+        context_conditional_guards=True,
+        context_descriptors=(
+            LoopBodyEffectRef(
+                kind="conditional_guard",
+                source="function_effect_summary",
+                scope="function",
+                guard_constraints=("0 < n",),
+            ),
+        ),
+    )
+
+    assert guard_profile.requires_effect_proof() is False
+    assert context_guard_profile.requires_effect_proof() is False
+
+
+def test_non_pure_guard_only_profiles_still_require_effect_proof():
+    for profile in ("effect_aware", "effect_unknown"):
+        guard_only_profile = LoopSideEffectProfileRef(
+            profile=profile,
+            conditional_guards=True,
+            effect_descriptors=(
+                LoopBodyEffectRef(
+                    kind="conditional_guard",
+                    source="pcode_scan",
+                    scope="loop",
+                    guard_constraints=("0 < n",),
+                ),
+            ),
+        )
+        context_guard_only_profile = LoopSideEffectProfileRef(
+            profile=profile,
+            context_conditional_guards=True,
+            context_descriptors=(
+                LoopBodyEffectRef(
+                    kind="conditional_guard",
+                    source="function_effect_summary",
+                    scope="function",
+                    guard_constraints=("0 < n",),
+                ),
+            ),
+        )
+
+        assert guard_only_profile.requires_effect_proof() is True
+        assert context_guard_only_profile.requires_effect_proof() is True
+
+
+def test_loop_summary_requires_path_proof_only_for_body_sensitive_cases():
+    guard_partition = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(LoopCaseRef(path_conditions=("0 < n",), case_kind="guard_partition"),),
+    )
+    body_sensitive = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(
+            LoopCaseRef(
+                path_conditions=("i_is_even",),
+                body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+                term_expr="i",
+                case_kind="accumulator_delta",
+            ),
+        ),
+    )
+
+    assert guard_partition.requires_path_proof() is False
+    assert body_sensitive.requires_path_proof() is True
+
+
 def test_effect_aware_loop_summary_disables_exact_and_smt_shortcuts():
     summary = LoopSummaryRef(
         start_expr=0,
@@ -2849,6 +2940,66 @@ def test_path_sensitive_loop_summary_disables_exact_and_smt_identity_shortcuts()
     smt_identity = _runtime_ref_smt_identity(expr, ref)
     assert smt_identity[0] == "opaque_loop_summary_identity"
     assert smt_identity[3] == "path_proof_required"
+
+
+def test_counted_loop_update_cases_are_not_path_proof_obligations():
+    loop_case = LoopCaseRef(
+        path_conditions=(),
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+        term_expr=Expression.parameter("__loop_iv", size=4),
+        case_kind="accumulator_delta",
+        source="counted_loop_update_case",
+    )
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 1, 0),)),
+        cases=(loop_case,),
+    )
+
+    assert summary.requires_path_proof() is False
+    assert summary.pairwise_exact_key() is not None
+
+
+def test_counted_loop_update_case_requires_path_proof_without_descriptor_coverage():
+    loop_case = LoopCaseRef(
+        path_conditions=(),
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+        term_expr=Expression.parameter("__loop_iv", size=4),
+        case_kind="accumulator_delta",
+        source="counted_loop_update_case",
+    )
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(loop_case,),
+    )
+
+    assert summary.requires_path_proof() is True
+    assert summary.pairwise_exact_key() is None
+
+
+def test_counted_loop_update_case_requires_path_proof_for_incomplete_residue_coverage():
+    loop_case = LoopCaseRef(
+        path_conditions=("i_mod_2_eq_0",),
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+        term_expr=Expression.parameter("__loop_iv", size=4),
+        case_kind="accumulator_delta",
+        source="counted_loop_update_case",
+    )
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((2, 0, 1, 0),)),
+        cases=(loop_case,),
+    )
+
+    assert summary.requires_path_proof() is True
+    assert summary.pairwise_exact_key() is None
 
 
 def test_loop_summary_comparator_blocks_different_path_cases():

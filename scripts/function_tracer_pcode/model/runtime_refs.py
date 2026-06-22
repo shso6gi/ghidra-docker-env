@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from .call_target import CallTargetRef, coerce_call_target_ref
 
@@ -29,7 +29,7 @@ class AddressValueRef:
     can_execute: Optional[bool] = None
     is_volatile: Optional[bool] = None
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
         return (
             "address",
             self.program_id,
@@ -192,7 +192,7 @@ class LocationBaseRef:
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_parameter():
             if self.parameter_index is not None:
                 if self.owner_program_id is not None or self.owner_entry_offset is not None:
@@ -1512,18 +1512,23 @@ class LoopSideEffectProfileRef:
 
     def requires_effect_proof(self) -> bool:
         profile = (self.profile or "").lower()
-        if profile not in {"pure", "pure_memory_read"}:
+        effect_descriptors = tuple(self.effect_descriptors or ())
+        context_descriptors = tuple(self.context_descriptors or ())
+
+        def _descriptor_requires_effect_proof(effect: LoopBodyEffectRef) -> bool:
+            return getattr(effect, "kind", None) != "conditional_guard"
+
+        if profile not in {"pure", "pure_memory_read", "pure_conditional"}:
             return True
         return bool(
             self.memory_writes
             or self.calls
             or self.escapes
-            or self.conditional_guards
             or self.context_memory_writes
             or self.context_calls
             or self.context_escapes
-            or self.context_conditional_guards
-            or self.context_descriptors
+            or any(_descriptor_requires_effect_proof(effect) for effect in effect_descriptors)
+            or any(_descriptor_requires_effect_proof(effect) for effect in context_descriptors)
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1564,9 +1569,20 @@ class LoopTermDescriptorRef:
     element_size: int = 0
     result_size: int = 0
     residue_cases: Tuple[Tuple[int, int, int, int], ...] = ()
+    residue_bias_terms: Tuple[Tuple[int, int, Any], ...] = ()
     lane_terms: Tuple[Tuple[int, int], ...] = ()
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        residue_bias_keys = tuple(
+            (
+                int(modulus),
+                int(residue),
+                _loop_object_key(bias_expr),
+            )
+            for modulus, residue, bias_expr in self.residue_bias_terms
+        )
+        if any(key[2] is None for key in residue_bias_keys):
+            return None
         return (
             "loop_term_descriptor",
             self.kind,
@@ -1585,12 +1601,23 @@ class LoopTermDescriptorRef:
                 )
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
+            residue_bias_keys,
             tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         location_key = self.location_base_ref.semantic_key() if self.location_base_ref is not None else None
         if self.location_base_ref is not None and location_key is None:
+            return None
+        residue_bias_keys = tuple(
+            (
+                int(modulus),
+                int(residue),
+                _loop_object_semantic_key(bias_expr),
+            )
+            for modulus, residue, bias_expr in self.residue_bias_terms
+        )
+        if any(key[2] is None for key in residue_bias_keys):
             return None
         return (
             "loop_term_descriptor",
@@ -1610,6 +1637,7 @@ class LoopTermDescriptorRef:
                 )
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
+            residue_bias_keys,
             tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
         )
 
@@ -1630,6 +1658,14 @@ class LoopTermDescriptorRef:
                     "bias": int(bias),
                 }
                 for modulus, residue, coeff, bias in self.residue_cases
+            ],
+            "residue_bias_terms": [
+                {
+                    "modulus": int(modulus),
+                    "residue": int(residue),
+                    "bias_expr": getattr(bias_expr, "to_dict", lambda: repr(bias_expr))(),
+                }
+                for modulus, residue, bias_expr in self.residue_bias_terms
             ],
             "lane_terms": [
                 {
@@ -1796,11 +1832,13 @@ class LoopSummaryRef:
         witness_keys = tuple(_loop_object_key(witness) for witness in self.witnesses)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
         case_keys = tuple(case.stable_key() for case in self.cases)
+        term_descriptor_key = self.term_descriptor.stable_key()
         side_effect_key = self.side_effect_profile.stable_key()
         if (
             start_key is None
             or limit_key is None
             or step_key is None
+            or term_descriptor_key is None
             or any(seed_key is None for seed_key in seed_keys)
             or any(witness_key is None for witness_key in witness_keys)
             or any(guard_key is None for guard_key in guard_keys)
@@ -1814,7 +1852,7 @@ class LoopSummaryRef:
             start_key,
             limit_key,
             step_key,
-            self.term_descriptor.stable_key(),
+            term_descriptor_key,
             seed_keys,
             witness_keys,
             side_effect_key,
@@ -1828,7 +1866,56 @@ class LoopSummaryRef:
         return self.side_effect_profile.requires_effect_proof()
 
     def requires_path_proof(self) -> bool:
-        return bool(self.cases)
+        counted_update_cases = []
+        for case in tuple(self.cases or ()):
+            if getattr(case, "source", None) == "counted_loop_update_case":
+                counted_update_cases.append(case)
+                continue
+            if getattr(case, "body_effect", None) is not None:
+                return True
+            if getattr(case, "term_expr", None) is not None:
+                return True
+        if counted_update_cases and not self._counted_loop_update_cases_are_descriptor_covered(counted_update_cases):
+            return True
+        return False
+
+    def _counted_loop_update_cases_are_descriptor_covered(self, cases: Sequence[Any]) -> bool:
+        if not cases:
+            return True
+        if getattr(self.term_descriptor, "kind", None) != "affine_residue":
+            return False
+        residue_cases = tuple(getattr(self.term_descriptor, "residue_cases", ()) or ())
+        if not residue_cases:
+            return False
+        for case in cases:
+            if getattr(case, "case_kind", None) != "accumulator_delta":
+                return False
+            body_effect = getattr(case, "body_effect", None)
+            if getattr(body_effect, "kind", None) != "accumulator_update":
+                return False
+            if getattr(case, "term_expr", None) is None:
+                return False
+        residue_keys = []
+        for residue_case in residue_cases:
+            if len(residue_case) < 4:
+                return False
+            try:
+                modulus = int(residue_case[0])
+                residue = int(residue_case[1])
+            except (TypeError, ValueError):
+                return False
+            if modulus <= 0 or residue < 0 or residue >= modulus:
+                return False
+            residue_keys.append((modulus, residue))
+        if len(residue_keys) == 1:
+            return residue_keys[0] == (1, 0) and len(cases) == 1
+        moduli = {modulus for modulus, _residue in residue_keys}
+        if len(moduli) != 1:
+            return False
+        modulus = moduli.pop()
+        if len(cases) != modulus:
+            return False
+        return {residue for _modulus, residue in residue_keys} == set(range(modulus))
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         if self.requires_effect_proof() or self.requires_path_proof():
@@ -3582,11 +3669,22 @@ class CountedLoopSummaryRef:
     result_size: int
     signed_loop: bool
     residue_cases: Tuple[Tuple[int, int, int, int], ...]
+    residue_bias_terms: Tuple[Tuple[int, int, Any], ...] = ()
     source: str = "recurrence_summary"
     loop_summary: Optional[LoopSummaryRef] = None
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
         loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
+        residue_bias_keys = tuple(
+            (
+                int(modulus),
+                int(residue),
+                _loop_object_key(bias_expr),
+            )
+            for modulus, residue, bias_expr in self.residue_bias_terms
+        )
+        if any(key[2] is None for key in residue_bias_keys):
+            return None
         return (
             "counted_loop_summary",
             int(self.induction_step),
@@ -3601,11 +3699,22 @@ class CountedLoopSummaryRef:
                 )
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
+            residue_bias_keys,
             self.source,
             loop_summary_key,
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        residue_bias_keys = tuple(
+            (
+                int(modulus),
+                int(residue),
+                _loop_object_semantic_key(bias_expr),
+            )
+            for modulus, residue, bias_expr in self.residue_bias_terms
+        )
+        if any(key[2] is None for key in residue_bias_keys):
+            return None
         if self.loop_summary is not None:
             loop_key = self.loop_summary.semantic_key()
             if loop_key is None:
@@ -3624,6 +3733,7 @@ class CountedLoopSummaryRef:
                     )
                     for modulus, residue, coeff, bias in self.residue_cases
                 ),
+                residue_bias_keys,
                 loop_key,
             )
         return (
@@ -3640,6 +3750,7 @@ class CountedLoopSummaryRef:
                 )
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
+            residue_bias_keys,
         )
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
@@ -3674,6 +3785,14 @@ class CountedLoopSummaryRef:
                     "bias": int(bias),
                 }
                 for modulus, residue, coeff, bias in self.residue_cases
+            ],
+            "residue_bias_terms": [
+                {
+                    "modulus": int(modulus),
+                    "residue": int(residue),
+                    "bias_expr": getattr(bias_expr, "to_dict", lambda: repr(bias_expr))(),
+                }
+                for modulus, residue, bias_expr in self.residue_bias_terms
             ],
             "source": self.source,
             "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
