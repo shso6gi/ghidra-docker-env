@@ -278,6 +278,7 @@ class PairwiseStrategy(CheckStrategy):
         )
         base_ctx["analysis1"] = solver_analysis1
         base_ctx["analysis2"] = solver_analysis2
+        semantic_parameter_sources = self._auxiliary_semantic_parameter_sources(base_ctx)
         safety_checker = ExpressionSafetyChecker(
             solver_runner=self.solver_runner,
             debug_print=self._debug_print,
@@ -414,7 +415,11 @@ class PairwiseStrategy(CheckStrategy):
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                         )
                     continue
-                if self._cases_have_equivalent_runtime_reductions(case1, case2):
+                if self._cases_have_equivalent_runtime_reductions(
+                    case1,
+                    case2,
+                    semantic_parameter_sources=semantic_parameter_sources,
+                ):
                     unsat_count += 1
                     resolved_pairs.add((i, j))
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
@@ -1066,12 +1071,15 @@ class PairwiseStrategy(CheckStrategy):
         self,
         case1: ReturnCase,
         case2: ReturnCase,
+        *,
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
     ) -> bool:
         if self._intrinsic_runtime_values_equivalent(
             case1.value_expr,
             case2.value_expr,
             left_case=case1,
             right_case=case2,
+            semantic_parameter_sources=semantic_parameter_sources,
         ):
             return True
         return self._cases_have_equivalent_readonly_reduction_proof(case1, case2)
@@ -1639,6 +1647,7 @@ class PairwiseStrategy(CheckStrategy):
         *,
         left_case: Optional[ReturnCase] = None,
         right_case: Optional[ReturnCase] = None,
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
     ) -> bool:
         if left is None or right is None:
             return False
@@ -1675,6 +1684,7 @@ class PairwiseStrategy(CheckStrategy):
                 right,
                 left_case=left_case,
                 right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
             ):
                 return True
             return False
@@ -5050,6 +5060,7 @@ class PairwiseStrategy(CheckStrategy):
         *,
         left_case: Optional[ReturnCase],
         right_case: Optional[ReturnCase],
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
     ) -> bool:
         if left_case is None or right_case is None:
             return False
@@ -5063,7 +5074,23 @@ class PairwiseStrategy(CheckStrategy):
         left_ref = getattr(left, "runtime_ref", None)
         right_ref = getattr(right, "runtime_ref", None)
         if not self._counted_loop_refs_allow_value_proof(left_ref, right_ref):
+            if self._counted_loop_affine_values_are_provably_equivalent(
+                left,
+                right,
+                left_case=left_case,
+                right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
+            ):
+                return True
             return False
+        if self._counted_loop_affine_values_are_provably_equivalent(
+            left,
+            right,
+            left_case=left_case,
+            right_case=right_case,
+            semantic_parameter_sources=semantic_parameter_sources,
+        ):
+            return True
         if (
             getattr(left_ref, "loop_summary", None) is not None
             or getattr(right_ref, "loop_summary", None) is not None
@@ -5100,6 +5127,396 @@ class PairwiseStrategy(CheckStrategy):
             right,
             conditions,
             parameters,
+        )
+
+    def _counted_loop_affine_values_are_provably_equivalent(
+        self,
+        left: Expression,
+        right: Expression,
+        *,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
+    ) -> bool:
+        left_ref = getattr(left, "runtime_ref", None)
+        right_ref = getattr(right, "runtime_ref", None)
+        if not self._counted_loop_refs_allow_affine_value_proof(left_ref, right_ref):
+            return False
+
+        left_guards, left_guards_complete = self._runtime_summary_guard_conditions_from_expression(left)
+        right_guards, right_guards_complete = self._runtime_summary_guard_conditions_from_expression(right)
+        if not left_guards_complete or not right_guards_complete:
+            return False
+        if not left_guards and not right_guards:
+            return False
+
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        for guard in tuple(left_guards) + tuple(right_guards):
+            if guard not in conditions:
+                conditions.append(guard)
+        parameters = self._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            left,
+            right,
+            *(condition.expression for condition in conditions or [] if condition is not None),
+            semantic_parameter_sources=semantic_parameter_sources,
+        )
+        if parameters is None:
+            return False
+        if self._condition_set_is_unsat(conditions, parameters):
+            return True
+
+        result_size = self._case_pair_comparison_result_size(left_case, right_case)
+        if result_size is None:
+            return False
+        if not self._counted_loop_affine_widths_are_safe(left, right, result_size, parameters):
+            return False
+        left_closed = self._counted_loop_affine_closed_expression(
+            left,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        right_closed = self._counted_loop_affine_closed_expression(
+            right,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        if left_closed is None or right_closed is None:
+            return False
+        return self._prove_intrinsic_equivalence_under_conditions(
+            left_closed,
+            right_closed,
+            conditions,
+            parameters,
+        )
+
+    def _counted_loop_affine_widths_are_safe(
+        self,
+        left: Expression,
+        right: Expression,
+        result_size: int,
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        target_bits = max(1, int(result_size or 0) * 8)
+        by_identity = {
+            tuple(spec.get("identity")): spec
+            for spec in parameters or []
+            if isinstance(spec.get("identity"), tuple)
+        }
+
+        def visit(expr: Optional[Expression]) -> bool:
+            if expr is None:
+                return True
+            if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+                expr_bits = max(1, int(getattr(expr, "size", 0) or 4) * 8)
+                if expr_bits <= target_bits:
+                    return True
+                identity = parameter_identity_key_from_expression(expr)
+                spec = by_identity.get(identity)
+                if spec is None:
+                    return False
+                try:
+                    narrow_bits = int(spec.get("semantic_narrow_bits"))
+                except (TypeError, ValueError):
+                    return False
+                if narrow_bits != target_bits:
+                    return False
+                return spec.get("semantic_signedness") in {"signed", "unsigned"}
+            if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+                for cond, branch_value in getattr(expr, "value", None) or []:
+                    if cond is not None and not visit(getattr(cond, "expression", None)):
+                        return False
+                    if not visit(branch_value):
+                        return False
+                return True
+            return all(visit(operand) for operand in getattr(expr, "operands", None) or [])
+
+        for counted in (left, right):
+            if not visit(counted):
+                return False
+            runtime_ref = getattr(counted, "runtime_ref", None)
+            for _, _, bias_expr in tuple(getattr(runtime_ref, "residue_bias_terms", ()) or ()):
+                if not visit(bias_expr):
+                    return False
+        return True
+
+    def _counted_loop_refs_allow_affine_value_proof(self, left_ref, right_ref) -> bool:
+        if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+            return False
+        for loop_summary in (getattr(left_ref, "loop_summary", None), getattr(right_ref, "loop_summary", None)):
+            if loop_summary is None:
+                return False
+            requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+            if callable(requires_effect_proof) and requires_effect_proof():
+                return False
+            requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+            if callable(requires_path_proof) and requires_path_proof():
+                return False
+        if max(1, int(getattr(left_ref, "result_size", 0) or 0)) != max(
+            1, int(getattr(right_ref, "result_size", 0) or 0)
+        ):
+            return False
+        return True
+
+    def _counted_loop_affine_closed_expression(
+        self,
+        counted: Expression,
+        *,
+        result_size: int,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[Expression]:
+        runtime_ref = getattr(counted, "runtime_ref", None)
+        if not isinstance(runtime_ref, CountedLoopSummaryRef):
+            return None
+        residue_cases = tuple(getattr(runtime_ref, "residue_cases", ()) or ())
+        if len(residue_cases) != 1:
+            return None
+        modulus, residue, coeff, bias = residue_cases[0]
+        if int(modulus) != 1 or int(residue) != 0:
+            return None
+        operands = list(getattr(counted, "operands", ()) or ())
+        if len(operands) != 3:
+            return None
+        base, start, limit = operands
+        step = int(getattr(runtime_ref, "induction_step", 0) or 0)
+        if step <= 0:
+            return None
+        if step != 1 and step != 5:
+            return None
+
+        trip_count = self._counted_loop_affine_trip_count_expression(
+            start,
+            limit,
+            step,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        if trip_count is None:
+            return None
+        if not self._expression_is_provably_nonnegative_under_conditions(trip_count, conditions, parameters):
+            return None
+
+        target_size = max(1, int(result_size or 0))
+        count_size = max(
+            target_size,
+            max(1, int(getattr(start, "size", 0) or 0)),
+            max(1, int(getattr(limit, "size", 0) or 0)),
+            max(1, int(getattr(trip_count, "size", 0) or 0)),
+        )
+        count = self._coerce_expression_to_size(
+            trip_count,
+            count_size,
+            signed=bool(getattr(runtime_ref, "signed_loop", False)),
+        )
+        start_count = self._coerce_expression_to_size(
+            start,
+            count_size,
+            signed=self._expression_prefers_signed_extension(start),
+        )
+        wide_size = max(8, count_size * 2, target_size * 2)
+        wide_count = Expression.unary_op("INT_ZEXT", count)
+        wide_count.size = wide_size
+        wide_start = Expression.unary_op("INT_ZEXT", start_count)
+        wide_start.size = wide_size
+
+        count_minus_one = Expression.binary_op(
+            "INT_SUB",
+            wide_count,
+            Expression.constant(1, size=wide_size),
+        )
+        count_minus_one.size = wide_size
+        triangular_product = Expression.binary_op("INT_MULT", wide_count, count_minus_one)
+        triangular_product.size = wide_size
+        triangular = Expression.binary_op(
+            "INT_RIGHT",
+            triangular_product,
+            Expression.constant(1, size=wide_size),
+        )
+        triangular.size = wide_size
+
+        progression_sum = Expression.binary_op(
+            "INT_ADD",
+            Expression.binary_op("INT_MULT", wide_count, wide_start),
+            Expression.binary_op("INT_MULT", Expression.constant(step, size=wide_size), triangular),
+        )
+        progression_sum.size = wide_size
+
+        terms: List[Expression] = []
+        coeff = int(coeff)
+        if coeff != 0:
+            coeff_term = progression_sum
+            if coeff != 1:
+                coeff_term = Expression.binary_op(
+                    "INT_MULT",
+                    progression_sum,
+                    Expression.constant(coeff, size=wide_size),
+                )
+                coeff_term.size = wide_size
+            terms.append(coeff_term)
+
+        bias = int(bias)
+        if bias != 0:
+            bias_term = Expression.binary_op(
+                "INT_MULT",
+                wide_count,
+                Expression.constant(bias, size=wide_size),
+            )
+            bias_term.size = wide_size
+            terms.append(bias_term)
+
+        for bias_modulus, bias_residue, bias_expr in tuple(getattr(runtime_ref, "residue_bias_terms", ()) or ()):
+            if int(bias_modulus) != 1 or int(bias_residue) != 0:
+                return None
+            bias_wide = self._coerce_expression_to_size(
+                bias_expr,
+                wide_size,
+                signed=self._expression_prefers_signed_extension(bias_expr),
+            )
+            bias_expr_term = Expression.binary_op("INT_MULT", wide_count, bias_wide)
+            bias_expr_term.size = wide_size
+            terms.append(bias_expr_term)
+
+        base_wide = None
+        if not (
+            getattr(base, "expr_type", None) == ExpressionType.CONSTANT
+            and int(getattr(base, "value", 0) or 0) == 0
+        ):
+            base_wide = self._coerce_expression_to_size(
+                base,
+                wide_size,
+                signed=self._expression_prefers_signed_extension(base),
+            )
+        if base_wide is not None:
+            terms.insert(0, base_wide)
+        if not terms:
+            return Expression.constant(0, size=target_size)
+
+        total = terms[0]
+        for term in terms[1:]:
+            total = Expression.binary_op("INT_ADD", total, term)
+            total.size = wide_size
+        low = Expression.binary_op("SUBPIECE", total, Expression.constant(0, size=4))
+        low.size = target_size
+        return low
+
+    def _counted_loop_affine_trip_count_expression(
+        self,
+        start: Expression,
+        limit: Expression,
+        step: int,
+        *,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[Expression]:
+        if step <= 0:
+            return None
+        if step == 1 and self._expression_is_zero(start):
+            return limit
+        candidate = self._extract_affine_limit_trip_count_candidate(start, limit, step)
+        if candidate is None:
+            return None
+        if not self._counted_loop_limit_matches_start_plus_step_count(
+            start,
+            limit,
+            step,
+            candidate,
+            conditions,
+            parameters,
+        ):
+            return None
+        return candidate
+
+    def _extract_affine_limit_trip_count_candidate(
+        self,
+        start: Expression,
+        limit: Expression,
+        step: int,
+    ) -> Optional[Expression]:
+        if getattr(limit, "expr_type", None) != ExpressionType.BINARY_OP or getattr(limit, "operator", None) != "INT_ADD":
+            return None
+        left, right = list(getattr(limit, "operands", ()) or ())
+        for maybe_start, maybe_scaled in ((left, right), (right, left)):
+            if not self._expressions_same_shape_ignoring_runtime(maybe_start, start):
+                continue
+            candidate = self._extract_constant_scaled_expression(maybe_scaled, step)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _extract_constant_scaled_expression(self, expr: Expression, factor: int) -> Optional[Expression]:
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or getattr(expr, "operator", None) != "INT_MULT":
+            return None
+        left, right = list(getattr(expr, "operands", ()) or ())
+        for maybe_const, candidate in ((left, right), (right, left)):
+            if getattr(maybe_const, "expr_type", None) != ExpressionType.CONSTANT:
+                continue
+            try:
+                if int(getattr(maybe_const, "value", 0) or 0) == int(factor):
+                    return candidate
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _counted_loop_limit_matches_start_plus_step_count(
+        self,
+        start: Expression,
+        limit: Expression,
+        step: int,
+        count: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        size = max(
+            1,
+            int(getattr(start, "size", 0) or 0),
+            int(getattr(limit, "size", 0) or 0),
+            int(getattr(count, "size", 0) or 0),
+        )
+        start_sized = self._coerce_expression_to_size(
+            start,
+            size,
+            signed=self._expression_prefers_signed_extension(start),
+        )
+        count_sized = self._coerce_expression_to_size(
+            count,
+            size,
+            signed=self._expression_prefers_signed_extension(count),
+        )
+        limit_sized = self._coerce_expression_to_size(
+            limit,
+            size,
+            signed=self._expression_prefers_signed_extension(limit),
+        )
+        scaled = Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(step, size=size),
+            count_sized,
+        )
+        scaled.size = size
+        expected_limit = Expression.binary_op("INT_ADD", start_sized, scaled)
+        expected_limit.size = size
+        if self._expressions_same_shape_ignoring_runtime(expected_limit, limit_sized):
+            return True
+        equality = Condition(Expression.binary_op("INT_EQUAL", limit_sized, expected_limit))
+        return self._condition_set_implies(conditions, [equality], parameters)
+
+    def _expression_is_zero(self, expr: Expression) -> bool:
+        if getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
+            return False
+        try:
+            return int(getattr(expr, "value", 0) or 0) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def _expressions_same_shape_ignoring_runtime(self, left: Expression, right: Expression) -> bool:
+        if left is None or right is None:
+            return False
+        return left.structural_key(include_semantic_runtime_refs=False) == right.structural_key(
+            include_semantic_runtime_refs=False
         )
 
     def _counted_loop_refs_allow_value_proof(self, left_ref, right_ref) -> bool:
@@ -5205,6 +5622,7 @@ class PairwiseStrategy(CheckStrategy):
         declarations.extend(self._collect_auxiliary_float_declarations([expr], conditions))
 
         assertions = []
+        assertions.extend(build_parameter_semantic_constraints(symbol_infos))
         for condition in conditions or []:
             if condition is None:
                 continue

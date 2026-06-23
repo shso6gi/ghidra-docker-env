@@ -1,0 +1,138 @@
+{
+  "manifest_version": 1,
+  "manifest_kind": "barthe_f_affine_representatives",
+  "target": {
+    "benchmark": "REVE/barthe",
+    "function": "f",
+    "equivalent_source": "targets/EqBench/benchmarks/REVE/barthe/Eq/source",
+    "negative_source": "targets/EqBench/benchmarks/REVE/barthe/Neq/source"
+  },
+  "frozen_dimensions": [
+    "reason_id",
+    "decision_effect",
+    "reason_scope",
+    "recovery_proof_kind",
+    "final_result",
+    "stage_path"
+  ],
+  "positive_representatives": [
+    {
+      "id": "barthe-f-b1-b6-timeout",
+      "binary_pair": "B1_B6",
+      "binary1": "newV-arm64-clang-O0",
+      "binary2": "newV-arm64-gcc-O1",
+      "before": {
+        "final_result": "TIMEOUT",
+        "reason_id": "solver_unknown_timeout",
+        "decision_effect": "retryable",
+        "reason_scope": "S_MONOLITHIC_FALLBACK",
+        "recovery_proof_kind": "solver_retry_or_normalization",
+        "stage_path": ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
+      },
+      "after": {
+        "final_result": "EQUIVALENT",
+        "stage_path": ["S_PAIRWISE"],
+        "unknown_reasons": [],
+        "pairwise_stats": {
+          "sat_pairs": 0,
+          "unknown_pairs": 0
+        }
+      }
+    },
+    {
+      "id": "barthe-f-b1-b14-sat-unsafety",
+      "binary_pair": "B1_B14",
+      "binary1": "newV-arm64-clang-O0",
+      "binary2": "newV-mips64-gcc-O1",
+      "before": {
+        "final_result": "UNKNOWN",
+        "reason_id": "sat_unsafety",
+        "decision_effect": "blocks_disequivalence",
+        "reason_scope": "pair",
+        "recovery_proof_kind": "sat_unsafety_resolution",
+        "stage_path": ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
+      },
+      "after": {
+        "final_result": "EQUIVALENT",
+        "stage_path": ["S_PAIRWISE"],
+        "unknown_reasons": [],
+        "pairwise_stats": {
+          "sat_pairs": 0,
+          "unknown_pairs": 0
+        }
+      }
+    },
+    {
+      "id": "barthe-f-b2-b8-gcc-optimized",
+      "binary_pair": "B2_B8",
+      "binary1": "newV-arm64-clang-O1",
+      "binary2": "newV-arm64-gcc-O3",
+      "optional": true,
+      "note": "Tracked as a gcc-O3 optimized-side backlog representative; the default runner reports it as BACKLOG_NOT_RUN until this optimized shape is supported.",
+      "before": {
+        "final_result": "UNKNOWN",
+        "reason_id": "sat_unsafety",
+        "decision_effect": "blocks_disequivalence",
+        "reason_scope": "pair",
+        "recovery_proof_kind": "sat_unsafety_resolution",
+        "stage_path": ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
+      },
+      "after": {
+        "allowed_results": ["EQUIVALENT", "UNKNOWN"],
+        "stage_path_contains": "S_PAIRWISE"
+      }
+    },
+    {
+      "id": "barthe-f-b8-b9-optimized-cross-arch",
+      "binary_pair": "B8_B9",
+      "binary1": "newV-arm64-gcc-O3",
+      "binary2": "newV-mips64-clang-O0",
+      "optional": true,
+      "note": "Backlog representative: current optimized gcc-O3 lowering is not covered by the initial step=5 affine counted-loop proof.",
+      "after": {
+        "allowed_results": ["EQUIVALENT", "UNKNOWN"],
+        "stage_path_contains": "S_PAIRWISE"
+      }
+    },
+    {
+      "id": "barthe-f-b10-b14-mips64-optimized",
+      "binary_pair": "B10_B14",
+      "binary1": "newV-mips64-clang-O1",
+      "binary2": "newV-mips64-gcc-O1",
+      "optional": true,
+      "note": "Backlog representative: no longer required for the default smoke runner until the remaining optimized MIPS shape is supported.",
+      "before": {
+        "final_result": "TIMEOUT",
+        "reason_id": "solver_unknown_timeout",
+        "decision_effect": "retryable",
+        "reason_scope": "S_MONOLITHIC_FALLBACK",
+        "recovery_proof_kind": "solver_retry_or_normalization",
+        "stage_path": ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
+      },
+      "after": {
+        "allowed_results": ["EQUIVALENT", "UNKNOWN"],
+        "stage_path_contains": "S_PAIRWISE"
+      }
+    }
+  ],
+  "negative_representatives": [
+    {
+      "id": "barthe-neq-f-x86_64-gcc-near-miss",
+      "binary_pair": "XG0_XG1",
+      "binary1": "newV-x86_64-gcc-O0",
+      "binary2": "oldV-x86_64-gcc-O1",
+      "source_pair": ["newV.c", "oldV.c"],
+      "expectation": "not_equivalent_or_unknown",
+      "must_not_promote_to": "EQUIVALENT",
+      "expected_unknown_reason": {
+        "reason_id": "sat_unsafety",
+        "decision_effect": "blocks_disequivalence",
+        "reason_scope": "pair",
+        "recovery_proof_kind": "sat_unsafety_resolution"
+      },
+      "negative_binaries_required": true,
+      "availability_note": "The default runner rebuilds the required x86_64 gcc Neq representative objects into OUTPUT_BASE_DIR/generated_neq from REVE/barthe/Neq/newV.c and oldV.c on every run.",
+      "note": "The unit near-miss guards the proof rule, and this manifest keeps the real Neq binary gate explicit and non-optional."
+    }
+  ]
+}
