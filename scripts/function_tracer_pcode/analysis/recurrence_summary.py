@@ -149,6 +149,8 @@ class ResidueLoopCase:
     residue: int
     affine: Tuple[int, int]
     bias_expr: Optional[Expression] = None
+    affine_from_readonly_literal: bool = False
+    affine_from_address_literal: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,6 +169,12 @@ class ReadonlyAccumulatorPhiCandidate:
     back_varnode: object
     back_def: object
     load_progressions: Tuple[Dict[str, object], ...]
+
+
+@dataclass(frozen=True)
+class ReadonlyAffineProgressionLiteral:
+    step: int
+    lane_base: int
 
 
 class StructuralRecurrenceSummarizer:
@@ -230,11 +238,11 @@ class StructuralRecurrenceSummarizer:
         if summary is not None:
             return summary
 
-        summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
+        summary = self._try_summarize_vectorized_affine_progression_sum(function, high_function, analysis)
         if summary is not None:
             return summary
 
-        summary = self._try_summarize_vectorized_affine_progression_sum(function, high_function, analysis)
+        summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
         if summary is not None:
             return summary
 
@@ -424,9 +432,9 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined vectorized affine progression summary: high-function effects require proof")
             return None
         parameters = list(getattr(analysis, "parameters", None) or [])
-        if len(parameters) != 2:
+        if len(parameters) not in {1, 2}:
             self._debug(
-                "Declined vectorized affine progression summary: expected two parameters "
+                "Declined vectorized affine progression summary: expected one or two parameters "
                 f"(found {len(parameters)})"
             )
             return None
@@ -437,23 +445,33 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined vectorized affine progression summary: parameter wider than 32 bits")
             return None
 
-        step = self._readonly_affine_progression_literal_step(analysis)
-        if step is None or step <= 0:
+        literal = self._readonly_affine_progression_literal(analysis)
+        if literal is None or literal.step <= 0:
             self._debug("Declined vectorized affine progression summary: no readonly affine literal")
             return None
+        step = int(literal.step)
 
-        count_expr = self._parameter_expression(parameters[0])
-        bias_expr = self._parameter_expression(parameters[1])
+        count_expr = self._vectorized_affine_counter_expression(parameters[0], analysis)
+        if count_expr is None:
+            self._debug("Declined vectorized affine progression summary: counter expression not identified")
+            return None
         signed_counter_guard = self._vectorized_affine_counter_guard_signedness(analysis, parameters[0])
         if signed_counter_guard is None:
             self._debug("Declined vectorized affine progression summary: counter guard signedness is ambiguous")
             return None
         result_size = max(
             1,
-            int(getattr(count_expr, "size", 0) or 0),
-            int(getattr(bias_expr, "size", 0) or 0),
+            *(int(param.get("size", 0) or 0) for param in parameters),
             4,
         )
+        bias_candidates = self._vectorized_affine_bias_candidates(
+            parameters,
+            result_size,
+            lane_base=int(literal.lane_base),
+        )
+        if not bias_candidates:
+            self._debug("Declined vectorized affine progression summary: no bias candidates")
+            return None
         zero = Expression.constant(0, size=result_size)
         positive_operator = "INT_SLESS" if signed_counter_guard else "INT_LESS"
         positive_guard = Condition(
@@ -467,47 +485,61 @@ class StructuralRecurrenceSummarizer:
         base_guard = self._zero_base_guard_cover_for_positive_counter_guard(
             analysis,
             parameters[0],
+            count_expr,
             positive_guard,
         )
         if base_guard is None:
             self._debug("Declined vectorized affine progression summary: missing proven zero base coverage")
             return None
-        if not self._nonzero_returns_are_disjoint_from_base_guard(analysis, base_guard):
+        if not self._nonzero_returns_are_disjoint_from_base_guard(
+            analysis,
+            base_guard,
+            parameters[0],
+            count_expr,
+        ):
             self._debug("Declined vectorized affine progression summary: nonzero return overlaps zero base guard")
             return None
-        summary_bias_expr = self._coerce_summary_expression_to_size(
-            bias_expr,
-            result_size,
-            signed=self._expression_prefers_signed_extension(bias_expr),
-        )
-        loop_value = self._build_counted_loop_summary_value(
-            base_expr=zero,
-            start_expr=zero,
-            limit_expr=self._coerce_summary_expression_to_size(count_expr, result_size, signed=signed_counter_guard),
-            induction_step=1,
-            residue_cases=(
-                ResidueLoopCase(
-                    modulus=1,
-                    residue=0,
-                    affine=(int(step), 0),
-                    bias_expr=summary_bias_expr,
+        selected_loop_value: Optional[Expression] = None
+        selected_bias_expr: Optional[Expression] = None
+        for bias_expr in bias_candidates:
+            summary_bias_expr = self._coerce_summary_expression_to_size(
+                bias_expr,
+                result_size,
+                signed=self._expression_prefers_signed_extension(bias_expr),
+            )
+            loop_value = self._build_counted_loop_summary_value(
+                base_expr=zero,
+                start_expr=zero,
+                limit_expr=self._coerce_summary_expression_to_size(count_expr, result_size, signed=signed_counter_guard),
+                induction_step=1,
+                residue_cases=(
+                    ResidueLoopCase(
+                        modulus=1,
+                        residue=0,
+                        affine=(int(step), 0),
+                        bias_expr=summary_bias_expr,
+                    ),
                 ),
-            ),
-            result_size=result_size,
-            signed_loop=signed_counter_guard,
-            guard_constraints=(positive_guard,),
-        )
-        if loop_value is None:
-            self._debug("Declined vectorized affine progression summary: failed to build counted-loop value")
-            return None
-        if not self._positive_returns_match_vectorized_affine_summary(
-            analysis,
-            parameters[0],
-            step=int(step),
-            bias_expr=summary_bias_expr,
-            result_size=result_size,
-            signed_counter_guard=signed_counter_guard,
-        ):
+                result_size=result_size,
+                signed_loop=signed_counter_guard,
+                side_effect_profile=side_effect_profile,
+                guard_constraints=(positive_guard,),
+            )
+            if loop_value is None:
+                continue
+            if self._positive_returns_match_vectorized_affine_summary(
+                analysis,
+                parameters[0],
+                count_expr,
+                step=int(step),
+                bias_expr=summary_bias_expr,
+                result_size=result_size,
+                signed_counter_guard=signed_counter_guard,
+            ):
+                selected_loop_value = loop_value
+                selected_bias_expr = summary_bias_expr
+                break
+        if selected_loop_value is None or selected_bias_expr is None:
             self._debug("Declined vectorized affine progression summary: positive return proof failed")
             return None
 
@@ -530,7 +562,7 @@ class StructuralRecurrenceSummarizer:
             ),
             ReturnInfo(
                 address=address,
-                value=loop_value,
+                value=selected_loop_value,
                 conditions=[positive_guard],
                 branch_index=1,
                 pcode_identity=pcode_identity,
@@ -540,17 +572,124 @@ class StructuralRecurrenceSummarizer:
             ),
         ], "vectorized_affine_progression_sum_summary"
 
+    def _vectorized_affine_bias_candidates(
+        self,
+        parameters: Sequence[dict],
+        result_size: int,
+        *,
+        lane_base: int = 0,
+    ) -> Tuple[Expression, ...]:
+        size = max(1, int(result_size or 0))
+        lane_base_expr = Expression.constant(int(lane_base), size=size)
+        if len(parameters) == 2:
+            param_bias = self._parameter_expression(parameters[1])
+            if int(lane_base) == 0:
+                return (param_bias,)
+            coerced_param_bias = self._coerce_summary_expression_to_size(
+                param_bias,
+                size,
+                signed=self._expression_prefers_signed_extension(param_bias),
+            )
+            combined_bias = Expression.binary_op("INT_ADD", coerced_param_bias, lane_base_expr)
+            combined_bias.size = size
+            return (combined_bias,)
+        if len(parameters) != 1:
+            return ()
+        return (lane_base_expr,)
+
+    def _vectorized_affine_counter_expression(
+        self,
+        counter_param: dict,
+        analysis,
+    ) -> Optional[Expression]:
+        primary = self._parameter_expression(counter_param)
+        expressions: List[Optional[Expression]] = [primary]
+        for ret in getattr(analysis, "returns", None) or ():
+            expressions.append(getattr(ret, "value", None))
+            for condition in getattr(ret, "conditions", None) or ():
+                expressions.append(getattr(condition, "expression", None))
+        candidates = self._parameter_expression_candidates(
+            counter_param,
+            expressions,
+            include_primary=True,
+            primary=primary,
+        )
+        selected: Optional[Expression] = None
+        selected_score = -1
+        for candidate in candidates:
+            if getattr(candidate, "expr_type", None) != ExpressionType.PARAMETER:
+                continue
+            if not self._counter_parameter_candidate_matches_descriptor(candidate, counter_param):
+                continue
+            score = 0
+            if getattr(candidate, "storage_info", None) is not None:
+                score += 4
+            if self._parameter_expression_semantic_identity(candidate) is not None:
+                score += 2
+            try:
+                if int(getattr(candidate, "value", -1)) >= 0:
+                    score += 1
+            except (TypeError, ValueError):
+                pass
+            if selected is None or score > selected_score:
+                selected = candidate
+                selected_score = score
+        if selected is not None:
+            return selected
+        if self._counter_parameter_candidate_matches_descriptor(primary, counter_param):
+            return primary
+        return None
+
+    def _counter_parameter_candidate_matches_descriptor(
+        self,
+        candidate: Optional[Expression],
+        counter_param: dict,
+    ) -> bool:
+        if candidate is None or getattr(candidate, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        expected_storage = counter_param.get("storage_info", counter_param.get("storage"))
+        candidate_storage = getattr(candidate, "storage_info", None)
+        if expected_storage is not None:
+            return (
+                candidate_storage is not None
+                and self._storage_infos_refer_to_same_parameter_slot(candidate_storage, expected_storage)
+            )
+        try:
+            expected_index = int(counter_param.get("index"))
+        except (TypeError, ValueError):
+            expected_index = -1
+        try:
+            candidate_index = int(getattr(candidate, "value", -1))
+        except (TypeError, ValueError):
+            candidate_index = -1
+        if expected_index >= 0 or candidate_index >= 0:
+            return expected_index >= 0 and expected_index == candidate_index
+        expected_identity = None
+        try:
+            expected_identity = parameter_identity_key_from_descriptor(counter_param)
+        except Exception:
+            expected_identity = None
+        candidate_identity = None
+        try:
+            candidate_identity = parameter_identity_key_from_expression(candidate)
+        except Exception:
+            candidate_identity = None
+        if expected_identity is not None or candidate_identity is not None:
+            return expected_identity is not None and expected_identity == candidate_identity
+        return False
+
     def _positive_returns_match_vectorized_affine_summary(
         self,
         analysis,
         counter_param: dict,
+        counter_expr: Expression,
         *,
         step: int,
         bias_expr: Expression,
         result_size: int,
         signed_counter_guard: bool,
     ) -> bool:
-        count_expr = self._parameter_expression(counter_param)
+        count_expr = counter_expr
         default_summary_closed = self._build_affine_progression_sum_closed_expression(
             count_expr=count_expr,
             step=int(step),
@@ -565,7 +704,18 @@ class StructuralRecurrenceSummarizer:
             value = getattr(ret, "value", None)
             if value is None:
                 return False
-            conditions = list(getattr(ret, "conditions", None) or [])
+            conditions = self._normalize_counter_parameter_conditions(
+                list(getattr(ret, "conditions", None) or []),
+                counter_param,
+                count_expr,
+            )
+            value = self._normalize_counter_parameter_expression(
+                value,
+                counter_param,
+                count_expr,
+            )
+            if value is None:
+                return False
             positive_counter_cases = self._positive_counter_conditions_for_return(
                 conditions,
                 counter_param,
@@ -902,7 +1052,7 @@ class StructuralRecurrenceSummarizer:
         widened.size = target_size
         return widened
 
-    def _readonly_affine_progression_literal_step(self, analysis) -> Optional[int]:
+    def _readonly_affine_progression_literal(self, analysis) -> Optional[ReadonlyAffineProgressionLiteral]:
         program = getattr(self.tracer, "program", None)
         if program is None:
             return None
@@ -914,14 +1064,18 @@ class StructuralRecurrenceSummarizer:
                 lanes = self._read_readonly_int32_lanes(base, 4)
                 if lanes is None or len(lanes) < 4:
                     continue
-                if lanes[0] != 0:
-                    continue
                 step = lanes[1] - lanes[0]
                 if step <= 0:
                     continue
                 if all((lanes[index] - lanes[index - 1]) == step for index in range(1, len(lanes))):
-                    return int(step)
+                    return ReadonlyAffineProgressionLiteral(step=int(step), lane_base=int(lanes[0]))
         return None
+
+    def _readonly_affine_progression_literal_step(self, analysis) -> Optional[int]:
+        literal = self._readonly_affine_progression_literal(analysis)
+        if literal is None:
+            return None
+        return int(literal.step)
 
     def _expression_integer_constants(self, expr: Optional[Expression]) -> List[int]:
         values: List[int] = []
@@ -985,6 +1139,7 @@ class StructuralRecurrenceSummarizer:
         self,
         analysis,
         counter_param: dict,
+        counter_expr: Expression,
         positive_guard: Condition,
     ) -> Optional[Condition]:
         zero_return_count = 0
@@ -994,7 +1149,11 @@ class StructuralRecurrenceSummarizer:
                 continue
             zero_return_count += 1
             conditions = ConditionSimplifier.simplify_conditions_object_centric(
-                list(getattr(ret, "conditions", None) or [])
+                self._normalize_counter_parameter_conditions(
+                    list(getattr(ret, "conditions", None) or []),
+                    counter_param,
+                    counter_expr,
+                )
             )
             if ConditionSimplifier.object_centric_is_contradiction(conditions):
                 continue
@@ -1026,12 +1185,25 @@ class StructuralRecurrenceSummarizer:
         )
         return None
 
-    def _nonzero_returns_are_disjoint_from_base_guard(self, analysis, base_guard: Condition) -> bool:
+    def _nonzero_returns_are_disjoint_from_base_guard(
+        self,
+        analysis,
+        base_guard: Condition,
+        counter_param: Optional[dict] = None,
+        counter_expr: Optional[Expression] = None,
+    ) -> bool:
         for ret in getattr(analysis, "returns", None) or ():
             if self._raw_constant_value(getattr(ret, "value", None)) == 0:
                 continue
+            raw_conditions = list(getattr(ret, "conditions", None) or [])
+            if counter_param is not None and counter_expr is not None:
+                raw_conditions = self._normalize_counter_parameter_conditions(
+                    raw_conditions,
+                    counter_param,
+                    counter_expr,
+                )
             conditions = ConditionSimplifier.simplify_conditions_object_centric(
-                list(getattr(ret, "conditions", None) or [])
+                raw_conditions
             )
             if ConditionSimplifier.object_centric_is_contradiction(conditions):
                 continue
@@ -1047,6 +1219,146 @@ class StructuralRecurrenceSummarizer:
                 )
                 return False
         return True
+
+    def _normalize_counter_parameter_conditions(
+        self,
+        conditions: Sequence[Condition],
+        counter_param: dict,
+        counter_expr: Expression,
+    ) -> List[Condition]:
+        normalized: List[Condition] = []
+        for condition in conditions or ():
+            expr = self._normalize_counter_parameter_expression(
+                getattr(condition, "expression", None),
+                counter_param,
+                counter_expr,
+            )
+            if expr is getattr(condition, "expression", None):
+                normalized.append(condition)
+            else:
+                normalized.append(Condition(expr, bool(getattr(condition, "negated", False))))
+        return normalized
+
+    def _normalize_counter_parameter_expression(
+        self,
+        expr: Optional[Expression],
+        counter_param: dict,
+        counter_expr: Expression,
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+        normalized = expr
+        for candidate in self._parameter_expression_candidates(
+            counter_param,
+            (expr,),
+            include_primary=False,
+            primary=counter_expr,
+        ):
+            if not self._counter_parameter_candidate_can_normalize(
+                candidate,
+                counter_param,
+                counter_expr,
+            ):
+                continue
+            substituted = self._substitute_exact_expression(normalized, candidate, counter_expr)
+            if substituted is not None:
+                normalized = substituted
+        return normalized
+
+    def _counter_parameter_candidate_can_normalize(
+        self,
+        candidate: Optional[Expression],
+        counter_param: dict,
+        counter_expr: Expression,
+    ) -> bool:
+        if candidate is None or getattr(candidate, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        if counter_expr is None or getattr(counter_expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        candidate_storage = getattr(candidate, "storage_info", None)
+        counter_storage = getattr(counter_expr, "storage_info", None)
+        if candidate_storage is not None or counter_storage is not None:
+            return (
+                candidate_storage is not None
+                and counter_storage is not None
+                and self._storage_infos_refer_to_same_parameter_slot(candidate_storage, counter_storage)
+            )
+        candidate_identity = self._parameter_expression_semantic_identity(candidate)
+        counter_identity = self._parameter_expression_semantic_identity(counter_expr)
+        if candidate_identity is not None or counter_identity is not None:
+            return candidate_identity is not None and candidate_identity == counter_identity
+        expected_index = None
+        try:
+            if counter_param.get("index") is not None:
+                expected_index = int(counter_param.get("index"))
+        except (TypeError, ValueError):
+            expected_index = None
+        try:
+            candidate_index = int(getattr(candidate, "value", -1))
+            counter_index = int(getattr(counter_expr, "value", -1))
+        except (TypeError, ValueError):
+            candidate_index = counter_index = -1
+        if candidate_index < 0:
+            return False
+        if counter_index >= 0:
+            return candidate_index == counter_index
+        return expected_index is not None and candidate_index == expected_index
+
+    def _storage_infos_refer_to_same_parameter_slot(
+        self,
+        left: Optional[StorageInfo],
+        right: Optional[StorageInfo],
+    ) -> bool:
+        if left is None or right is None:
+            return False
+        if left == right:
+            return True
+        left_key = getattr(left, "storage_identity_key", None)
+        right_key = getattr(right, "storage_identity_key", None)
+        if callable(left_key):
+            try:
+                left_key = left_key()
+            except Exception:
+                left_key = None
+        if callable(right_key):
+            try:
+                right_key = right_key()
+            except Exception:
+                right_key = None
+        if left_key is not None and right_key is not None and left_key == right_key:
+            return True
+        if not bool(getattr(left, "is_register", False)) or not bool(getattr(right, "is_register", False)):
+            return False
+        shares_base = getattr(left, "shares_base_register_with", None)
+        overlaps = getattr(left, "bit_range_overlaps_with", None)
+        if not callable(shares_base) or not callable(overlaps):
+            return False
+        try:
+            return bool(shares_base(right)) and bool(overlaps(right))
+        except Exception:
+            return False
+
+    def _parameter_expression_semantic_identity(self, expr: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if runtime_ref is None:
+            return None
+        semantic_key = getattr(runtime_ref, "semantic_key", None)
+        if callable(semantic_key):
+            try:
+                key = semantic_key()
+            except Exception:
+                key = None
+            if key is not None:
+                return ("semantic", key)
+        stable_key = getattr(runtime_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+            except Exception:
+                key = None
+            if key is not None:
+                return ("stable", key)
+        return None
 
     def _vectorized_affine_counter_guard_signedness(self, analysis, counter_param: dict) -> Optional[bool]:
         signedness_values: set[bool] = set()
@@ -1092,11 +1404,23 @@ class StructuralRecurrenceSummarizer:
     def _same_counter_expression(self, expr: Optional[Expression], counter_expr: Optional[Expression]) -> bool:
         if expr is None or counter_expr is None:
             return False
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.PARAMETER
+            or getattr(counter_expr, "expr_type", None) == ExpressionType.PARAMETER
+        ):
+            return self._parameter_expressions_share_counter_identity(expr, counter_expr)
         try:
             if expr.equals(counter_expr):
                 return True
         except Exception:
             pass
+        return False
+
+    def _parameter_expressions_share_counter_identity(
+        self,
+        expr: Optional[Expression],
+        counter_expr: Optional[Expression],
+    ) -> bool:
         if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
             return False
         if getattr(counter_expr, "expr_type", None) != ExpressionType.PARAMETER:
@@ -1108,13 +1432,19 @@ class StructuralRecurrenceSummarizer:
             expr_index = counter_index = -1
         if expr_index >= 0 and counter_index >= 0 and expr_index == counter_index:
             return True
-        expr_name = getattr(expr, "name", None)
-        counter_name = getattr(counter_expr, "name", None)
-        if expr_name is not None and counter_name is not None and expr_name == counter_name:
-            return True
         expr_storage = getattr(expr, "storage_info", None)
         counter_storage = getattr(counter_expr, "storage_info", None)
-        return expr_storage is not None and counter_storage is not None and expr_storage == counter_storage
+        if expr_storage is not None or counter_storage is not None:
+            return (
+                expr_storage is not None
+                and counter_storage is not None
+                and self._storage_infos_refer_to_same_parameter_slot(expr_storage, counter_storage)
+            )
+        expr_identity = self._parameter_expression_semantic_identity(expr)
+        counter_identity = self._parameter_expression_semantic_identity(counter_expr)
+        if expr_identity is not None or counter_identity is not None:
+            return expr_identity is not None and expr_identity == counter_identity
+        return False
 
     def _condition_clause_expression(self, conditions: Sequence[Condition]) -> Optional[Expression]:
         if not conditions:
@@ -1175,7 +1505,11 @@ class StructuralRecurrenceSummarizer:
             for node in self._iter_expression_nodes(expr):
                 if getattr(node, "expr_type", None) != ExpressionType.PARAMETER:
                     continue
-                same_index = expected_index >= 0 and int(getattr(node, "value", -1) or -1) == expected_index
+                try:
+                    node_index = int(getattr(node, "value", -1))
+                except (TypeError, ValueError):
+                    node_index = -1
+                same_index = expected_index >= 0 and node_index == expected_index
                 same_name = expected_name is not None and getattr(node, "name", None) == expected_name
                 same_storage = (
                     expected_storage is not None
@@ -1606,6 +1940,13 @@ class StructuralRecurrenceSummarizer:
             return None
 
         induction, accumulator, guard, residue_cases = model
+        function_body_ranges = self._function_body_address_ranges(high_function, analysis, function=function)
+        if self._residue_cases_contain_readonly_affine_literal_address(
+            residue_cases,
+            function_body_ranges=function_body_ranges,
+        ):
+            self._debug("Declined counted scalar loop summary: residue affine uses address-like vector literal")
+            return None
         update_cases = self._try_extract_counted_loop_update_cases_for_summary(accumulator, induction, guard)
         loop_cases = self._build_counted_loop_case_refs(update_cases)
         start_expr = induction.init_expr
@@ -1660,7 +2001,6 @@ class StructuralRecurrenceSummarizer:
             accumulator.init_expr,
             continue_conditions,
         )
-        function_body_ranges = self._function_body_address_ranges(high_function, analysis, function=function)
         if self._expression_contains_executable_address_constant(
             base_return_expr,
             function_body_ranges=function_body_ranges,
@@ -1778,6 +2118,89 @@ class StructuralRecurrenceSummarizer:
             f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
         )
         return summarized, "counted_scalar_loop_summary"
+
+    def _residue_cases_contain_readonly_affine_literal_address(
+        self,
+        residue_cases: Sequence[ResidueLoopCase],
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> bool:
+        for case in residue_cases or ():
+            # Once extraction has proven that a SUBPIECE/PIECE/shift term came
+            # from readonly literal data, keep the scalar counted-loop path
+            # conservative.  The readonly literal may be carried by bias_expr
+            # rather than by the integer affine tuple, and treating it as an
+            # ordinary scalar affine term can hide the vector-lane contract.
+            if bool(getattr(case, "affine_from_readonly_literal", False)):
+                return True
+            if bool(getattr(case, "affine_from_address_literal", False)):
+                return True
+            # Some optimized vector loops have already collapsed the readonly
+            # lane literal to a bare constant by this point.  Keep this
+            # fallback specific to readonly int32 progressions.  A bare
+            # executable/function-body-looking bias is rejected only for the
+            # constant-iteration shape; address-like affine offsets still need
+            # extraction provenance before they block scalar summaries.
+            affine = tuple(getattr(case, "affine", ()) or ())
+            if len(affine) >= 2:
+                coeff_value = affine[0]
+                bias_value = affine[1]
+                if self._readonly_int32_progression_literal_at_value(bias_value):
+                    return True
+                try:
+                    integer_coeff = int(coeff_value)
+                    integer_bias = int(bias_value)
+                except (TypeError, ValueError):
+                    integer_coeff = None
+                    integer_bias = None
+                if integer_coeff == 0 and integer_bias is not None and (
+                    self._constant_resolves_to_function_body_address(integer_bias, function_body_ranges)
+                    or self._constant_resolves_to_executable_address(integer_bias)
+                ):
+                    return True
+        return False
+
+    def _readonly_int32_progression_literal_at_value(self, value: Any) -> bool:
+        try:
+            integer_value = int(value)
+        except (TypeError, ValueError):
+            return False
+        lanes = self._read_readonly_int32_lanes(integer_value, 4)
+        if lanes is None or len(lanes) < 4:
+            return False
+        step = lanes[1] - lanes[0]
+        if step <= 0:
+            return False
+        return all(
+            (lanes[index] - lanes[index - 1]) == step
+            for index in range(1, len(lanes))
+        )
+
+    def _address_points_to_readonly_data(self, address_value: int) -> bool:
+        if address_value < 0:
+            return False
+        program = getattr(self.tracer, "program", None)
+        if program is None:
+            return False
+        try:
+            memory = program.getMemory()
+            address_factory = program.getAddressFactory()
+            default_space = address_factory.getDefaultAddressSpace()
+            address = default_space.getAddress(int(address_value))
+        except Exception:
+            return False
+        if memory is None or address is None:
+            return False
+        try:
+            block = memory.getBlock(address)
+        except Exception:
+            return False
+        if block is None:
+            return False
+        try:
+            return bool(block.isRead()) and not bool(block.isWrite()) and not bool(block.isExecute())
+        except Exception:
+            return False
 
     def _safe_pcode_input_count(self, op) -> int:
         try:
@@ -2465,7 +2888,7 @@ class StructuralRecurrenceSummarizer:
             ),
         )
         for ordinal, spec in enumerate(ordered):
-            spec["aux_name"] = spec.get("aux_name") or f"aux_sym_{ordinal}"
+            spec["aux_name"] = f"aux_sym_{ordinal}"
             spec["aux_index"] = ordinal
         return ordered
 
@@ -2789,6 +3212,7 @@ class StructuralRecurrenceSummarizer:
                         residue_cases = self._extract_residue_loop_cases(
                             cases,
                             induction.placeholder.name or "__loop_iv",
+                            function_body_ranges=function_body_ranges,
                         )
                         if residue_cases is None:
                             continue
@@ -4341,6 +4765,8 @@ class StructuralRecurrenceSummarizer:
         self,
         cases: Sequence[CountedLoopUpdateCase],
         counter_name: str,
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
     ) -> Optional[Tuple[ResidueLoopCase, ...]]:
         if not cases:
             return None
@@ -4349,7 +4775,21 @@ class StructuralRecurrenceSummarizer:
             if affine_case is None:
                 return None
             affine, bias_expr = affine_case
-            return (ResidueLoopCase(modulus=1, residue=0, affine=affine, bias_expr=bias_expr),)
+            return (
+                ResidueLoopCase(
+                    modulus=1,
+                    residue=0,
+                    affine=affine,
+                    bias_expr=bias_expr,
+                    affine_from_readonly_literal=self._expression_contains_readonly_literal_access(
+                        cases[0].delta_expr
+                    ),
+                    affine_from_address_literal=self._expression_contains_address_literal_access(
+                        cases[0].delta_expr,
+                        function_body_ranges=function_body_ranges,
+                    ),
+                ),
+            )
 
         residue_cases: List[ResidueLoopCase] = []
         modulus = None
@@ -4376,11 +4816,110 @@ class StructuralRecurrenceSummarizer:
                     residue=residue,
                     affine=affine,
                     bias_expr=bias_expr,
+                    affine_from_readonly_literal=self._expression_contains_readonly_literal_access(
+                        case.delta_expr
+                    ),
+                    affine_from_address_literal=self._expression_contains_address_literal_access(
+                        case.delta_expr,
+                        function_body_ranges=function_body_ranges,
+                    ),
                 )
             )
         if modulus is None or seen_residues != set(range(modulus)):
             return None
         return tuple(sorted(residue_cases, key=lambda item: item.residue))
+
+    def _expression_contains_readonly_literal_access(
+        self,
+        expr: Optional[Expression],
+    ) -> bool:
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(node, "operator", None) not in {"SUBPIECE", "PIECE", "INT_RIGHT"}:
+                continue
+            operands = tuple(getattr(node, "operands", ()) or ())
+            if not operands:
+                continue
+            for operand in operands:
+                if self._expression_contains_readonly_address_constant(operand):
+                    return True
+        return False
+
+    def _expression_contains_readonly_address_constant(
+        self,
+        expr: Optional[Expression],
+    ) -> bool:
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.CONSTANT:
+                continue
+            value = self._raw_constant_value(node)
+            if value is None:
+                continue
+            integer_value = int(value)
+            if self._address_points_to_readonly_data(integer_value):
+                return True
+            lanes = self._read_readonly_int32_lanes(integer_value, 4)
+            if lanes is None or len(lanes) < 4:
+                continue
+            step = lanes[1] - lanes[0]
+            if step > 0 and all(
+                (lanes[index] - lanes[index - 1]) == step
+                for index in range(1, len(lanes))
+            ):
+                return True
+        return False
+
+    def _expression_contains_address_literal_access(
+        self,
+        expr: Optional[Expression],
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> bool:
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(node, "operator", None) not in {
+                "SUBPIECE",
+                "PIECE",
+                "INT_RIGHT",
+                "INT_SRIGHT",
+                "INT_LEFT",
+                "LOAD",
+                "PTRADD",
+                "PTRSUB",
+            }:
+                continue
+            operands = tuple(getattr(node, "operands", ()) or ())
+            for operand in operands:
+                if self._expression_contains_address_constant(
+                    operand,
+                    function_body_ranges=function_body_ranges,
+                ):
+                    return True
+        return False
+
+    def _expression_contains_address_constant(
+        self,
+        expr: Optional[Expression],
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> bool:
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.CONSTANT:
+                continue
+            value = self._raw_constant_value(node)
+            if value is None:
+                continue
+            try:
+                integer_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if self._constant_resolves_to_function_body_address(integer_value, function_body_ranges):
+                return True
+            if self._constant_resolves_to_executable_address(integer_value):
+                return True
+        return False
 
     def _extract_affine_loop_case(
         self,
