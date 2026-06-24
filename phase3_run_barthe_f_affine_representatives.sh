@@ -109,8 +109,8 @@ CASES=(
 )
 
 BACKLOG_CASES=(
-    "eq|B2|B8|barthe-f-b2-b8-gcc-optimized|optional backlog: gcc-O3 optimized-side shape remains outside the initial step=5 affine proof"
-    "eq|B8|B9|barthe-f-b8-b9-optimized-cross-arch|optional backlog: optimized gcc-O3 cross-arch lowering remains unsupported"
+    "eq|B2|B8|barthe-f-b2-b8-gcc-optimized|backlog: gcc-O3 vector accumulator prefix proof is required before this can be a sound EQ gate"
+    "eq|B8|B9|barthe-f-b8-b9-optimized-cross-arch|backlog: gcc-O3 vector accumulator prefix proof is required before this can be a sound EQ gate"
     "eq|B10|B14|barthe-f-b10-b14-mips64-optimized|optional backlog: optimized MIPS shape remains outside the default smoke gate"
 )
 

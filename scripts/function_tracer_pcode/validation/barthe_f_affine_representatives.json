@@ -68,7 +68,7 @@
       "binary1": "newV-arm64-clang-O1",
       "binary2": "newV-arm64-gcc-O3",
       "optional": true,
-      "note": "Tracked as a gcc-O3 optimized-side backlog representative; the default runner reports it as BACKLOG_NOT_RUN until this optimized shape is supported.",
+      "note": "Backlog representative: gcc-O3 vector accumulator prefix proof must be recovered from P-code/high-function evidence before this can be a sound required EQ case.",
       "before": {
         "final_result": "UNKNOWN",
         "reason_id": "sat_unsafety",
@@ -88,7 +88,7 @@
       "binary1": "newV-arm64-gcc-O3",
       "binary2": "newV-mips64-clang-O0",
       "optional": true,
-      "note": "Backlog representative: current optimized gcc-O3 lowering is not covered by the initial step=5 affine counted-loop proof.",
+      "note": "Backlog representative: gcc-O3 vector accumulator prefix proof must be recovered from P-code/high-function evidence before this can be a sound required EQ case.",
       "after": {
         "allowed_results": ["EQUIVALENT", "UNKNOWN"],
         "stage_path_contains": "S_PAIRWISE"

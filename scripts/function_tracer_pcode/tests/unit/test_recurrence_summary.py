@@ -625,13 +625,27 @@ class _FakeAddressSpace:
             raise AttributeError("stack flag unavailable")
         return self._is_stack
 
+    def getAddress(self, offset):
+        return _FakeAddress(self, offset=int(offset))
+
 
 class _FakeAddress:
-    def __init__(self, space_name: str | _FakeAddressSpace):
+    def __init__(self, space_name: str | _FakeAddressSpace, *, offset: int | None = None):
         self._space = space_name if isinstance(space_name, _FakeAddressSpace) else _FakeAddressSpace(space_name)
+        self._offset = offset
 
     def getAddressSpace(self):
         return self._space
+
+    def getOffset(self):
+        if self._offset is None:
+            raise AttributeError("offset unavailable")
+        return self._offset
+
+    def add(self, offset):
+        if self._offset is None:
+            raise AttributeError("offset unavailable")
+        return _FakeAddress(self._space, offset=self._offset + int(offset))
 
 
 class _FakeOutput:
@@ -782,19 +796,93 @@ class _FakeStoreSpaceVarnode:
 
 
 class _FakeAddressFactory:
-    def __init__(self, spaces):
+    def __init__(self, spaces, default_space=None):
         self._spaces = dict(spaces)
+        self._default_space = default_space
 
     def getAddressSpace(self, space_id):
         return self._spaces[int(space_id)]
 
+    def getDefaultAddressSpace(self):
+        if self._default_space is not None:
+            return self._default_space
+        return next(iter(self._spaces.values()))
+
+
+class _FakeMemoryBlock:
+    def __init__(self, start: int, end: int, *, execute: bool, read: bool = True, write: bool = False):
+        self._start = int(start)
+        self._end = int(end)
+        self._execute = bool(execute)
+        self._read = bool(read)
+        self._write = bool(write)
+
+    def contains(self, address):
+        try:
+            offset = int(address.getOffset())
+        except Exception:
+            return False
+        return self._start <= offset <= self._end
+
+    def isExecute(self):
+        return self._execute
+
+    def isRead(self):
+        return self._read
+
+    def isWrite(self):
+        return self._write
+
+
+class _FakeMemory:
+    def __init__(self, blocks, bytes_by_address=None):
+        self._blocks = list(blocks or [])
+        self._bytes_by_address = dict(bytes_by_address or {})
+
+    def getBlock(self, address):
+        return next((block for block in self._blocks if block.contains(address)), None)
+
+    def getByte(self, address):
+        offset = int(address.getOffset())
+        if offset not in self._bytes_by_address:
+            raise KeyError(offset)
+        return self._bytes_by_address[offset]
+
+
+class _FakeLanguage:
+    def __init__(self, *, big_endian: bool = False):
+        self._big_endian = bool(big_endian)
+
+    def isBigEndian(self):
+        return self._big_endian
+
+
+class _FakeIntDataType:
+    def __init__(self, *, signed: bool = True, length: int = 4):
+        self._signed = bool(signed)
+        self._length = int(length)
+
+    def isSigned(self):
+        return self._signed
+
+    def getLength(self):
+        return self._length
+
 
 class _FakeProgram:
-    def __init__(self, address_factory):
+    def __init__(self, address_factory, memory=None, language=None):
         self._address_factory = address_factory
+        self._memory = memory
+        self._language = language or _FakeLanguage()
 
     def getAddressFactory(self):
         return self._address_factory
+
+    def getMemory(self):
+        return self._memory
+
+    def getLanguage(self):
+        return self._language
 
 
 class _IdentityTracer:
@@ -975,10 +1063,11 @@ class _FakeCfgHighFunction:
 
 
 class _FakeTracer:
-    def __init__(self, function_name: str, arg_expr: Expression):
+    def __init__(self, function_name: str, arg_expr: Expression, *, program=None):
         self._function_name = function_name
         self._arg_expr = arg_expr
         self.debug = False
+        self.program = program
 
     def trace_varnode(self, varnode, use_cache=True):
         if hasattr(varnode, "expr"):
@@ -2833,6 +2922,768 @@ def test_counted_loop_model_prefers_return_reaching_accumulator_over_larger_coef
     _, accumulator, _, residue_cases = model
     assert accumulator is good_acc
     assert residue_cases == (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),)
+
+
+def test_counted_loop_accumulator_extraction_rejects_executable_address_seed():
+    header = _FakeCfgBlock(1)
+    body = _FakeCfgBlock(2)
+    header.add_edge(body)
+    body.add_edge(header)
+
+    text_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    program = _FakeProgram(
+        _FakeAddressFactory({1: text_space}, default_space=text_space),
+        memory=_FakeMemory([_FakeMemoryBlock(0x100000, 0x101000, execute=False)]),
+    )
+    summarizer = StructuralRecurrenceSummarizer(
+        _FakeTracer("unused", _const(0), program=program),
+        debug=False,
+    )
+
+    zero_vn = _FakeVarnode("zero", expr=_const(0))
+    one_vn = _FakeVarnode("one", expr=_const(1))
+    twenty_vn = _FakeVarnode("twenty", expr=_const(20))
+    param_2_vn = _FakeVarnode("param_2", expr=_param("param_2"))
+    address_seed_vn = _FakeVarnode(
+        "address_seed",
+        expr=Expression.binary_op("INT_ADD", _param("param_2"), _const(0x100100)),
+    )
+
+    iv_phi_vn = _FakeVarnode("iv_phi")
+    iv_next_vn = _FakeVarnode("iv_next")
+    _FakePcodeOp("INT_ADD", [iv_phi_vn, one_vn], iv_next_vn).setParent(body)
+    iv_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, iv_next_vn], iv_phi_vn)
+
+    bad_phi_vn = _FakeVarnode("bad_acc")
+    bad_next_vn = _FakeVarnode("bad_next")
+    _FakePcodeOp("INT_ADD", [bad_phi_vn, twenty_vn], bad_next_vn).setParent(body)
+    bad_phi_op = _FakePcodeOp("MULTIEQUAL", [address_seed_vn, bad_next_vn], bad_phi_vn)
+
+    good_phi_vn = _FakeVarnode("good_acc")
+    good_next_vn = _FakeVarnode("good_next")
+    _FakePcodeOp("INT_ADD", [good_phi_vn, twenty_vn], good_next_vn).setParent(body)
+    good_phi_op = _FakePcodeOp("MULTIEQUAL", [param_2_vn, good_next_vn], good_phi_vn)
+
+    induction = CountedLoopInduction(
+        phi_op=iv_phi_op,
+        phi_output=iv_phi_vn,
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-10000, size=4),
+        signed_guard=False,
+        init_index=0,
+        backedge_indices=(1,),
+    )
+
+    accumulators = summarizer._match_counted_loop_accumulators(
+        [iv_phi_op, bad_phi_op, good_phi_op],
+        induction,
+        body,
+        function_body_ranges=((0x100000, 0x101000),),
+    )
+
+    assert [accumulator.phi_output for accumulator in accumulators] == [good_phi_vn]
+
+
+def test_vectorized_affine_progression_literal_summary_builds_counted_loop_sum():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    zero_case = ReturnInfo(
+        address="00100104",
+        value=_const(0),
+        conditions=[
+            Condition(
+                Expression.binary_op("INT_SLESS", n_expr, _const(1)),
+                False,
+            )
+        ],
+        branch_index=0,
+    )
+    literal_case = ReturnInfo(
+        address="00100104",
+        value=positive_value,
+        conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+        branch_index=1,
+    )
+    literal_probe_case = ReturnInfo(
+        address="00100104",
+        value=Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+        conditions=[
+            Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False),
+            Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False),
+        ],
+        branch_index=2,
+    )
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "uint", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [zero_case, literal_case, literal_probe_case]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    summary = summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    returns, note = summary
+    assert note == "vectorized_affine_progression_sum_summary"
+    assert len(returns) == 2
+    assert returns[0].value.equals(_const(0))
+    loop_value = returns[1].value
+    assert getattr(loop_value, "opcode", None) == COUNTED_LOOP_SUM_OPCODE
+    runtime_ref = getattr(loop_value, "runtime_ref", None)
+    assert runtime_ref is not None
+    assert runtime_ref.residue_cases == ((1, 0, 5, 0),)
+    assert runtime_ref.residue_bias_terms
+
+
+def test_vectorized_affine_progression_literal_summary_builds_unsigned_counted_loop_sum():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="uint", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+        signed_count=False,
+    )
+    assert positive_value is not None
+    zero_case = ReturnInfo(
+        address="00100104",
+        value=_const(0),
+        conditions=[Condition(Expression.binary_op("INT_LESS", n_expr, _const(1)), False)],
+        branch_index=0,
+    )
+    positive_case = ReturnInfo(
+        address="00100104",
+        value=positive_value,
+        conditions=[Condition(Expression.binary_op("INT_LESS", _const(0), n_expr), False)],
+        branch_index=1,
+    )
+    literal_probe_case = ReturnInfo(
+        address="00100104",
+        value=Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+        conditions=[
+            Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False),
+            Condition(Expression.binary_op("INT_LESS", _const(0), n_expr), False),
+        ],
+        branch_index=2,
+    )
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "uint", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [zero_case, positive_case, literal_probe_case]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    summary = summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    returns, _note = summary
+    positive_guard = returns[1].conditions[0]
+    assert positive_guard.expression.operator == "INT_LESS"
+    runtime_ref = getattr(returns[1].value, "runtime_ref", None)
+    assert runtime_ref is not None
+    assert runtime_ref.signed_loop is False
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_signed_local_bias_candidate_mismatch():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    primary_unsigned_bias = Expression.parameter("param_2", index=1, data_type="uint16_t", size=2)
+    signed_local_bias = Expression.parameter("param_2", index=1, data_type="short", size=2)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=signed_local_bias,
+        result_size=4,
+    )
+    assert positive_value is not None
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "uint16_t", "data_type_obj": int_type, "size": 2},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_SLESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=1,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+            conditions=[
+                Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False),
+                Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False),
+            ],
+            branch_index=2,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+    assert not primary_unsigned_bias.equals(signed_local_bias) or (
+        primary_unsigned_bias.data_type != signed_local_bias.data_type
+    )
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_unproved_positive_return():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "uint", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_LESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=Expression.binary_op(
+                "INT_ADD",
+                Expression.parameter("param_2", index=1, data_type="int", size=4),
+                Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+            ),
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=1,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_unknown_positive_overlap():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    opaque_guard = Expression.binary_op(
+        "INT_SLESS",
+        Expression.constant(0, size=4),
+        Expression.variable("opaque_positive_guard", size=4),
+    )
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_LESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=1,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=_const(123),
+            conditions=[Condition(opaque_guard, False)],
+            branch_index=2,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+            conditions=[
+                Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False),
+                Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False),
+            ],
+            branch_index=3,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_incomplete_zero_base_cover():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=_const(7),
+            conditions=[Condition(Expression.binary_op("INT_SLESS", n_expr, _const(0)), False)],
+            branch_index=1,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=2,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_nonzero_base_overlap():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_SLESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=_const(7),
+            conditions=[Condition(Expression.binary_op("INT_SLESS", n_expr, _const(0)), False)],
+            branch_index=1,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=2,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_memory_effects():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    summarizer = StructuralRecurrenceSummarizer(
+        _FakeTracer("f", _const(0), program=program),
+        debug=False,
+    )
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_LESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=1,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("param_1", index=0),
+                    offset=0,
+                    size=4,
+                ),
+                value=_const(1),
+                conditions=[],
+                order_key=0,
+            )
+        ],
+    )
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_high_function_effects():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    summarizer = StructuralRecurrenceSummarizer(
+        _FakeTracer("f", _const(0), program=program),
+        debug=False,
+    )
+    n_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    bias_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_value = summarizer._build_affine_progression_sum_closed_expression(
+        count_expr=n_expr,
+        step=5,
+        bias_expr=bias_expr,
+        result_size=4,
+    )
+    assert positive_value is not None
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=_const(0),
+            conditions=[Condition(Expression.binary_op("INT_LESS", n_expr, _const(1)), False)],
+            branch_index=0,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=positive_value,
+            conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False)],
+            branch_index=1,
+        ),
+        ReturnInfo(
+            address="00100104",
+            value=Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+            conditions=[
+                Condition(Expression.binary_op("INT_EQUAL", n_expr, _const(0)), False),
+                Condition(Expression.binary_op("INT_SLESS", _const(0), n_expr), False),
+            ],
+            branch_index=2,
+        ),
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+    store_op = _FakePcodeOp(
+        "STORE",
+        [
+            _FakeStoreSpaceVarnode(target_space_id=1),
+            _FakeVarnode("store_addr", expr=n_expr),
+            _FakeVarnode("store_value", expr=_const(1)),
+        ],
+    )
+    call_op = _FakePcodeOp("CALL", [_FakeVarnode("call_target")])
+    branchind_op = _FakePcodeOp("BRANCHIND", [_FakeVarnode("branch_target")])
+
+    for op in (store_op, call_op, branchind_op):
+        assert summarizer._try_summarize_vectorized_affine_progression_sum(
+            _FakeFunction("f"),
+            _FakeCfgHighFunction([_FakeCfgBlock(1, [op])]),
+            analysis,
+        ) is None
+
+
+def test_vectorized_affine_progression_literal_summary_rejects_missing_zero_base_case():
+    ram_space = _FakeAddressSpace("ram", space_id=1, is_memory=True)
+    literal_base = 0x100120
+    literal_bytes = bytes(
+        byte
+        for value in (0, 5, 10, 15)
+        for byte in int(value).to_bytes(4, "little", signed=True)
+    )
+    program = _FakeProgram(
+        _FakeAddressFactory({1: ram_space}, default_space=ram_space),
+        memory=_FakeMemory(
+            [_FakeMemoryBlock(literal_base, literal_base + len(literal_bytes) - 1, execute=False)],
+            bytes_by_address={
+                literal_base + offset: byte
+                for offset, byte in enumerate(literal_bytes)
+            },
+        ),
+    )
+    tracer = _FakeTracer("f", _const(0), program=program)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    analysis = type("FakeAnalysis", (), {})()
+    int_type = _FakeIntDataType()
+    analysis.parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "data_type_obj": int_type, "size": 4},
+        {"name": "param_2", "index": 1, "data_type": "int", "data_type_obj": int_type, "size": 4},
+    ]
+    analysis.returns = [
+        ReturnInfo(
+            address="00100104",
+            value=Expression.binary_op(
+                "INT_ADD",
+                Expression.parameter("param_2", index=1, data_type="int", size=4),
+                Expression.binary_op("SUBPIECE", Expression.constant(literal_base, size=8), _const(0)),
+            ),
+            conditions=[],
+            branch_index=0,
+        )
+    ]
+    analysis.incomplete_control_flow = False
+    analysis.effect_summary = None
+
+    assert summarizer._try_summarize_vectorized_affine_progression_sum(
+        _FakeFunction("f"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    ) is None
 
 
 def test_counted_scalar_loop_summary_keeps_function_memory_writes_as_context():

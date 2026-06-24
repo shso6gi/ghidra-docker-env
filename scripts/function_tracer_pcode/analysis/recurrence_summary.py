@@ -234,6 +234,10 @@ class StructuralRecurrenceSummarizer:
         if summary is not None:
             return summary
 
+        summary = self._try_summarize_vectorized_affine_progression_sum(function, high_function, analysis)
+        if summary is not None:
+            return summary
+
         summary = self._try_summarize_state_transition_loop(function, high_function, analysis)
         if summary is not None:
             return summary
@@ -396,6 +400,794 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined counted scalar loop summary: control flow is incomplete")
             return False
         return True
+
+    def _try_summarize_vectorized_affine_progression_sum(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        if function is None or high_function is None or analysis is None:
+            return None
+        if not self._analysis_is_safe_for_counted_scalar_summary(analysis):
+            self._debug("Declined vectorized affine progression summary: unsafe counted scalar profile")
+            return None
+        if getattr(getattr(analysis, "effect_summary", None), "effects", None):
+            self._debug("Declined vectorized affine progression summary: function has memory side effects")
+            return None
+        side_effect_profile = self._build_loop_side_effect_profile(
+            analysis=analysis,
+            high_function=high_function,
+        )
+        requires_effect_proof = getattr(side_effect_profile, "requires_effect_proof", None)
+        if callable(requires_effect_proof) and requires_effect_proof():
+            self._debug("Declined vectorized affine progression summary: high-function effects require proof")
+            return None
+        parameters = list(getattr(analysis, "parameters", None) or [])
+        if len(parameters) != 2:
+            self._debug(
+                "Declined vectorized affine progression summary: expected two parameters "
+                f"(found {len(parameters)})"
+            )
+            return None
+        if not all(is_integral_data_type(param.get("data_type_obj"), param.get("data_type")) for param in parameters):
+            self._debug("Declined vectorized affine progression summary: non-integral parameter")
+            return None
+        if any(int(param.get("size", 0) or 0) > 4 for param in parameters):
+            self._debug("Declined vectorized affine progression summary: parameter wider than 32 bits")
+            return None
+
+        step = self._readonly_affine_progression_literal_step(analysis)
+        if step is None or step <= 0:
+            self._debug("Declined vectorized affine progression summary: no readonly affine literal")
+            return None
+
+        count_expr = self._parameter_expression(parameters[0])
+        bias_expr = self._parameter_expression(parameters[1])
+        signed_counter_guard = self._vectorized_affine_counter_guard_signedness(analysis, parameters[0])
+        if signed_counter_guard is None:
+            self._debug("Declined vectorized affine progression summary: counter guard signedness is ambiguous")
+            return None
+        result_size = max(
+            1,
+            int(getattr(count_expr, "size", 0) or 0),
+            int(getattr(bias_expr, "size", 0) or 0),
+            4,
+        )
+        zero = Expression.constant(0, size=result_size)
+        positive_operator = "INT_SLESS" if signed_counter_guard else "INT_LESS"
+        positive_guard = Condition(
+            Expression.binary_op(
+                positive_operator,
+                zero,
+                self._coerce_summary_expression_to_size(count_expr, result_size, signed=signed_counter_guard),
+            ),
+            False,
+        )
+        base_guard = self._zero_base_guard_cover_for_positive_counter_guard(
+            analysis,
+            parameters[0],
+            positive_guard,
+        )
+        if base_guard is None:
+            self._debug("Declined vectorized affine progression summary: missing proven zero base coverage")
+            return None
+        if not self._nonzero_returns_are_disjoint_from_base_guard(analysis, base_guard):
+            self._debug("Declined vectorized affine progression summary: nonzero return overlaps zero base guard")
+            return None
+        summary_bias_expr = self._coerce_summary_expression_to_size(
+            bias_expr,
+            result_size,
+            signed=self._expression_prefers_signed_extension(bias_expr),
+        )
+        loop_value = self._build_counted_loop_summary_value(
+            base_expr=zero,
+            start_expr=zero,
+            limit_expr=self._coerce_summary_expression_to_size(count_expr, result_size, signed=signed_counter_guard),
+            induction_step=1,
+            residue_cases=(
+                ResidueLoopCase(
+                    modulus=1,
+                    residue=0,
+                    affine=(int(step), 0),
+                    bias_expr=summary_bias_expr,
+                ),
+            ),
+            result_size=result_size,
+            signed_loop=signed_counter_guard,
+            guard_constraints=(positive_guard,),
+        )
+        if loop_value is None:
+            self._debug("Declined vectorized affine progression summary: failed to build counted-loop value")
+            return None
+        if not self._positive_returns_match_vectorized_affine_summary(
+            analysis,
+            parameters[0],
+            step=int(step),
+            bias_expr=summary_bias_expr,
+            result_size=result_size,
+            signed_counter_guard=signed_counter_guard,
+        ):
+            self._debug("Declined vectorized affine progression summary: positive return proof failed")
+            return None
+
+        anchor = next(iter((getattr(analysis, "returns", None) or [])), None)
+        address = getattr(anchor, "address", getattr(function, "getEntryPoint", lambda: "0x0")())
+        pcode_identity = getattr(anchor, "pcode_identity", None)
+        pcode_order = getattr(anchor, "pcode_order", None)
+        pcode_time = getattr(anchor, "pcode_time", None)
+        pcode_op_ref = getattr(anchor, "pcode_op_ref", None)
+        return [
+            ReturnInfo(
+                address=address,
+                value=zero,
+                conditions=[base_guard],
+                branch_index=0,
+                pcode_identity=pcode_identity,
+                pcode_order=pcode_order,
+                pcode_time=pcode_time,
+                pcode_op_ref=pcode_op_ref,
+            ),
+            ReturnInfo(
+                address=address,
+                value=loop_value,
+                conditions=[positive_guard],
+                branch_index=1,
+                pcode_identity=pcode_identity,
+                pcode_order=pcode_order,
+                pcode_time=pcode_time,
+                pcode_op_ref=pcode_op_ref,
+            ),
+        ], "vectorized_affine_progression_sum_summary"
+
+    def _positive_returns_match_vectorized_affine_summary(
+        self,
+        analysis,
+        counter_param: dict,
+        *,
+        step: int,
+        bias_expr: Expression,
+        result_size: int,
+        signed_counter_guard: bool,
+    ) -> bool:
+        count_expr = self._parameter_expression(counter_param)
+        default_summary_closed = self._build_affine_progression_sum_closed_expression(
+            count_expr=count_expr,
+            step=int(step),
+            bias_expr=bias_expr,
+            result_size=result_size,
+            signed_count=signed_counter_guard,
+        )
+        if default_summary_closed is None:
+            return False
+        positive_case_count = 0
+        for ret in getattr(analysis, "returns", None) or ():
+            value = getattr(ret, "value", None)
+            if value is None:
+                return False
+            conditions = list(getattr(ret, "conditions", None) or [])
+            positive_counter_cases = self._positive_counter_conditions_for_return(
+                conditions,
+                counter_param,
+                signed_counter_guard=signed_counter_guard,
+            )
+            if positive_counter_cases is None:
+                self._debug(
+                    "Declined vectorized affine progression summary: positive return overlap proof unknown "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={[condition.to_string() for condition in conditions]})"
+                )
+                return False
+            if len(positive_counter_cases) == 0:
+                continue
+            positive_case_count += 1
+            if not any(
+                self._return_value_matches_affine_progression_summary(
+                    value=value,
+                    conditions=list(conditions),
+                    positive_condition=positive_condition,
+                    counter_expr=counter_expr,
+                    bias_expr=bias_expr,
+                    step=int(step),
+                    result_size=result_size,
+                    signed_counter_guard=signed_counter_guard,
+                )
+                for positive_condition, counter_expr in positive_counter_cases
+            ):
+                self._debug(
+                    "Declined vectorized affine progression summary: positive return fragment mismatch "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={[condition.to_string() for condition in conditions]}, "
+                    f"value={value.to_string()[:240]})"
+                )
+                return False
+        return positive_case_count > 0
+
+    def _return_value_matches_affine_progression_summary(
+        self,
+        *,
+        value: Expression,
+        conditions: Sequence[Condition],
+        positive_condition: Condition,
+        counter_expr: Expression,
+        bias_expr: Expression,
+        step: int,
+        result_size: int,
+        signed_counter_guard: bool,
+    ) -> bool:
+        proof_conditions = list(conditions) + [positive_condition]
+        direct_count = (
+            self._implied_counter_constant_expression(conditions, counter_expr)
+            or counter_expr
+        )
+        direct_summary = self._build_affine_progression_sum_closed_expression(
+            count_expr=direct_count,
+            step=int(step),
+            bias_expr=bias_expr,
+            result_size=result_size,
+            signed_count=signed_counter_guard,
+        )
+        if direct_summary is not None and self._prove_return_value_equals_summary_closed_form(
+            value,
+            direct_summary,
+            proof_conditions,
+            result_size=result_size,
+        ):
+            return True
+
+        finite_counts = self._complete_counter_constant_cover(
+            proof_conditions,
+            counter_expr,
+        )
+        if finite_counts is None:
+            return False
+        for count_value in finite_counts:
+            count_const = Expression.constant(count_value, size=max(1, int(getattr(counter_expr, "size", 0) or 4)))
+            exact_count = Condition(
+                Expression.binary_op("INT_EQUAL", counter_expr, count_const),
+                False,
+            )
+            summary = self._build_affine_progression_sum_closed_expression(
+                count_expr=count_const,
+                step=int(step),
+                bias_expr=bias_expr,
+                result_size=result_size,
+                signed_count=signed_counter_guard,
+            )
+            if summary is None:
+                return False
+            if not self._prove_return_value_equals_summary_closed_form(
+                value,
+                summary,
+                proof_conditions + [exact_count],
+                result_size=result_size,
+            ):
+                return False
+        return True
+
+    def _complete_counter_constant_cover(
+        self,
+        conditions: Sequence[Condition],
+        counter_expr: Expression,
+        *,
+        search_limit: int = 64,
+    ) -> Optional[Tuple[int, ...]]:
+        size = max(1, int(getattr(counter_expr, "size", 0) or 4))
+        possible_values: List[int] = []
+        for value in range(0, int(search_limit) + 1):
+            equality = Condition(
+                Expression.binary_op(
+                    "INT_EQUAL",
+                    counter_expr,
+                    Expression.constant(value, size=size),
+                ),
+                False,
+            )
+            try:
+                is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [equality])
+            except Exception:
+                return None
+            if is_unsat is False:
+                possible_values.append(value)
+            elif is_unsat is not True:
+                return None
+        if not possible_values:
+            return None
+        disjunction = None
+        for value in possible_values:
+            equality_expr = Expression.binary_op(
+                "INT_EQUAL",
+                counter_expr,
+                Expression.constant(value, size=size),
+            )
+            equality_expr.size = 1
+            if disjunction is None:
+                disjunction = equality_expr
+            else:
+                disjunction = Expression.binary_op("BOOL_OR", disjunction, equality_expr)
+                disjunction.size = 1
+        outside_cover = Condition(disjunction, True)
+        try:
+            cover_complete = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [outside_cover])
+        except Exception:
+            return None
+        if cover_complete is not True:
+            return None
+        return tuple(possible_values)
+
+    def _implied_counter_constant_expression(
+        self,
+        conditions: Sequence[Condition],
+        counter_expr: Expression,
+        *,
+        search_limit: int = 64,
+    ) -> Optional[Expression]:
+        if not conditions:
+            return None
+        size = max(1, int(getattr(counter_expr, "size", 0) or 4))
+        for value in range(0, int(search_limit) + 1):
+            diseq = Condition(
+                Expression.binary_op(
+                    "INT_NOTEQUAL",
+                    counter_expr,
+                    Expression.constant(value, size=size),
+                ),
+                False,
+            )
+            proof_conditions = list(conditions) + [diseq]
+            try:
+                if ConditionSMTOracle.conjunction_is_unsat(proof_conditions) is True:
+                    return Expression.constant(value, size=size)
+            except Exception:
+                pass
+            try:
+                usable, script = ConditionSMTOracle._build_script(proof_conditions)
+            except Exception:
+                continue
+            if not usable or not script:
+                continue
+            try:
+                result = Z3Solver(timeout=2, debug=False).check_equivalence_direct(script)
+            except Exception:
+                continue
+            if result.status == SolverStatus.UNSAT:
+                return Expression.constant(value, size=size)
+        return None
+
+    def _build_affine_progression_sum_closed_expression(
+        self,
+        *,
+        count_expr: Expression,
+        step: int,
+        bias_expr: Expression,
+        result_size: int,
+        signed_count: bool = True,
+    ) -> Optional[Expression]:
+        target_size = max(1, int(result_size or 0))
+        count = self._coerce_summary_expression_to_size(count_expr, target_size, signed=bool(signed_count))
+        bias = self._coerce_summary_expression_to_size(bias_expr, target_size, signed=True)
+        wide_size = max(8, target_size * 2)
+        wide_count = Expression.unary_op("INT_ZEXT", count)
+        wide_count.size = wide_size
+        count_minus_one = Expression.binary_op(
+            "INT_SUB",
+            count,
+            Expression.constant(1, size=target_size),
+        )
+        count_minus_one.size = target_size
+        wide_count_minus_one = Expression.unary_op("INT_ZEXT", count_minus_one)
+        wide_count_minus_one.size = wide_size
+        product = Expression.binary_op("INT_MULT", wide_count, wide_count_minus_one)
+        product.size = wide_size
+        half = Expression.binary_op("INT_RIGHT", product, Expression.constant(1, size=wide_size))
+        half.size = wide_size
+        triangular = Expression.binary_op("SUBPIECE", half, Expression.constant(0, size=4))
+        triangular.size = target_size
+        step_term = triangular
+        if int(step) != 1:
+            step_term = Expression.binary_op(
+                "INT_MULT",
+                triangular,
+                Expression.constant(int(step), size=target_size),
+            )
+            step_term.size = target_size
+        bias_term = Expression.binary_op("INT_MULT", count, bias)
+        bias_term.size = target_size
+        total = Expression.binary_op("INT_ADD", step_term, bias_term)
+        total.size = target_size
+        return total
+
+    def _positive_counter_conditions_for_return(
+        self,
+        conditions: Sequence[Condition],
+        counter_param: dict,
+        *,
+        signed_counter_guard: bool = True,
+    ) -> Optional[Tuple[Tuple[Condition, Expression], ...]]:
+        positives: List[Tuple[Condition, Expression]] = []
+        candidates = self._counter_guard_parameter_candidates(counter_param, conditions)
+        if not candidates:
+            return None
+        operator = "INT_SLESS" if bool(signed_counter_guard) else "INT_LESS"
+        for counter_expr in candidates:
+            positive = Condition(
+                Expression.binary_op(
+                    operator,
+                    Expression.constant(0, size=counter_expr.size or 4),
+                    counter_expr,
+                ),
+                False,
+            )
+            try:
+                is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [positive])
+            except Exception:
+                return None
+            if is_unsat is False:
+                positives.append((positive, counter_expr))
+            elif is_unsat is not True:
+                return None
+        return tuple(positives)
+
+    def _prove_return_value_equals_summary_closed_form(
+        self,
+        value: Expression,
+        summary_closed: Expression,
+        conditions: Sequence[Condition],
+        *,
+        result_size: int,
+    ) -> bool:
+        reduced_value = _reduce_expression_under_conditions(value, conditions)
+        if reduced_value is not None:
+            value = reduced_value
+        reduced_summary = _reduce_expression_under_conditions(summary_closed, conditions)
+        if reduced_summary is not None:
+            summary_closed = reduced_summary
+        actual = self._coerce_summary_expression_to_size(
+            value,
+            result_size,
+            signed=self._expression_prefers_signed_extension(value),
+        )
+        expected = self._coerce_summary_expression_to_size(
+            summary_closed,
+            result_size,
+            signed=False,
+        )
+        disequality = Condition(Expression.binary_op("INT_NOTEQUAL", actual, expected), False)
+        proof_conditions = list(conditions or []) + [disequality]
+        try:
+            if ConditionSMTOracle.conjunction_is_unsat(proof_conditions) is True:
+                return True
+        except Exception:
+            pass
+        try:
+            usable, script = ConditionSMTOracle._build_script(proof_conditions)
+        except Exception:
+            return False
+        if not usable or not script:
+            return False
+        try:
+            result = Z3Solver(timeout=2, debug=False).check_equivalence_direct(script)
+        except Exception:
+            return False
+        return result.status == SolverStatus.UNSAT
+
+    def _expression_prefers_signed_extension(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        data_type = str(getattr(expr, "data_type", "") or "").lower()
+        if "unsigned" in data_type or data_type.startswith("u"):
+            return False
+        if any(token in data_type for token in ("signed", "int", "long", "short", "char")):
+            return True
+        return False
+
+    def _coerce_summary_expression_to_size(
+        self,
+        expr: Expression,
+        target_size: int,
+        *,
+        signed: bool = False,
+    ) -> Expression:
+        target_size = max(1, int(target_size or 0))
+        expr_size = int(getattr(expr, "size", 0) or 0)
+        if expr_size <= 0:
+            expr_size = target_size
+        if expr_size == target_size:
+            return expr
+        if expr_size > target_size:
+            narrowed = Expression.binary_op("SUBPIECE", expr, Expression.constant(0, size=4))
+            narrowed.size = target_size
+            return narrowed
+        widened = Expression.unary_op("INT_SEXT" if signed else "INT_ZEXT", expr)
+        widened.size = target_size
+        return widened
+
+    def _readonly_affine_progression_literal_step(self, analysis) -> Optional[int]:
+        program = getattr(self.tracer, "program", None)
+        if program is None:
+            return None
+        constants: List[int] = []
+        for ret in getattr(analysis, "returns", None) or ():
+            constants.extend(self._expression_integer_constants(getattr(ret, "value", None)))
+        for value in constants:
+            for base in (int(value), int(value) & ~0xF):
+                lanes = self._read_readonly_int32_lanes(base, 4)
+                if lanes is None or len(lanes) < 4:
+                    continue
+                if lanes[0] != 0:
+                    continue
+                step = lanes[1] - lanes[0]
+                if step <= 0:
+                    continue
+                if all((lanes[index] - lanes[index - 1]) == step for index in range(1, len(lanes))):
+                    return int(step)
+        return None
+
+    def _expression_integer_constants(self, expr: Optional[Expression]) -> List[int]:
+        values: List[int] = []
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.CONSTANT:
+                continue
+            value = self._raw_constant_value(node)
+            if value is not None:
+                values.append(int(value))
+        return values
+
+    def _read_readonly_int32_lanes(self, address_value: int, lane_count: int) -> Optional[Tuple[int, ...]]:
+        if address_value < 0 or lane_count <= 0:
+            return None
+        program = getattr(self.tracer, "program", None)
+        if program is None:
+            return None
+        try:
+            memory = program.getMemory()
+            address_factory = program.getAddressFactory()
+            default_space = address_factory.getDefaultAddressSpace()
+            address = default_space.getAddress(int(address_value))
+        except Exception:
+            return None
+        if memory is None or address is None:
+            return None
+        try:
+            block = memory.getBlock(address)
+        except Exception:
+            block = None
+        if block is None:
+            return None
+        try:
+            if block.isExecute() or block.isWrite() or not block.isRead():
+                return None
+        except Exception:
+            return None
+        lanes: List[int] = []
+        try:
+            is_big_endian = bool(program.getLanguage().isBigEndian())
+        except Exception:
+            is_big_endian = False
+        try:
+            for lane in range(int(lane_count)):
+                raw_bytes = [
+                    int(memory.getByte(address.add(lane * 4 + offset))) & 0xFF
+                    for offset in range(4)
+                ]
+                ordered = raw_bytes if is_big_endian else list(reversed(raw_bytes))
+                value = 0
+                for byte_value in ordered:
+                    value = (value << 8) | byte_value
+                if value & 0x80000000:
+                    value -= 0x100000000
+                lanes.append(value)
+        except Exception:
+            return None
+        return tuple(lanes)
+
+    def _zero_base_guard_cover_for_positive_counter_guard(
+        self,
+        analysis,
+        counter_param: dict,
+        positive_guard: Condition,
+    ) -> Optional[Condition]:
+        zero_return_count = 0
+        zero_guard_clauses: List[Expression] = []
+        for ret in getattr(analysis, "returns", None) or ():
+            if self._raw_constant_value(getattr(ret, "value", None)) != 0:
+                continue
+            zero_return_count += 1
+            conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                list(getattr(ret, "conditions", None) or [])
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(conditions):
+                continue
+            clause = self._condition_clause_expression(conditions)
+            if clause is not None:
+                zero_guard_clauses.append(clause)
+        if not zero_guard_clauses:
+            self._debug(
+                "Declined vectorized affine progression summary: zero base guard check failed "
+                f"(zero_returns={zero_return_count}, zero_guard_clauses=0)"
+            )
+            return None
+        covered_expr = zero_guard_clauses[0]
+        for clause in zero_guard_clauses[1:]:
+            covered_expr = Expression.binary_op("BOOL_OR", covered_expr, clause)
+            covered_expr.size = 1
+        base_guard = Condition(covered_expr, False)
+        try:
+            uncovered_is_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                [positive_guard.negate(), base_guard.negate()]
+            )
+        except Exception:
+            uncovered_is_unsat = None
+        if uncovered_is_unsat is True:
+            return base_guard
+        self._debug(
+            "Declined vectorized affine progression summary: zero base guard check failed "
+            f"(zero_returns={zero_return_count}, zero_guard_clauses={len(zero_guard_clauses)})"
+        )
+        return None
+
+    def _nonzero_returns_are_disjoint_from_base_guard(self, analysis, base_guard: Condition) -> bool:
+        for ret in getattr(analysis, "returns", None) or ():
+            if self._raw_constant_value(getattr(ret, "value", None)) == 0:
+                continue
+            conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                list(getattr(ret, "conditions", None) or [])
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(conditions):
+                continue
+            try:
+                is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [base_guard])
+            except Exception:
+                is_unsat = None
+            if is_unsat is not True:
+                self._debug(
+                    "Declined vectorized affine progression summary: nonzero return/base overlap proof failed "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={[condition.to_string() for condition in conditions]})"
+                )
+                return False
+        return True
+
+    def _vectorized_affine_counter_guard_signedness(self, analysis, counter_param: dict) -> Optional[bool]:
+        signedness_values: set[bool] = set()
+        for ret in getattr(analysis, "returns", None) or ():
+            conditions = list(getattr(ret, "conditions", None) or [])
+            candidates = self._counter_guard_parameter_candidates(counter_param, conditions)
+            for condition in conditions:
+                value = self._counter_guard_signedness_from_condition(condition, candidates)
+                if value is not None:
+                    signedness_values.add(value)
+        if len(signedness_values) == 1:
+            return next(iter(signedness_values))
+        return None
+
+    def _counter_guard_signedness_from_condition(
+        self,
+        condition: Condition,
+        counter_candidates: Sequence[Expression],
+    ) -> Optional[bool]:
+        expr = getattr(condition, "expression", None)
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        operator = getattr(expr, "operator", None)
+        if operator not in {"INT_LESS", "INT_SLESS"}:
+            return None
+        operands = list(getattr(expr, "operands", None) or [])
+        if len(operands) != 2:
+            return None
+        left, right = operands
+        mentions_counter = any(
+            self._same_counter_expression(left, candidate)
+            or self._same_counter_expression(right, candidate)
+            for candidate in counter_candidates or ()
+        )
+        if not mentions_counter:
+            return None
+        left_const = self._raw_constant_value(left)
+        right_const = self._raw_constant_value(right)
+        if left_const not in {0, 1} and right_const not in {0, 1}:
+            return None
+        return operator == "INT_SLESS"
+
+    def _same_counter_expression(self, expr: Optional[Expression], counter_expr: Optional[Expression]) -> bool:
+        if expr is None or counter_expr is None:
+            return False
+        try:
+            if expr.equals(counter_expr):
+                return True
+        except Exception:
+            pass
+        if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        if getattr(counter_expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        try:
+            expr_index = int(getattr(expr, "value", -1))
+            counter_index = int(getattr(counter_expr, "value", -1))
+        except (TypeError, ValueError):
+            expr_index = counter_index = -1
+        if expr_index >= 0 and counter_index >= 0 and expr_index == counter_index:
+            return True
+        expr_name = getattr(expr, "name", None)
+        counter_name = getattr(counter_expr, "name", None)
+        if expr_name is not None and counter_name is not None and expr_name == counter_name:
+            return True
+        expr_storage = getattr(expr, "storage_info", None)
+        counter_storage = getattr(counter_expr, "storage_info", None)
+        return expr_storage is not None and counter_storage is not None and expr_storage == counter_storage
+
+    def _condition_clause_expression(self, conditions: Sequence[Condition]) -> Optional[Expression]:
+        if not conditions:
+            return Expression.constant(1, size=1)
+        combined = Condition.combine_and(list(conditions))
+        if combined is None:
+            return Expression.constant(1, size=1)
+        if bool(getattr(combined, "negated", False)):
+            expr = Expression.unary_op("BOOL_NEGATE", combined.expression)
+            expr.size = 1
+            return expr
+        return combined.expression
+
+    def _counter_guard_parameter_candidates(
+        self,
+        counter_param: dict,
+        conditions: Sequence[Condition],
+    ) -> Tuple[Expression, ...]:
+        primary = self._parameter_expression(counter_param)
+        return self._parameter_expression_candidates(
+            counter_param,
+            [getattr(condition, "expression", None) for condition in conditions or ()],
+            include_primary=True,
+            primary=primary,
+        )
+
+    def _parameter_expression_candidates(
+        self,
+        parameter: dict,
+        expressions: Sequence[Optional[Expression]],
+        *,
+        include_primary: bool = True,
+        primary: Optional[Expression] = None,
+    ) -> Tuple[Expression, ...]:
+        primary = primary or self._parameter_expression(parameter)
+        candidates: List[Expression] = []
+
+        def add(expr: Expression) -> None:
+            if expr is None:
+                return
+            if any(
+                existing.equals(expr)
+                and getattr(existing, "data_type", None) == getattr(expr, "data_type", None)
+                and getattr(existing, "data_type_obj", None) is getattr(expr, "data_type_obj", None)
+                for existing in candidates
+            ):
+                return
+            candidates.append(expr)
+
+        expected_name = parameter.get("name")
+        try:
+            expected_index = int(parameter.get("index")) if parameter.get("index") is not None else -1
+        except (TypeError, ValueError):
+            expected_index = -1
+        expected_size = int(parameter.get("size") or getattr(primary, "size", 0) or 0)
+        expected_storage = getattr(primary, "storage_info", None)
+        for expr in expressions or ():
+            for node in self._iter_expression_nodes(expr):
+                if getattr(node, "expr_type", None) != ExpressionType.PARAMETER:
+                    continue
+                same_index = expected_index >= 0 and int(getattr(node, "value", -1) or -1) == expected_index
+                same_name = expected_name is not None and getattr(node, "name", None) == expected_name
+                same_storage = (
+                    expected_storage is not None
+                    and getattr(node, "storage_info", None) is not None
+                    and getattr(node, "storage_info", None) == expected_storage
+                )
+                same_size = expected_size <= 0 or int(getattr(node, "size", 0) or 0) == expected_size
+                if same_size and (same_index or same_name or same_storage):
+                    add(node)
+        if include_primary:
+            add(primary)
+        return tuple(candidates)
 
     def _loop_effect_profile_name(
         self,
@@ -868,6 +1660,16 @@ class StructuralRecurrenceSummarizer:
             accumulator.init_expr,
             continue_conditions,
         )
+        function_body_ranges = self._function_body_address_ranges(high_function, analysis, function=function)
+        if self._expression_contains_executable_address_constant(
+            base_return_expr,
+            function_body_ranges=function_body_ranges,
+        ) or self._expression_contains_executable_address_constant(
+            loop_base_expr,
+            function_body_ranges=function_body_ranges,
+        ):
+            self._debug("Declined counted scalar loop summary: base expression contains function-address constant")
+            return None
         loop_value = self._build_counted_loop_summary_value(
             base_expr=loop_base_expr,
             start_expr=start_expr,
@@ -1943,6 +2745,7 @@ class StructuralRecurrenceSummarizer:
             return None
         best_model = None
         best_score = None
+        function_body_ranges = self._function_body_address_ranges(high_function, analysis)
 
         for header in blocks:
             cbranch = self._find_cbranch_op(header)
@@ -1974,6 +2777,7 @@ class StructuralRecurrenceSummarizer:
                         phi_ops,
                         induction,
                         guard.body_block,
+                        function_body_ranges=function_body_ranges,
                     ):
                         cases = self._extract_counted_loop_update_cases(
                             accumulator,
@@ -2490,6 +3294,8 @@ class StructuralRecurrenceSummarizer:
         phi_ops: Sequence,
         induction: CountedLoopInduction,
         body_block,
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
     ) -> List[CountedLoopAccumulator]:
         induction_input_count = int(getattr(induction.phi_op, "getNumInputs", lambda: 0)() or 0)
         induction_init_index = self._induction_init_index(induction)
@@ -2512,6 +3318,14 @@ class StructuralRecurrenceSummarizer:
             except RecursionError:
                 continue
             if init_expr is None or self._expression_is_unresolved(init_expr):
+                continue
+            if self._expression_contains_executable_address_constant(
+                init_expr,
+                function_body_ranges=function_body_ranges,
+            ):
+                self._debug(
+                    "Declined counted scalar loop accumulator: init expression contains executable address constant"
+                )
                 continue
             placeholder = self._loop_variable_expression(
                 None,
@@ -2618,6 +3432,158 @@ class StructuralRecurrenceSummarizer:
             output_size,
             init_const,
         )
+
+    def _expression_contains_executable_address_constant(
+        self,
+        expr: Optional[Expression],
+        *,
+        function_body_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> bool:
+        program = getattr(self.tracer, "program", None)
+        if program is None and not function_body_ranges:
+            return False
+        if expr is None:
+            return False
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.CONSTANT:
+                continue
+            value = self._raw_constant_value(node)
+            if value is None:
+                continue
+            if self._constant_resolves_to_function_body_address(value, function_body_ranges):
+                return True
+            if self._constant_resolves_to_executable_address(value):
+                return True
+        return False
+
+    def _constant_resolves_to_function_body_address(
+        self,
+        value: int,
+        function_body_ranges: Sequence[Tuple[int, int]],
+    ) -> bool:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False
+        for start, end in function_body_ranges or ():
+            try:
+                start_int = int(start)
+                end_int = int(end)
+            except (TypeError, ValueError):
+                continue
+            if start_int <= value <= end_int:
+                return True
+        return False
+
+    def _constant_resolves_to_executable_address(self, value: int) -> bool:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False
+        if value < 0:
+            return False
+        program = getattr(self.tracer, "program", None)
+        if program is None:
+            return False
+        try:
+            memory = program.getMemory()
+        except Exception:
+            memory = None
+        if memory is None:
+            return False
+        address = None
+        try:
+            address_factory = program.getAddressFactory()
+            default_space = address_factory.getDefaultAddressSpace()
+            address = default_space.getAddress(value)
+        except Exception:
+            address = None
+        if address is None:
+            return False
+        try:
+            block = memory.getBlock(address)
+        except Exception:
+            block = None
+        if block is None:
+            return False
+        try:
+            return bool(block.isExecute())
+        except Exception:
+            return False
+
+    def _function_body_address_ranges(self, high_function, analysis, *, function=None) -> Tuple[Tuple[int, int], ...]:
+        ranges: List[Tuple[int, int]] = []
+
+        def add_range(start, end) -> None:
+            try:
+                start_int = int(start)
+                end_int = int(end)
+            except (TypeError, ValueError):
+                return
+            if start_int < 0 or end_int < 0:
+                return
+            if end_int < start_int:
+                start_int, end_int = end_int, start_int
+            ranges.append((start_int, end_int))
+
+        if function is None:
+            getter = getattr(high_function, "getFunction", None)
+        else:
+            getter = None
+        if function is None and callable(getter):
+            try:
+                function = getter()
+            except Exception:
+                function = None
+        body = None
+        body_getter = getattr(function, "getBody", None)
+        if callable(body_getter):
+            try:
+                body = body_getter()
+            except Exception:
+                body = None
+        if body is not None:
+            try:
+                min_address = body.getMinAddress()
+                max_address = body.getMaxAddress()
+                add_range(min_address.getOffset(), max_address.getOffset())
+            except Exception:
+                pass
+
+        entry_value = None
+        entry_getter = getattr(function, "getEntryPoint", None)
+        if callable(entry_getter):
+            try:
+                entry_point = entry_getter()
+                entry_value = int(entry_point.getOffset())
+            except Exception:
+                entry_value = None
+        function_ref = getattr(analysis, "function_ref", None)
+        if entry_value is None and function_ref is not None:
+            entry_value = getattr(function_ref, "entry_offset", None)
+        if entry_value is None:
+            entry_point = getattr(analysis, "entry_point", None)
+            if entry_point is not None:
+                try:
+                    entry_value = int(str(entry_point), 16)
+                except (TypeError, ValueError):
+                    entry_value = None
+        if entry_value is not None:
+            max_seen = int(entry_value)
+            for ret in getattr(analysis, "returns", None) or ():
+                address = getattr(ret, "address", None)
+                if address is None:
+                    continue
+                try:
+                    max_seen = max(max_seen, int(str(address), 16))
+                except (TypeError, ValueError):
+                    continue
+            if max_seen > int(entry_value):
+                add_range(int(entry_value), max(max_seen + 0x100, int(entry_value) + 0x1000))
+            else:
+                add_range(int(entry_value), int(entry_value) + 0x1000)
+
+        return tuple(dict.fromkeys(ranges))
 
     def _counted_loop_accumulator_order_key(
         self,
@@ -3937,7 +4903,9 @@ class StructuralRecurrenceSummarizer:
         ):
             self._debug(
                 "Declined state-affine accumulator sum: state guard is not signed-positive "
-                f"({model.state_guard_expr.to_string()})"
+                f"({model.state_guard_expr.to_string()}); "
+                f"transition={model.state_transition_expr.to_string()}; "
+                f"delta={model.accumulator_delta_expr.to_string()}"
             )
             return None
         transition_affine = self._extract_affine_placeholder_term(
