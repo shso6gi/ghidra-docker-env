@@ -15,7 +15,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import Expression, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.model.runtime_refs import PcodeOpRef
 from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 import (
     DEFAULT_REPRESENTATIVES,
@@ -2897,6 +2897,124 @@ def test_return_coverage_object_key_specificity_requires_canonical_function_bina
     assert _object_target_key_is_specific(code_address_program_uid_key) is False
     assert _object_target_key_is_specific(good_key) is True
     assert _object_target_key_is_specific(code_address_binary_key) is True
+
+
+def test_return_coverage_object_key_specificity_rejects_forbidden_identity_atoms():
+    good_key = _reason_from_ref("function2:return_coverage_gap").object_target_key
+    opaque_key = (
+        good_key[0],
+        good_key[1],
+        good_key[2],
+        good_key[3],
+        good_key[4],
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    ("opaque", "some.module", "AddressLike"),
+                    *good_key[5][1][0][3:],
+                ),
+            ),
+        ),
+        good_key[6],
+    )
+    object_id_key = (
+        good_key[0],
+        good_key[1],
+        good_key[2],
+        good_key[3],
+        good_key[4],
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    ("object_id", 12345),
+                    *good_key[5][1][0][3:],
+                ),
+            ),
+        ),
+        good_key[6],
+    )
+    program_uid_key = (
+        good_key[0],
+        good_key[1],
+        good_key[2],
+        good_key[3],
+        good_key[4],
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    ("program_uid", 12345),
+                    *good_key[5][1][0][3:],
+                ),
+            ),
+        ),
+        good_key[6],
+    )
+
+    assert _object_target_key_is_specific(opaque_key) is False
+    assert _object_target_key_is_specific(object_id_key) is False
+    assert _object_target_key_is_specific(program_uid_key) is False
+
+
+def test_return_coverage_v3_object_key_specificity_rejects_opaque_identity():
+    strategy = _NoopStrategy(None, None)
+    ret = ReturnInfo(
+        address=object(),
+        value=Expression.constant(0, 4),
+        conditions=[],
+        pcode_op_ref=PcodeOpRef(
+            address_offset=0x401000,
+            seq_time=23,
+            seq_order=1,
+            block_index=4,
+            mnemonic="RETURN",
+            binary_id="B11",
+            function_entry_space="ram",
+            function_entry_offset=0x400000,
+            target_space="ram",
+            target_offset=0x401000,
+            opcode=62,
+            local_op_ordinal=3,
+        ),
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x400000",
+        parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[ret],
+        return_type="int",
+        binary_id="B11",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x500000",
+        parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[
+            ReturnInfo(
+                address="ram:00500000",
+                value=Expression.constant(0, 4),
+                conditions=[],
+            )
+        ],
+        return_type="int",
+        binary_id="B15",
+    )
+
+    target = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+    )
+
+    assert _object_target_key_is_specific(target) is False
 
 
 def test_return_coverage_object_key_specificity_rejects_address_only_or_legacy_return_case():

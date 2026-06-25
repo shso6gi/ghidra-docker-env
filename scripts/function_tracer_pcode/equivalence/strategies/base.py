@@ -57,10 +57,21 @@ class ReturnCoverageCheckResult:
     reason_id: Optional[UnknownReasonId] = None
     detail: Optional[str] = None
     can_record_completion_proof: bool = False
+    inconclusive_cause: Optional[str] = None
+    coverage_proof_method: Optional[str] = None
+    solver_status: Optional[str] = None
 
 
 class CheckStrategy(ABC):
     """等価性判定戦略の基底クラス"""
+
+    _RETURN_COVERAGE_TARGET_SCHEMA_VERSION = 3
+    _RETURN_COVERAGE_PROOF_SCHEMA_VERSION = 2
+    _RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION = 1
+    _RETURN_COVERAGE_DISCHARGEABLE_INCONCLUSIVE_CAUSES = {
+        "solver_timeout",
+        "smt_disambiguation_inconclusive",
+    }
 
     _CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS = {
         "unsupported_call_effect_summary",
@@ -269,12 +280,14 @@ class CheckStrategy(ABC):
                     and self.enable_completed_recovery_proofs
                     and analysis is not None
                     and coverage_result.can_record_completion_proof
+                    and coverage_result.inconclusive_cause in self._RETURN_COVERAGE_DISCHARGEABLE_INCONCLUSIVE_CAUSES
                     and self._return_coverage_proof_content_can_discharge_inconclusive(
                         self._return_coverage_inconclusive_proof_content(
                             base_ctx=base_ctx,
                             label=label,
                             cases=cases,
                             replace_fn=replace_fn,
+                            inconclusive_cause=coverage_result.inconclusive_cause,
                         )
                     )
                 ):
@@ -289,6 +302,7 @@ class CheckStrategy(ABC):
                             label=label,
                             cases=cases,
                             replace_fn=replace_fn,
+                            inconclusive_cause=coverage_result.inconclusive_cause,
                         ),
                     )
             elif (
@@ -301,29 +315,33 @@ class CheckStrategy(ABC):
                     analysis,
                     ignored_reason_ids=(coverage_result.reason_id,),
                 )
-                if blocker_reason is None and self.enable_completed_recovery_proofs:
-                    blocker_reason = UnknownReasonId.RETURN_COVERAGE_GAP
-                if blocker_reason is not None and self.enable_completed_recovery_proofs:
+                required_blocker_reason = blocker_reason
+                proof_record_reason = blocker_reason
+                if proof_record_reason is None and self.enable_completed_recovery_proofs:
+                    proof_record_reason = UnknownReasonId.RETURN_COVERAGE_GAP
+                if proof_record_reason is not None and self.enable_completed_recovery_proofs:
                     proof_content = self._return_coverage_covered_proof_content(
                         base_ctx=base_ctx,
                         label=label,
                         cases=cases,
                         replace_fn=replace_fn,
+                        coverage_proof_method=coverage_result.coverage_proof_method,
+                        solver_status=coverage_result.solver_status,
                     )
                     self._record_completed_return_coverage_proof(
                         label,
-                        blocker_reason,
+                        proof_record_reason,
                         analysis,
                         analysis1,
                         analysis2,
                         proof_content=proof_content,
                     )
-                    if blocker_reason in {
+                    if required_blocker_reason in {
                         UnknownReasonId.RETURN_COVERAGE_GAP,
                         UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                     }:
                         reason_record = self._make_blocking_unsafety_unknown_reason(
-                            f"{label}:{blocker_reason.value}",
+                            f"{label}:{required_blocker_reason.value}",
                             analysis1,
                             analysis2,
                             stage="S_RETURN_COVERAGE_CHECK",
@@ -333,7 +351,7 @@ class CheckStrategy(ABC):
                             analysis1,
                             analysis2,
                         ):
-                            reasons.append(f"{label}:{blocker_reason.value}")
+                            reasons.append(f"{label}:{required_blocker_reason.value}")
                 elif blocker_reason is not None:
                     reasons.append(f"{label}:{blocker_reason.value}")
                 if coverage_result.detail:
@@ -378,9 +396,13 @@ class CheckStrategy(ABC):
             if isinstance(item, Mapping)
         ]
         proof_content_map = dict(proof_content) if isinstance(proof_content, Mapping) else {}
+        proof_content_map["proof_target_identity"] = object_target_key
         prototype = {
             "status": "complete",
             "reason_id": reason_id.value,
+            "target_schema_version": self._RETURN_COVERAGE_TARGET_SCHEMA_VERSION,
+            "proof_schema_version": self._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
+            "object_target_key": object_target_key,
             "proof_content": proof_content_map,
         }
         if not self._return_coverage_proof_content_is_complete(
@@ -403,6 +425,8 @@ class CheckStrategy(ABC):
                 "status": "complete",
                 "reason_id": reason_id.value,
                 "recovery_proof_kind": proof_kind,
+                "target_schema_version": self._RETURN_COVERAGE_TARGET_SCHEMA_VERSION,
+                "proof_schema_version": self._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
                 "proof_stage": proof_stage,
                 "evidence_kind": evidence_kind,
                 "object_target_key": object_target_key,
@@ -444,6 +468,9 @@ class CheckStrategy(ABC):
         label: str,
         cases: Sequence[Any],
         replace_fn,
+        *,
+        coverage_proof_method: Optional[str] = None,
+        solver_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         disjuncts = self._return_case_smt_disjunctions(cases, replace_fn)
         query = self._build_return_case_coverage_query(
@@ -458,7 +485,16 @@ class CheckStrategy(ABC):
         normalized_query_status = (
             "complete" if normalized_query is not None else "missing"
         )
+        structural_evidence = self._return_coverage_structural_proof_content(
+            cases,
+            solver_status=solver_status,
+            coverage_proof_method=coverage_proof_method,
+        )
+        coverage_method = coverage_proof_method or "return_case_coverage_check"
         return {
+            "proof_schema_version": self._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
+            "normalization_schema_version": self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION,
+            **structural_evidence,
             "case_guard_disjunction": {
                 "status": "complete",
                 "query_cases": tuple(disjuncts or ()),
@@ -473,7 +509,7 @@ class CheckStrategy(ABC):
                 "status": normalized_query_status,
                 "guard_source": "return_partition_guard_set",
                 "coverage_status": "covered",
-                "coverage_proof_method": "return_case_coverage_check",
+                "coverage_proof_method": coverage_method,
                 "case_count": len(tuple(disjuncts or ())),
                 "normalized_guard_formula_sha256": (
                     hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
@@ -494,6 +530,7 @@ class CheckStrategy(ABC):
         label: str,
         cases: Sequence[Any],
         replace_fn,
+        inconclusive_cause: Optional[str] = None,
     ) -> Dict[str, Any]:
         disjuncts = self._return_case_smt_disjunctions(cases, replace_fn)
         query = self._build_return_case_coverage_query(
@@ -508,7 +545,15 @@ class CheckStrategy(ABC):
         normalized_query_status = (
             "complete" if normalized_query is not None else "missing"
         )
+        structural_evidence = self._return_coverage_structural_proof_content(
+            cases,
+            solver_status="unknown",
+        )
         return {
+            "proof_schema_version": self._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
+            "normalization_schema_version": self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION,
+            "inconclusive_cause": inconclusive_cause,
+            **structural_evidence,
             "case_guard_disjunction": {
                 "status": "complete",
                 "query_cases": tuple(disjuncts or ()),
@@ -535,6 +580,79 @@ class CheckStrategy(ABC):
             },
         }
 
+    def _return_coverage_structural_proof_content(
+        self,
+        cases: Sequence[Any],
+        *,
+        solver_status: Optional[str],
+        coverage_proof_method: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        case_entries: List[Tuple[Any, ...]] = []
+        miss_entries: List[Tuple[Any, ...]] = []
+        bit_widths: Set[int] = set()
+        signedness: Set[str] = set()
+        for case_index, case in enumerate(cases or ()):
+            return_info = getattr(case, "return_info", None)
+            structural_conditions = (
+                getattr(return_info, "conditions", None)
+                if return_info is not None
+                else getattr(case, "conditions", None)
+            ) or ()
+            structural_value = (
+                getattr(return_info, "value", None)
+                if return_info is not None
+                else getattr(case, "value_expr", None)
+            )
+            guard_keys = tuple(
+                self._return_condition_object_key(condition)
+                for condition in structural_conditions
+            )
+            value_key = self._expression_runtime_object_key(structural_value)
+            miss_expr = self._case_miss_expression(
+                list(structural_conditions)
+            )
+            miss_key = self._expression_runtime_object_key(miss_expr) if miss_expr is not None else None
+            case_entries.append(
+                (
+                    "return_case_guard_set",
+                    int(case_index),
+                    ("guard_structural_keys", guard_keys),
+                    ("return_value_structural_key", value_key),
+                )
+            )
+            miss_entries.append(
+                (
+                    "case_miss_formula",
+                    int(case_index),
+                    miss_key,
+                )
+            )
+            for condition in structural_conditions:
+                self._collect_condition_width_sign_metadata(condition, bit_widths, signedness)
+        case_entries = list(self._canonicalize_key_sequence(case_entries))
+        miss_entries = list(self._canonicalize_key_sequence(miss_entries))
+        return {
+            "structural_guard_keys": {
+                "status": "complete",
+                "case_count": len(case_entries),
+                "keys": tuple(case_entries),
+            },
+            "structural_miss_formula_keys": {
+                "status": "complete",
+                "case_count": len(miss_entries),
+                "keys": tuple(miss_entries),
+            },
+            "coverage_solver_evidence": {
+                "status": str(solver_status) if solver_status is not None else "not_applicable",
+                "proof_method": coverage_proof_method or "unknown",
+            },
+            "bit_width_signedness_metadata": {
+                "status": "complete",
+                "bit_widths": tuple(sorted(bit_widths)),
+                "signedness": tuple(sorted(signedness)),
+            },
+        }
+
     @staticmethod
     def _normalize_query(query: Optional[str]) -> Optional[str]:
         if not query or not isinstance(query, str):
@@ -542,6 +660,54 @@ class CheckStrategy(ABC):
         lines = [line.strip() for line in query.splitlines() if line.strip()]
         normalized = [line for line in lines if not line.startswith("; Return coverage")]
         return "\n".join(normalized)
+
+    @staticmethod
+    def _canonicalize_key_sequence(values: Sequence[Any]) -> Tuple[Any, ...]:
+        return tuple(sorted(tuple(values or ()), key=repr))
+
+    @classmethod
+    def _collect_condition_width_sign_metadata(
+        cls,
+        condition: Any,
+        bit_widths: Set[int],
+        signedness: Set[str],
+    ) -> None:
+        expr = getattr(condition, "expression", None)
+        for node in cls._iter_expression_nodes_for_metadata(expr):
+            try:
+                bit_width = int(expression_smt_bit_width(node) or 0)
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                bit_width = 0
+            if bit_width > 0:
+                bit_widths.add(bit_width)
+            operator = getattr(node, "operator", None)
+            if operator in {"INT_SLESS", "INT_SLESSEQUAL"}:
+                signedness.add("signed")
+            elif operator in {"INT_LESS", "INT_LESSEQUAL"}:
+                signedness.add("unsigned")
+            elif operator in {"INT_EQUAL", "INT_NOTEQUAL"}:
+                signedness.add("equality")
+
+    @classmethod
+    def _iter_expression_nodes_for_metadata(cls, expr: Any):
+        stack = [expr]
+        seen: Set[int] = set()
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            yield current
+            for operand in getattr(current, "operands", ()) or ():
+                stack.append(operand)
+            if getattr(current, "expr_type", None) == ExpressionType.PHI:
+                for cond, value in getattr(current, "value", ()) or ():
+                    if cond is not None:
+                        stack.append(getattr(cond, "expression", None))
+                    stack.append(value)
 
     def _record_completed_call_effect_summary_proof_if_safe(
         self,
@@ -4955,12 +5121,31 @@ class CheckStrategy(ABC):
         evidence: Mapping[str, Any],
         reason_id: Optional[UnknownReasonId] = None,
     ) -> bool:
+        if cls._evidence_get(evidence, "target_schema_version") != cls._RETURN_COVERAGE_TARGET_SCHEMA_VERSION:
+            return False
+        if cls._evidence_get(evidence, "proof_schema_version") != cls._RETURN_COVERAGE_PROOF_SCHEMA_VERSION:
+            return False
         if reason_id is not None:
             evidence_reason_id = cls._evidence_text(evidence, "reason_id")
             if evidence_reason_id != reason_id.value:
                 return False
         proof_content = cls._evidence_get(evidence, "proof_content")
         if not isinstance(proof_content, Mapping):
+            return False
+        evidence_target = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        proof_target = cls._normalize_nested_tuple(proof_content.get("proof_target_identity"))
+        if proof_target != evidence_target:
+            return False
+        if proof_content.get("proof_schema_version") != cls._RETURN_COVERAGE_PROOF_SCHEMA_VERSION:
+            return False
+        if proof_content.get("normalization_schema_version") != cls._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION:
+            return False
+        if not cls._return_coverage_structural_proof_content_is_complete(proof_content):
+            return False
+        if not cls._return_coverage_structural_proof_content_matches_target(
+            proof_content,
+            evidence_target,
+        ):
             return False
         case_guard_disjunction = proof_content.get("case_guard_disjunction")
         if not isinstance(case_guard_disjunction, Mapping):
@@ -4989,6 +5174,139 @@ class CheckStrategy(ABC):
                 if solver_status in {"unknown", "timeout", "error", "inconclusive"}:
                     return False
         return True
+
+    @classmethod
+    def _return_coverage_structural_proof_content_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+    ) -> bool:
+        guard_keys = proof_content.get("structural_guard_keys")
+        miss_keys = proof_content.get("structural_miss_formula_keys")
+        solver_evidence = proof_content.get("coverage_solver_evidence")
+        bit_width_metadata = proof_content.get("bit_width_signedness_metadata")
+        if not isinstance(guard_keys, Mapping) or cls._evidence_text(guard_keys, "status") != "complete":
+            return False
+        if not isinstance(miss_keys, Mapping) or cls._evidence_text(miss_keys, "status") != "complete":
+            return False
+        if not isinstance(solver_evidence, Mapping):
+            return False
+        solver_status = cls._evidence_text(solver_evidence, "status")
+        proof_method = cls._evidence_text(solver_evidence, "proof_method")
+        if solver_status != "unsat" and not (
+            solver_status == "not_applicable"
+            and proof_method in {"unconditional_return_case", "object_centric_total_coverage"}
+        ):
+            return False
+        if not isinstance(bit_width_metadata, Mapping):
+            return False
+        if cls._evidence_text(bit_width_metadata, "status") != "complete":
+            return False
+        guard_key_values = cls._normalize_nested_tuple(guard_keys.get("keys"))
+        miss_key_values = cls._normalize_nested_tuple(miss_keys.get("keys"))
+        if not isinstance(guard_key_values, tuple) or not guard_key_values:
+            return False
+        if not isinstance(miss_key_values, tuple) or not miss_key_values:
+            return False
+        if cls._evidence_has_any_recursive(
+            {
+                "structural_guard_keys": guard_key_values,
+                "structural_miss_formula_keys": miss_key_values,
+            },
+            cls._COMPLETED_PROOF_BLOCKER_FIELDS,
+        ):
+            return False
+        return True
+
+    @classmethod
+    def _return_coverage_structural_proof_content_matches_target(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Any,
+    ) -> bool:
+        if not cls._return_coverage_object_target_key_is_valid(object_target_key):
+            return False
+        target_partition_cases = cls._return_coverage_target_partition_cases(object_target_key)
+        if target_partition_cases is None:
+            return False
+        expected_guard_entries: List[Tuple[Any, ...]] = []
+        expected_miss_entries: List[Tuple[Any, ...]] = []
+        for case in target_partition_cases:
+            fields = {
+                field[0]: field[1]
+                for field in case[1:]
+                if isinstance(field, tuple) and len(field) == 2 and isinstance(field[0], str)
+            }
+            if "guards" not in fields or "return_value" not in fields or "case_miss_formula" not in fields:
+                return False
+            expected_guard_entries.append(
+                (
+                    "return_case_guard_set",
+                    ("guard_structural_keys", cls._normalize_nested_tuple(fields["guards"])),
+                    ("return_value_structural_key", cls._normalize_nested_tuple(fields["return_value"])),
+                )
+            )
+            expected_miss_entries.append(
+                (
+                    "case_miss_formula",
+                    cls._normalize_nested_tuple(fields["case_miss_formula"]),
+                )
+            )
+
+        guard_keys = proof_content.get("structural_guard_keys")
+        miss_keys = proof_content.get("structural_miss_formula_keys")
+        if not isinstance(guard_keys, Mapping) or not isinstance(miss_keys, Mapping):
+            return False
+        actual_guard_entries = []
+        for entry in cls._normalize_nested_tuple(guard_keys.get("keys")) or ():
+            if not isinstance(entry, tuple) or len(entry) < 4 or entry[0] != "return_case_guard_set":
+                return False
+            fields = {
+                field[0]: field[1]
+                for field in entry[2:]
+                if isinstance(field, tuple) and len(field) == 2 and isinstance(field[0], str)
+            }
+            if "guard_structural_keys" not in fields or "return_value_structural_key" not in fields:
+                return False
+            actual_guard_entries.append(
+                (
+                    "return_case_guard_set",
+                    ("guard_structural_keys", cls._normalize_nested_tuple(fields["guard_structural_keys"])),
+                    ("return_value_structural_key", cls._normalize_nested_tuple(fields["return_value_structural_key"])),
+                )
+            )
+        actual_miss_entries = []
+        for entry in cls._normalize_nested_tuple(miss_keys.get("keys")) or ():
+            if not isinstance(entry, tuple) or len(entry) < 3 or entry[0] != "case_miss_formula":
+                return False
+            actual_miss_entries.append(
+                (
+                    "case_miss_formula",
+                    cls._normalize_nested_tuple(entry[2]),
+                )
+            )
+        return (
+            cls._canonicalize_key_sequence(expected_guard_entries)
+            == cls._canonicalize_key_sequence(actual_guard_entries)
+            and cls._canonicalize_key_sequence(expected_miss_entries)
+            == cls._canonicalize_key_sequence(actual_miss_entries)
+        )
+
+    @staticmethod
+    def _return_coverage_target_partition_cases(object_target_key: Any) -> Optional[Tuple[Any, ...]]:
+        if not isinstance(object_target_key, tuple) or len(object_target_key) < 7:
+            return None
+        partition = object_target_key[6]
+        if not isinstance(partition, tuple) or len(partition) < 3:
+            return None
+        if partition[0] != "return_partition_identity":
+            return None
+        cases = partition[2]
+        if not isinstance(cases, tuple):
+            return None
+        for case in cases:
+            if not isinstance(case, tuple) or not case or case[0] != "return_case_identity":
+                return None
+        return cases
 
     @classmethod
     def _return_coverage_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
@@ -5029,6 +5347,8 @@ class CheckStrategy(ABC):
         object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
         if not isinstance(object_target_key, tuple):
             return None
+        if not cls._return_coverage_object_target_key_is_valid(object_target_key):
+            return None
         proof_id = build_proof_obligation_id(
             reason_id,
             proof_stage,
@@ -5042,6 +5362,50 @@ class CheckStrategy(ABC):
         if not cls._return_coverage_proof_content_is_complete(evidence, canonical_reason_id):
             return None
         return proof_id
+
+    @classmethod
+    def _return_coverage_object_target_key_is_valid(cls, object_target_key: Tuple[Any, ...]) -> bool:
+        if not isinstance(object_target_key, tuple) or len(object_target_key) < 8:
+            return False
+        if object_target_key[0] != "return_coverage":
+            return False
+        schema = object_target_key[1]
+        if not (
+            isinstance(schema, tuple)
+            and len(schema) == 2
+            and schema[0] == "target_schema_version"
+            and schema[1] == cls._RETURN_COVERAGE_TARGET_SCHEMA_VERSION
+        ):
+            return False
+        if object_target_key[2] not in {"function1", "function2"}:
+            return False
+        if not isinstance(object_target_key[3], tuple) or object_target_key[3][0] != "function_identity":
+            return False
+        if object_target_key[4] not in {"return_coverage_gap", "return_coverage_inconclusive"}:
+            return False
+        if not isinstance(object_target_key[6], tuple) or object_target_key[6][0] != "return_partition_identity":
+            return False
+        if not isinstance(object_target_key[7], tuple) or object_target_key[7][0] != "guard_disjunction_identity":
+            return False
+        return not cls._return_coverage_identity_contains_forbidden_atoms(object_target_key)
+
+    @classmethod
+    def _return_coverage_identity_contains_forbidden_atoms(cls, value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return True
+        if isinstance(value, (list, set, frozenset)):
+            return True
+        if isinstance(value, tuple):
+            if value and value[0] in {"object_id", "program_uid", "opaque"}:
+                return True
+            if len(value) == 2 and value[0] == "int" and isinstance(value[1], int) and value[1] < 0:
+                return False
+            return any(cls._return_coverage_identity_contains_forbidden_atoms(item) for item in value)
+        if value is None or isinstance(value, str) or isinstance(value, bool):
+            return False
+        if isinstance(value, int) and not isinstance(value, bool):
+            return False
+        return True
 
     @classmethod
     def _analysis_has_active_call_effect_proof_blockers(
@@ -5241,14 +5605,21 @@ class CheckStrategy(ABC):
         analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
         if analysis is None:
             return None
-        return (
+        target = (
             "return_coverage",
+            ("target_schema_version", self._RETURN_COVERAGE_TARGET_SCHEMA_VERSION),
             label,
-            self._analysis_entry_key(analysis),
+            self._deterministic_function_identity(analysis),
             reason_kind,
             self._return_storage_object_key(analysis),
-            self._return_partition_object_key(analysis),
-            self._return_guard_disjunction_object_key(analysis),
+            self._return_coverage_partition_identity_key(analysis),
+            self._return_coverage_guard_disjunction_identity_key(analysis),
+        )
+        return self._identity_freeze(
+            self._artifact_stable_key_for_analysis(
+                self._identity_freeze(target),
+                analysis,
+            )
         )
 
     def _make_sat_unsafety_unknown_reason(
@@ -5936,6 +6307,65 @@ class CheckStrategy(ABC):
             ),
         )
 
+    def _return_coverage_partition_identity_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        cases = tuple(
+            self._return_coverage_case_identity_key(return_info)
+            for return_info in (getattr(analysis, "returns", ()) or ())
+        )
+        return (
+            "return_partition_identity",
+            ("normalization_schema_version", self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION),
+            self._canonicalize_key_sequence(cases),
+        )
+
+    def _return_coverage_case_identity_key(self, return_info: Any) -> Tuple[Any, ...]:
+        pcode_op_ref = getattr(return_info, "pcode_op_ref", None)
+        value = getattr(return_info, "value", None)
+        conditions = tuple(getattr(return_info, "conditions", None) or ())
+        miss_expr = self._case_miss_expression(list(conditions))
+        return (
+            "return_case_identity",
+            ("site", self._identity_freeze(getattr(return_info, "address", None))),
+            ("pcode_sequence", self._identity_freeze(self._stable_key_or_none(pcode_op_ref))),
+            ("pcode_identity", self._identity_freeze(getattr(return_info, "pcode_identity", None))),
+            ("pcode_order", self._identity_freeze(getattr(return_info, "pcode_order", None))),
+            ("pcode_time", self._identity_freeze(getattr(return_info, "pcode_time", None))),
+            ("return_value", self._expression_runtime_object_key(value)),
+            (
+                "case_miss_formula",
+                self._expression_runtime_object_key(miss_expr) if miss_expr is not None else None,
+            ),
+            (
+                "guards",
+                self._canonicalize_key_sequence(
+                    tuple(
+                        self._return_condition_object_key(condition)
+                        for condition in conditions
+                    )
+                ),
+            ),
+            ("bit_width", self._expression_smt_bit_width_for_object_key(value)),
+        )
+
+    def _return_coverage_guard_disjunction_identity_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        guard_sets = tuple(
+            (
+                "return_case_guard_identity",
+                self._canonicalize_key_sequence(
+                    tuple(
+                        self._return_condition_object_key(condition)
+                        for condition in (getattr(return_info, "conditions", None) or ())
+                    )
+                ),
+            )
+            for return_info in (getattr(analysis, "returns", ()) or ())
+        )
+        return (
+            "guard_disjunction_identity",
+            ("normalization_schema_version", self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION),
+            self._canonicalize_key_sequence(guard_sets),
+        )
+
     def _return_case_object_key(self, index: int, return_info: Any) -> Tuple[Any, ...]:
         pcode_op_ref = getattr(return_info, "pcode_op_ref", None)
         pcode_key = self._stable_key_or_none(pcode_op_ref)
@@ -6361,6 +6791,145 @@ class CheckStrategy(ABC):
         return ("entry_point", getattr(analysis, "entry_point", None))
 
     @classmethod
+    def _deterministic_function_identity(
+        cls,
+        analysis: FunctionReturnAnalysis,
+    ) -> Tuple[Any, ...]:
+        binary_id = getattr(analysis, "binary_id", None)
+        normalized_binary_id = str(binary_id).strip() if binary_id is not None and str(binary_id).strip() else "unknown_binary"
+        binary_name = getattr(analysis, "binary_name", None)
+        normalized_binary_name = str(binary_name).strip() if binary_name is not None and str(binary_name).strip() else "unknown_binary_name"
+        language_id = (
+            getattr(analysis, "language_id", None)
+            or getattr(analysis, "program_language_id", None)
+            or getattr(analysis, "architecture_language_id", None)
+        )
+        normalized_language_id = str(language_id).strip() if language_id is not None and str(language_id).strip() else "unknown_language"
+        compiler_artifact = (
+            getattr(analysis, "compiler_artifact_identity", None)
+            or getattr(analysis, "compiler_spec_id", None)
+            or getattr(analysis, "compiler_id", None)
+        )
+        normalized_compiler = (
+            str(compiler_artifact).strip()
+            if compiler_artifact is not None and str(compiler_artifact).strip()
+            else "unknown_compiler_artifact"
+        )
+        calling_convention = (
+            getattr(analysis, "calling_convention", None)
+            or getattr(analysis, "calling_convention_name", None)
+        )
+        normalized_calling_convention = (
+            str(calling_convention).strip()
+            if calling_convention is not None and str(calling_convention).strip()
+            else "unknown_calling_convention"
+        )
+        return (
+            "function_identity",
+            ("identity_schema_version", cls._RETURN_COVERAGE_TARGET_SCHEMA_VERSION),
+            (
+                "binary_identity",
+                ("binary_id", normalized_binary_id),
+                ("binary_name", normalized_binary_name),
+                ("language_id", normalized_language_id),
+                ("compiler_artifact", normalized_compiler),
+            ),
+            ("function_name", cls._identity_freeze(getattr(analysis, "function_name", None))),
+            ("entry_offset", cls._analysis_entry_offset(analysis)),
+            ("entry_point", cls._identity_freeze(getattr(analysis, "entry_point", None))),
+            ("signature", cls._normalized_function_signature_key(analysis)),
+            ("calling_convention", normalized_calling_convention),
+        )
+
+    @classmethod
+    def _analysis_entry_offset(cls, analysis: FunctionReturnAnalysis) -> Optional[int]:
+        function_ref = getattr(analysis, "function_ref", None)
+        for value in (
+            getattr(function_ref, "entry_offset", None),
+            getattr(function_ref, "address_offset", None),
+            getattr(analysis, "entry_point", None),
+        ):
+            try:
+                return int(str(value), 0)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @classmethod
+    def _normalized_function_signature_key(
+        cls,
+        analysis: FunctionReturnAnalysis,
+    ) -> Tuple[Any, ...]:
+        parameters = []
+        for param in getattr(analysis, "parameters", ()) or ():
+            if isinstance(param, Mapping):
+                param_index = param.get("index")
+                try:
+                    param_index = int(param_index)
+                except (TypeError, ValueError):
+                    param_index = None
+                parameters.append(
+                    (
+                        "parameter",
+                        ("index", param_index),
+                        ("name", cls._identity_freeze(param.get("name"))),
+                        ("data_type", cls._identity_freeze(param.get("data_type"))),
+                        ("size", cls._identity_freeze(param.get("size"))),
+                        ("is_signed", cls._identity_freeze(param.get("is_signed"))),
+                        ("storage", cls._identity_freeze(param.get("storage"))),
+                    )
+                )
+            else:
+                parameters.append(("parameter", cls._identity_freeze(param)))
+        parameters.sort(key=repr)
+        return (
+            "function_signature",
+            ("return_type", cls._identity_freeze(getattr(analysis, "return_type", None))),
+            ("return_storage", cls._identity_freeze(cls._return_storage_static_key(analysis))),
+            ("parameters", tuple(parameters)),
+        )
+
+    @staticmethod
+    def _return_storage_static_key(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        surface = None
+        surface_getter = getattr(analysis, "get_comparison_surface", None)
+        if callable(surface_getter):
+            try:
+                surface = surface_getter()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                surface = None
+        return (
+            "return_storage",
+            getattr(surface, "kind", None),
+            getattr(surface, "explicit_bit_width", None),
+            getattr(surface, "use_sign_extension", None),
+            getattr(analysis, "return_type", None),
+        )
+
+    @classmethod
+    def _identity_freeze(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return tuple(
+                (str(key), cls._identity_freeze(item))
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            )
+        if isinstance(value, (tuple, list)):
+            return tuple(cls._identity_freeze(item) for item in value)
+        if isinstance(value, (set, frozenset)):
+            return tuple(sorted((cls._identity_freeze(item) for item in value), key=repr))
+        if isinstance(value, bool) or isinstance(value, int) or isinstance(value, str) or value is None:
+            return value
+        if isinstance(value, float):
+            return ("float", repr(value))
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            try:
+                return cls._identity_freeze(stable_key())
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                pass
+        return ("opaque", type(value).__module__, type(value).__qualname__)
+
+    @classmethod
     def _call_target_key_for_analysis(
         cls,
         target_ref: Any,
@@ -6406,12 +6975,18 @@ class CheckStrategy(ABC):
                 detail=f"{label} has no return cases after extraction",
             )
         if any(not getattr(case, "conditions", None) for case in cases):
-            return ReturnCoverageCheckResult(status="covered")
+            return ReturnCoverageCheckResult(
+                status="covered",
+                coverage_proof_method="unconditional_return_case",
+            )
         object_centric_status = self._return_cases_have_object_centric_total_coverage(
             cases
         )
         if object_centric_status is True:
-            return ReturnCoverageCheckResult(status="covered")
+            return ReturnCoverageCheckResult(
+                status="covered",
+                coverage_proof_method="object_centric_total_coverage",
+            )
         if object_centric_status is False and not self._base_context_has_return_coverage_domain_assumptions(base_ctx):
             return ReturnCoverageCheckResult(
                 status="gap",
@@ -6428,18 +7003,21 @@ class CheckStrategy(ABC):
                     status="inconclusive",
                     reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                     detail=f"{label} return-case object-centric coverage check was inconclusive",
+                    inconclusive_cause="object_identity_unsupported",
                 )
         if not base_ctx.get("header_lines"):
             return ReturnCoverageCheckResult(
                 status="inconclusive",
                 reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                 detail=f"{label} return-case coverage query skipped: base context has no declarations",
+                inconclusive_cause="missing_header_context",
             )
         if any(self._case_conditions_contain_unresolved_expression(case) for case in cases):
             return ReturnCoverageCheckResult(
                 status="inconclusive",
                 reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                 detail=f"{label} return-case coverage query skipped: unresolved condition expression",
+                inconclusive_cause="unresolved_expression",
             )
 
         query = self._build_return_case_coverage_query(
@@ -6453,6 +7031,7 @@ class CheckStrategy(ABC):
                 status="inconclusive",
                 reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                 detail=f"{label} return-case coverage query could not be built",
+                inconclusive_cause="unsupported_expression",
             )
 
         result = self.solver_runner.run_sequential(query)
@@ -6468,8 +7047,13 @@ class CheckStrategy(ABC):
                 reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
                 detail=f"{label} return-case coverage query was inconclusive",
                 can_record_completion_proof=True,
+                inconclusive_cause="smt_disambiguation_inconclusive",
             )
-        return ReturnCoverageCheckResult(status="covered")
+        return ReturnCoverageCheckResult(
+            status="covered",
+            coverage_proof_method="smt_coverage_query",
+            solver_status="unsat",
+        )
 
     @staticmethod
     def _base_context_has_return_coverage_domain_assumptions(

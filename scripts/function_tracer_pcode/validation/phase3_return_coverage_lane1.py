@@ -3082,6 +3082,37 @@ def _object_target_key_is_specific(value: Any) -> bool:
 
 
 def _return_coverage_key_is_specific(value: Tuple[Any, ...]) -> bool:
+    if _nested_contains_forbidden_identity_atom(value):
+        return False
+    if (
+        len(value) == 8
+        and isinstance(value[1], tuple)
+        and len(value[1]) == 2
+        and value[1][0] == "target_schema_version"
+        # v2 is accepted for existing lane artifacts; v3 is the strict
+        # return-coverage identity schema used by new proof targets.
+        and value[1][1] in {2, 3}
+    ):
+        (
+            _kind,
+            _schema,
+            side_label,
+            function_identity,
+            reason_kind,
+            return_storage_key,
+            return_partition_key,
+            guard_disjunction_key,
+        ) = value
+        return all(
+            (
+                side_label in {"function1", "function2"},
+                _function_identity_key_is_specific(function_identity),
+                reason_kind in {"return_coverage_gap", "return_coverage_inconclusive"},
+                _return_storage_key_is_specific(return_storage_key),
+                _return_partition_identity_key_is_specific(return_partition_key),
+                _guard_disjunction_identity_key_is_specific(guard_disjunction_key),
+            )
+        )
     if len(value) != 7:
         return False
     (
@@ -3103,6 +3134,120 @@ def _return_coverage_key_is_specific(value: Tuple[Any, ...]) -> bool:
             _guard_disjunction_key_is_specific(guard_disjunction_key),
         )
     )
+
+
+def _function_identity_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 8 or value[0] != "function_identity":
+        return False
+    schema = value[1]
+    binary_identity = value[2]
+    entry_offset = value[4]
+    signature = value[6]
+    if not (
+        isinstance(schema, tuple)
+        and len(schema) == 2
+        and schema[0] == "identity_schema_version"
+        and _int_like_is_specific(schema[1])
+    ):
+        return False
+    if not _binary_identity_key_is_specific(binary_identity):
+        return False
+    if not (
+        isinstance(entry_offset, tuple)
+        and len(entry_offset) == 2
+        and entry_offset[0] == "entry_offset"
+        and _address_like_is_specific(entry_offset[1])
+    ):
+        return False
+    return isinstance(signature, tuple) and signature and signature[0] == "signature"
+
+
+def _binary_identity_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 2 or value[0] != "binary_identity":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in value[1:]
+        if isinstance(item, tuple) and len(item) == 2
+    }
+    binary_id = fields.get("binary_id")
+    language_id = fields.get("language_id")
+    return _binary_id_is_specific(binary_id) and isinstance(language_id, str) and bool(language_id.strip())
+
+
+def _return_partition_identity_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 3 or value[0] != "return_partition_identity":
+        return False
+    schema = value[1]
+    cases = value[2]
+    if not (
+        isinstance(schema, tuple)
+        and len(schema) == 2
+        and schema[0] == "normalization_schema_version"
+        and _int_like_is_specific(schema[1])
+    ):
+        return False
+    if not isinstance(cases, tuple) or not cases:
+        return False
+    return all(_return_case_identity_key_is_specific(case) for case in cases)
+
+
+def _return_case_identity_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 8 or value[0] != "return_case_identity":
+        return False
+    fields = {
+        item[0]: item[1]
+        for item in value[1:]
+        if isinstance(item, tuple) and len(item) == 2
+    }
+    pcode_sequence = fields.get("pcode_sequence")
+    pcode_identity = fields.get("pcode_identity")
+    return_value = fields.get("return_value")
+    case_miss_formula = fields.get("case_miss_formula")
+    guards = fields.get("guards")
+    if pcode_sequence is not None:
+        if not _pcode_ref_is_specific(pcode_sequence):
+            return False
+    elif pcode_identity is not None:
+        if not _nested_has_specific_leaf(pcode_identity):
+            return False
+    else:
+        return False
+    if not _nested_has_specific_leaf(return_value) or _nested_contains_log_prose(return_value):
+        return False
+    if case_miss_formula is not None and (
+        not _nested_has_specific_leaf(case_miss_formula)
+        or _nested_contains_log_prose(case_miss_formula)
+    ):
+        return False
+    if not isinstance(guards, tuple):
+        return False
+    return all(_return_guard_key_is_specific(guard) for guard in guards)
+
+
+def _guard_disjunction_identity_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 3 or value[0] != "guard_disjunction_identity":
+        return False
+    schema = value[1]
+    cases = value[2]
+    if not (
+        isinstance(schema, tuple)
+        and len(schema) == 2
+        and schema[0] == "normalization_schema_version"
+        and _int_like_is_specific(schema[1])
+    ):
+        return False
+    if not isinstance(cases, tuple):
+        return False
+    for case in cases:
+        if not isinstance(case, tuple) or len(case) != 2 or case[0] != "return_case_guard_identity":
+            return False
+        guards = case[1]
+        if not isinstance(guards, tuple):
+            return False
+        if not all(_return_guard_key_is_specific(guard) for guard in guards):
+            return False
+    return True
 
 
 def _analysis_key_is_specific(value: Any) -> bool:
@@ -3270,11 +3415,31 @@ def _int_like_is_specific(value: Any) -> bool:
 def _nested_has_specific_leaf(value: Any) -> bool:
     if value is None or value == "" or value == MISSING_SENTINEL:
         return False
+    if _identity_atom_is_forbidden(value):
+        return False
     if isinstance(value, tuple):
         return any(_nested_has_specific_leaf(item) for item in value)
     if isinstance(value, list):
         return any(_nested_has_specific_leaf(item) for item in value)
     return True
+
+
+def _nested_contains_forbidden_identity_atom(value: Any) -> bool:
+    if _identity_atom_is_forbidden(value):
+        return True
+    if isinstance(value, tuple):
+        return any(_nested_contains_forbidden_identity_atom(item) for item in value)
+    if isinstance(value, list):
+        return any(_nested_contains_forbidden_identity_atom(item) for item in value)
+    return False
+
+
+def _identity_atom_is_forbidden(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and bool(value)
+        and value[0] in {"opaque", "object_id", "program_uid"}
+    )
 
 
 def _nested_contains_log_prose(value: Any) -> bool:

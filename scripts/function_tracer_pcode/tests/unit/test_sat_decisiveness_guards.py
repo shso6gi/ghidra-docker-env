@@ -872,39 +872,98 @@ def _expected_call_effect_summary_proof_id(evidence):
     )
 
 
+def _return_coverage_structural_fixture_from_target(object_target_key):
+    cases = PairwiseStrategy._return_coverage_target_partition_cases(object_target_key)
+    assert cases is not None
+    guard_entries = []
+    miss_entries = []
+    for index, case in enumerate(cases):
+        fields = {
+            field[0]: field[1]
+            for field in case[1:]
+            if isinstance(field, tuple) and len(field) == 2
+        }
+        guard_entries.append(
+            (
+                "return_case_guard_set",
+                index,
+                ("guard_structural_keys", fields["guards"]),
+                ("return_value_structural_key", fields["return_value"]),
+            )
+        )
+        miss_entries.append(
+            (
+                "case_miss_formula",
+                index,
+                fields["case_miss_formula"],
+            )
+        )
+    guard_entries = PairwiseStrategy._canonicalize_key_sequence(guard_entries)
+    miss_entries = PairwiseStrategy._canonicalize_key_sequence(miss_entries)
+    return {
+        "structural_guard_keys": {
+            "status": "complete",
+            "case_count": len(guard_entries),
+            "keys": guard_entries,
+        },
+        "structural_miss_formula_keys": {
+            "status": "complete",
+            "case_count": len(miss_entries),
+            "keys": miss_entries,
+        },
+    }
+
+
 def _return_coverage_completion_evidence(
     action,
     reason_id: UnknownReasonId = UnknownReasonId.RETURN_COVERAGE_GAP,
     **overrides,
 ):
+    structural_fixture = _return_coverage_structural_fixture_from_target(action.object_target_key)
+    proof_content = {
+        "proof_schema_version": PairwiseStrategy._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
+        "normalization_schema_version": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION,
+        "proof_target_identity": action.object_target_key,
+        **structural_fixture,
+        "coverage_solver_evidence": {
+            "status": "unsat",
+            "proof_method": "smt_coverage_query",
+        },
+        "bit_width_signedness_metadata": {
+            "status": "complete",
+            "bit_widths": (32,),
+            "signedness": ("equality",),
+        },
+        "case_guard_disjunction": {
+            "status": "complete",
+            "query_cases": ("(true)",),
+            "case_count": 1,
+        },
+        "normalized_guard_formula": {
+            "status": "complete",
+            "query": "(or true)",
+        },
+        "coverage_guard_evidence": {
+            "status": "complete",
+            "guard_source": "return_partition_guard_set",
+            "coverage_status": "covered",
+            "coverage_proof_method": "test_fixture",
+            "case_count": 1,
+            "normalized_guard_formula_sha256": hashlib.sha256(b"(or true)").hexdigest(),
+        },
+    }
     evidence = {
         "object_derived": True,
         "status": "complete",
         "reason_id": reason_id.value,
         "recovery_proof_kind": UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+        "target_schema_version": PairwiseStrategy._RETURN_COVERAGE_TARGET_SCHEMA_VERSION,
+        "proof_schema_version": PairwiseStrategy._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
         "proof_stage": action.proof_stage,
         "evidence_kind": action.evidence_kind,
         "object_target_key": action.object_target_key,
         "proof_obligation_id": action.proof_obligation_id,
-        "proof_content": {
-            "case_guard_disjunction": {
-                "status": "complete",
-                "query_cases": ("(true)",),
-                "case_count": 1,
-            },
-            "normalized_guard_formula": {
-                "status": "complete",
-                "query": "(or true)",
-            },
-            "coverage_guard_evidence": {
-                "status": "complete",
-                "guard_source": "return_partition_guard_set",
-                "coverage_status": "covered",
-                "coverage_proof_method": "test_fixture",
-                "case_count": 1,
-                "normalized_guard_formula_sha256": hashlib.sha256(b"(or true)").hexdigest(),
-            },
-        },
+        "proof_content": proof_content,
     }
     evidence.update(overrides)
     return evidence
@@ -2243,6 +2302,7 @@ def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypat
     )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.get_decisive_sat_unsafety_reasons = lambda: ["return_coverage_gap"]
     pending_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:return_coverage_gap",
         analysis1,
@@ -2272,6 +2332,7 @@ def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypa
     )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.get_decisive_sat_unsafety_reasons = lambda: ["return_coverage_gap"]
     pending_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:return_coverage_gap",
         analysis1,
@@ -2326,14 +2387,7 @@ def test_return_coverage_proof_content_requires_disjunction_and_normalized_guard
         UnknownReasonId.RETURN_COVERAGE_GAP,
     )
 
-    valid_guard_evidence = deepcopy(invalid_empty_cases)
-    valid_guard_evidence["proof_content"]["coverage_guard_evidence"] = {
-        "status": "complete",
-        "guard_source": "return_partition_guard_set",
-        "coverage_status": "covered",
-        "case_count": 0,
-        "normalized_guard_formula_sha256": hashlib.sha256(b"(or true)").hexdigest(),
-    }
+    valid_guard_evidence = deepcopy(evidence)
     assert strategy._return_coverage_proof_content_is_complete(
         valid_guard_evidence,
         UnknownReasonId.RETURN_COVERAGE_GAP,
@@ -2351,6 +2405,7 @@ def test_return_coverage_proof_completion_rejects_empty_case_guard_disjunction(m
     )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.get_decisive_sat_unsafety_reasons = lambda: ["return_coverage_gap"]
     pending_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:return_coverage_gap",
         analysis1,
@@ -2607,6 +2662,52 @@ def test_pairwise_return_coverage_inconclusive_unresolved_expression_does_not_au
     assert analysis1.completed_recovery_proof_evidence == ()
 
 
+def test_pairwise_return_coverage_non_dischargeable_inconclusive_causes_do_not_auto_complete(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    case1 = ReturnCase(
+        index=0,
+        conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+
+    for cause in ("object_identity_unsupported", "unresolved_expression", "missing_header_context"):
+        analysis1.completed_recovery_proof_evidence = ()
+        monkeypatch.setattr(
+            strategy,
+            "_check_return_case_coverage_gap",
+            lambda *_args, cause=cause, **_kwargs: ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+                can_record_completion_proof=True,
+                inconclusive_cause=cause,
+            ),
+        )
+        reasons = strategy._collect_return_coverage_unsafety_reasons(
+            _base_context_for_single_int_param(),
+            [case1],
+            [case2],
+            lambda value: value,
+            lambda value: value,
+            analysis1,
+            analysis2,
+        )
+
+        assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
+        assert analysis1.completed_recovery_proof_evidence == ()
+
+
 def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_recorded(monkeypatch):
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
@@ -2654,6 +2755,37 @@ def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_reco
 
     assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
     assert analysis1.completed_recovery_proof_evidence == ()
+
+
+def test_return_coverage_non_smt_covered_proof_content_does_not_claim_unsat():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    case = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis.returns[0].value,
+        return_info=analysis.returns[0],
+        return_type=analysis.return_type or "int",
+        parameters=analysis.parameters,
+    )
+
+    proof_content = strategy._return_coverage_covered_proof_content(
+        base_ctx=_base_context_for_single_int_param(),
+        label="function1",
+        cases=[case],
+        replace_fn=lambda value: value,
+        coverage_proof_method="unconditional_return_case",
+        solver_status=None,
+    )
+
+    assert proof_content["coverage_solver_evidence"]["status"] == "not_applicable"
+    assert proof_content["coverage_solver_evidence"]["proof_method"] == "unconditional_return_case"
 
 
 def test_unsupported_call_effect_reason_group_is_used_for_signature_matching():
@@ -7829,7 +7961,7 @@ def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.recovery_action == "return_coverage_proof_required"
     assert reason.object_target_key[0] == "return_coverage"
-    assert return_ref.stable_key() in reason.object_target_key[5][1][0]
+    assert _nested_contains(reason.object_target_key, return_ref.stable_key())
     assert ("return_storage", "return_value", 32, None, "int") in reason.object_target_key
     assert [action.proof_stage for action in actions] == [
         "return_partition_extraction",
@@ -7901,6 +8033,248 @@ def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_bac
         "case_guard_disjunction",
         reason.object_target_key,
     )
+
+
+def _coverage_identity_analysis(
+    *,
+    binary_id: str = "B1",
+    returns_order: Tuple[int, ...] = (0, 1),
+) -> FunctionReturnAnalysis:
+    x0 = Expression.parameter("x", 0, size=4)
+    returns = [
+        ReturnInfo(
+            address="0x401020",
+            value=_const(1),
+            conditions=[_eq(x0, _const(0))],
+            pcode_op_ref=PcodeOpRef(
+                address_offset=0x401020,
+                seq_time=0x401020,
+                seq_order=3,
+                block_index=1,
+                mnemonic="RETURN",
+                input_sizes=(8, 4),
+                binary_id=binary_id,
+                function_entry_space="ram",
+                function_entry_offset=0x401000,
+                target_space="ram",
+                target_offset=0x401020,
+                opcode=61,
+                local_op_ordinal=0,
+            ),
+        ),
+        ReturnInfo(
+            address="0x401030",
+            value=_const(2),
+            conditions=[_ne(Expression.parameter("x", 0, size=4), _const(0))],
+            pcode_op_ref=PcodeOpRef(
+                address_offset=0x401030,
+                seq_time=0x401030,
+                seq_order=4,
+                block_index=2,
+                mnemonic="RETURN",
+                input_sizes=(8, 4),
+                binary_id=binary_id,
+                function_entry_space="ram",
+                function_entry_offset=0x401000,
+                target_space="ram",
+                target_offset=0x401030,
+                opcode=61,
+                local_op_ordinal=0,
+            ),
+        ),
+    ]
+    return FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x401000",
+        function_ref=CallTargetRef.from_name("f", program_id=12345, entry_offset=0x401000),
+        parameters=[_param("x")],
+        returns=[returns[index] for index in returns_order],
+        return_type="int",
+        binary_id=binary_id,
+    )
+
+
+def test_return_coverage_target_identity_is_deterministic_for_rebuilt_ast_and_case_order():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    other = _coverage_identity_analysis(binary_id="B2")
+    first = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B1", returns_order=(0, 1)),
+        other,
+    )
+    rebuilt = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B1", returns_order=(0, 1)),
+        other,
+    )
+    reordered = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B1", returns_order=(1, 0)),
+        other,
+    )
+
+    assert first == rebuilt
+    assert first == reordered
+    assert strategy._return_coverage_object_target_key_is_valid(first)
+
+
+def test_return_coverage_target_identity_distinguishes_binary_identity():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    other = _coverage_identity_analysis(binary_id="B9")
+    target_b1 = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B1"),
+        other,
+    )
+    target_b2 = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B2"),
+        other,
+    )
+
+    assert target_b1 != target_b2
+
+
+def test_return_coverage_completed_evidence_rejects_exact_target_and_schema_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    valid = _return_coverage_completion_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(valid) == action.proof_obligation_id
+
+    side_mismatch = deepcopy(valid)
+    side_target = list(side_mismatch["object_target_key"])
+    side_target[2] = "function2"
+    side_mismatch["object_target_key"] = tuple(side_target)
+    assert strategy._return_coverage_proof_id_from_evidence(side_mismatch) is None
+
+    schema_mismatch = deepcopy(valid)
+    schema_mismatch["target_schema_version"] = -1
+    assert strategy._return_coverage_proof_id_from_evidence(schema_mismatch) is None
+
+    target_content_mismatch = deepcopy(valid)
+    target_content_mismatch["proof_content"] = dict(target_content_mismatch["proof_content"])
+    target_content_mismatch["proof_content"]["proof_target_identity"] = ("return_coverage", "different")
+    assert strategy._return_coverage_proof_id_from_evidence(target_content_mismatch) is None
+
+    solver_unknown = deepcopy(valid)
+    solver_unknown["proof_content"] = deepcopy(solver_unknown["proof_content"])
+    solver_unknown["proof_content"]["coverage_solver_evidence"] = {"status": "unknown"}
+    assert strategy._return_coverage_proof_id_from_evidence(solver_unknown) is None
+
+
+def test_return_coverage_completed_evidence_rejects_structural_content_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    valid = _return_coverage_completion_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(valid) == action.proof_obligation_id
+
+    guard_mismatch = deepcopy(valid)
+    guard_mismatch["proof_content"] = deepcopy(guard_mismatch["proof_content"])
+    guard_keys = list(guard_mismatch["proof_content"]["structural_guard_keys"]["keys"])
+    first_guard = list(guard_keys[0])
+    first_guard[2] = ("guard_structural_keys", (("return_guard", False, ("wrong",), ("wrong",)),))
+    guard_keys[0] = tuple(first_guard)
+    guard_mismatch["proof_content"]["structural_guard_keys"]["keys"] = tuple(guard_keys)
+    assert strategy._return_coverage_proof_id_from_evidence(guard_mismatch) is None
+
+    return_value_mismatch = deepcopy(valid)
+    return_value_mismatch["proof_content"] = deepcopy(return_value_mismatch["proof_content"])
+    value_keys = list(return_value_mismatch["proof_content"]["structural_guard_keys"]["keys"])
+    first_value = list(value_keys[0])
+    first_value[3] = ("return_value_structural_key", ("expression", "wrong_return_value"))
+    value_keys[0] = tuple(first_value)
+    return_value_mismatch["proof_content"]["structural_guard_keys"]["keys"] = tuple(value_keys)
+    assert strategy._return_coverage_proof_id_from_evidence(return_value_mismatch) is None
+
+    miss_mismatch = deepcopy(valid)
+    miss_mismatch["proof_content"] = deepcopy(miss_mismatch["proof_content"])
+    miss_keys = list(miss_mismatch["proof_content"]["structural_miss_formula_keys"]["keys"])
+    miss_keys[0] = ("case_miss_formula", 0, ("expression", "wrong_miss_formula"))
+    miss_mismatch["proof_content"]["structural_miss_formula_keys"]["keys"] = tuple(miss_keys)
+    assert strategy._return_coverage_proof_id_from_evidence(miss_mismatch) is None
+
+
+def test_return_coverage_target_identity_validator_rejects_raw_object_leaf():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        _coverage_identity_analysis(binary_id="B1"),
+        _coverage_identity_analysis(binary_id="B2"),
+    )
+    poisoned = list(target)
+    function_identity = list(poisoned[3])
+    function_identity.append(("raw_object", object()))
+    poisoned[3] = tuple(function_identity)
+
+    assert not strategy._return_coverage_object_target_key_is_valid(tuple(poisoned))
+
+
+def test_return_coverage_target_identity_rejects_opaque_return_address():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    analysis1.returns[0].address = object()
+
+    target = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+    )
+
+    assert _nested_contains(target, "opaque")
+    assert not strategy._return_coverage_object_target_key_is_valid(target)
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _return_coverage_completion_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
+
+
+def test_return_coverage_target_identity_rejects_opaque_parameter_storage():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    analysis1.parameters[0]["storage"] = object()
+
+    target = strategy._return_coverage_object_target_key(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+    )
+
+    assert _nested_contains(target, "opaque")
+    assert not strategy._return_coverage_object_target_key_is_valid(target)
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _return_coverage_completion_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
 
 
 def test_return_coverage_object_target_ignores_diagnostic_suffix():
