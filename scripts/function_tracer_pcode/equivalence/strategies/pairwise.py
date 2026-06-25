@@ -26,6 +26,7 @@ from ...analysis.effect_summary import canonicalize_location
 from ...model.render_smt import (
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
+    collect_unknown_smt_declarations,
     expression_contains_unsupported_smt_ops,
     expression_uses_smt_float_theory,
     expression_uses_smt_uf,
@@ -1679,6 +1680,14 @@ class PairwiseStrategy(CheckStrategy):
             result_size=comparison_result_size,
         )
         if not shortcut_decision.equivalent:
+            if self._case_pair_loop_summaries_solver_equivalent(
+                left_ref,
+                right_ref,
+                left_case=left_case,
+                right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
+            ):
+                return True
             if self._counted_loop_values_are_provably_equivalent(
                 left,
                 right,
@@ -1700,6 +1709,97 @@ class PairwiseStrategy(CheckStrategy):
             self._expressions_share_object_centric_structure(left_operand, right_operand)
             for left_operand, right_operand in zip(left.operands, right.operands)
         )
+
+    def _case_pair_loop_summaries_solver_equivalent(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        left_case: Optional[ReturnCase],
+        right_case: Optional[ReturnCase],
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
+    ) -> bool:
+        if left_case is None or right_case is None:
+            return False
+        left_summary = getattr(left_ref, "loop_summary", None)
+        right_summary = getattr(right_ref, "loop_summary", None)
+        if left_summary is None or right_summary is None:
+            return False
+        if self._loop_summary_surface_blocks_solver_equality(left_summary, right_summary):
+            return False
+        left_term_key = self._loop_term_descriptor_semantic_key(left_summary)
+        right_term_key = self._loop_term_descriptor_semantic_key(right_summary)
+        if left_term_key is None or right_term_key is None or left_term_key != right_term_key:
+            return False
+        left_seed = tuple(getattr(left_summary, "seed_terms", ()) or ())
+        right_seed = tuple(getattr(right_summary, "seed_terms", ()) or ())
+        if left_seed != right_seed:
+            return False
+        if getattr(left_summary, "seed_term_count", None) != getattr(right_summary, "seed_term_count", None):
+            return False
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        expr_pairs = (
+            (getattr(left_summary, "start_expr", None), getattr(right_summary, "start_expr", None)),
+            (getattr(left_summary, "limit_expr", None), getattr(right_summary, "limit_expr", None)),
+            (getattr(left_summary, "step_expr", None), getattr(right_summary, "step_expr", None)),
+        )
+        exprs = [expr for pair in expr_pairs for expr in pair if expr is not None]
+        exprs.extend(condition.expression for condition in conditions or [] if condition is not None)
+        parameters = self._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            *exprs,
+            semantic_parameter_sources=semantic_parameter_sources,
+        )
+        if parameters is None:
+            return False
+        if self._condition_set_is_unsat(conditions, parameters):
+            return True
+        for left_expr, right_expr in expr_pairs:
+            if left_expr is None or right_expr is None:
+                return False
+            if not self._prove_intrinsic_equivalence_under_conditions(
+                left_expr,
+                right_expr,
+                conditions,
+                parameters,
+            ):
+                return False
+        if not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case):
+            return False
+        return True
+
+    def _loop_summary_surface_blocks_solver_equality(self, left_summary, right_summary) -> bool:
+        if getattr(left_summary, "loop_var_unit", None) != getattr(right_summary, "loop_var_unit", None):
+            return True
+        left_profile = getattr(left_summary, "side_effect_profile", None)
+        right_profile = getattr(right_summary, "side_effect_profile", None)
+        if left_profile is None or right_profile is None:
+            return True
+        left_profile_key = left_profile.stable_key()
+        right_profile_key = right_profile.stable_key()
+        if left_profile_key is None or right_profile_key is None or left_profile_key != right_profile_key:
+            return True
+        left_cases = tuple(getattr(left_summary, "cases", ()) or ())
+        right_cases = tuple(getattr(right_summary, "cases", ()) or ())
+        if len(left_cases) != len(right_cases):
+            return True
+        left_case_keys = tuple(case.stable_key() for case in left_cases)
+        right_case_keys = tuple(case.stable_key() for case in right_cases)
+        if any(key is None for key in left_case_keys + right_case_keys):
+            return True
+        return left_case_keys != right_case_keys
+
+    def _loop_term_descriptor_semantic_key(self, summary) -> Optional[Tuple[Any, ...]]:
+        descriptor = getattr(summary, "term_descriptor", None)
+        semantic_key = getattr(descriptor, "semantic_key", None)
+        if callable(semantic_key):
+            try:
+                key = semantic_key()
+            except Exception:
+                return None
+            return key
+        return None
 
     def _runtime_refs_share_shortcut_semantics(self, left_ref, right_ref) -> tuple[bool, bool]:
         decision = self._runtime_refs_shortcut_decision(left_ref, right_ref)
@@ -5820,10 +5920,18 @@ class PairwiseStrategy(CheckStrategy):
             for declaration in collect_intrinsic_smt_declarations(expr):
                 if declaration not in intrinsic_declarations:
                     intrinsic_declarations.append(declaration)
+            for name, bit_width in collect_unknown_smt_declarations(expr):
+                declaration = f"(declare-const {name} (_ BitVec {int(bit_width)}))"
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
         for condition in conditions or []:
             if condition is None:
                 continue
             for declaration in collect_intrinsic_smt_declarations(condition.expression):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+            for name, bit_width in collect_unknown_smt_declarations(condition.expression):
+                declaration = f"(declare-const {name} (_ BitVec {int(bit_width)}))"
                 if declaration not in intrinsic_declarations:
                     intrinsic_declarations.append(declaration)
         declarations.extend(intrinsic_declarations)

@@ -2063,7 +2063,7 @@ def compare_loop_summaries(
     if left_semantic_key is not None and right_semantic_key is not None:
         if left_semantic_key == right_semantic_key:
             return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic key")
-    return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
+    return LoopSummaryComparisonResult("unknown", "loop summary comparator requires case-aware solver proof")
 
 
 def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
@@ -3958,6 +3958,132 @@ class StateTransitionLoopSummaryRef:
             "side_effect_profile": self.side_effect_profile.to_dict(),
             "state_size": int(self.state_size),
             "result_size": int(self.result_size),
+            "source": self.source,
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
+class CountedStateTransitionLoopSummaryRef:
+    """Summary for counted loops whose scalar state is updated by a transition."""
+
+    initial_state: Any
+    start_expr: Any
+    limit_expr: Any
+    step_expr: Any
+    transition_expr: Any
+    state_placeholder: Any
+    transition_cases: Any = None
+    side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
+    guard_constraints: Tuple[Any, ...] = ()
+    state_size: int = 0
+    result_size: int = 0
+    signed_loop: bool = False
+    handoff_proof_key: Optional[Tuple[Any, ...]] = None
+    source: str = "counted_state_transition_loop_summary"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "state_size", max(1, int(self.state_size or self.result_size or 0)))
+        object.__setattr__(self, "result_size", max(1, int(self.result_size or self.state_size or 0)))
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        init_key = _loop_object_key(self.initial_state)
+        start_key = _loop_object_key(self.start_expr)
+        limit_key = _loop_object_key(self.limit_expr)
+        step_key = _loop_object_key(self.step_expr)
+        transition_key = _loop_object_key(
+            self.transition_cases if self.transition_cases is not None else self.transition_expr
+        )
+        placeholder_key = _loop_object_key(self.state_placeholder)
+        guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if (
+            init_key is None
+            or start_key is None
+            or limit_key is None
+            or step_key is None
+            or transition_key is None
+            or placeholder_key is None
+            or any(guard_key is None for guard_key in guard_keys)
+            or side_effect_key is None
+        ):
+            return None
+        return (
+            "counted_state_transition_loop_summary",
+            init_key,
+            start_key,
+            limit_key,
+            step_key,
+            transition_key,
+            placeholder_key,
+            side_effect_key,
+            guard_keys,
+            int(self.state_size),
+            int(self.result_size),
+            bool(self.signed_loop),
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        binding_context = _loop_variable_binding_context_from_values(
+            self.state_placeholder,
+            self.transition_cases if self.transition_cases is not None else self.transition_expr,
+        )
+        if binding_context is None:
+            return None
+        init_key = _loop_object_semantic_key(self.initial_state, binding_context)
+        start_key = _loop_object_semantic_key(self.start_expr, binding_context)
+        limit_key = _loop_object_semantic_key(self.limit_expr, binding_context)
+        step_key = _loop_object_semantic_key(self.step_expr, binding_context)
+        transition_key = _loop_object_semantic_key(
+            self.transition_cases if self.transition_cases is not None else self.transition_expr,
+            binding_context,
+        )
+        guard_keys = tuple(_loop_object_semantic_key(guard, binding_context) for guard in self.guard_constraints)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if (
+            init_key is None
+            or start_key is None
+            or limit_key is None
+            or step_key is None
+            or transition_key is None
+            or any(guard_key is None for guard_key in guard_keys)
+            or side_effect_key is None
+        ):
+            return None
+        return (
+            "counted_state_transition_loop_summary",
+            init_key,
+            start_key,
+            limit_key,
+            step_key,
+            transition_key,
+            side_effect_key,
+            guard_keys,
+            int(self.state_size),
+            int(self.result_size),
+            bool(self.signed_loop),
+            self.source,
+        )
+
+    def display_name(self) -> str:
+        return f"counted_state_transition(state={int(self.state_size)},result={int(self.result_size)})"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "counted_state_transition_loop_summary",
+            "initial_state": _loop_object_to_dict(self.initial_state),
+            "start_expr": _loop_object_to_dict(self.start_expr),
+            "limit_expr": _loop_object_to_dict(self.limit_expr),
+            "step_expr": _loop_object_to_dict(self.step_expr),
+            "transition_expr": _loop_object_to_dict(self.transition_expr),
+            "transition_cases": _loop_object_to_dict(self.transition_cases),
+            "side_effect_profile": self.side_effect_profile.to_dict(),
+            "guard_constraints": _loop_object_to_dict(self.guard_constraints),
+            "state_size": int(self.state_size),
+            "result_size": int(self.result_size),
+            "signed_loop": bool(self.signed_loop),
+            "handoff_proof_key": _loop_object_to_dict(self.handoff_proof_key),
             "source": self.source,
             "display_name": self.display_name(),
         }

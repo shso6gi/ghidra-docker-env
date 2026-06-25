@@ -158,10 +158,18 @@ class _EffectRewritePrecision:
 class ReturnAnalyzer:
     """関数のReturn値を解析"""
 
-    def __init__(self, program, debug: bool = False, binary_id: Optional[str] = None):
+    def __init__(
+        self,
+        program,
+        debug: bool = False,
+        binary_id: Optional[str] = None,
+        *,
+        enable_completed_recovery_proofs: bool = True,
+    ):
         self.program = program
         self.debug = debug
         self._binary_id = binary_id
+        self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
         self._decompiler = None
         self._current_parameters: List[Dict] = []
         self._current_effect_summary: Optional[EffectSummary] = None
@@ -1170,7 +1178,11 @@ class ReturnAnalyzer:
         if analysis is None or not analysis.returns:
             return None
 
-        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=self.debug,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+        )
         should_try = analysis.has_unresolved_return_value() or any(
             reason in {"call_out_of_scope", "max_depth_exceeded", "phi_no_valid_branch", "phi_circular"}
             for reason in getattr(analysis, "unknown_event_reasons", [])
@@ -1190,6 +1202,7 @@ class ReturnAnalyzer:
             analysis,
             summary_returns,
             summary_note=summary_note,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
         )
         analysis.summary_return_candidates = accepted.candidates
         if accepted.blockers:
@@ -1250,7 +1263,11 @@ class ReturnAnalyzer:
             program_is_big_endian=self._program_is_big_endian(),
             binary_id=self._binary_id,
         )
-        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=self.debug,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+        )
         summary = summarizer.try_summarize_pre_return_counted_scalar_loop(
             function,
             high_function,
@@ -1265,6 +1282,7 @@ class ReturnAnalyzer:
             skeleton,
             summary_returns,
             summary_note=summary_note,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
         )
         if accepted.blockers or not accepted.accepted_returns:
             return None

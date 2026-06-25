@@ -12,6 +12,7 @@ PTRSUB_OPCODE = 66
 READONLY_SUM_OPCODE = 4097
 COUNTED_LOOP_SUM_OPCODE = 4098
 STATE_TRANSITION_LOOP_COUNT_OPCODE = 4099
+COUNTED_STATE_TRANSITION_VALUE_OPCODE = 4100
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,12 @@ _INTRINSIC_SPECS = (
         opcode=STATE_TRANSITION_LOOP_COUNT_OPCODE,
         mnemonic="STATE_TRANSITION_LOOP_COUNT",
         arity=1,
+        smt_lowerable=True,
+    ),
+    PcodeIntrinsicSpec(
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+        mnemonic="COUNTED_STATE_TRANSITION_VALUE",
+        arity=3,
         smt_lowerable=True,
     ),
 )

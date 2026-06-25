@@ -7,6 +7,7 @@ from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
     PTRADD_OPCODE,
@@ -17,6 +18,7 @@ from .signature import get_declared_type_signedness
 from .runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     PostStateReadRef,
     PostStateValueRef,
@@ -196,6 +198,8 @@ def expression_smt_bit_width(expr) -> int:
         if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
             return explicit_bits or operand_bits
         if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
+            return explicit_bits or operand_bits
+        if opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE or mnemonic == "COUNTED_STATE_TRANSITION_VALUE":
             return explicit_bits or operand_bits
         return max(explicit_bits, operand_bits)
 
@@ -1190,6 +1194,13 @@ def _state_transition_loop_count_ref(expr) -> Optional[StateTransitionLoopSummar
     return None
 
 
+def _counted_state_transition_value_ref(expr) -> Optional[CountedStateTransitionLoopSummaryRef]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, CountedStateTransitionLoopSummaryRef):
+        return runtime_ref
+    return None
+
+
 def _state_transition_loop_count_function_name(expr) -> str:
     operands = getattr(expr, "operands", None) or []
     state_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
@@ -1200,6 +1211,23 @@ def _state_transition_loop_count_function_name(expr) -> str:
     identity = _runtime_ref_smt_identity(expr, summary_ref)
     digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
     return f"rt_state_transition_loop_count_{digest}_{state_bits}_{result_bits}"
+
+
+def _counted_state_transition_value_function_name(expr) -> str:
+    operands = getattr(expr, "operands", None) or []
+    init_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
+    start_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
+    limit_bits = expression_smt_bit_width(operands[2]) if len(operands) >= 3 else 0
+    result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+    summary_ref = _counted_state_transition_value_ref(expr)
+    if summary_ref is None:
+        return f"rt_counted_state_transition_value_{init_bits}_{start_bits}_{limit_bits}_{result_bits}"
+    identity = _runtime_ref_smt_identity(expr, summary_ref)
+    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    return (
+        f"rt_counted_state_transition_value_{digest}_"
+        f"{init_bits}_{start_bits}_{limit_bits}_{result_bits}"
+    )
 
 
 def _counted_loop_sum_function_name(expr) -> str:
@@ -1488,6 +1516,19 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         return (
             f"(declare-fun {_state_transition_loop_count_function_name(expr)} "
             f"((_ BitVec {state_bits})) "
+            f"(_ BitVec {result_bits}))"
+        )
+
+    if opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE or mnemonic == "COUNTED_STATE_TRANSITION_VALUE":
+        if len(operands) != 3:
+            raise ValueError(f"COUNTED_STATE_TRANSITION_VALUE expects 3 operands, got {len(operands)}")
+        init_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+        start_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+        limit_bits = max(1, int(expression_smt_bit_width(operands[2]) or 1))
+        result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+        return (
+            f"(declare-fun {_counted_state_transition_value_function_name(expr)} "
+            f"((_ BitVec {init_bits}) (_ BitVec {start_bits}) (_ BitVec {limit_bits})) "
             f"(_ BitVec {result_bits}))"
         )
 
@@ -2117,6 +2158,30 @@ def _lower_intrinsic_to_smt(
             float_mode=float_mode,
         )
         return f"({_state_transition_loop_count_function_name(expr)} {state_smt})"
+
+    if opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE or mnemonic == "COUNTED_STATE_TRANSITION_VALUE":
+        if len(operands) != 3:
+            raise ValueError(f"COUNTED_STATE_TRANSITION_VALUE expects 3 operands, got {len(operands)}")
+        rendered = []
+        for operand in operands:
+            operand_bits = max(1, int(expression_smt_bit_width(operand) or 1))
+            operand_smt = _to_smt_internal(
+                operand,
+                prefer_signed_arithmetic,
+                symbol_name_mapping,
+                address_context,
+                float_mode,
+            )
+            rendered.append(
+                _coerce_expr_to_bitvec_width(
+                    operand,
+                    operand_smt,
+                    operand_bits,
+                    prefer_sign_extension=_expr_prefers_signed_extension(operand),
+                    float_mode=float_mode,
+                )
+            )
+        return f"({_counted_state_transition_value_function_name(expr)} {' '.join(rendered)})"
 
     raise ValueError(
         f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"

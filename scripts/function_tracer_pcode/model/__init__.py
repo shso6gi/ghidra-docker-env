@@ -10,6 +10,7 @@ from .call_target import CallTargetRef, coerce_call_target_ref
 from .runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     DeferredCallRef,
     LoopBodyEffectRef,
@@ -39,6 +40,7 @@ from .runtime_refs import (
 )
 from .intrinsics import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
     PTRADD_OPCODE,
@@ -83,6 +85,7 @@ __all__ = [
     "coerce_call_target_ref",
     "AddressValueRef",
     "CanonicalLocation",
+    "CountedStateTransitionLoopSummaryRef",
     "CountedLoopSummaryRef",
     "DeferredCallRef",
     "LoopBodyEffectRef",
@@ -110,6 +113,7 @@ __all__ = [
     "compare_loop_summaries",
     "loop_summary_method_b_key",
     "COUNTED_LOOP_SUM_OPCODE",
+    "COUNTED_STATE_TRANSITION_VALUE_OPCODE",
     "READONLY_SUM_OPCODE",
     "STATE_TRANSITION_LOOP_COUNT_OPCODE",
     "PTRADD_OPCODE",

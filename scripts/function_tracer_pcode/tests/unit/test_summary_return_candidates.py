@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
+from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.summary_returns import accept_summary_return_candidates
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
@@ -34,6 +35,103 @@ _SUMMARY_SOURCE_KEY = (
     ("loop_side_effect_profile", "pure", False, False, False, False, False, False, False, False, False, 0, 0, (), ()),
     "unit_test",
 )
+
+_COUNTED_STATE_TRANSITION_SOURCE_KEY = (
+    "counted_state_transition_loop_summary",
+    ("expr", "initial_state"),
+    ("expr", "start"),
+    ("expr", "limit"),
+    ("expr", "step"),
+    ("expr", "transition"),
+    ("expr", "state_placeholder"),
+    ("loop_side_effect_profile", "pure", False, False, False, False, False, False, False, False, False, 0, 0, (), ()),
+    ("guard_constraints", ("n_gt_one",)),
+    32,
+    32,
+    True,
+    "unit_test",
+)
+
+_STATE_TRANSITION_HANDOFF_TARGET_KEY = (
+    "prior_state_transition_handoff_target",
+    _COUNTED_STATE_TRANSITION_SOURCE_KEY,
+    (
+        "handoff_blocks",
+        ("pcode_block", "B", ("function_entry", "ram", 0x1000), 3, 0x1008),
+        ("pcode_block", "B", ("function_entry", "ram", 0x1000), 4, 0x100c),
+        ("pcode_block", "B", ("function_entry", "ram", 0x1000), 4, 0x100c),
+        "all_paths_clean_to_phi_predecessor",
+    ),
+    (
+        "value_preserving_flow",
+        ("varnode", "prior_output"),
+        ("varnode", "current_acc_init"),
+        (
+            (
+                "edge",
+                "COPY",
+                ("varnode", "prior_output"),
+                ("varnode", "current_acc_init"),
+                32,
+                32,
+                (
+                    "edge_location",
+                    ("pcode_op", "B", 0x100c, 9, 0),
+                    ("pcode_block", "B", ("function_entry", "ram", 0x1000), 4, 0x100c),
+                ),
+            ),
+        ),
+    ),
+    ("guard_handoff_proof", "identical_guard_domain", ("guard", "prior_entry"), ("guard", "prior_entry"), "proved", ("guard_constraints", ("n_gt_one",))),
+    ("loop_identity", ("expr", "start"), ("expr", "limit"), 1, ("guard", "continue"), ("guard", "entry"), True, "bv_modular"),
+    ("loop_side_effect_profile", "pure", False, False, False, False, False, False, False, False, False, 0, 0, (), ()),
+    ("handoff_widths", 32, 32, 32, "same_width"),
+)
+
+_STATE_TRANSITION_HANDOFF_PROOF_ID = (
+    "proof_obligation_id",
+    "prior_state_transition_handoff",
+    _STATE_TRANSITION_HANDOFF_TARGET_KEY,
+)
+
+_STATE_TRANSITION_HANDOFF_PROOF_KEY = (
+    "prior_state_transition_handoff_proof_ref",
+    _STATE_TRANSITION_HANDOFF_PROOF_ID,
+    _STATE_TRANSITION_HANDOFF_TARGET_KEY,
+)
+
+_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE = {
+    "object_derived": True,
+    "status": "complete",
+    "reason_id": "prior_state_transition_handoff",
+    "recovery_proof_kind": "loop_recurrence_proof",
+    "proof_stage": "prior_state_transition_handoff",
+    "evidence_kind": "value_preserving_handoff",
+    "object_target_key": _STATE_TRANSITION_HANDOFF_TARGET_KEY,
+    "proof_obligation_id": _STATE_TRANSITION_HANDOFF_PROOF_ID,
+    "proof_source": "unit_test",
+    "proof_content": {
+        "object_derived": True,
+        "object_target_key": _STATE_TRANSITION_HANDOFF_TARGET_KEY,
+        "handoff_status": "proved",
+        "target_summary_key": _COUNTED_STATE_TRANSITION_SOURCE_KEY,
+        "handoff_blocks": _STATE_TRANSITION_HANDOFF_TARGET_KEY[2],
+        "value_flow": _STATE_TRANSITION_HANDOFF_TARGET_KEY[3],
+        "guard_handoff": _STATE_TRANSITION_HANDOFF_TARGET_KEY[4],
+        "loop_identity": _STATE_TRANSITION_HANDOFF_TARGET_KEY[5],
+        "side_effect_profile": _STATE_TRANSITION_HANDOFF_TARGET_KEY[6],
+        "widths": _STATE_TRANSITION_HANDOFF_TARGET_KEY[7],
+        "checks": (
+            ("phi_predecessor_edge", "proved"),
+            ("clean_handoff_paths", "proved"),
+            ("value_preserving_flow", "proved"),
+            ("guard_handoff", "proved"),
+            ("loop_identity", "proved"),
+            ("widths", "proved"),
+            ("side_effects", "proved"),
+        ),
+    },
+}
 
 _SUMMARY_TRANSITION_KEY = (
     "counted_loop_transition_evidence",
@@ -630,6 +728,545 @@ def test_summary_candidate_accepts_changed_accumulator_base_with_complete_prior_
         "exact",
         "summary_derived",
     ]
+
+
+def test_summary_candidate_rejects_changed_accumulator_base_with_raw_state_transition_summary_key():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    raw_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _COUNTED_STATE_TRANSITION_SOURCE_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = raw_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_accepts_changed_accumulator_base_with_completed_state_transition_handoff_proof():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    n = _n()
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.blockers == ()
+    assert result.coverage_complete is True
+    assert [ret.return_kind for ret in result.accepted_returns] == [
+        "exact",
+        "exact",
+        "summary_derived",
+    ]
+
+
+def test_summary_candidate_rejects_completed_state_transition_handoff_when_completed_proofs_disabled():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    n = _n()
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+        enable_completed_recovery_proofs=False,
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_state_transition_handoff_recorder_respects_completed_proof_disable_flag():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    summarizer = StructuralRecurrenceSummarizer(
+        tracer=None,
+        enable_completed_recovery_proofs=False,
+    )
+
+    recorded = summarizer._record_completed_prior_state_transition_handoff_proof(
+        analysis,
+        proof_obligation_id=_STATE_TRANSITION_HANDOFF_PROOF_ID,
+        object_target_key=_STATE_TRANSITION_HANDOFF_TARGET_KEY,
+    )
+
+    assert recorded is False
+    assert analysis.completed_recovery_proof_evidence == ()
+
+
+def test_summary_candidate_rejects_state_transition_handoff_ref_without_completed_evidence():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_ref_with_mismatched_proof_id_target():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    n = _n()
+    alternate_target_key = tuple(
+        ("guard_handoff_proof", "identical_guard_domain", ("guard", "prior_entry_alt"), ("guard", "prior_entry_alt"), "proved", ("guard_constraints", ("n_gt_one",)))
+        if isinstance(part, tuple) and part[:1] == ("guard_handoff_proof",)
+        else part
+        for part in _STATE_TRANSITION_HANDOFF_TARGET_KEY
+    )
+    mismatched_proof_key = (
+        "prior_state_transition_handoff_proof_ref",
+        _STATE_TRANSITION_HANDOFF_PROOF_ID,
+        alternate_target_key,
+    )
+    mismatched_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            mismatched_proof_key,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = mismatched_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_evidence_with_mismatched_proof_id_target():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    alternate_target_key = tuple(
+        ("guard_handoff_proof", "identical_guard_domain", ("guard", "prior_entry_alt"), ("guard", "prior_entry_alt"), "proved", ("guard_constraints", ("n_gt_one",)))
+        if isinstance(part, tuple) and part[:1] == ("guard_handoff_proof",)
+        else part
+        for part in _STATE_TRANSITION_HANDOFF_TARGET_KEY
+    )
+    alternate_content = dict(_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE["proof_content"])
+    alternate_content.update(
+        {
+            "object_target_key": alternate_target_key,
+            "guard_handoff": alternate_target_key[4],
+        }
+    )
+    analysis.completed_recovery_proof_evidence = ({
+        **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
+        "object_target_key": alternate_target_key,
+        "proof_obligation_id": _STATE_TRANSITION_HANDOFF_PROOF_ID,
+        "proof_content": alternate_content,
+    },)
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_evidence_with_missing_proof_content():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    analysis.completed_recovery_proof_evidence = ({
+        **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
+        "proof_content": {
+            "object_derived": True,
+            "object_target_key": _STATE_TRANSITION_HANDOFF_TARGET_KEY,
+            "handoff_status": "proved",
+        },
+    },)
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_evidence_with_content_mismatch():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    bad_content = dict(_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE["proof_content"])
+    bad_content["value_flow"] = (
+        "value_preserving_flow",
+        ("varnode", "different_prior_output"),
+        ("varnode", "current_acc_init"),
+        (
+            (
+                "edge",
+                "COPY",
+                ("varnode", "different_prior_output"),
+                ("varnode", "current_acc_init"),
+                32,
+                32,
+                (
+                    "edge_location",
+                    ("pcode_op", "B", 0x100c, 9, 0),
+                    ("pcode_block", "B", ("function_entry", "ram", 0x1000), 4, 0x100c),
+                ),
+            ),
+        ),
+    )
+    analysis.completed_recovery_proof_evidence = ({
+        **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
+        "proof_content": bad_content,
+    },)
+    proved_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            _STATE_TRANSITION_HANDOFF_PROOF_KEY,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = proved_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_edge_outside_handoff_path():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    outside_flow = (
+        "value_preserving_flow",
+        ("varnode", "prior_output"),
+        ("varnode", "current_acc_init"),
+        (
+            (
+                "edge",
+                "COPY",
+                ("varnode", "prior_output"),
+                ("varnode", "current_acc_init"),
+                32,
+                32,
+                (
+                    "edge_location",
+                    ("pcode_op", "B", 0x2000, 9, 0),
+                    ("pcode_block", "B", ("function_entry", "ram", 0x1000), 9, 0x2000),
+                ),
+            ),
+        ),
+    )
+    outside_target_key = tuple(
+        outside_flow
+        if isinstance(part, tuple) and part[:1] == ("value_preserving_flow",)
+        else part
+        for part in _STATE_TRANSITION_HANDOFF_TARGET_KEY
+    )
+    outside_proof_id = ("proof_obligation_id", "prior_state_transition_handoff", outside_target_key)
+    outside_content = dict(_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE["proof_content"])
+    outside_content.update(
+        {
+            "object_target_key": outside_target_key,
+            "value_flow": outside_flow,
+        }
+    )
+    analysis.completed_recovery_proof_evidence = ({
+        **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
+        "object_target_key": outside_target_key,
+        "proof_obligation_id": outside_proof_id,
+        "proof_content": outside_content,
+    },)
+    outside_proof_key = (
+        "prior_state_transition_handoff_proof_ref",
+        outside_proof_id,
+        outside_target_key,
+    )
+    outside_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            outside_proof_key,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = outside_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_proof_with_run_specific_identity():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    weak_flow = (
+        "value_preserving_flow",
+        ("varnode_id", 12345),
+        ("varnode", "current_acc_init"),
+        (
+            (
+                "edge",
+                "COPY",
+                ("varnode_id", 12345),
+                ("varnode", "current_acc_init"),
+                32,
+                32,
+                (
+                    "edge_location",
+                    ("pcode_op", "B", 0x100c, 9, 0),
+                    ("pcode_block", "B", ("function_entry", "ram", 0x1000), 4, 0x100c),
+                ),
+            ),
+        ),
+    )
+    weak_target_key = tuple(
+        weak_flow
+        if isinstance(part, tuple) and part[:1] == ("value_preserving_flow",)
+        else part
+        for part in _STATE_TRANSITION_HANDOFF_TARGET_KEY
+    )
+    weak_proof_key = (
+        "prior_state_transition_handoff_proof_ref",
+        ("proof_obligation_id", "prior_state_transition_handoff", weak_target_key),
+        weak_target_key,
+    )
+    weak_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            weak_proof_key,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = weak_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:unstable_transition_evidence" in result.blockers
+
+
+def test_summary_candidate_rejects_state_transition_handoff_without_guard_implication_proof():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    weak_guard_target_key = tuple(
+        ("guard_handoff_proof", "smt_implication", ("guard", "prior_exit"), ("guard", "current_entry"), "unknown", ("guard_constraints", ("n_gt_one",)))
+        if isinstance(part, tuple) and part[:1] == ("guard_handoff_proof",)
+        else part
+        for part in _STATE_TRANSITION_HANDOFF_TARGET_KEY
+    )
+    weak_proof_id = ("proof_obligation_id", "prior_state_transition_handoff", weak_guard_target_key)
+    weak_proof_key = (
+        "prior_state_transition_handoff_proof_ref",
+        weak_proof_id,
+        weak_guard_target_key,
+    )
+    analysis.completed_recovery_proof_evidence = ({
+        **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
+        "object_target_key": weak_guard_target_key,
+        "proof_obligation_id": weak_proof_id,
+        "proof_content": {
+            "object_derived": True,
+            "object_target_key": weak_guard_target_key,
+            "handoff_status": "unproved",
+        },
+    },)
+    weak_prior_transition_key = tuple(
+        (
+            "accumulator_base",
+            ("expr", "init"),
+            ("expr", "loop_base_from_prior_state_transition"),
+            weak_proof_key,
+        )
+        if isinstance(part, tuple) and part[:1] == ("accumulator_base",)
+        else part
+        for part in _SUMMARY_TRANSITION_KEY
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+    summary_return.summary_transition_evidence_key = weak_prior_transition_key
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
 
 
 def test_summary_candidate_rejects_prior_dependency_with_empty_guard_constraints():

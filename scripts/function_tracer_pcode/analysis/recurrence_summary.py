@@ -10,9 +10,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
     Condition,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
@@ -125,6 +127,15 @@ class CountedLoopUpdateCase:
 
 
 @dataclass(frozen=True)
+class CountedStateTransitionLoopModel:
+    induction: CountedLoopInduction
+    accumulator: CountedLoopAccumulator
+    guard: CountedLoopGuard
+    transition_cases: Tuple[Tuple[Tuple[Condition, ...], Expression], ...]
+    side_effect_profile: LoopSideEffectProfileRef
+
+
+@dataclass(frozen=True)
 class StateTransitionLoopModel:
     header_block: object
     body_block: object
@@ -195,9 +206,16 @@ class StructuralRecurrenceSummarizer:
 
     _SIGNED_GT_OPS = {"INT_SLESS", "INT_SLESSEQUAL"}
 
-    def __init__(self, tracer, debug: bool = False):
+    def __init__(
+        self,
+        tracer,
+        debug: bool = False,
+        *,
+        enable_completed_recovery_proofs: bool = True,
+    ):
         self.tracer = tracer
         self.debug = debug
+        self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
 
     def has_summary_candidate(self, function, high_function, analysis) -> bool:
         if function is None or high_function is None or analysis is None:
@@ -2033,7 +2051,7 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined counted scalar loop summary: loop body contains calls or escaping control flow")
             return None
         entry_guard_expr = self._substitute_exact_expression(
-            guard.condition_expr,
+            guard.entry_condition_expr or guard.condition_expr,
             induction.placeholder,
             start_expr,
         )
@@ -2070,6 +2088,17 @@ class StructuralRecurrenceSummarizer:
             accumulator.init_expr,
             continue_conditions,
         )
+        prior_state_value = self._prior_counted_state_transition_base_value(
+            high_function=high_function,
+            analysis=analysis,
+            current_induction=induction,
+            current_accumulator=accumulator,
+            current_guard=guard,
+            continue_conditions=continue_conditions,
+            result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
+        )
+        if prior_state_value is not None:
+            loop_base_expr = prior_state_value
         if self._expression_contains_executable_address_constant(
             base_return_expr,
             function_body_ranges=function_body_ranges,
@@ -2224,6 +2253,9 @@ class StructuralRecurrenceSummarizer:
 
     def _summary_value_source_key(self, value: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
         runtime_ref = getattr(value, "runtime_ref", None)
+        handoff_proof_key = getattr(runtime_ref, "handoff_proof_key", None)
+        if handoff_proof_key is not None:
+            return handoff_proof_key
         stable_key = getattr(runtime_ref, "stable_key", None)
         if callable(stable_key):
             try:
@@ -2322,7 +2354,10 @@ class StructuralRecurrenceSummarizer:
             )
             if any(ref is None for ref in refs):
                 return None
-            case_keys = tuple(case.stable_key() for case in loop_cases or ())
+            case_keys = tuple(
+                self._sanitize_summary_evidence_key(case.stable_key())
+                for case in loop_cases or ()
+            )
             if not case_keys or any(key is None for key in case_keys):
                 return None
             update_keys = tuple(
@@ -2385,6 +2420,25 @@ class StructuralRecurrenceSummarizer:
                 except Exception:
                     return ("guard_constraints", "unavailable", len(guards))
             return ("guard_constraints", tuple(sorted(keys, key=repr)))
+
+    def _sanitize_summary_evidence_key(self, value: Any) -> Any:
+        if value is None:
+            return ("none",)
+        if isinstance(value, tuple):
+            return tuple(self._sanitize_summary_evidence_key(item) for item in value)
+        if isinstance(value, list):
+            return tuple(self._sanitize_summary_evidence_key(item) for item in value)
+        if isinstance(value, dict):
+            return tuple(
+                sorted(
+                    (
+                        self._sanitize_summary_evidence_key(key),
+                        self._sanitize_summary_evidence_key(item),
+                    )
+                    for key, item in value.items()
+                )
+            )
+        return value
 
     def _counted_loop_summary_source_key_fallback(self, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
         if runtime_ref is None or type(runtime_ref).__name__ != "CountedLoopSummaryRef":
@@ -2636,6 +2690,61 @@ class StructuralRecurrenceSummarizer:
             opcode=COUNTED_LOOP_SUM_OPCODE,
         )
         intrinsic.size = max(1, int(result_size or 0))
+        return intrinsic
+
+    def _build_counted_state_transition_value(
+        self,
+        *,
+        initial_state: Expression,
+        start_expr: Expression,
+        limit_expr: Expression,
+        induction_step: int,
+        transition_cases: Sequence[Tuple[Tuple[Condition, ...], Expression]],
+        state_placeholder: Expression,
+        side_effect_profile: LoopSideEffectProfileRef,
+        guard_constraints: Sequence[Condition],
+        result_size: int,
+        signed_loop: bool,
+        handoff_proof_key: Optional[Tuple[Any, ...]] = None,
+    ) -> Optional[Expression]:
+        if induction_step == 0 or not transition_cases:
+            return None
+        if any(self._expression_is_unresolved(expr) for expr in (initial_state, start_expr, limit_expr)):
+            return None
+        case_key = tuple(
+            (
+                _runtime_conditions_signature(tuple(conditions or ())),
+                _runtime_expression_signature(transition_expr),
+            )
+            for conditions, transition_expr in transition_cases
+        )
+        step_expr = Expression.constant(
+            int(induction_step),
+            size=max(1, int(getattr(start_expr, "size", 0) or getattr(limit_expr, "size", 0) or 4)),
+        )
+        runtime_ref = CountedStateTransitionLoopSummaryRef(
+            initial_state=initial_state,
+            start_expr=start_expr,
+            limit_expr=limit_expr,
+            step_expr=step_expr,
+            transition_expr=transition_cases[0][1],
+            state_placeholder=state_placeholder,
+            transition_cases=case_key,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=tuple(guard_constraints or ()),
+            state_size=max(1, int(getattr(state_placeholder, "size", 0) or getattr(initial_state, "size", 0) or 4)),
+            result_size=max(1, int(result_size or getattr(initial_state, "size", 0) or 4)),
+            signed_loop=bool(signed_loop),
+            handoff_proof_key=handoff_proof_key,
+        )
+        intrinsic = Expression.intrinsic(
+            "COUNTED_STATE_TRANSITION_VALUE",
+            [initial_state, start_expr, limit_expr],
+            size=max(1, int(result_size or getattr(initial_state, "size", 0) or 4)),
+            runtime_ref=runtime_ref,
+            opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+        )
+        intrinsic.size = max(1, int(result_size or getattr(initial_state, "size", 0) or 4))
         return intrinsic
 
     def _canonicalize_zero_value_under_conditions(
@@ -3626,6 +3735,722 @@ class StructuralRecurrenceSummarizer:
 
         return best_model
 
+    def _extract_counted_state_transition_loop_models(
+        self,
+        high_function,
+        analysis,
+    ) -> Tuple[CountedStateTransitionLoopModel, ...]:
+        blocks = list(self._iter_basic_blocks(high_function))
+        if not blocks:
+            return ()
+        models: List[CountedStateTransitionLoopModel] = []
+        function_body_ranges = self._function_body_address_ranges(high_function, analysis)
+        for header in blocks:
+            cbranch = self._find_cbranch_op(header)
+            if cbranch is None:
+                continue
+            phi_ops = [
+                op for op in self._iter_block_ops(header)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+            ]
+            if len(phi_ops) < 2:
+                continue
+            induction_candidates = [
+                info for info in (self._match_counted_loop_induction(phi_op) for phi_op in phi_ops)
+                if info is not None
+            ]
+            for induction in induction_candidates:
+                for guard in self._candidate_counted_loop_guards(header, cbranch, induction):
+                    loop_body_blocks = self._collect_loop_body_blocks(header_block=header, guard=guard)
+                    loop_block_guard_info = self._loop_block_guard_effect_info(
+                        header_block=header,
+                        guard=guard,
+                        loop_blocks=loop_body_blocks,
+                    )
+                    ignored_branch_ops = [
+                        self._find_cbranch_op(block)
+                        for block in (header, guard.latch_block)
+                        if block is not None
+                    ]
+                    side_effect_profile = self._build_loop_side_effect_profile(
+                        analysis=analysis,
+                        loop_blocks=loop_body_blocks,
+                        ignored_branch_ops=ignored_branch_ops,
+                        block_guard_info=loop_block_guard_info,
+                    )
+                    if side_effect_profile.memory_writes or side_effect_profile.calls or side_effect_profile.escapes:
+                        continue
+                    for accumulator in self._match_counted_loop_accumulators(
+                        phi_ops,
+                        induction,
+                        guard.body_block,
+                        function_body_ranges=function_body_ranges,
+                    ):
+                        transition_cases = self._extract_counted_state_transition_cases(
+                            accumulator,
+                            induction,
+                            guard,
+                        )
+                        if not transition_cases:
+                            continue
+                        models.append(
+                            CountedStateTransitionLoopModel(
+                                induction=induction,
+                                accumulator=accumulator,
+                                guard=guard,
+                                transition_cases=transition_cases,
+                                side_effect_profile=side_effect_profile,
+                            )
+                        )
+        models.sort(key=lambda model: self._counted_loop_accumulator_priority(model.accumulator), reverse=True)
+        return tuple(models)
+
+    def _extract_counted_state_transition_cases(
+        self,
+        accumulator: CountedLoopAccumulator,
+        induction: CountedLoopInduction,
+        guard: CountedLoopGuard,
+    ) -> Tuple[Tuple[Tuple[Condition, ...], Expression], ...]:
+        header_block = getattr(induction.phi_op, "getParent", lambda: None)()
+        placeholders = {induction.phi_output: induction.placeholder}
+        for output, replacement in zip(accumulator.member_outputs, accumulator.member_placeholders):
+            placeholders[output] = replacement
+        if not accumulator.member_outputs and accumulator.phi_output is not None:
+            placeholders[accumulator.phi_output] = accumulator.placeholder
+
+        raw_cases: List[Tuple[List[Condition], Expression]] = []
+        if accumulator.phi_op is None:
+            return ()
+        parent_block = getattr(accumulator.phi_op, "getParent", lambda: None)()
+        in_size = int(getattr(parent_block, "getInSize", lambda: 0)() or 0) if parent_block is not None else 0
+        for backedge_index in self._accumulator_backedge_indices(accumulator):
+            backedge_varnode = accumulator.phi_op.getInput(backedge_index)
+            expr = self._build_pcode_expression(backedge_varnode, placeholders=placeholders)
+            if expr is None or self._expression_is_unresolved(expr):
+                continue
+            target_block = None
+            def_op = getattr(backedge_varnode, "getDef", lambda: None)()
+            if parent_block is not None and backedge_index < in_size:
+                target_block = parent_block.getIn(backedge_index)
+            if target_block is None:
+                target_block = getattr(def_op, "getParent", lambda: None)() if def_op is not None else guard.body_block
+            for conditions in self._enumerate_paths_with_conditions(
+                start_block=guard.body_block,
+                target_block=target_block,
+                header_block=header_block,
+                placeholders=placeholders,
+                stop_block=guard.exit_block,
+            ):
+                raw_cases.append((conditions, expr))
+        cases: List[Tuple[Tuple[Condition, ...], Expression]] = []
+        seen = set()
+        for conditions, update_expr in raw_cases:
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(list(conditions or []))
+            if ConditionSimplifier.object_centric_is_contradiction(simplified):
+                continue
+            reduced_update = _reduce_expression_under_conditions(update_expr, simplified) or update_expr
+            if not self._expression_mentions_placeholder(reduced_update, accumulator.placeholder):
+                continue
+            key = (
+                _runtime_conditions_signature(simplified),
+                _runtime_expression_signature(reduced_update),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            cases.append((tuple(simplified), self._canonicalize_expression(reduced_update)))
+        return tuple(cases)
+
+    def _prior_counted_state_transition_base_value(
+        self,
+        *,
+        high_function,
+        analysis,
+        current_induction: CountedLoopInduction,
+        current_accumulator: CountedLoopAccumulator,
+        current_guard: CountedLoopGuard,
+        continue_conditions: Sequence[Condition],
+        result_size: int,
+    ) -> Optional[Expression]:
+        current_header = getattr(current_induction.phi_op, "getParent", lambda: None)()
+        if current_header is None or current_accumulator.phi_op is None:
+            return None
+        current_init_index = self._accumulator_init_index(current_accumulator, current_induction)
+        try:
+            current_init_varnode = current_accumulator.phi_op.getInput(current_init_index)
+        except Exception:
+            return None
+        current_init_predecessor = self._phi_input_predecessor_block(
+            current_accumulator.phi_op,
+            current_init_index,
+        )
+        if current_init_predecessor is None:
+            return None
+
+        candidates = self._extract_counted_state_transition_loop_models(high_function, analysis)
+        current_header_key = self._block_key(current_header)
+        for model in candidates:
+            prior_induction = model.induction
+            prior_accumulator = model.accumulator
+            prior_guard = model.guard
+            prior_header = getattr(prior_induction.phi_op, "getParent", lambda: None)()
+            if prior_header is None or self._block_key(prior_header) == current_header_key:
+                continue
+            if not self._can_reach_block(prior_guard.exit_block, current_header):
+                continue
+            loop_identity_key = self._counted_loop_identity_match_key(
+                prior_induction,
+                prior_guard,
+                current_induction,
+                current_guard,
+                result_size=result_size,
+            )
+            if loop_identity_key is None:
+                continue
+            value_flow_key = self._prior_state_transition_value_flow_key(
+                prior_accumulator,
+                current_init_varnode,
+            )
+            if value_flow_key is None:
+                continue
+            handoff_blocks_key = self._clean_edge_specific_handoff_blocks_key(
+                prior_guard.exit_block,
+                current_init_predecessor,
+                current_header,
+            )
+            if handoff_blocks_key is None:
+                continue
+            summary_value = self._build_counted_state_transition_value(
+                initial_state=prior_accumulator.init_expr,
+                start_expr=prior_induction.init_expr,
+                limit_expr=prior_guard.bound_expr,
+                induction_step=prior_induction.step,
+                transition_cases=model.transition_cases,
+                state_placeholder=prior_accumulator.placeholder,
+                side_effect_profile=model.side_effect_profile,
+                guard_constraints=continue_conditions,
+                result_size=max(1, int(result_size or getattr(prior_accumulator.placeholder, "size", 0) or 4)),
+                signed_loop=prior_induction.signed_guard or prior_guard.signed_comparison,
+            )
+            summary_key = self._runtime_ref_stable_key(summary_value)
+            if summary_key is None:
+                continue
+            guard_handoff_key = self._guard_handoff_key(
+                prior_guard=prior_guard,
+                current_guard=current_guard,
+                continue_conditions=continue_conditions,
+            )
+            if guard_handoff_key is None:
+                continue
+            side_effect_key = model.side_effect_profile.stable_key()
+            if side_effect_key is None:
+                continue
+            widths_key = self._handoff_widths_key(
+                prior_accumulator=prior_accumulator,
+                current_init_varnode=current_init_varnode,
+                result_size=result_size,
+                value_flow_key=value_flow_key,
+            )
+            if widths_key is None:
+                continue
+            proof_target_key = (
+                "prior_state_transition_handoff_target",
+                summary_key,
+                handoff_blocks_key,
+                value_flow_key,
+                guard_handoff_key,
+                loop_identity_key,
+                side_effect_key,
+                widths_key,
+            )
+            proof_obligation_id = (
+                "proof_obligation_id",
+                "prior_state_transition_handoff",
+                proof_target_key,
+            )
+            if not self._record_completed_prior_state_transition_handoff_proof(
+                analysis,
+                proof_obligation_id=proof_obligation_id,
+                object_target_key=proof_target_key,
+            ):
+                continue
+            proof_ref_key = (
+                "prior_state_transition_handoff_proof_ref",
+                proof_obligation_id,
+                proof_target_key,
+            )
+            return self._build_counted_state_transition_value(
+                initial_state=prior_accumulator.init_expr,
+                start_expr=prior_induction.init_expr,
+                limit_expr=prior_guard.bound_expr,
+                induction_step=prior_induction.step,
+                transition_cases=model.transition_cases,
+                state_placeholder=prior_accumulator.placeholder,
+                side_effect_profile=model.side_effect_profile,
+                guard_constraints=continue_conditions,
+                result_size=max(1, int(result_size or getattr(prior_accumulator.placeholder, "size", 0) or 4)),
+                signed_loop=prior_induction.signed_guard or prior_guard.signed_comparison,
+                handoff_proof_key=proof_ref_key,
+            )
+        return None
+
+    def _record_completed_prior_state_transition_handoff_proof(
+        self,
+        analysis,
+        *,
+        proof_obligation_id: Tuple[Any, ...],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not self.enable_completed_recovery_proofs:
+            return False
+        if analysis is None:
+            return False
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, dict)
+        ]
+        existing_ids = {
+            item.get("proof_obligation_id")
+            for item in records
+            if isinstance(item.get("proof_obligation_id"), tuple)
+        }
+        if proof_obligation_id in existing_ids:
+            return True
+        proof_content = self._prior_state_transition_handoff_proof_content(object_target_key)
+        if proof_content is None:
+            return False
+        records.append(
+            {
+                "object_derived": True,
+                "status": "complete",
+                "reason_id": "prior_state_transition_handoff",
+                "recovery_proof_kind": "loop_recurrence_proof",
+                "proof_stage": "prior_state_transition_handoff",
+                "evidence_kind": "value_preserving_handoff",
+                "object_target_key": object_target_key,
+                "proof_obligation_id": proof_obligation_id,
+                "proof_source": "object_level_edge_specific_handoff",
+                "proof_content": proof_content,
+            }
+        )
+        analysis.completed_recovery_proof_evidence = tuple(records)
+        return True
+
+    def _prior_state_transition_handoff_proof_content(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(object_target_key, tuple) or len(object_target_key) != 8:
+            return None
+        (
+            tag,
+            target_summary_key,
+            handoff_blocks,
+            value_flow,
+            guard_handoff,
+            loop_identity,
+            side_effect_key,
+            widths,
+        ) = object_target_key
+        if tag != "prior_state_transition_handoff_target":
+            return None
+        return {
+            "object_derived": True,
+            "object_target_key": object_target_key,
+            "handoff_status": "proved",
+            "target_summary_key": target_summary_key,
+            "handoff_blocks": handoff_blocks,
+            "value_flow": value_flow,
+            "guard_handoff": guard_handoff,
+            "loop_identity": loop_identity,
+            "side_effect_profile": side_effect_key,
+            "widths": widths,
+            "checks": (
+                ("phi_predecessor_edge", "proved"),
+                ("clean_handoff_paths", "proved"),
+                ("value_preserving_flow", "proved"),
+                ("guard_handoff", "proved"),
+                ("loop_identity", "proved"),
+                ("widths", "proved"),
+                ("side_effects", "proved"),
+            ),
+        }
+
+    def _runtime_ref_stable_key(self, value: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
+        runtime_ref = getattr(value, "runtime_ref", None)
+        stable_key = getattr(runtime_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+            except Exception:
+                return None
+            return key if isinstance(key, tuple) else ("stable", key)
+        return None
+
+    def _counted_loop_identity_match_key(
+        self,
+        left_induction: CountedLoopInduction,
+        left_guard: CountedLoopGuard,
+        right_induction: CountedLoopInduction,
+        right_guard: CountedLoopGuard,
+        *,
+        result_size: int,
+    ) -> Optional[Tuple[Any, ...]]:
+        if int(left_induction.step) != int(right_induction.step):
+            return None
+        signed_left = bool(left_induction.signed_guard or left_guard.signed_comparison)
+        signed_right = bool(right_induction.signed_guard or right_guard.signed_comparison)
+        if signed_left != signed_right:
+            return None
+        try:
+            if _runtime_expression_signature(left_induction.init_expr) != _runtime_expression_signature(right_induction.init_expr):
+                return None
+            if _runtime_expression_signature(left_guard.bound_expr) != _runtime_expression_signature(right_guard.bound_expr):
+                return None
+            if _runtime_expression_signature(left_guard.condition_expr) != _runtime_expression_signature(right_guard.condition_expr):
+                return None
+            left_entry = left_guard.entry_condition_expr or left_guard.condition_expr
+            right_entry = right_guard.entry_condition_expr or right_guard.condition_expr
+            if _runtime_expression_signature(left_entry) != _runtime_expression_signature(right_entry):
+                return None
+        except Exception:
+            return None
+        left_width = max(1, int(getattr(left_induction.placeholder, "size", 0) or 4))
+        right_width = max(1, int(getattr(right_induction.placeholder, "size", 0) or 4))
+        if left_width != right_width:
+            return None
+        return (
+            "loop_identity",
+            _runtime_expression_signature(left_induction.init_expr),
+            _runtime_expression_signature(left_guard.bound_expr),
+            int(left_induction.step),
+            _runtime_expression_signature(left_guard.condition_expr),
+            _runtime_expression_signature(left_guard.entry_condition_expr or left_guard.condition_expr),
+            signed_left,
+            "bv_modular",
+        )
+
+    def _prior_state_transition_value_flow_key(
+        self,
+        prior_accumulator: CountedLoopAccumulator,
+        current_init_varnode,
+    ) -> Optional[Tuple[Any, ...]]:
+        if current_init_varnode is None:
+            return None
+        starts = [
+            varnode
+            for varnode in (prior_accumulator.update_varnode, prior_accumulator.phi_output)
+            if varnode is not None
+        ]
+        for start in starts:
+            edges = self._value_preserving_varnode_path(start, current_init_varnode)
+            if edges is None:
+                continue
+            source_key = self._value_flow_varnode_key(start)
+            target_key = self._value_flow_varnode_key(current_init_varnode)
+            if source_key is None or target_key is None:
+                continue
+            return (
+                "value_preserving_flow",
+                source_key,
+                target_key,
+                tuple(edges),
+            )
+        return None
+
+    def _value_preserving_varnode_path(
+        self,
+        start_varnode,
+        target_varnode,
+        *,
+        budget: int = 128,
+    ) -> Optional[Tuple[Tuple[Any, ...], ...]]:
+        if start_varnode is None or target_varnode is None:
+            return None
+        if self._same_varnode_object_identity(start_varnode, target_varnode):
+            edge = self._value_preserving_edge_key("identity", start_varnode, target_varnode)
+            return (edge,) if edge is not None else None
+        stack = [(start_varnode, ())]
+        seen = set()
+        exhausted = False
+        while stack:
+            if len(seen) >= budget:
+                exhausted = True
+                break
+            current, path = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            descendants = getattr(current, "getDescendants", lambda: None)()
+            if descendants is None:
+                continue
+            for op in self._iter_descendant_ops(descendants):
+                edge_kind = self._value_preserving_edge_kind(op, current)
+                if edge_kind is None:
+                    continue
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is not None:
+                    edge = self._value_preserving_edge_key(edge_kind, current, output, op=op)
+                    if edge is None:
+                        continue
+                    next_path = path + (edge,)
+                    if self._same_varnode_object_identity(output, target_varnode):
+                        return next_path
+                    stack.append((output, next_path))
+        return None if exhausted else None
+
+    def _iter_descendant_ops(self, descendants) -> Iterable[Any]:
+        try:
+            iterator = iter(descendants)
+        except TypeError:
+            iterator = None
+        if iterator is not None:
+            yield from iterator
+            return
+        while descendants.hasNext():
+            yield descendants.next()
+
+    def _same_varnode_object_identity(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        left_key = self._value_flow_varnode_key(left)
+        right_key = self._value_flow_varnode_key(right)
+        return left_key is not None and right_key is not None and left_key == right_key
+
+    def _value_flow_varnode_key(self, varnode) -> Optional[Tuple[Any, ...]]:
+        key = self._varnode_cache_key(varnode)
+        if not isinstance(key, tuple) or len(key) != 3 or key[0] != "varnode":
+            return None
+        _tag, _address_key, def_key = key
+        if def_key is None:
+            return None
+        return key
+
+    def _value_preserving_edge_kind(self, op, input_varnode) -> Optional[str]:
+        mnemonic = getattr(op, "getMnemonic", lambda: None)()
+        output = getattr(op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+        if self._safe_pcode_input_count(op) < 1:
+            return None
+        try:
+            first_input = op.getInput(0)
+        except Exception:
+            return None
+        if not self._same_varnode_object_identity(first_input, input_varnode):
+            return None
+        if mnemonic == "COPY":
+            return "COPY"
+        if mnemonic == "SUBPIECE":
+            if self._safe_pcode_input_count(op) < 2:
+                return None
+            offset = self._varnode_constant_value(op.getInput(1))
+            if int(offset or 0) == 0 and self._varnode_size_bits(input_varnode) == self._varnode_size_bits(output):
+                return "SUBPIECE_ZERO_SAME_WIDTH"
+            return None
+        if mnemonic in {"INT_ZEXT", "INT_SEXT"}:
+            in_bits = self._varnode_size_bits(input_varnode)
+            out_bits = self._varnode_size_bits(output)
+            if in_bits > 0 and out_bits >= in_bits:
+                return mnemonic
+        return None
+
+    def _value_preserving_edge_key(
+        self,
+        edge_kind: str,
+        source_varnode,
+        target_varnode,
+        *,
+        op=None,
+    ) -> Optional[Tuple[Any, ...]]:
+        source_key = self._value_flow_varnode_key(source_varnode)
+        target_key = self._value_flow_varnode_key(target_varnode)
+        if source_key is None or target_key is None:
+            return None
+        location_key: Tuple[Any, ...]
+        if op is None:
+            location_key = ("edge_location", "identity")
+        else:
+            op_ref = self._make_pcode_op_ref(op)
+            block_ref = self._make_pcode_block_ref(getattr(op, "getParent", lambda: None)())
+            if op_ref is None or block_ref is None:
+                return None
+            location_key = (
+                "edge_location",
+                op_ref.stable_key(),
+                block_ref.stable_key(),
+            )
+        return (
+            "edge",
+            edge_kind,
+            source_key,
+            target_key,
+            self._varnode_size_bits(source_varnode),
+            self._varnode_size_bits(target_varnode),
+            location_key,
+        )
+
+    def _varnode_size_bits(self, varnode) -> int:
+        try:
+            return max(1, int(getattr(varnode, "getSize", lambda: 0)() or 0)) * 8
+        except Exception:
+            return 0
+
+    def _phi_input_predecessor_block(self, phi_op, input_index: int):
+        if phi_op is None:
+            return None
+        parent = getattr(phi_op, "getParent", lambda: None)()
+        if parent is None:
+            return None
+        try:
+            index = int(input_index)
+            in_size = int(getattr(parent, "getInSize", lambda: 0)() or 0)
+            if index < 0 or index >= in_size:
+                return None
+            return parent.getIn(index)
+        except Exception:
+            return None
+
+    def _clean_edge_specific_handoff_blocks_key(
+        self,
+        start_block,
+        predecessor_block,
+        target_block,
+        *,
+        budget: int = 64,
+    ) -> Optional[Tuple[Any, ...]]:
+        if start_block is None or predecessor_block is None or target_block is None:
+            return None
+        start_ref = self._make_pcode_block_ref(start_block)
+        predecessor_ref = self._make_pcode_block_ref(predecessor_block)
+        target_ref = self._make_pcode_block_ref(target_block)
+        if start_ref is None or predecessor_ref is None or target_ref is None:
+            return None
+        target_key = self._block_key(target_block)
+        predecessor_key = self._block_key(predecessor_block)
+        if not any(
+            self._block_key(successor) == target_key
+            for successor in self._collect_block_successors(predecessor_block)
+        ):
+            return None
+        stack = [start_block]
+        seen = set()
+        exhausted = False
+        found_phi_edge = False
+        while stack:
+            if len(seen) >= budget:
+                exhausted = True
+                break
+            block = stack.pop()
+            if block is None:
+                continue
+            block_key = self._block_key(block)
+            if block_key in seen:
+                continue
+            seen.add(block_key)
+            if block_key == target_key:
+                continue
+            for op in self._iter_block_ops(block):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic in {"STORE", "CALL", "CALLIND", "BRANCHIND", "CALLOTHER"}:
+                    return None
+            for successor in self._collect_block_successors(block):
+                successor_key = self._block_key(successor)
+                if successor_key == target_key:
+                    if block_key != predecessor_key:
+                        return None
+                    found_phi_edge = True
+                    continue
+                if successor_key not in seen and self._can_reach_block(successor, target_block):
+                    stack.append(successor)
+        if exhausted or not found_phi_edge:
+            return None
+        return (
+            "handoff_blocks",
+            start_ref.stable_key(),
+            predecessor_ref.stable_key(),
+            target_ref.stable_key(),
+            "all_paths_clean_to_phi_predecessor",
+        )
+
+    def _guard_handoff_key(
+        self,
+        *,
+        prior_guard: CountedLoopGuard,
+        current_guard: CountedLoopGuard,
+        continue_conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        prior_entry = prior_guard.entry_condition_expr or prior_guard.condition_expr
+        current_entry = current_guard.entry_condition_expr or current_guard.condition_expr
+        prior_continue = prior_guard.condition_expr
+        current_continue = current_guard.condition_expr
+        prior_entry_sig = _runtime_expression_signature(prior_entry)
+        current_entry_sig = _runtime_expression_signature(current_entry)
+        prior_continue_sig = _runtime_expression_signature(prior_continue)
+        current_continue_sig = _runtime_expression_signature(current_continue)
+        active_sig = _runtime_conditions_signature(tuple(continue_conditions or ()))
+        if prior_entry_sig == current_entry_sig and prior_continue_sig == current_continue_sig:
+            return (
+                "guard_handoff_proof",
+                "identical_guard_domain",
+                prior_entry_sig,
+                current_entry_sig,
+                "proved",
+                active_sig,
+            )
+        try:
+            not_current_entry = Expression.unary_op("BOOL_NEGATE", current_entry)
+            not_current_entry.size = 1
+            implication_obligation = list(continue_conditions or ()) + [
+                Condition(prior_continue, True),
+                Condition(not_current_entry, False),
+            ]
+            implication_unsat = ConditionSMTOracle.conjunction_is_unsat(implication_obligation)
+        except Exception:
+            return None
+        if implication_unsat is not True:
+            return None
+        return (
+            "guard_handoff_proof",
+            "smt_implication",
+            prior_continue_sig,
+            current_entry_sig,
+            "proved",
+            active_sig,
+        )
+
+    def _handoff_widths_key(
+        self,
+        *,
+        prior_accumulator: CountedLoopAccumulator,
+        current_init_varnode,
+        result_size: int,
+        value_flow_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        source_bits = max(
+            self._varnode_size_bits(prior_accumulator.update_varnode),
+            self._varnode_size_bits(prior_accumulator.phi_output),
+        )
+        target_bits = self._varnode_size_bits(current_init_varnode)
+        return_bits = max(1, int(result_size or 0)) * 8
+        if source_bits <= 0 or target_bits <= 0 or return_bits <= 0:
+            return None
+        conversion = "same_width"
+        edges = value_flow_key[3] if isinstance(value_flow_key, tuple) and len(value_flow_key) == 4 else ()
+        if any(isinstance(edge, tuple) and len(edge) > 1 and edge[1] == "INT_ZEXT" for edge in edges):
+            conversion = "zero_extend"
+        if any(isinstance(edge, tuple) and len(edge) > 1 and edge[1] == "INT_SEXT" for edge in edges):
+            conversion = "sign_extend"
+        if conversion == "same_width" and source_bits != target_bits:
+            return None
+        return ("handoff_widths", source_bits, target_bits, return_bits, conversion)
+
     def _candidate_counted_loop_guards(
         self,
         header_block,
@@ -4041,7 +4866,7 @@ class StructuralRecurrenceSummarizer:
             induction.step,
         )
         if normalized is not None:
-            condition_expr, bound_expr, signed_comparison = normalized
+            condition_expr, entry_condition_expr, bound_expr, signed_comparison = normalized
             return CountedLoopGuard(
                 condition_expr=condition_expr,
                 bound_expr=bound_expr,
@@ -4050,7 +4875,7 @@ class StructuralRecurrenceSummarizer:
                 exit_block=exit_block,
                 signed_comparison=signed_comparison,
                 guard_op=cbranch_op,
-                entry_condition_expr=condition_expr,
+                entry_condition_expr=entry_condition_expr,
             )
         return None
 
@@ -5008,7 +5833,7 @@ class StructuralRecurrenceSummarizer:
         counter_placeholder: Expression,
         body_on_true: bool,
         step: int,
-    ) -> Optional[Tuple[Expression, Expression, bool]]:
+    ) -> Optional[Tuple[Expression, Expression, Expression, bool]]:
         counter_name = counter_placeholder.name or "__loop_iv"
         parsed = self._parse_counter_comparison(raw_expr, counter_name)
         if parsed is None:
@@ -5024,6 +5849,8 @@ class StructuralRecurrenceSummarizer:
                 ">=": "<",
             }.get(relation)
         if step > 0:
+            entry_relation = relation
+            entry_bound_expr = other_expr
             if relation == "<=":
                 other_expr = self._adjust_loop_bound_for_strict_relation(other_expr, +1)
                 relation = "<"
@@ -5032,8 +5859,13 @@ class StructuralRecurrenceSummarizer:
             operator = "INT_SLESS" if signed else "INT_LESS"
             condition_expr = Expression.binary_op(operator, counter_placeholder, other_expr)
             condition_expr.size = 1
-            return condition_expr, other_expr, signed
+            entry_operator = operator if entry_relation == "<" else ("INT_SLESSEQUAL" if signed else "INT_LESSEQUAL")
+            entry_condition_expr = Expression.binary_op(entry_operator, counter_placeholder, entry_bound_expr)
+            entry_condition_expr.size = 1
+            return condition_expr, entry_condition_expr, other_expr, signed
 
+        entry_relation = relation
+        entry_bound_expr = other_expr
         if relation == ">=":
             other_expr = self._adjust_loop_bound_for_strict_relation(other_expr, -1)
             relation = ">"
@@ -5042,7 +5874,10 @@ class StructuralRecurrenceSummarizer:
         operator = "INT_SLESS" if signed else "INT_LESS"
         condition_expr = Expression.binary_op(operator, other_expr, counter_placeholder)
         condition_expr.size = 1
-        return condition_expr, other_expr, signed
+        entry_operator = operator if entry_relation == ">" else ("INT_SLESSEQUAL" if signed else "INT_LESSEQUAL")
+        entry_condition_expr = Expression.binary_op(entry_operator, entry_bound_expr, counter_placeholder)
+        entry_condition_expr.size = 1
+        return condition_expr, entry_condition_expr, other_expr, signed
 
     def _normalize_latch_continue_guard(
         self,

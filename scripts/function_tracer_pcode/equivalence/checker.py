@@ -223,7 +223,11 @@ class EquivalenceChecker:
         
         self._debug_print(f"Getting params via decompile for '{function_name}'")
         
-        analyzer = ReturnAnalyzer(program, debug=self.debug)
+        analyzer = ReturnAnalyzer(
+            program,
+            debug=self.debug,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+        )
         try:
             analysis = analyzer.analyze_function_by_name(function_name, timeout)
             if analysis and analysis.parameters:

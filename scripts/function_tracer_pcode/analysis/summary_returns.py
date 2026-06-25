@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo, SummaryReturnCandidate
 from ..model import ExpressionType
@@ -29,6 +29,7 @@ def accept_summary_return_candidates(
     proposed_returns: Sequence[ReturnInfo],
     *,
     summary_note: str,
+    enable_completed_recovery_proofs: bool = True,
 ) -> SummaryReturnAcceptanceResult:
     """Validate summary-derived returns before exposing them as normal returns.
 
@@ -71,7 +72,11 @@ def accept_summary_return_candidates(
     blockers: List[str] = []
     valid_candidates: Dict[int, SummaryReturnCandidate] = {}
     for candidate in candidates:
-        candidate_blockers = _validate_candidate(candidate, analysis)
+        candidate_blockers = _validate_candidate(
+            candidate,
+            analysis,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        )
         if candidate_blockers:
             blockers.extend(candidate_blockers)
             candidate.validation_blockers = tuple(candidate_blockers)
@@ -192,6 +197,8 @@ def _return_is_exact_seed(ret: ReturnInfo) -> bool:
 def _validate_candidate(
     candidate: SummaryReturnCandidate,
     analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
 ) -> Tuple[str, ...]:
     blockers: List[str] = []
     ret = candidate.return_info
@@ -217,7 +224,11 @@ def _validate_candidate(
         blockers.append("summary_return_candidate_invalid:unstable_transition_evidence")
     elif _key_contains_incomplete_summary_metadata(candidate.transition_evidence_key):
         blockers.append("summary_return_candidate_invalid:transition_evidence_incomplete")
-    elif not _transition_evidence_has_required_parts(candidate.transition_evidence_key):
+    elif not _transition_evidence_has_required_parts(
+        candidate.transition_evidence_key,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    ):
         blockers.append("summary_return_candidate_invalid:transition_evidence_incomplete")
     if _key_contains_incomplete_summary_metadata(candidate.loop_summary_structural_key):
         blockers.append("summary_effect_unmodeled:side_effect_provenance_incomplete")
@@ -442,7 +453,16 @@ def _expression_key(expr: Optional[Expression]) -> Tuple[Any, ...]:
 
 def _key_contains_forbidden_identity(value: Any) -> bool:
     if isinstance(value, tuple):
-        if value and value[0] in {"opaque", "object_id", "opaque_condition", "opaque_expression"}:
+        if value and value[0] in {
+            "opaque",
+            "object_id",
+            "opaque_condition",
+            "opaque_expression",
+            "expression_object",
+            "varnode_id",
+            "block_id",
+            "id",
+        }:
             return True
         return any(_key_contains_forbidden_identity(item) for item in value)
     if isinstance(value, list):
@@ -479,7 +499,12 @@ def _key_contains_incomplete_summary_metadata(value: Any) -> bool:
     return False
 
 
-def _transition_evidence_has_required_parts(value: Any) -> bool:
+def _transition_evidence_has_required_parts(
+    value: Any,
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
     evidence = _unwrap_counted_loop_transition_evidence(value)
     if evidence is None:
         return False
@@ -519,7 +544,11 @@ def _transition_evidence_has_required_parts(value: Any) -> bool:
         return False
     if any(_key_contains_incomplete_summary_metadata(item) for item in accumulator_base[1:]):
         return False
-    if not _accumulator_base_dependency_is_proved(accumulator_base):
+    if not _accumulator_base_dependency_is_proved(
+        accumulator_base,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    ):
         return False
 
     updates = fields["updates"]
@@ -579,7 +608,12 @@ def _tag_has_nonempty_payload(value: Any, *, expected_arity: int) -> bool:
     return not _key_contains_incomplete_summary_metadata(value[1])
 
 
-def _accumulator_base_dependency_is_proved(accumulator_base: Tuple[Any, ...]) -> bool:
+def _accumulator_base_dependency_is_proved(
+    accumulator_base: Tuple[Any, ...],
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
     if len(accumulator_base) != 4:
         return False
     init_key = accumulator_base[1]
@@ -591,7 +625,11 @@ def _accumulator_base_dependency_is_proved(accumulator_base: Tuple[Any, ...]) ->
         return False
     if _key_contains_incomplete_summary_metadata(dependency_key):
         return False
-    return _prior_summary_dependency_key_is_strong(dependency_key)
+    return _prior_summary_dependency_key_is_strong(
+        dependency_key,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    )
 
 
 def _tag_has_scoped_pcode_block_payload(value: Any) -> bool:
@@ -619,7 +657,12 @@ def _is_scoped_pcode_block_key(value: Any) -> bool:
     return not _key_contains_incomplete_summary_metadata(value[3:])
 
 
-def _prior_summary_dependency_key_is_strong(value: Any) -> bool:
+def _prior_summary_dependency_key_is_strong(
+    value: Any,
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
     if not isinstance(value, tuple) or not value:
         return False
     tag = value[0]
@@ -627,7 +670,359 @@ def _prior_summary_dependency_key_is_strong(value: Any) -> bool:
         return _counted_loop_summary_parts_key_is_strong(value)
     if tag == "counted_loop_summary_fallback":
         return _counted_loop_summary_fallback_key_is_strong(value)
+    if tag == "prior_state_transition_handoff_proof_ref":
+        return _prior_state_transition_handoff_proof_ref_is_strong(
+            value,
+            analysis,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        )
     return False
+
+
+def _prior_state_transition_handoff_proof_ref_is_strong(
+    value: Tuple[Any, ...],
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
+    if not enable_completed_recovery_proofs:
+        return False
+    if len(value) != 3:
+        return False
+    if _key_contains_forbidden_identity(value) or _key_contains_incomplete_summary_metadata(value):
+        return False
+    _tag, proof_obligation_id, object_target_key = value
+    if not proof_obligation_id or not _prior_state_transition_handoff_target_key_is_strong(object_target_key):
+        return False
+    if not _prior_state_transition_handoff_proof_id_matches_target(
+        proof_obligation_id,
+        object_target_key,
+    ):
+        return False
+    completed = _completed_prior_state_transition_handoff_proof_ids(analysis)
+    return proof_obligation_id in completed
+
+
+def _prior_state_transition_handoff_target_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 8 or value[0] != "prior_state_transition_handoff_target":
+        return False
+    (
+        _tag,
+        target_summary_key,
+        handoff_blocks,
+        value_flow,
+        guard_handoff,
+        loop_identity,
+        side_effect_key,
+        widths,
+    ) = value
+    if not _counted_state_transition_summary_key_is_strong(target_summary_key):
+        return False
+    if not _handoff_blocks_key_is_strong(handoff_blocks):
+        return False
+    if not _value_preserving_flow_key_is_strong(value_flow):
+        return False
+    if not _guard_handoff_key_is_strong(guard_handoff):
+        return False
+    if not _loop_identity_key_is_strong(loop_identity):
+        return False
+    if not _counted_state_transition_side_effect_profile_key_is_strong(side_effect_key):
+        return False
+    return _handoff_widths_key_is_strong(widths)
+
+
+def _completed_prior_state_transition_handoff_proof_ids(
+    analysis: FunctionReturnAnalysis,
+) -> Tuple[Tuple[Any, ...], ...]:
+    proof_ids: List[Tuple[Any, ...]] = []
+    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+        proof_id = _prior_state_transition_handoff_proof_id_from_evidence(evidence)
+        if proof_id is not None:
+            proof_ids.append(proof_id)
+    return tuple(dict.fromkeys(proof_ids))
+
+
+def _prior_state_transition_handoff_proof_id_from_evidence(evidence: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(evidence, Mapping):
+        return None
+    if not bool(evidence.get("object_derived")):
+        return None
+    if str(evidence.get("status") or "") not in {"complete", "completed", "proven"}:
+        return None
+    if str(evidence.get("proof_stage") or "") != "prior_state_transition_handoff":
+        return None
+    if str(evidence.get("evidence_kind") or "") != "value_preserving_handoff":
+        return None
+    proof_id = _nested_tuple(evidence.get("proof_obligation_id"))
+    object_target_key = _nested_tuple(evidence.get("object_target_key"))
+    if proof_id is None or not _prior_state_transition_handoff_target_key_is_strong(object_target_key):
+        return None
+    if not _prior_state_transition_handoff_proof_id_matches_target(proof_id, object_target_key):
+        return None
+    proof_content = evidence.get("proof_content")
+    if not isinstance(proof_content, Mapping):
+        return None
+    content_target_key = _nested_tuple(proof_content.get("object_target_key"))
+    if content_target_key != object_target_key:
+        return None
+    if str(proof_content.get("handoff_status") or "") != "proved":
+        return None
+    if not bool(proof_content.get("object_derived")):
+        return None
+    if not _prior_state_transition_handoff_proof_content_matches_target(
+        proof_content,
+        object_target_key,
+    ):
+        return None
+    return proof_id
+
+
+def _prior_state_transition_handoff_proof_id_matches_target(
+    proof_id: Any,
+    object_target_key: Any,
+) -> bool:
+    return (
+        isinstance(proof_id, tuple)
+        and len(proof_id) == 3
+        and proof_id[0] == "proof_obligation_id"
+        and proof_id[1] == "prior_state_transition_handoff"
+        and proof_id[2] == object_target_key
+    )
+
+
+def _prior_state_transition_handoff_proof_content_matches_target(
+    proof_content: Mapping[str, Any],
+    object_target_key: Tuple[Any, ...],
+) -> bool:
+    if not _prior_state_transition_handoff_target_key_is_strong(object_target_key):
+        return False
+    (
+        _tag,
+        target_summary_key,
+        handoff_blocks,
+        value_flow,
+        guard_handoff,
+        loop_identity,
+        side_effect_key,
+        widths,
+    ) = object_target_key
+    expected_parts = {
+        "target_summary_key": target_summary_key,
+        "handoff_blocks": handoff_blocks,
+        "value_flow": value_flow,
+        "guard_handoff": guard_handoff,
+        "loop_identity": loop_identity,
+        "side_effect_profile": side_effect_key,
+        "widths": widths,
+    }
+    for field, expected in expected_parts.items():
+        if _nested_tuple(proof_content.get(field)) != expected:
+            return False
+    if not _value_flow_edges_are_bound_to_handoff_blocks(value_flow, handoff_blocks):
+        return False
+    checks = proof_content.get("checks")
+    checks = _nested_tuple(checks)
+    if not isinstance(checks, tuple):
+        return False
+    required_checks = {
+        ("phi_predecessor_edge", "proved"),
+        ("clean_handoff_paths", "proved"),
+        ("value_preserving_flow", "proved"),
+        ("guard_handoff", "proved"),
+        ("loop_identity", "proved"),
+        ("widths", "proved"),
+        ("side_effects", "proved"),
+    }
+    return required_checks.issubset(set(checks))
+
+
+def _value_flow_edges_are_bound_to_handoff_blocks(value_flow: Any, handoff_blocks: Any) -> bool:
+    if not _value_preserving_flow_key_is_strong(value_flow):
+        return False
+    if not _handoff_blocks_key_is_strong(handoff_blocks):
+        return False
+    allowed_blocks = set(handoff_blocks[1:4])
+    for edge in value_flow[3]:
+        location = edge[6]
+        if location == ("edge_location", "identity"):
+            continue
+        if not isinstance(location, tuple) or len(location) != 3 or location[0] != "edge_location":
+            return False
+        block_key = location[2]
+        if block_key not in allowed_blocks:
+            return False
+    return True
+
+
+def _nested_tuple(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return tuple(_nested_tuple(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_nested_tuple(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _nested_tuple(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _counted_state_transition_summary_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 13:
+        return False
+    (
+        tag,
+        init_key,
+        start_key,
+        limit_key,
+        step_key,
+        transition_key,
+        placeholder_key,
+        side_effect_key,
+        guard_keys,
+        state_size,
+        result_size,
+        signed_loop,
+        source,
+    ) = value
+    if tag != "counted_state_transition_loop_summary":
+        return False
+    if _key_contains_forbidden_identity(value) or _key_contains_incomplete_summary_metadata(value):
+        return False
+    return (
+        bool(init_key)
+        and bool(start_key)
+        and bool(limit_key)
+        and bool(step_key)
+        and bool(transition_key)
+        and bool(placeholder_key)
+        and _counted_state_transition_side_effect_profile_key_is_strong(side_effect_key)
+        and _guard_constraints_collection_is_strong(guard_keys)
+        and isinstance(state_size, int)
+        and state_size > 0
+        and isinstance(result_size, int)
+        and result_size > 0
+        and isinstance(signed_loop, bool)
+        and isinstance(source, str)
+        and bool(source)
+    )
+
+
+def _handoff_blocks_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 5 or value[0] != "handoff_blocks":
+        return False
+    if value[4] != "all_paths_clean_to_phi_predecessor":
+        return False
+    return all(_is_scoped_pcode_block_key(item) for item in value[1:4])
+
+
+def _value_preserving_flow_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 4 or value[0] != "value_preserving_flow":
+        return False
+    source_key, target_key, edges = value[1], value[2], value[3]
+    if not source_key or not target_key:
+        return False
+    if not isinstance(edges, tuple) or not edges:
+        return False
+    for edge in edges:
+        if not isinstance(edge, tuple) or len(edge) != 7:
+            return False
+        if edge[0] != "edge" or edge[1] not in {"identity", "COPY", "SUBPIECE_ZERO_SAME_WIDTH", "INT_ZEXT", "INT_SEXT"}:
+            return False
+        if not isinstance(edge[4], int) or not isinstance(edge[5], int):
+            return False
+        location = edge[6]
+        if edge[1] == "identity":
+            if location != ("edge_location", "identity"):
+                return False
+            continue
+        if not isinstance(location, tuple) or len(location) != 3 or location[0] != "edge_location":
+            return False
+        if not _is_scoped_pcode_block_key(location[2]):
+            return False
+    return True
+
+
+def _guard_handoff_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 6 or value[0] != "guard_handoff_proof":
+        return False
+    _tag, proof_kind, prior_guard, current_guard, implication_status, active_conditions = value
+    return (
+        proof_kind in {"smt_implication", "identical_guard_domain"}
+        and bool(prior_guard)
+        and bool(current_guard)
+        and implication_status == "proved"
+        and bool(active_conditions)
+    )
+
+
+def _loop_identity_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 8 or value[0] != "loop_identity":
+        return False
+    _tag, init_key, bound_key, step, guard_key, exit_key, signed_loop, overflow_model = value
+    return (
+        bool(init_key)
+        and bool(bound_key)
+        and isinstance(step, int)
+        and bool(guard_key)
+        and bool(exit_key)
+        and isinstance(signed_loop, bool)
+        and overflow_model == "bv_modular"
+    )
+
+
+def _handoff_widths_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 5 or value[0] != "handoff_widths":
+        return False
+    _tag, source_width, target_width, return_width, conversion = value
+    return (
+        isinstance(source_width, int)
+        and source_width > 0
+        and isinstance(target_width, int)
+        and target_width > 0
+        and isinstance(return_width, int)
+        and return_width > 0
+        and conversion in {"same_width", "zero_extend", "sign_extend"}
+    )
+
+
+def _counted_state_transition_side_effect_profile_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 15:
+        return False
+    if value[0] != "loop_side_effect_profile":
+        return False
+    if value[1] not in {"pure", "pure_conditional"}:
+        return False
+    bool_fields = value[2:11]
+    if len(bool_fields) != 9 or not all(isinstance(item, bool) for item in bool_fields):
+        return False
+    (
+        memory_reads,
+        memory_writes,
+        calls,
+        escapes,
+        _conditional_guards,
+        context_memory_writes,
+        context_calls,
+        context_escapes,
+        _context_conditional_guards,
+    ) = bool_fields
+    if any((memory_reads, memory_writes, calls, escapes, context_memory_writes, context_calls, context_escapes)):
+        return False
+    if not isinstance(value[11], int) or not isinstance(value[12], int):
+        return False
+    if not isinstance(value[13], tuple) or not isinstance(value[14], tuple):
+        return False
+    effect_descriptors = value[13]
+    context_descriptors = value[14]
+    if context_descriptors:
+        return False
+    for descriptor in effect_descriptors:
+        if not isinstance(descriptor, tuple) or len(descriptor) < 2:
+            return False
+        if descriptor[0] != "loop_body_effect" or descriptor[1] != "conditional_guard":
+            return False
+    return True
 
 
 def _counted_loop_summary_parts_key_is_strong(value: Tuple[Any, ...]) -> bool:
