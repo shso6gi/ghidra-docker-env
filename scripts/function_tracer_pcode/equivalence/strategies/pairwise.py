@@ -1680,6 +1680,11 @@ class PairwiseStrategy(CheckStrategy):
             result_size=comparison_result_size,
         )
         if not shortcut_decision.equivalent:
+            if (
+                isinstance(left_ref, ReadonlyReductionRef)
+                or isinstance(right_ref, ReadonlyReductionRef)
+            ) and str(getattr(shortcut_decision, "reason", "") or "").startswith("readonly_contract_"):
+                return False
             if self._case_pair_loop_summaries_solver_equivalent(
                 left_ref,
                 right_ref,
@@ -1725,6 +1730,13 @@ class PairwiseStrategy(CheckStrategy):
         right_summary = getattr(right_ref, "loop_summary", None)
         if left_summary is None or right_summary is None:
             return False
+        for summary in (left_summary, right_summary):
+            requires_effect_proof = getattr(summary, "requires_effect_proof", None)
+            if callable(requires_effect_proof) and requires_effect_proof():
+                return False
+            requires_path_proof = getattr(summary, "requires_path_proof", None)
+            if callable(requires_path_proof) and requires_path_proof():
+                return False
         if self._loop_summary_surface_blocks_solver_equality(left_summary, right_summary):
             return False
         left_term_key = self._loop_term_descriptor_semantic_key(left_summary)
@@ -6337,12 +6349,12 @@ class PairwiseStrategy(CheckStrategy):
         right_case: ReturnCase,
         reason: str,
     ) -> bool:
-        if reason != "loop_summary_guard_mismatch":
-            return False
-        return self._loop_summary_contracts_match_without_guard(
-            left_case.value_expr,
-            right_case.value_expr,
-        )
+        if reason == "loop_summary_guard_mismatch":
+            return self._loop_summary_contracts_match_without_guard(
+                left_case.value_expr,
+                right_case.value_expr,
+            )
+        return False
 
     def _loop_summary_contracts_match_without_guard(
         self,

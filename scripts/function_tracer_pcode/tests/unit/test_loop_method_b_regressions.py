@@ -3370,6 +3370,39 @@ def test_counted_loop_summary_vs_closed_form_near_miss_stays_proof_missing():
     strategy.solver_runner.run_sequential.assert_not_called()
 
 
+def test_counted_loop_summary_vs_closed_form_near_miss_with_total_partition_stays_unknown():
+    counted_value = _counted_loop(_pure_counted_summary_with_guard())
+    off_by_n_closed_form = _triangular_closed_form(inclusive=True)
+    non_positive = _count_gt(0).negate()
+    strategy = _pairwise_strategy()
+    unsat = SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.0)
+    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([unsat]))
+
+    result = strategy.check(
+        _analysis(
+            "barthe_like_counted_summary_total",
+            [
+                ReturnInfo(address="0x7310", value=counted_value, conditions=[_count_gt(0)]),
+                ReturnInfo(address="0x7314", value=Expression.constant(0, size=4), conditions=[non_positive]),
+            ],
+        ),
+        _analysis(
+            "barthe_like_closed_form_near_miss_total",
+            [
+                ReturnInfo(address="0x7320", value=off_by_n_closed_form, conditions=[_count_gt(0)]),
+                ReturnInfo(address="0x7324", value=Expression.constant(0, size=4), conditions=[non_positive]),
+            ],
+        ),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 4
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
+
+
 def test_pure_counted_loop_with_total_return_coverage_can_be_closed_by_method_b():
     left_value = _counted_loop(_pure_counted_summary())
     right_value = _counted_loop(_pure_counted_summary())
