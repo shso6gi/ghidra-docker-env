@@ -272,6 +272,10 @@ class CheckStrategy(ABC):
             )
             if coverage_result.status == "gap":
                 reasons.append(f"{label}:return_coverage_gap")
+                reasons.extend(
+                    f"{label}:{reason_id}"
+                    for reason_id in self._summary_return_candidate_blocker_reason_ids(analysis)
+                )
             elif coverage_result.status == "inconclusive":
                 blocker_reason = coverage_result.reason_id or UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
                 reasons.append(f"{label}:{blocker_reason.value}")
@@ -357,6 +361,46 @@ class CheckStrategy(ABC):
                 if coverage_result.detail:
                     self._debug_print(coverage_result.detail)
         return reasons
+
+    @classmethod
+    def _summary_return_candidate_blocker_reason_ids(
+        cls,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> Tuple[str, ...]:
+        if analysis is None:
+            return ()
+        known = {
+            UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID.value,
+            UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN.value,
+            UnknownReasonId.SUMMARY_EFFECT_UNMODELED.value,
+            UnknownReasonId.SUMMARY_PRECONDITION_INCOMPLETE.value,
+            UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL.value,
+            UnknownReasonId.PHI_CIRCULAR_REPLACEMENT_UNPROVEN.value,
+        }
+        reasons: List[str] = []
+        for candidate in getattr(analysis, "summary_return_candidates", ()) or ():
+            for blocker in getattr(candidate, "validation_blockers", ()) or ():
+                reason_id = cls._summary_return_blocker_reason_id(str(blocker))
+                if reason_id in known:
+                    reasons.append(reason_id)
+        for note in getattr(analysis, "analysis_notes", ()) or ():
+            text = str(note)
+            if not text.startswith("summary_return_blocker:"):
+                continue
+            blocker = text[len("summary_return_blocker:"):]
+            reason_id = cls._summary_return_blocker_reason_id(blocker)
+            if reason_id in known:
+                reasons.append(reason_id)
+        return tuple(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _summary_return_blocker_reason_id(blocker: str) -> str:
+        text = str(blocker or "")
+        if text == "return_coverage_gap:summary_partition_not_total":
+            return UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL.value
+        if text.startswith("return_coverage_gap:summary_partition_not_total:"):
+            return UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL.value
+        return text.split(":", 1)[0]
 
     def _record_completed_return_coverage_proof(
         self,
@@ -2101,6 +2145,16 @@ class CheckStrategy(ABC):
             return UnknownReasonId.RETURN_COVERAGE_GAP
         if reason_kind == "return_coverage_inconclusive":
             return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+        summary_return_reason_ids = {
+            UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID.value: UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
+            UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN.value: UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN,
+            UnknownReasonId.SUMMARY_EFFECT_UNMODELED.value: UnknownReasonId.SUMMARY_EFFECT_UNMODELED,
+            UnknownReasonId.SUMMARY_PRECONDITION_INCOMPLETE.value: UnknownReasonId.SUMMARY_PRECONDITION_INCOMPLETE,
+            UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL.value: UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL,
+            UnknownReasonId.PHI_CIRCULAR_REPLACEMENT_UNPROVEN.value: UnknownReasonId.PHI_CIRCULAR_REPLACEMENT_UNPROVEN,
+        }
+        if reason_kind in summary_return_reason_ids:
+            return summary_return_reason_ids[reason_kind]
         if reason_kind in {"recoverable_partial", "argument_recovery_recoverable_partial"}:
             return UnknownReasonId.RECOVERABLE_PARTIAL
         return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY

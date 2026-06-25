@@ -2842,6 +2842,7 @@ def test_pre_return_counted_loop_summary_requires_single_covered_return(monkeypa
             (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
         ),
     )
+    monkeypatch.setattr(summarizer, "_count_counted_scalar_loop_models", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(summarizer, "_derive_direct_counted_loop_conditions", lambda *_args, **_kwargs: None)
     analysis = create_mock_analysis(
         "branch_for_accumulate",
@@ -2858,6 +2859,15 @@ def test_pre_return_counted_loop_summary_requires_single_covered_return(monkeypa
     )
 
     assert summary is not None
+    monkeypatch.setattr(summarizer, "_count_counted_scalar_loop_models", lambda *_args, **_kwargs: 2)
+    assert summarizer.try_summarize_pre_return_counted_scalar_loop(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([header, ret_block]),
+        analysis,
+        [return_op],
+    ) is None
+
+    monkeypatch.setattr(summarizer, "_count_counted_scalar_loop_models", lambda *_args, **_kwargs: 1)
     extra_ret_block = _FakeCfgBlock(2)
     assert summarizer.try_summarize_pre_return_counted_scalar_loop(
         _FakeFunction("branch_for_accumulate"),
@@ -2865,6 +2875,61 @@ def test_pre_return_counted_loop_summary_requires_single_covered_return(monkeypa
         analysis,
         [return_op],
     ) is None
+
+
+def test_counted_loop_model_count_includes_latch_guard_without_header_cbranch(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    iv_phi_vn = _FakeVarnode("iv_phi")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    iv_phi = _FakePcodeOp("MULTIEQUAL", [_FakeVarnode("iv_init"), _FakeVarnode("iv_next")], iv_phi_vn)
+    acc_phi = _FakePcodeOp("MULTIEQUAL", [_FakeVarnode("acc_init"), _FakeVarnode("acc_next")], acc_phi_vn)
+    header = _FakeCfgBlock(1, ops=[iv_phi, acc_phi])
+    induction = CountedLoopInduction(
+        phi_op=iv_phi,
+        phi_output=iv_phi_vn,
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-1, size=4),
+        signed_guard=True,
+    )
+    accumulator = CountedLoopAccumulator(
+        phi_op=acc_phi,
+        phi_output=acc_phi_vn,
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=Expression.variable("__loop_acc", size=4),
+    )
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+        bound_expr=_param(),
+        continue_on_true=True,
+        body_block=header,
+        exit_block=_FakeCfgBlock(2),
+        signed_comparison=True,
+        latch_block=_FakeCfgBlock(3),
+    )
+
+    monkeypatch.setattr(summarizer, "_find_cbranch_op", lambda block: None)
+    monkeypatch.setattr(summarizer, "_match_counted_loop_induction", lambda phi_op: induction if phi_op is iv_phi else None)
+
+    def fake_guards(candidate_header, cbranch, candidate_induction):
+        assert candidate_header is header
+        assert cbranch is None
+        assert candidate_induction is induction
+        return [guard]
+
+    monkeypatch.setattr(summarizer, "_candidate_counted_loop_guards", fake_guards)
+    monkeypatch.setattr(summarizer, "_match_counted_loop_accumulators", lambda *_args, **_kwargs: [accumulator])
+
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[],
+    )
+
+    assert summarizer._count_counted_scalar_loop_models(_FakeCfgHighFunction([header]), analysis) == 1
 
 
 def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_cfg():

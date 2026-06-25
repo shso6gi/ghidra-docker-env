@@ -41,6 +41,7 @@ from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalize
 from .condition.bitvector import eval_constant_raw
 from .debug import summarize_expression
 from .signedness import SignednessDetector
+from .summary_returns import accept_summary_return_candidates
 from .effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -1179,7 +1180,41 @@ class ReturnAnalyzer:
         if not should_try:
             return None
 
-        return summarizer.try_summarize_function(function, high_function, analysis)
+        summary = summarizer.try_summarize_function(function, high_function, analysis)
+        if summary is None:
+            if self.debug:
+                print("Summary return diagnostic: no_summary_candidate")
+            return None
+        summary_returns, summary_note = summary
+        accepted = accept_summary_return_candidates(
+            analysis,
+            summary_returns,
+            summary_note=summary_note,
+        )
+        analysis.summary_return_candidates = accepted.candidates
+        if accepted.blockers:
+            if self.debug:
+                for candidate in accepted.candidates:
+                    ret = getattr(candidate, "return_info", None)
+                    conditions = [
+                        getattr(cond, "to_string", lambda: repr(cond))()
+                        for cond in (getattr(ret, "conditions", None) or [])
+                    ]
+                    value = getattr(getattr(ret, "value", None), "to_string", lambda: repr(getattr(ret, "value", None)))()
+                    print(
+                        "Summary return candidate rejected/status="
+                        f"{getattr(candidate, 'acceptance_status', None)} "
+                        f"blockers={list(getattr(candidate, 'validation_blockers', ()) or ())} "
+                        f"conditions={conditions} value={value}"
+                    )
+            for blocker in accepted.blockers:
+                note = f"summary_return_blocker:{blocker}"
+                if note not in analysis.analysis_notes:
+                    analysis.analysis_notes.append(note)
+            return None
+        if not accepted.accepted_returns:
+            return None
+        return list(accepted.accepted_returns), summary_note
 
     def _try_pre_return_counted_loop_summary(
         self,
@@ -1226,11 +1261,18 @@ class ReturnAnalyzer:
             return None
 
         summary_returns, summary_note = summary
+        accepted = accept_summary_return_candidates(
+            skeleton,
+            summary_returns,
+            summary_note=summary_note,
+        )
+        if accepted.blockers or not accepted.accepted_returns:
+            return None
         result = FunctionReturnAnalysis(
             function_name=function.getName(),
             entry_point=str(function.getEntryPoint()),
             parameters=list(parameters or []),
-            returns=list(summary_returns),
+            returns=list(accepted.accepted_returns),
             function_ref=current_function_ref,
             analysis_scope_key=analysis_scope_key,
             return_type=return_type,
@@ -1240,6 +1282,7 @@ class ReturnAnalyzer:
             effect_summary=effect_summary,
             program_is_big_endian=self._program_is_big_endian(),
             binary_id=self._binary_id,
+            summary_return_candidates=accepted.candidates,
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -1269,7 +1312,7 @@ class ReturnAnalyzer:
         address = str(getattr(seqnum, "getTarget", lambda: function.getEntryPoint())())
         pcode_time = getattr(seqnum, "getTime", lambda: None)()
         pcode_order = getattr(seqnum, "getOrder", lambda: None)()
-        return self._make_return_info(
+        anchor = self._make_return_info(
             address=address,
             value=Expression.unknown("pre_return_counted_loop_candidate"),
             conditions=[],
@@ -1290,6 +1333,9 @@ class ReturnAnalyzer:
                 ),
             },
         )
+        anchor.return_kind = "summary_anchor"
+        anchor.acceptance_status = "anchor"
+        return anchor
 
     def _effect_summary_allows_pre_return_structural_summary(
         self,

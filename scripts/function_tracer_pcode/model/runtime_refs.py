@@ -787,8 +787,27 @@ class PcodeBlockRef:
 
     block_index: Optional[int] = None
     start_address_offset: Optional[int] = None
+    binary_id: Optional[Any] = None
+    function_entry_space: Optional[str] = None
+    function_entry_offset: Optional[int] = None
 
     def stable_key(self) -> Tuple[Any, ...]:
+        if (
+            self.binary_id is not None
+            and self.function_entry_space is not None
+            and self.function_entry_offset is not None
+        ):
+            return (
+                "pcode_block",
+                self.binary_id,
+                (
+                    "function_entry",
+                    self.function_entry_space,
+                    int(self.function_entry_offset),
+                ),
+                None if self.block_index is None else int(self.block_index),
+                None if self.start_address_offset is None else int(self.start_address_offset),
+            )
         return (
             "pcode_block",
             None if self.block_index is None else int(self.block_index),
@@ -800,6 +819,9 @@ class PcodeBlockRef:
             "kind": "pcode_block",
             "block_index": self.block_index,
             "start_address_offset": self.start_address_offset,
+            "binary_id": self.binary_id,
+            "function_entry_space": self.function_entry_space,
+            "function_entry_offset": self.function_entry_offset,
         }
 
 

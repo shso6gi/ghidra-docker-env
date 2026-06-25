@@ -26,6 +26,12 @@ class UnknownReasonId(str, Enum):
     LOOP_SUMMARY_PROOF_MISSING = "loop_summary_proof_missing"
     RETURN_COVERAGE_GAP = "return_coverage_gap"
     RETURN_COVERAGE_INCONCLUSIVE = "return_coverage_inconclusive"
+    SUMMARY_RETURN_CANDIDATE_INVALID = "summary_return_candidate_invalid"
+    SUMMARY_RETURN_OVERLAP_UNPROVEN = "summary_return_overlap_unproven"
+    SUMMARY_EFFECT_UNMODELED = "summary_effect_unmodeled"
+    SUMMARY_PRECONDITION_INCOMPLETE = "summary_precondition_incomplete"
+    SUMMARY_PARTITION_NOT_TOTAL = "summary_partition_not_total"
+    PHI_CIRCULAR_REPLACEMENT_UNPROVEN = "phi_circular_replacement_unproven"
     EQUIVALENCE_BLOCKING_UNSAFETY = "equivalence_blocking_unsafety"
     SAT_UNSAFETY = "sat_unsafety"
     SAT_COUNTEREXAMPLE_AMBIGUOUS = "sat_counterexample_ambiguous"
@@ -88,6 +94,11 @@ class UnknownRecoveryProofKind(str, Enum):
     STORAGE_BACKED_IDENTITY_PROPAGATION = "storage_backed_identity_propagation"
     PROOF_BACKED_COVERING_CASE = "proof_backed_covering_case"
     GUARD_PARTITION_COMPLETION = "guard_partition_completion"
+    LOOP_SUMMARY_COMPLETION = "loop_summary_completion"
+    RETURN_PARTITION_OVERLAP_PROOF = "return_partition_overlap_proof"
+    EFFECT_SUMMARY_COMPLETION = "effect_summary_completion"
+    PRECONDITION_COMPLETION = "precondition_completion"
+    LOOP_RECURRENCE_PROOF = "loop_recurrence_proof"
     SAT_UNSAFETY_RESOLUTION = "sat_unsafety_resolution"
     SOLVER_RETRY_OR_NORMALIZATION = "solver_retry_or_normalization"
     RETURN_COVERAGE_COMPLETION = "return_coverage_completion"
@@ -426,6 +437,60 @@ def _register_defaults() -> None:
             target_regression="return_coverage_inconclusive",
         ),
         UnknownReasonDefinition.create(
+            UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.LOOP_SUMMARY_COMPLETION,
+            target_regression="summary_return_candidate_invalid",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.RETURN_PARTITION_OVERLAP_PROOF,
+            target_regression="summary_return_overlap_unproven",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.SUMMARY_EFFECT_UNMODELED,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.EFFECT_SUMMARY_COMPLETION,
+            target_regression="summary_effect_unmodeled",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.SUMMARY_PRECONDITION_INCOMPLETE,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.PRECONDITION_COMPLETION,
+            target_regression="summary_precondition_incomplete",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL,
+            UnknownReasonClass.COVERAGE_GAP,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.PRECONDITION_COMPLETION,
+            target_regression="summary_partition_not_total",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.PHI_CIRCULAR_REPLACEMENT_UNPROVEN,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.LOOP_RECURRENCE_PROOF,
+            target_regression="phi_circular_replacement_unproven",
+        ),
+        UnknownReasonDefinition.create(
             UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
             UnknownReasonClass.UNSAFE_ANALYSIS,
             UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
@@ -687,6 +752,108 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="return_coverage_inconclusive",
             description="Recover inconclusive coverage by proving or refuting the uncovered guard.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.LOOP_SUMMARY_COMPLETION,
+                    "summary_return_candidate_validation",
+                    required_evidence=(
+                        "summary_guard",
+                        "summary_value_provenance",
+                        "loop_summary_identity",
+                    ),
+                    description="Validate a loop-summary return candidate before exposing it as ReturnInfo.",
+                ),
+            ),
+            target_regression="summary_return_candidate_invalid",
+            description="Recover summary-derived returns only after candidate validity is complete.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.RETURN_PARTITION_OVERLAP_PROOF,
+                    "summary_return_overlap_value_equality",
+                    required_evidence=(
+                        "overlap_guard",
+                        "return_storage",
+                        "value_inequality_unsat",
+                    ),
+                    description="Prove overlapping exact/summary returns have equal values under the overlap guard.",
+                ),
+            ),
+            target_regression="summary_return_overlap_unproven",
+            description="Keep overlapping summary returns out of the accepted partition until value equality is proved.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SUMMARY_EFFECT_UNMODELED,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.EFFECT_SUMMARY_COMPLETION,
+                    "summary_return_effect_region",
+                    required_evidence=(
+                        "effect_region",
+                        "memory_write_set",
+                        "call_effect_summary",
+                    ),
+                    description="Bind summary-derived returns to modeled side effects or object-derived no-effect evidence.",
+                ),
+            ),
+            target_regression="summary_effect_unmodeled",
+            description="Reject value-only summary returns when effects, memory, or calls are not modeled.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SUMMARY_PRECONDITION_INCOMPLETE,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.PRECONDITION_COMPLETION,
+                    "summary_return_active_precondition",
+                    required_evidence=(
+                        "active_function_precondition",
+                        "summary_applicability_guard",
+                    ),
+                    description="Define the active precondition covered by the proposed return partition.",
+                ),
+            ),
+            target_regression="summary_precondition_incomplete",
+            description="Do not accept summary returns without the applicability/precondition context.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SUMMARY_PARTITION_NOT_TOTAL,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.PRECONDITION_COMPLETION,
+                    "summary_return_partition_totality",
+                    required_evidence=(
+                        "active_function_precondition",
+                        "summary_guard_disjunction",
+                        "miss_region_unsat",
+                    ),
+                    description="Prove the accepted exact/summary return partition covers the active precondition.",
+                ),
+            ),
+            target_regression="summary_partition_not_total",
+            description="Keep summary returns out of the accepted partition until total coverage is proved.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.PHI_CIRCULAR_REPLACEMENT_UNPROVEN,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.LOOP_RECURRENCE_PROOF,
+                    "phi_circular_structural_replacement",
+                    required_evidence=(
+                        "origin_pcode_ref",
+                        "induction_binding",
+                        "exit_guard_binding",
+                        "replacement_expression",
+                    ),
+                    description="Replace phi_circular only through a structural loop recurrence proof.",
+                ),
+            ),
+            target_regression="phi_circular_replacement_unproven",
+            description="Keep phi_circular unresolved until a structural recurrence replacement is proved.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SAT_UNSAFETY,

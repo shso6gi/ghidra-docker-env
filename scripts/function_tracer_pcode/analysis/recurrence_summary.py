@@ -112,6 +112,7 @@ class CountedLoopGuard:
     body_block: object
     exit_block: object
     signed_comparison: bool
+    guard_op: Optional[object] = None
     entry_condition_expr: Optional[Expression] = None
     latch_block: Optional[object] = None
 
@@ -265,7 +266,7 @@ class StructuralRecurrenceSummarizer:
         if function is None or high_function is None or analysis is None:
             return None
         return_ops = list(return_ops or [])
-        if not self._pre_return_counted_scalar_summary_is_cfg_safe(high_function, return_ops):
+        if not self._pre_return_counted_scalar_summary_is_cfg_safe(high_function, analysis, return_ops):
             return None
         if not self._analysis_is_safe_for_counted_scalar_summary(analysis):
             return None
@@ -279,6 +280,7 @@ class StructuralRecurrenceSummarizer:
     def _pre_return_counted_scalar_summary_is_cfg_safe(
         self,
         high_function,
+        analysis,
         return_ops: Sequence,
     ) -> bool:
         if high_function is None:
@@ -292,6 +294,13 @@ class StructuralRecurrenceSummarizer:
             return False
         if not self._has_counted_scalar_loop_candidate(high_function):
             self._debug("Declined pre-return counted loop summary: no counted-loop CFG candidate")
+            return False
+        counted_loop_count = self._count_counted_scalar_loop_models(high_function, analysis)
+        if counted_loop_count != 1:
+            self._debug(
+                "Declined pre-return counted loop summary: prior loop dependency is not proved "
+                f"(counted_loop_candidates={counted_loop_count})"
+            )
             return False
 
         forbidden = {"CALL", "CALLIND", "BRANCHIND", "STORE"}
@@ -318,6 +327,54 @@ class StructuralRecurrenceSummarizer:
             )
             return False
         return True
+
+    def _count_counted_scalar_loop_models(self, high_function, analysis) -> int:
+        if high_function is None:
+            return 0
+        function_body_ranges = self._function_body_address_ranges(high_function, analysis)
+        seen = set()
+        for header in self._iter_basic_blocks(high_function):
+            cbranch = self._find_cbranch_op(header)
+            phi_ops = [
+                op for op in self._iter_block_ops(header)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+            ]
+            if len(phi_ops) < 2:
+                continue
+            induction_candidates = [
+                info for info in (
+                    self._match_counted_loop_induction(phi_op)
+                    for phi_op in phi_ops
+                )
+                if info is not None
+            ]
+            if not induction_candidates:
+                continue
+            for induction in induction_candidates:
+                guards = self._candidate_counted_loop_guards(header, cbranch, induction)
+                for guard in guards:
+                    accumulators = list(
+                        self._match_counted_loop_accumulators(
+                            phi_ops,
+                            induction,
+                            guard.body_block,
+                            function_body_ranges=function_body_ranges,
+                        )
+                    )
+                    if not accumulators:
+                        continue
+                    model_key = (
+                        self._block_key(header),
+                        self._block_key(getattr(guard, "latch_block", None)),
+                        self._block_key(getattr(guard, "exit_block", None)),
+                        _runtime_expression_signature(getattr(guard, "condition_expr", None)),
+                    )
+                    if model_key in seen:
+                        continue
+                    seen.add(model_key)
+                    if len(seen) > 1:
+                        return len(seen)
+        return len(seen)
 
     def _has_readonly_pointer_reduction_candidate(
         self,
@@ -1992,6 +2049,18 @@ class StructuralRecurrenceSummarizer:
                 base_conditions,
                 continue_conditions,
             )
+            if (
+                not self._two_way_condition_partition_is_total(base_conditions, continue_conditions)
+                or not self._condition_sets_equivalent(continue_conditions, [derived_continue_condition])
+                or not self._condition_sets_equivalent(base_conditions, [derived_base_condition])
+            ):
+                self._debug(
+                    "Declined direct counted-loop path guards: base/continue partition is not total "
+                    "or does not match loop-entry orientation; "
+                    "using entry guard derived from loop condition"
+                )
+                continue_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_continue_condition])
+                base_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_base_condition])
 
         base_return_expr = self._canonicalize_zero_value_under_conditions(
             accumulator.init_expr,
@@ -2010,6 +2079,29 @@ class StructuralRecurrenceSummarizer:
         ):
             self._debug("Declined counted scalar loop summary: base expression contains function-address constant")
             return None
+        loop_summary_source_key = self._counted_loop_summary_source_key_from_parts(
+            start_expr=start_expr,
+            limit_expr=limit_expr,
+            induction_step=induction.step,
+            residue_cases=residue_cases,
+            result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
+            signed_loop=induction.signed_guard or guard.signed_comparison,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=continue_conditions,
+            source="counted_scalar_loop_summary",
+        )
+        transition_evidence_key = self._counted_loop_transition_evidence_key_from_parts(
+            header_block=header_block,
+            latch_block=guard.latch_block or accumulator.update_block or guard.body_block,
+            exit_block=guard.exit_block,
+            induction_phi_op=induction.phi_op,
+            accumulator_phi_op=accumulator.phi_op,
+            guard=guard,
+            accumulator_init_expr=accumulator.init_expr,
+            loop_base_expr=loop_base_expr,
+            update_cases=update_cases,
+            loop_cases=loop_cases,
+        )
         loop_value = self._build_counted_loop_summary_value(
             base_expr=loop_base_expr,
             start_expr=start_expr,
@@ -2024,6 +2116,7 @@ class StructuralRecurrenceSummarizer:
         )
         if loop_value is None:
             return None
+        loop_summary_source_key = loop_summary_source_key or self._summary_value_source_key(loop_value)
 
         anchor = next(iter((getattr(analysis, "returns", None) or [])), None)
         address = getattr(anchor, "address", getattr(function, "getEntryPoint", lambda: "0x0")())
@@ -2031,6 +2124,8 @@ class StructuralRecurrenceSummarizer:
         pcode_order = getattr(anchor, "pcode_order", None)
         pcode_time = getattr(anchor, "pcode_time", None)
         pcode_op_ref = getattr(anchor, "pcode_op_ref", None)
+        base_summary_source_key = loop_summary_source_key if pre_return_ops is not None else None
+        base_transition_evidence_key = transition_evidence_key if pre_return_ops is not None else None
 
         summarized = [
             ReturnInfo(
@@ -2042,6 +2137,8 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=pcode_order,
                 pcode_time=pcode_time,
                 pcode_op_ref=pcode_op_ref,
+                summary_candidate_source_key=base_summary_source_key,
+                summary_transition_evidence_key=base_transition_evidence_key,
             )
         ]
         summarized.append(
@@ -2054,6 +2151,8 @@ class StructuralRecurrenceSummarizer:
                 pcode_order=pcode_order,
                 pcode_time=pcode_time,
                 pcode_op_ref=pcode_op_ref,
+                summary_candidate_source_key=loop_summary_source_key,
+                summary_transition_evidence_key=transition_evidence_key,
             )
         )
         loop_case = summarized[-1]
@@ -2102,6 +2201,10 @@ class StructuralRecurrenceSummarizer:
                 return_value_pcode_op_refs=tuple(
                     getattr(loop_case, "return_value_pcode_op_refs", ()) or ()
                 ),
+                summary_candidate_source_key=getattr(loop_case, "summary_candidate_source_key", None)
+                or loop_summary_source_key,
+                summary_transition_evidence_key=getattr(loop_case, "summary_transition_evidence_key", None)
+                or transition_evidence_key,
             )
         effective_loop_value = summarized[-1].value
         effective_start_expr = start_expr
@@ -2118,6 +2221,222 @@ class StructuralRecurrenceSummarizer:
             f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
         )
         return summarized, "counted_scalar_loop_summary"
+
+    def _summary_value_source_key(self, value: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
+        runtime_ref = getattr(value, "runtime_ref", None)
+        stable_key = getattr(runtime_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+            except Exception:
+                key = None
+            if key is not None:
+                return key if isinstance(key, tuple) else ("stable", key)
+        fallback = self._counted_loop_summary_source_key_fallback(runtime_ref)
+        if fallback is not None:
+            return fallback
+        return None
+
+    def _counted_loop_summary_source_key_from_parts(
+        self,
+        *,
+        start_expr: Optional[Expression],
+        limit_expr: Optional[Expression],
+        induction_step: int,
+        residue_cases: Sequence[ResidueLoopCase],
+        result_size: int,
+        signed_loop: bool,
+        side_effect_profile: Optional[LoopSideEffectProfileRef],
+        guard_constraints: Sequence[Condition],
+        source: str,
+    ) -> Optional[Tuple[Any, ...]]:
+        try:
+            guard_key = self._summary_guard_constraints_key(guard_constraints)
+            side_effect_key = None
+            stable_key = getattr(side_effect_profile, "stable_key", None)
+            if callable(stable_key):
+                try:
+                    side_effect_key = stable_key()
+                except Exception:
+                    return None
+            if side_effect_key is None:
+                return None
+            return (
+                "counted_loop_summary_parts",
+                _runtime_expression_signature(start_expr),
+                _runtime_expression_signature(limit_expr),
+                int(induction_step),
+                max(1, int(result_size or 0)),
+                bool(signed_loop),
+                tuple(
+                    (
+                        int(case.modulus),
+                        int(case.residue),
+                        int(case.affine[0]),
+                        int(case.affine[1]),
+                        _runtime_expression_signature(case.bias_expr),
+                    )
+                    for case in residue_cases or ()
+                ),
+                guard_key,
+                side_effect_key,
+                str(source or "counted_scalar_loop_summary"),
+            )
+        except Exception:
+            return None
+
+    def _counted_loop_transition_evidence_key_from_parts(
+        self,
+        *,
+        header_block,
+        latch_block,
+        exit_block,
+        induction_phi_op,
+        accumulator_phi_op,
+        guard: CountedLoopGuard,
+        accumulator_init_expr: Optional[Expression],
+        loop_base_expr: Optional[Expression],
+        update_cases: Sequence[CountedLoopUpdateCase],
+        loop_cases: Sequence[LoopCaseRef],
+    ) -> Optional[Tuple[Any, ...]]:
+        try:
+            header_ref = self._make_pcode_block_ref(header_block)
+            effective_latch_block = latch_block or getattr(guard, "latch_block", None) or getattr(guard, "body_block", None)
+            latch_ref = self._make_pcode_block_ref(effective_latch_block)
+            exit_ref = self._make_pcode_block_ref(exit_block)
+            induction_phi_ref = self._make_pcode_op_ref(induction_phi_op)
+            accumulator_phi_ref = self._make_pcode_op_ref(accumulator_phi_op)
+            guard_op = getattr(guard, "guard_op", None)
+            if guard_op is None:
+                guard_op = self._find_cbranch_op(latch_block)
+            if guard_op is None:
+                guard_op = self._find_cbranch_op(header_block)
+            exit_guard_ref = self._make_pcode_op_ref(guard_op)
+            refs = (
+                header_ref,
+                latch_ref,
+                exit_ref,
+                induction_phi_ref,
+                accumulator_phi_ref,
+                exit_guard_ref,
+            )
+            if any(ref is None for ref in refs):
+                return None
+            case_keys = tuple(case.stable_key() for case in loop_cases or ())
+            if not case_keys or any(key is None for key in case_keys):
+                return None
+            update_keys = tuple(
+                (
+                    _runtime_conditions_signature(tuple(case.conditions or ())),
+                    _runtime_expression_signature(case.update_expr),
+                    _runtime_expression_signature(case.delta_expr),
+                )
+                for case in update_cases or ()
+            )
+            if not update_keys:
+                return None
+            accumulator_init_key = _runtime_expression_signature(accumulator_init_expr)
+            loop_base_key = _runtime_expression_signature(loop_base_expr)
+            prior_dependency_key = self._summary_value_source_key(loop_base_expr)
+            if prior_dependency_key is None:
+                if accumulator_init_key != loop_base_key:
+                    return None
+                prior_dependency_key = ("prior_summary_dependency", "none")
+            return (
+                "counted_loop_transition_evidence",
+                ("header_block", header_ref.stable_key()),
+                ("latch_block", latch_ref.stable_key()),
+                ("exit_block", exit_ref.stable_key()),
+                ("induction_phi", induction_phi_ref.stable_key()),
+                ("accumulator_phi", accumulator_phi_ref.stable_key()),
+                ("exit_guard", exit_guard_ref.stable_key()),
+                ("exit_guard_binding", _runtime_expression_signature(guard.condition_expr)),
+                ("bound_binding", _runtime_expression_signature(guard.bound_expr)),
+                (
+                    "accumulator_base",
+                    accumulator_init_key,
+                    loop_base_key,
+                    prior_dependency_key,
+                ),
+                ("updates", update_keys),
+                ("loop_cases", case_keys),
+                ("replacement_obligation", "not_required_without_phi_circular"),
+            )
+        except Exception:
+            return None
+
+    def _summary_guard_constraints_key(
+        self,
+        guard_constraints: Sequence[Condition],
+    ) -> Tuple[Any, ...]:
+        guards = tuple(guard_constraints or ())
+        if not guards:
+            return ("guard_constraints", ())
+        try:
+            return ("guard_constraints", _runtime_conditions_signature(guards))
+        except Exception:
+            keys = []
+            for guard in guards:
+                key_fn = getattr(guard, "structural_key", None)
+                if not callable(key_fn):
+                    return ("guard_constraints", "unavailable", len(guards))
+                try:
+                    keys.append(key_fn(budget=256))
+                except Exception:
+                    return ("guard_constraints", "unavailable", len(guards))
+            return ("guard_constraints", tuple(sorted(keys, key=repr)))
+
+    def _counted_loop_summary_source_key_fallback(self, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+        if runtime_ref is None or type(runtime_ref).__name__ != "CountedLoopSummaryRef":
+            return None
+        loop_summary = getattr(runtime_ref, "loop_summary", None)
+        loop_summary_key = None
+        if loop_summary is not None:
+            guard_keys = []
+            for guard in getattr(loop_summary, "guard_constraints", ()) or ():
+                key_fn = getattr(guard, "structural_key", None)
+                if callable(key_fn):
+                    try:
+                        guard_keys.append(key_fn(budget=256))
+                    except Exception:
+                        return None
+                else:
+                    return None
+            guard_keys.sort(key=repr)
+            side_effect_profile = getattr(loop_summary, "side_effect_profile", None)
+            side_effect_key = None
+            stable_key = getattr(side_effect_profile, "stable_key", None)
+            if callable(stable_key):
+                try:
+                    side_effect_key = stable_key()
+                except Exception:
+                    return None
+            loop_summary_key = (
+                "loop_summary_fallback",
+                _runtime_expression_signature(getattr(loop_summary, "start_expr", None)),
+                _runtime_expression_signature(getattr(loop_summary, "limit_expr", None)),
+                _runtime_expression_signature(getattr(loop_summary, "step_expr", None)),
+                tuple(guard_keys),
+                side_effect_key,
+                getattr(loop_summary, "source", None),
+            )
+        return (
+            "counted_loop_summary_fallback",
+            int(getattr(runtime_ref, "induction_step", 0) or 0),
+            int(getattr(runtime_ref, "result_size", 0) or 0),
+            bool(getattr(runtime_ref, "signed_loop", False)),
+            tuple(getattr(runtime_ref, "residue_cases", ()) or ()),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    _runtime_expression_signature(bias_expr),
+                )
+                for modulus, residue, bias_expr in getattr(runtime_ref, "residue_bias_terms", ()) or ()
+            ),
+            getattr(runtime_ref, "source", None),
+            loop_summary_key,
+        )
 
     def _residue_cases_contain_readonly_affine_literal_address(
         self,
@@ -3083,6 +3402,83 @@ class StructuralRecurrenceSummarizer:
 
         return base_simplified, continue_simplified
 
+    def _two_way_condition_partition_is_total(
+        self,
+        base_conditions: Sequence[Condition],
+        continue_conditions: Sequence[Condition],
+    ) -> bool:
+        base = ConditionSimplifier.simplify_conditions_object_centric(list(base_conditions or []))
+        cont = ConditionSimplifier.simplify_conditions_object_centric(list(continue_conditions or []))
+        if not base or not cont:
+            return False
+        try:
+            overlap_unsat = ConditionSMTOracle.conjunction_is_unsat(list(base) + list(cont))
+        except Exception:
+            overlap_unsat = None
+        if overlap_unsat is not True:
+            return False
+        base_clause = Condition.combine_and(list(base))
+        cont_clause = Condition.combine_and(list(cont))
+        if base_clause is None or cont_clause is None:
+            return False
+        base_expr = base_clause.expression
+        if bool(getattr(base_clause, "negated", False)):
+            base_expr = Expression.unary_op("BOOL_NEGATE", base_expr)
+            base_expr.size = 1
+        cont_expr = cont_clause.expression
+        if bool(getattr(cont_clause, "negated", False)):
+            cont_expr = Expression.unary_op("BOOL_NEGATE", cont_expr)
+            cont_expr.size = 1
+        disjunction = Expression.binary_op("BOOL_OR", base_expr, cont_expr)
+        disjunction.size = 1
+        try:
+            coverage_unsat = ConditionSMTOracle.conjunction_is_unsat([Condition(disjunction, True)])
+        except Exception:
+            coverage_unsat = None
+        return coverage_unsat is True
+
+    def _condition_sets_equivalent(
+        self,
+        left_conditions: Sequence[Condition],
+        right_conditions: Sequence[Condition],
+    ) -> bool:
+        left = ConditionSimplifier.simplify_conditions_object_centric(list(left_conditions or []))
+        right = ConditionSimplifier.simplify_conditions_object_centric(list(right_conditions or []))
+        left_clause = Condition.combine_and(list(left))
+        right_clause = Condition.combine_and(list(right))
+        if left_clause is None or right_clause is None:
+            return False
+        left_expr = left_clause.expression
+        if bool(getattr(left_clause, "negated", False)):
+            left_expr = Expression.unary_op("BOOL_NEGATE", left_expr)
+            left_expr.size = 1
+        right_expr = right_clause.expression
+        if bool(getattr(right_clause, "negated", False)):
+            right_expr = Expression.unary_op("BOOL_NEGATE", right_expr)
+            right_expr.size = 1
+        left_and_not_right = Expression.binary_op(
+            "BOOL_AND",
+            left_expr,
+            Expression.unary_op("BOOL_NEGATE", right_expr),
+        )
+        left_and_not_right.size = 1
+        right_and_not_left = Expression.binary_op(
+            "BOOL_AND",
+            right_expr,
+            Expression.unary_op("BOOL_NEGATE", left_expr),
+        )
+        right_and_not_left.size = 1
+        try:
+            left_implies_right = ConditionSMTOracle.conjunction_is_unsat(
+                [Condition(left_and_not_right, False)]
+            )
+            right_implies_left = ConditionSMTOracle.conjunction_is_unsat(
+                [Condition(right_and_not_left, False)]
+            )
+        except Exception:
+            return False
+        return left_implies_right is True and right_implies_left is True
+
     def _derive_direct_counted_loop_conditions(
         self,
         high_function,
@@ -3305,6 +3701,9 @@ class StructuralRecurrenceSummarizer:
         return PcodeBlockRef(
             block_index=block_index,
             start_address_offset=start_address_offset,
+            binary_id=getattr(self.tracer, "_function_binary_id", None),
+            function_entry_space=getattr(self.tracer, "_function_entry_space", None),
+            function_entry_offset=getattr(self.tracer, "_function_entry_offset", None),
         )
 
     def _collect_block_successors(self, block) -> List[object]:
@@ -3650,6 +4049,7 @@ class StructuralRecurrenceSummarizer:
                 body_block=body_block,
                 exit_block=exit_block,
                 signed_comparison=signed_comparison,
+                guard_op=cbranch_op,
                 entry_condition_expr=condition_expr,
             )
         return None
@@ -3709,6 +4109,7 @@ class StructuralRecurrenceSummarizer:
             body_block=header_block,
             exit_block=exit_block,
             signed_comparison=signed_comparison,
+            guard_op=cbranch_op,
             entry_condition_expr=entry_condition_expr,
             latch_block=latch_block,
         )

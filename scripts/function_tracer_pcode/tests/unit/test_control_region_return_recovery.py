@@ -407,7 +407,14 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
     with patch(
         "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
-    ) as summary_mock:
+    ) as summary_mock, patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.accept_summary_return_candidates",
+    ) as accept_mock:
+        accept_mock.return_value = Mock(
+            accepted_returns=tuple(summary_returns),
+            candidates=(),
+            blockers=(),
+        )
         result = analyzer._apply_structural_recurrence_summary(
             function,
             high_function,
@@ -417,6 +424,7 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
 
     assert result == (summary_returns, "counted_scalar_loop_summary")
     summary_mock.assert_called_once()
+    accept_mock.assert_called_once()
 
 
 def test_analyze_function_applies_counted_loop_summary_after_return_analysis():

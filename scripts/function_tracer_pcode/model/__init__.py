@@ -51,6 +51,7 @@ from .analysis import (
     ComparisonSurface,
     DeferredCallInfo,
     ReturnInfo,
+    SummaryReturnCandidate,
     FunctionReturnAnalysis,
     SignednessResult,
 )
@@ -119,6 +120,7 @@ __all__ = [
     "DeferredCallInfo",
     "ComparisonSurface",
     "ReturnInfo",
+    "SummaryReturnCandidate",
     "FunctionReturnAnalysis",
     "Expression",
     "ExpressionType",

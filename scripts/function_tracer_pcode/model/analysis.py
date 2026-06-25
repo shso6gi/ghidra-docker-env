@@ -46,6 +46,12 @@ class ReturnInfo:
     pcode_time: Optional[int] = None
     pcode_op_ref: Optional[PcodeOpRef] = None
     return_value_pcode_op_refs: Tuple[PcodeOpRef, ...] = field(default_factory=tuple)
+    return_kind: str = "exact"
+    acceptance_status: Optional[str] = None
+    summary_candidate_id: Optional[Tuple[Any, ...]] = None
+    summary_candidate_source_key: Optional[Tuple[Any, ...]] = None
+    summary_transition_evidence_key: Optional[Tuple[Any, ...]] = None
+    validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""
@@ -70,7 +76,71 @@ class ReturnInfo:
             result["return_value_pcode_op_refs"] = [
                 ref.to_dict() for ref in self.return_value_pcode_op_refs
             ]
+        if self.return_kind != "exact":
+            result["return_kind"] = self.return_kind
+        if self.acceptance_status is not None:
+            result["acceptance_status"] = self.acceptance_status
+        if self.summary_candidate_id is not None:
+            result["summary_candidate_id"] = _jsonable_nested_tuple(self.summary_candidate_id)
+        if self.summary_candidate_source_key is not None:
+            result["summary_candidate_source_key"] = _jsonable_nested_tuple(
+                self.summary_candidate_source_key
+            )
+        if self.summary_transition_evidence_key is not None:
+            result["summary_transition_evidence_key"] = _jsonable_nested_tuple(
+                self.summary_transition_evidence_key
+            )
+        if self.validation_blockers:
+            result["validation_blockers"] = list(self.validation_blockers)
         return result
+
+
+@dataclass
+class SummaryReturnCandidate:
+    """Loop-summary-derived return candidate kept outside normal returns until accepted."""
+
+    candidate_id: Tuple[Any, ...]
+    return_info: ReturnInfo
+    guard_structural_key: Tuple[Any, ...]
+    value_structural_key: Tuple[Any, ...]
+    loop_summary_structural_key: Optional[Tuple[Any, ...]] = None
+    transition_evidence_key: Optional[Tuple[Any, ...]] = None
+    active_precondition_key: Optional[Tuple[Any, ...]] = None
+    summary_applicability_guard_key: Optional[Tuple[Any, ...]] = None
+    effect_region_key: Optional[Tuple[Any, ...]] = None
+    memory_read_set_key: Optional[Tuple[Any, ...]] = None
+    memory_write_set_key: Optional[Tuple[Any, ...]] = None
+    call_effect_key: Optional[Tuple[Any, ...]] = None
+    ub_assumption_key: Optional[Tuple[Any, ...]] = None
+    effect_model_schema_version: str = "summary-return-effect-v1"
+    eq_eligible: bool = False
+    acceptance_status: str = "candidate"
+    validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
+            "return_info": self.return_info.to_dict(),
+            "guard_structural_key": _jsonable_nested_tuple(self.guard_structural_key),
+            "value_structural_key": _jsonable_nested_tuple(self.value_structural_key),
+            "loop_summary_structural_key": _jsonable_nested_tuple(self.loop_summary_structural_key),
+            "transition_evidence_key": _jsonable_nested_tuple(self.transition_evidence_key),
+            "active_precondition_key": _jsonable_nested_tuple(self.active_precondition_key),
+            "summary_applicability_guard_key": _jsonable_nested_tuple(
+                self.summary_applicability_guard_key
+            ),
+            "effect_region_key": _jsonable_nested_tuple(self.effect_region_key),
+            "memory_read_set_key": _jsonable_nested_tuple(self.memory_read_set_key),
+            "memory_write_set_key": _jsonable_nested_tuple(self.memory_write_set_key),
+            "call_effect_key": _jsonable_nested_tuple(self.call_effect_key),
+            "ub_assumption_key": _jsonable_nested_tuple(self.ub_assumption_key),
+            "effect_model_schema_version": self.effect_model_schema_version,
+            "eq_eligible": bool(self.eq_eligible),
+            "acceptance_status": self.acceptance_status,
+            "validation_blockers": list(self.validation_blockers),
+            "evidence": _jsonable_nested_tuple(self.evidence),
+        }
 
 
 @dataclass(init=False)
@@ -638,6 +708,7 @@ class FunctionReturnAnalysis:
     completed_recovery_proof_ids: Tuple[Tuple[Any, ...], ...] = ()
     completed_recovery_proof_evidence: Tuple[Dict[str, Any], ...] = ()
     binary_id: Optional[str] = None
+    summary_return_candidates: Tuple[SummaryReturnCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -727,6 +798,11 @@ class FunctionReturnAnalysis:
             result["completed_recovery_proof_evidence"] = [
                 _jsonable_nested_tuple(evidence)
                 for evidence in self.completed_recovery_proof_evidence
+            ]
+        if self.summary_return_candidates:
+            result["summary_return_candidates"] = [
+                candidate.to_dict()
+                for candidate in self.summary_return_candidates
             ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key
