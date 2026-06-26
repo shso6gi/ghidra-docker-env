@@ -9,6 +9,14 @@ from .debug import summarize_expression
 from .condition import ConditionSimplifier, ConditionNormalizer
 
 
+class _PhiExpansionBudgetOrigin:
+    def __init__(self, key: Tuple[Any, ...]):
+        self._key = key
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return self._key
+
+
 def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
     ref = PcodeOpRef.from_pcode_op(pcode_op)
     if ref is None:
@@ -76,6 +84,7 @@ class PhiHandler:
         self._expanding_ops: Set[Tuple[Any, ...]] = set()
         self._expansion_cache: Dict[tuple, List[ExpandedBranch]] = {}
         self._expansion_cache_limit = 2048
+        self._combined_branch_limit = 256
         self._debug_message_limit = 4000
         self._debug_message_count = 0
         self._debug_suppressed = False
@@ -103,7 +112,8 @@ class PhiHandler:
         return summarize_expression(expr, max_depth=max_depth)
 
     def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> tuple:
-        op_key = _pcode_op_stable_key(multiequal_op)
+        op_ref = _pcode_op_ref_from_tracer(self.tracer, multiequal_op)
+        op_key = op_ref.stable_key() if op_ref is not None else _pcode_op_stable_key(multiequal_op)
         return (op_key, self._condition_signature(base_conditions))
 
     def _clone_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
@@ -432,6 +442,13 @@ class PhiHandler:
             conditions,
             opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
             output_size=output_size,
+            origin_ref=self._phi_expansion_budget_origin(
+                mnemonic,
+                opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+                pcode_op=pcode_op,
+                base_conditions=conditions,
+                output_size=output_size,
+            ),
         )
     
     def _combine_expansions(
@@ -441,6 +458,7 @@ class PhiHandler:
         base_conditions: List[Condition],
         opcode: Optional[int] = None,
         output_size: int = 0,
+        origin_ref: Optional[Any] = None,
     ) -> List[ExpandedBranch]:
         """入力の展開を組み合わせて結果を生成"""
         if len(input_expansions) == 1:
@@ -452,6 +470,16 @@ class PhiHandler:
             return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]
         
         if len(input_expansions) == 2:
+            left_count = len(input_expansions[0])
+            right_count = len(input_expansions[1])
+            if left_count * right_count > self._combined_branch_limit:
+                return self._branch_budget_unknown(
+                    mnemonic,
+                    base_conditions,
+                    output_size=output_size,
+                    branch_count=left_count * right_count,
+                    origin_ref=origin_ref,
+                )
             result = []
             for left_exp in input_expansions[0]:
                 for right_exp in input_expansions[1]:
@@ -469,6 +497,18 @@ class PhiHandler:
                     result.append(ExpandedBranch(combined_conds, new_value))
             
             return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]
+
+        branch_count = 1
+        for expansion in input_expansions:
+            branch_count *= len(expansion)
+            if branch_count > self._combined_branch_limit:
+                return self._branch_budget_unknown(
+                    mnemonic,
+                    base_conditions,
+                    output_size=output_size,
+                    branch_count=branch_count,
+                    origin_ref=origin_ref,
+                )
 
         result = []
         for expansion_tuple in product(*input_expansions):
@@ -492,6 +532,75 @@ class PhiHandler:
             result.append(ExpandedBranch(combined_conds, new_value))
 
         return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]
+
+    def _branch_budget_unknown(
+        self,
+        mnemonic: str,
+        base_conditions: List[Condition],
+        *,
+        output_size: int,
+        branch_count: int,
+        origin_ref: Optional[Any] = None,
+    ) -> List[ExpandedBranch]:
+        reason = "phi_expansion_budget_exceeded"
+        self._debug_print(
+            f"{mnemonic} PHI expansion budget exceeded: branches={branch_count}, "
+            f"limit={self._combined_branch_limit}",
+        )
+        emit_unknown_event = getattr(self.tracer, "emit_unknown_event", None)
+        if callable(emit_unknown_event):
+            emit_unknown_event(
+                reason=reason,
+                depth=0,
+                note=(
+                    f"mnemonic={mnemonic}, branches={branch_count}, "
+                    f"limit={self._combined_branch_limit}"
+                ),
+                context="phi_handler",
+            )
+        if origin_ref is None:
+            origin_ref = self._phi_expansion_budget_origin(
+                mnemonic,
+                opcode=None,
+                pcode_op=None,
+                base_conditions=base_conditions,
+                output_size=output_size,
+            )
+        value = Expression.unknown(
+            reason,
+            runtime_ref=UnknownValueRef.budget_exceeded(
+                operation="phi_expansion",
+                origin_kind="phi_expansion_site",
+                origin_ref=origin_ref,
+            ),
+        )
+        if output_size > 0:
+            value.size = output_size
+        return [ExpandedBranch(list(base_conditions), value)]
+
+    def _phi_expansion_budget_origin(
+        self,
+        mnemonic: str,
+        *,
+        opcode: Optional[int],
+        pcode_op: Optional[Any],
+        base_conditions: List[Condition],
+        output_size: int,
+    ) -> _PhiExpansionBudgetOrigin:
+        pcode_ref = _pcode_op_ref_from_tracer(self.tracer, pcode_op) if pcode_op is not None else None
+        pcode_key = pcode_ref.stable_key() if pcode_ref is not None else (
+            _pcode_op_stable_key(pcode_op) if pcode_op is not None else None
+        )
+        return _PhiExpansionBudgetOrigin(
+            (
+                "phi_expansion_budget_origin",
+                str(mnemonic),
+                None if opcode is None else int(opcode),
+                pcode_key,
+                int(output_size or 0),
+                ConditionNormalizer.conditions_signature(base_conditions),
+            )
+        )
 
     def _build_combined_expression(
         self,

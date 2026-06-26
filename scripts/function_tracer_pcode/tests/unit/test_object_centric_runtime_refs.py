@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.model import (
     Condition,
     ComposedLoopSummaryRef,
     DeferredCallInfo,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     Expression,
     FunctionReturnAnalysis,
@@ -554,6 +555,59 @@ def test_composed_loop_summary_ref_projects_current_surface_and_keys_handoff():
         current=current,
         handoff_proof_key=("prior_state_transition_handoff_proof_ref", "other", ("target", "stable")),
     ).stable_key()
+
+
+def test_composed_loop_summary_ref_is_excluded_from_method_b_fast_path():
+    count = Expression.parameter("count", index=0, data_type="int", size=4)
+    state = Expression.parameter("state", index=1, data_type="int", size=4)
+    one = Expression.constant(1, size=4)
+    zero = Expression.constant(0, size=4)
+
+    def prior_transition(multiplier: int) -> CountedStateTransitionLoopSummaryRef:
+        transition = Expression.binary_op("INT_MULT", state, Expression.constant(multiplier, size=4))
+        return CountedStateTransitionLoopSummaryRef(
+            initial_state=one,
+            start_expr=zero,
+            limit_expr=count,
+            step_expr=one,
+            transition_expr=transition,
+            state_placeholder=state,
+            transition_cases=(((), transition.structural_key()),),
+            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+            state_size=4,
+            result_size=4,
+            signed_loop=True,
+            handoff_proof_key=(
+                "prior_state_transition_handoff_proof_ref",
+                ("proof_obligation_id", "prior_state_transition_handoff", ("target", "stable")),
+                ("target", "stable"),
+            ),
+        )
+
+    current = LoopSummaryRef(
+        start_expr=state,
+        limit_expr=count,
+        step_expr=one,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 1, 0),)),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        loop_var_unit="induction_value",
+    )
+    left = ComposedLoopSummaryRef(
+        prior=prior_transition(5),
+        current=current,
+        handoff_proof_key=("prior_state_transition_handoff_proof_ref", "left", ("target", "stable")),
+    )
+    right = ComposedLoopSummaryRef(
+        prior=prior_transition(6),
+        current=current,
+        handoff_proof_key=("prior_state_transition_handoff_proof_ref", "right", ("target", "stable")),
+    )
+
+    assert loop_summary_method_b_key(left) is None
+    assert loop_summary_method_b_key(right) is None
+    result = compare_loop_summaries(left, right)
+    assert result.status == "unknown"
+    assert result.is_equivalent() is None
 
 
 def _pure_counted_loop_summary() -> LoopSummaryRef:

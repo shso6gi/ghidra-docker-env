@@ -2293,6 +2293,8 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
 
     if summary is None:
         return None
+    if isinstance(summary, ComposedLoopSummaryRef):
+        return None
     seed_terms_for_binding = tuple(getattr(summary, "seed_terms", ()) or ())
     binding_context = _loop_variable_binding_context_from_values(
         getattr(summary, "start_expr", None),
@@ -2391,6 +2393,8 @@ def loop_summary_method_b_key_at_result_size(
     """Projected Method-B key for comparing a wider sum at a narrower width."""
 
     if summary is None:
+        return None
+    if isinstance(summary, ComposedLoopSummaryRef):
         return None
     try:
         target_result_size = max(1, int(result_size))
@@ -4385,11 +4389,15 @@ class UnknownValueRef:
         cls,
         *,
         operation: Optional[str] = None,
+        origin_kind: Optional[str] = None,
+        origin_ref: Optional[Any] = None,
     ) -> "UnknownValueRef":
         reason = f"{operation}_budget_exceeded" if operation else "budget_exceeded"
         return cls(
             kind="budget_exceeded",
             reason=reason,
+            origin_kind=origin_kind,
+            origin_ref=origin_ref,
             display_hint=reason,
         )
 

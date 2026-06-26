@@ -15,7 +15,7 @@ from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInf
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
-from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
+from scripts.function_tracer_pcode.analysis.recurrence_summary import ResidueLoopCase, StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     build_proof_obligation_id,
@@ -26,7 +26,9 @@ from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
     Condition,
+    ComposedLoopSummaryRef,
     ComparisonSurface,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     Expression,
     FunctionReturnAnalysis,
@@ -916,6 +918,103 @@ def test_vectorized_affine_counter_descriptor_storage_is_normalized_for_matching
 
     assert isinstance(candidate.storage_info, StorageInfo)
     assert summarizer._counter_parameter_candidate_matches_descriptor(candidate, descriptor)
+
+
+def test_counted_loop_builder_composes_prior_state_transition_base():
+    summarizer = StructuralRecurrenceSummarizer(Mock())
+    n = _count_param()
+    zero = _const(0)
+    one = _const(1)
+    state = Expression.parameter("state", index=2, data_type="int", size=4)
+    transition = Expression.binary_op("INT_MULT", state, Expression.constant(5, size=4))
+    handoff_key = (
+        "prior_state_transition_handoff_proof_ref",
+        ("proof_obligation_id", "prior_state_transition_handoff", ("target", "stable")),
+        ("target", "stable"),
+    )
+    prior_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=one,
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=one,
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), transition.structural_key()),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(_count_gt(0),),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+        handoff_proof_key=handoff_key,
+    )
+    prior_value = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [one, zero, n],
+        size=4,
+        runtime_ref=prior_ref,
+    )
+
+    counted = summarizer._build_counted_loop_summary_value(
+        base_expr=prior_value,
+        start_expr=zero,
+        limit_expr=n,
+        induction_step=1,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(_count_gt(0),),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    loop_summary = counted.runtime_ref.loop_summary
+    assert isinstance(loop_summary, ComposedLoopSummaryRef)
+    assert loop_summary.prior is prior_ref
+    assert loop_summary.handoff_proof_key == handoff_key
+    assert loop_summary.current.limit_expr is n
+    assert loop_summary.stable_key() is not None
+
+
+def test_counted_loop_builder_keeps_unproved_state_transition_base_uncomposed():
+    summarizer = StructuralRecurrenceSummarizer(Mock())
+    n = _count_param()
+    zero = _const(0)
+    one = _const(1)
+    state = Expression.parameter("state", index=2, data_type="int", size=4)
+    transition = Expression.binary_op("INT_MULT", state, Expression.constant(5, size=4))
+    prior_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=one,
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=one,
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), transition.structural_key()),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(_count_gt(0),),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    prior_value = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [one, zero, n],
+        size=4,
+        runtime_ref=prior_ref,
+    )
+
+    counted = summarizer._build_counted_loop_summary_value(
+        base_expr=prior_value,
+        start_expr=zero,
+        limit_expr=n,
+        induction_step=1,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(_count_gt(0),),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert not isinstance(counted.runtime_ref.loop_summary, ComposedLoopSummaryRef)
 
 
 def _branch_returns(value: Expression):

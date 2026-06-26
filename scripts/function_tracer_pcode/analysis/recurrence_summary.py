@@ -13,6 +13,7 @@ from ..model import (
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
+    ComposedLoopSummaryRef,
     Condition,
     CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
@@ -2700,13 +2701,23 @@ class StructuralRecurrenceSummarizer:
             cases=tuple(cases or ()),
             loop_var_unit="induction_value",
         )
+        loop_summary_for_runtime = loop_summary
+        base_runtime_ref = getattr(base_expr, "runtime_ref", None)
+        handoff_proof_key = getattr(base_runtime_ref, "handoff_proof_key", None)
+        if isinstance(base_runtime_ref, CountedStateTransitionLoopSummaryRef) and handoff_proof_key is not None:
+            loop_summary_for_runtime = ComposedLoopSummaryRef(
+                prior=base_runtime_ref,
+                current=loop_summary,
+                handoff_proof_key=handoff_proof_key,
+                source="prior_state_transition_then_counted_loop",
+            )
         runtime_ref = CountedLoopSummaryRef(
             induction_step=int(induction_step),
             result_size=max(1, int(result_size or 0)),
             signed_loop=bool(signed_loop),
             residue_cases=term_descriptor.residue_cases,
             residue_bias_terms=term_descriptor.residue_bias_terms,
-            loop_summary=loop_summary,
+            loop_summary=loop_summary_for_runtime,
         )
         intrinsic = Expression.intrinsic(
             "COUNTED_LOOP_SUM",
@@ -3914,6 +3925,11 @@ class StructuralRecurrenceSummarizer:
             return None
 
         candidates = self._extract_counted_state_transition_loop_models(high_function, analysis)
+        if self.debug:
+            self._debug(
+                "Prior state-transition handoff candidates: "
+                f"{len(candidates)} for current header {self._block_key(current_header)}"
+            )
         current_header_key = self._block_key(current_header)
         for model in candidates:
             prior_induction = model.induction
@@ -3921,8 +3937,12 @@ class StructuralRecurrenceSummarizer:
             prior_guard = model.guard
             prior_header = getattr(prior_induction.phi_op, "getParent", lambda: None)()
             if prior_header is None or self._block_key(prior_header) == current_header_key:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: same or missing prior header")
                 continue
             if not self._can_reach_block(prior_guard.exit_block, current_header):
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: prior exit cannot reach current header")
                 continue
             loop_identity_key = self._counted_loop_identity_match_key(
                 prior_induction,
@@ -3932,12 +3952,16 @@ class StructuralRecurrenceSummarizer:
                 result_size=result_size,
             )
             if loop_identity_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: loop identity mismatch")
                 continue
             value_flow_key = self._prior_state_transition_value_flow_key(
                 prior_accumulator,
                 current_init_varnode,
             )
             if value_flow_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: value flow not proved")
                 continue
             handoff_blocks_key = self._clean_edge_specific_handoff_blocks_key(
                 prior_guard.exit_block,
@@ -3945,6 +3969,8 @@ class StructuralRecurrenceSummarizer:
                 current_header,
             )
             if handoff_blocks_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: clean edge-specific handoff not proved")
                 continue
             summary_value = self._build_counted_state_transition_value(
                 initial_state=prior_accumulator.init_expr,
@@ -3960,6 +3986,8 @@ class StructuralRecurrenceSummarizer:
             )
             summary_key = self._runtime_ref_stable_key(summary_value)
             if summary_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: summary key unavailable")
                 continue
             guard_handoff_key = self._guard_handoff_key(
                 prior_guard=prior_guard,
@@ -3967,9 +3995,13 @@ class StructuralRecurrenceSummarizer:
                 continue_conditions=continue_conditions,
             )
             if guard_handoff_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: guard handoff not proved")
                 continue
             side_effect_key = model.side_effect_profile.stable_key()
             if side_effect_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: side-effect key unavailable")
                 continue
             widths_key = self._handoff_widths_key(
                 prior_accumulator=prior_accumulator,
@@ -3978,6 +4010,8 @@ class StructuralRecurrenceSummarizer:
                 value_flow_key=value_flow_key,
             )
             if widths_key is None:
+                if self.debug:
+                    self._debug("Declined prior state-transition handoff: width preservation not proved")
                 continue
             proof_target_key = (
                 "prior_state_transition_handoff_target",

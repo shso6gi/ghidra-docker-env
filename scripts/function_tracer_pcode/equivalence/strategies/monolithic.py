@@ -394,6 +394,29 @@ class MonolithicStrategy(CheckStrategy):
                 ],
             )
 
+        except ValueError as e:
+            message = str(e)
+            if "Unsupported intrinsic for SMT lowering" not in message:
+                raise
+            self._debug_print(f"Monolithic check blocked by unresolved intrinsic: {message}")
+            return StrategyResult(
+                is_equivalent=None,
+                solver_results=ParallelResult(results=[]),
+                smt_formula=None,
+                counterexample_raw=None,
+                return_var1=None,
+                return_var2=None,
+                constrained_fragments=[],
+                unknown_reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.UNRESOLVED_EXPRESSION,
+                        stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=("unsupported_intrinsic_smt_lowering",),
+                        detail=message,
+                    )
+                ],
+            )
+
         except Exception as e:
             self._debug_print(f"Exception in monolithic check: {e}")
             if self.debug:

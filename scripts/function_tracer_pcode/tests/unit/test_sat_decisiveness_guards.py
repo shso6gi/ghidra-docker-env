@@ -1488,6 +1488,37 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
     assert reason.object_evidence == query_result.object_evidence
 
 
+def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_exception():
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.side_effect = ValueError(
+        "Unsupported intrinsic for SMT lowering: CALLOTHER"
+    )
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    assert result.unknown_reasons[0].evidence_refs == ("unsupported_intrinsic_smt_lowering",)
+    solver_runner.run_parallel.assert_not_called()
+
+
 def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown():
     class _ValidationSolverRunner:
         def __init__(self):
