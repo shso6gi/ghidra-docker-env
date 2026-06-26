@@ -3823,6 +3823,7 @@ class CheckStrategy(ABC):
                 "counted_loop_summary",
                 "counted_loop_summary_loop_semantic",
                 "counted_loop_summary_semantic",
+                "counted_loop_summary_profile_ref",
             }
             and not cls._proof_target_contains_missing_or_diagnostic(normalized)
         )
@@ -3833,7 +3834,7 @@ class CheckStrategy(ABC):
         return (
             isinstance(normalized, tuple)
             and len(normalized) >= 2
-            and normalized[0] in {"loop_summary", "loop_summary_method_b"}
+            and normalized[0] in {"loop_summary", "loop_summary_method_b", "counted_loop_summary_loop_profile"}
             and not cls._proof_target_contains_missing_or_diagnostic(normalized)
         )
 
@@ -3860,6 +3861,20 @@ class CheckStrategy(ABC):
         if normalized[0] == "affine_readonly_sum":
             return len(normalized) >= 4 and all(
                 cls._readonly_component_key_is_specific(item) for item in normalized[1:]
+            )
+        if normalized[0] == "counted_loop_summary_contract":
+            return (
+                len(normalized) == 10
+                and cls._method_b_runtime_ref_key_is_specific(normalized[1])
+                and cls._method_b_loop_summary_key_is_specific(normalized[2])
+                and cls._proof_positive_int_like(normalized[3])
+                and cls._proof_int_like(normalized[4])
+                and isinstance(normalized[5], bool)
+                and isinstance(normalized[6], tuple)
+                and isinstance(normalized[7], tuple)
+                and cls._proof_int_like(normalized[8])
+                and isinstance(normalized[9], tuple)
+                and not cls._proof_target_contains_missing_or_diagnostic(normalized)
             )
         return False
 
@@ -4193,6 +4208,12 @@ class CheckStrategy(ABC):
                 for field in ("seed_compensation", "term_sequence", "pure_side_effect_profile")
             ):
                 return False
+            if cls._method_b_dual_summary_proof_content_matches_relation(
+                proof_content,
+                object_target_key,
+                proof_stage=proof_stage,
+            ):
+                return True
             return cls._method_b_covering_proof_content_matches_relation(proof_content, object_target_key)
         if proof_stage == "method_b_guard_partition":
             if not all(
@@ -4200,6 +4221,12 @@ class CheckStrategy(ABC):
                 for field in ("guard_partition", "partition_coverage_proof")
             ):
                 return False
+            if cls._method_b_dual_summary_proof_content_matches_relation(
+                proof_content,
+                object_target_key,
+                proof_stage=proof_stage,
+            ):
+                return True
             return cls._method_b_guard_proof_content_matches_relation(proof_content, object_target_key)
         return False
 
@@ -4279,6 +4306,63 @@ class CheckStrategy(ABC):
             if int(proof_content.get("count_value")) not in set(normalized):
                 return ()
         return tuple(normalized)
+
+    @classmethod
+    def _method_b_dual_summary_relation_payload(
+        cls,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not (
+            isinstance(target, tuple)
+            and len(target) == 5
+            and cls._method_b_closure_relation_is_specific(target[4])
+        ):
+            return None
+        fields = cls._method_b_closure_relation_fields(target[4])
+        if not fields or fields.get("kind", (None,))[0] != "dual_summary":
+            return None
+        left_summary = cls._normalize_nested_tuple(fields.get("left_summary", (None,))[0])
+        right_summary = cls._normalize_nested_tuple(fields.get("right_summary", (None,))[0])
+        if not (
+            cls._method_b_summary_profile_is_specific(left_summary)
+            and cls._method_b_summary_profile_is_specific(right_summary)
+        ):
+            return None
+        return {
+            "left_summary": left_summary,
+            "right_summary": right_summary,
+        }
+
+    @classmethod
+    def _method_b_dual_summary_proof_content_matches_relation(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+        *,
+        proof_stage: str,
+    ) -> bool:
+        relation_payload = cls._method_b_dual_summary_relation_payload(object_target_key)
+        if relation_payload is None:
+            return False
+        if cls._evidence_text(proof_content, "relation_kind") != "dual_summary":
+            return False
+        left_summary = cls._normalize_nested_tuple(proof_content.get("left_summary"))
+        right_summary = cls._normalize_nested_tuple(proof_content.get("right_summary"))
+        if (
+            left_summary != relation_payload["left_summary"]
+            or right_summary != relation_payload["right_summary"]
+        ):
+            return False
+        if cls._evidence_text(proof_content, "summary_value_equivalence") != "unsat":
+            return False
+        if cls._evidence_text(proof_content, "guard_coverage") != "proven":
+            return False
+        if proof_stage == "method_b_covering_case":
+            return cls._evidence_text(proof_content, "solver_equality_proof") == "unsat"
+        if proof_stage == "method_b_guard_partition":
+            return cls._evidence_text(proof_content, "partition_coverage_proof") == "covered"
+        return False
 
     @classmethod
     def _proof_status_value_is_complete(cls, value: Any) -> bool:

@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     CallTargetRef,
     Condition,
+    ComposedLoopSummaryRef,
     DeferredCallInfo,
     CountedLoopSummaryRef,
     Expression,
@@ -19,6 +20,7 @@ from scripts.function_tracer_pcode.model import (
     LocationBaseRef,
     LoopBodyEffectRef,
     LoopCaseRef,
+    LoopSummaryComparisonResult,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
@@ -426,6 +428,132 @@ def test_loop_summary_comparator_rejects_different_side_effect_profiles():
     assert result.status == "incompatible"
     assert result.is_equivalent() is None
     assert result.blocks_shortcut() is True
+
+
+def test_loop_summary_comparator_emits_case_aware_solver_obligation():
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    left = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=count,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 5, 0),)),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    right = LoopSummaryRef(
+        start_expr=Expression.binary_op("INT_ADD", zero, Expression.constant(0, size=4)),
+        limit_expr=count,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=left.term_descriptor,
+        side_effect_profile=left.side_effect_profile,
+    )
+
+    result = compare_loop_summaries(left, right)
+
+    assert result.status == "unknown"
+    assert result.proof_obligation is not None
+    assert result.proof_obligation.proof_kind == "case_aware_loop_summary_solver_equality"
+    assert result.proof_obligation.required_evidence == (
+        "guard_partition",
+        "transition_or_term_equality",
+        "pure_side_effect_profile",
+        "width_policy",
+    )
+
+
+def test_loop_summary_comparator_uses_injected_solver_prover():
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    left = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=count,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 5, 0),)),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    right = LoopSummaryRef(
+        start_expr=Expression.binary_op("INT_ADD", zero, Expression.constant(0, size=4)),
+        limit_expr=count,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=left.term_descriptor,
+        side_effect_profile=left.side_effect_profile,
+    )
+    seen = []
+
+    def prover(obligation):
+        seen.append(obligation)
+        return LoopSummaryComparisonResult(
+            "equivalent",
+            "unit-test solver proof",
+            proof_obligation=obligation,
+        )
+
+    result = compare_loop_summaries(left, right, solver_prover=prover)
+
+    assert result.status == "equivalent"
+    assert result.is_equivalent() is True
+    assert len(seen) == 1
+    assert result.proof_obligation == seen[0]
+
+
+def test_loop_summary_comparator_does_not_call_prover_for_incompatible_surfaces():
+    pure = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    effectful = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(profile="effect_aware", memory_writes=True, effect_count=1),
+    )
+    prover = Mock()
+
+    result = compare_loop_summaries(pure, effectful, solver_prover=prover)
+
+    assert result.status == "incompatible"
+    prover.assert_not_called()
+
+
+def test_composed_loop_summary_ref_projects_current_surface_and_keys_handoff():
+    prior = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 5, 0),)),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    current = LoopSummaryRef(
+        start_expr=Expression.parameter("seed", index=2, data_type="int", size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue", residue_cases=((1, 0, 1, 0),)),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), Expression.parameter("count", index=1, data_type="int", size=4))),),
+        loop_var_unit="induction_value",
+    )
+    handoff = (
+        "prior_state_transition_handoff_proof_ref",
+        ("proof_obligation_id", "prior_state_transition_handoff", ("target", "stable")),
+        ("target", "stable"),
+    )
+
+    composed = ComposedLoopSummaryRef(prior=prior, current=current, handoff_proof_key=handoff)
+
+    assert composed.start_expr is current.start_expr
+    assert composed.term_descriptor is current.term_descriptor
+    assert composed.guard_constraints == current.guard_constraints
+    assert composed.stable_key() is not None
+    assert composed.semantic_key() is not None
+    assert composed.stable_key() != ComposedLoopSummaryRef(
+        prior=prior,
+        current=current,
+        handoff_proof_key=("prior_state_transition_handoff_proof_ref", "other", ("target", "stable")),
+    ).stable_key()
 
 
 def _pure_counted_loop_summary() -> LoopSummaryRef:

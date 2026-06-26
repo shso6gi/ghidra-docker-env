@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from .call_target import CallTargetRef, coerce_call_target_ref
 
@@ -1972,11 +1972,205 @@ class LoopSummaryRef:
 
 
 @dataclass(frozen=True)
+class ComposedLoopSummaryRef:
+    """Lightweight composition wrapper for sequential loop summaries.
+
+    The wrapper keeps composition identity separate from ``LoopSummaryRef`` while
+    projecting the current summary surface for legacy consumers that only need
+    guard/term/side-effect shape.
+    """
+
+    prior: Any
+    current: Any
+    handoff_proof_key: Optional[Tuple[Any, ...]] = None
+    source: str = "composed_loop_summary"
+
+    @property
+    def start_expr(self) -> Any:
+        return getattr(self.current, "start_expr", None)
+
+    @property
+    def limit_expr(self) -> Any:
+        return getattr(self.current, "limit_expr", None)
+
+    @property
+    def step_expr(self) -> Any:
+        return getattr(self.current, "step_expr", None)
+
+    @property
+    def term_descriptor(self) -> Any:
+        return getattr(self.current, "term_descriptor", None)
+
+    @property
+    def seed_terms(self) -> Tuple[Any, ...]:
+        return tuple(getattr(self.current, "seed_terms", ()) or ())
+
+    @property
+    def seed_term_count(self) -> Optional[int]:
+        return getattr(self.current, "seed_term_count", None)
+
+    @property
+    def witnesses(self) -> Tuple[Any, ...]:
+        return tuple(getattr(self.current, "witnesses", ()) or ())
+
+    @property
+    def side_effect_profile(self) -> LoopSideEffectProfileRef:
+        profile = getattr(self.current, "side_effect_profile", None)
+        return profile if isinstance(profile, LoopSideEffectProfileRef) else LoopSideEffectProfileRef()
+
+    @property
+    def guard_constraints(self) -> Tuple[Any, ...]:
+        return tuple(getattr(self.current, "guard_constraints", ()) or ())
+
+    @property
+    def cases(self) -> Tuple[Any, ...]:
+        return tuple(getattr(self.current, "cases", ()) or ())
+
+    @property
+    def loop_var_unit(self) -> str:
+        return str(getattr(self.current, "loop_var_unit", "element_index") or "element_index")
+
+    @property
+    def constant_bias(self) -> int:
+        try:
+            return int(getattr(self.current, "constant_bias", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        prior_key = _loop_object_key(self.prior)
+        current_key = _loop_object_key(self.current)
+        handoff_key = _loop_object_key(self.handoff_proof_key)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if prior_key is None or current_key is None or handoff_key is None or side_effect_key is None:
+            return None
+        return (
+            "composed_loop_summary",
+            prior_key,
+            current_key,
+            handoff_key,
+            side_effect_key,
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        prior_key = _loop_object_semantic_key(self.prior)
+        current_key = _loop_object_semantic_key(self.current)
+        handoff_key = _loop_object_semantic_key(self.handoff_proof_key)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if prior_key is None or current_key is None or handoff_key is None or side_effect_key is None:
+            return None
+        return (
+            "composed_loop_summary",
+            prior_key,
+            current_key,
+            handoff_key,
+            side_effect_key,
+            self.source,
+        )
+
+    def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
+        return self.stable_key()
+
+    def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        return self.semantic_key()
+
+    def requires_effect_proof(self) -> bool:
+        for summary in (self.prior, self.current):
+            requires_effect_proof = getattr(summary, "requires_effect_proof", None)
+            if callable(requires_effect_proof) and requires_effect_proof():
+                return True
+        return False
+
+    def requires_path_proof(self) -> bool:
+        for summary in (self.prior, self.current):
+            requires_path_proof = getattr(summary, "requires_path_proof", None)
+            if callable(requires_path_proof) and requires_path_proof():
+                return True
+        return False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "composed_loop_summary",
+            "prior": _loop_object_to_dict(self.prior),
+            "current": _loop_object_to_dict(self.current),
+            "handoff_proof_key": _loop_object_to_dict(self.handoff_proof_key),
+            "side_effect_profile": self.side_effect_profile.to_dict(),
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class LoopSummaryProofObligation:
+    """Proof obligation emitted when loop-summary equality needs a solver context."""
+
+    proof_kind: str
+    left_summary_key: Optional[Tuple[Any, ...]]
+    right_summary_key: Optional[Tuple[Any, ...]]
+    relation: str
+    required_evidence: Tuple[str, ...]
+    reason: str
+
+    @classmethod
+    def case_aware_solver_equality(
+        cls,
+        left: "LoopSummaryRef",
+        right: "LoopSummaryRef",
+        *,
+        reason: str,
+    ) -> "LoopSummaryProofObligation":
+        return cls(
+            proof_kind="case_aware_loop_summary_solver_equality",
+            left_summary_key=_loop_summary_comparison_key(left),
+            right_summary_key=_loop_summary_comparison_key(right),
+            relation="loop_summary_value_equality_under_case_guards",
+            required_evidence=(
+                "guard_partition",
+                "transition_or_term_equality",
+                "pure_side_effect_profile",
+                "width_policy",
+            ),
+            reason=reason,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_summary_proof_obligation",
+            "proof_kind": self.proof_kind,
+            "left_summary_key": self.left_summary_key,
+            "right_summary_key": self.right_summary_key,
+            "relation": self.relation,
+            "required_evidence": self.required_evidence,
+            "reason": self.reason,
+        }
+
+
+def _loop_summary_comparison_key(summary: Optional["LoopSummaryRef"]) -> Optional[Tuple[Any, ...]]:
+    if summary is None:
+        return None
+    for name in ("pairwise_semantic_key", "semantic_key", "stable_key"):
+        key_fn = getattr(summary, name, None)
+        if not callable(key_fn):
+            continue
+        try:
+            key = key_fn()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            key = None
+        if key is not None:
+            return key
+    return None
+
+
+LoopSummarySolverProver = Callable[[LoopSummaryProofObligation], "LoopSummaryComparisonResult"]
+
+
+@dataclass(frozen=True)
 class LoopSummaryComparisonResult:
     """Tri-state result for the future Method-B loop-summary comparator."""
 
     status: str
     reason: Optional[str] = None
+    proof_obligation: Optional[LoopSummaryProofObligation] = None
 
     def __post_init__(self) -> None:
         if self.status not in {"equivalent", "different", "incompatible", "unknown"}:
@@ -1997,18 +2191,23 @@ class LoopSummaryComparisonResult:
             "kind": "loop_summary_comparison_result",
             "status": self.status,
             "reason": self.reason,
+            "proof_obligation": self.proof_obligation.to_dict()
+            if self.proof_obligation is not None
+            else None,
         }
 
 
 def compare_loop_summaries(
     left: Optional[LoopSummaryRef],
     right: Optional[LoopSummaryRef],
+    *,
+    solver_prover: Optional[LoopSummarySolverProver] = None,
 ) -> LoopSummaryComparisonResult:
     """Compare Method-B loop summaries.
 
-    The full seed/tail, guard-aware, and SMT-backed proof is intentionally still
-    non-decisive. We can, however, safely reject summaries whose loop-body
-    effect surfaces are already structurally different.
+    This central comparator owns the structural gates.  Solver-backed equality
+    is supplied as an optional callback because the model layer does not know
+    the active return-case guards or SMT runner.
     """
 
     if left is None or right is None:
@@ -2063,7 +2262,24 @@ def compare_loop_summaries(
     if left_semantic_key is not None and right_semantic_key is not None:
         if left_semantic_key == right_semantic_key:
             return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic key")
-    return LoopSummaryComparisonResult("unknown", "loop summary comparator requires case-aware solver proof")
+    obligation = LoopSummaryProofObligation.case_aware_solver_equality(
+        left,
+        right,
+        reason="loop summary comparator requires case-aware solver proof",
+    )
+    if solver_prover is not None:
+        try:
+            proven = solver_prover(obligation)
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            proven = None
+        if isinstance(proven, LoopSummaryComparisonResult):
+            if proven.status in {"equivalent", "different", "incompatible"}:
+                return proven
+    return LoopSummaryComparisonResult(
+        "unknown",
+        "loop summary comparator requires case-aware solver proof",
+        proof_obligation=obligation,
+    )
 
 
 def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:

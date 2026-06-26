@@ -16,6 +16,7 @@ from ...model import (
     FunctionReturnAnalysis,
     LoopSummaryRef,
     LoopTermDescriptorRef,
+    LoopSummaryComparisonResult,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     StorageInfo,
@@ -499,6 +500,12 @@ class PairwiseStrategy(CheckStrategy):
                     )
                     if reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
                         self._record_completed_method_b_covering_case_proof_if_safe(
+                            reason_record,
+                            analysis1,
+                            case1,
+                            case2,
+                        )
+                        self._record_completed_method_b_dual_summary_solver_proof_if_safe(
                             reason_record,
                             analysis1,
                             case1,
@@ -1539,6 +1546,118 @@ class PairwiseStrategy(CheckStrategy):
         existing_ids.add(proof_id)
         return True
 
+    def _record_completed_method_b_dual_summary_solver_proof_if_safe(
+        self,
+        reason_record,
+        analysis: FunctionReturnAnalysis,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+            return
+        object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
+        if not self._method_b_closure_target_is_specific(object_target_key):
+            return
+        relation = self._normalize_nested_tuple(object_target_key[4])
+        relation_fields = {
+            item[0]: item[1]
+            for item in relation[1:]
+            if isinstance(item, tuple) and len(item) == 2
+        } if isinstance(relation, tuple) and len(relation) >= 2 else {}
+        if relation_fields.get("kind") != "dual_summary":
+            return
+        left_ref = self._method_b_summary_runtime_ref(getattr(case1, "value_expr", None))
+        right_ref = self._method_b_summary_runtime_ref(getattr(case2, "value_expr", None))
+        if left_ref is None or right_ref is None:
+            return
+        left_profile = self._method_b_summary_profile_key(left_ref)
+        right_profile = self._method_b_summary_profile_key(right_ref)
+        if relation_fields.get("left_summary") != left_profile or relation_fields.get("right_summary") != right_profile:
+            return
+        if not self._case_pair_loop_summaries_solver_equivalent(
+            left_ref,
+            right_ref,
+            left_case=case1,
+            right_case=case2,
+        ):
+            return
+        actions = tuple(build_unknown_recovery_actions([reason_record]))
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in records
+        }
+        changed = False
+        for action in actions:
+            proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
+            if proof_id is None or proof_id in existing_ids:
+                continue
+            proof_content = self._method_b_dual_summary_solver_proof_content(
+                action.proof_stage,
+                object_target_key=object_target_key,
+                left_profile=left_profile,
+                right_profile=right_profile,
+            )
+            if proof_content is None:
+                continue
+            records.append(
+                {
+                    "object_derived": True,
+                    "status": "complete",
+                    "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+                    "proof_kind": action.proof_kind,
+                    "recovery_proof_kind": action.proof_kind,
+                    "proof_stage": action.proof_stage,
+                    "evidence_kind": action.evidence_kind,
+                    "required_evidence": tuple(action.required_evidence),
+                    "object_target_key": object_target_key,
+                    "proof_obligation_id": proof_id,
+                    "proof_source": "method_b_dual_summary_case_local_solver_equality",
+                    "proof_content": proof_content,
+                }
+            )
+            existing_ids.add(proof_id)
+            changed = True
+        if changed:
+            analysis.completed_recovery_proof_evidence = tuple(records)
+
+    def _method_b_dual_summary_solver_proof_content(
+        self,
+        proof_stage: str,
+        *,
+        object_target_key: Tuple[Any, ...],
+        left_profile: Tuple[Any, ...],
+        right_profile: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        common = {
+            "object_derived": True,
+            "object_target_key": object_target_key,
+            "relation_kind": "dual_summary",
+            "left_summary": left_profile,
+            "right_summary": right_profile,
+            "summary_value_equivalence": "unsat",
+            "solver_equality_proof": "unsat",
+            "guard_coverage": "proven",
+            "seed_compensation": "vacuous",
+            "term_sequence": "proven",
+            "pure_side_effect_profile": "proven",
+        }
+        if proof_stage == "method_b_covering_case":
+            return common
+        if proof_stage == "method_b_guard_partition":
+            return {
+                **common,
+                "guard_partition": "proven",
+                "partition_coverage_proof": "covered",
+            }
+        return None
+
     @staticmethod
     def _method_b_recovery_action(
         actions: Sequence[Any],
@@ -1730,6 +1849,62 @@ class PairwiseStrategy(CheckStrategy):
         right_summary = getattr(right_ref, "loop_summary", None)
         if left_summary is None or right_summary is None:
             return False
+        if (
+            isinstance(left_ref, CountedLoopSummaryRef)
+            and isinstance(right_ref, CountedLoopSummaryRef)
+            and not self._counted_loop_summary_wrapper_semantics_match(left_ref, right_ref)
+        ):
+            return self._case_pair_loop_summaries_solver_equivalent_core(
+                left_ref,
+                right_ref,
+                left_case=left_case,
+                right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
+            )
+        def solver_prover(obligation) -> LoopSummaryComparisonResult:
+            if getattr(obligation, "proof_kind", None) != "case_aware_loop_summary_solver_equality":
+                return LoopSummaryComparisonResult("unknown", "unsupported loop-summary proof obligation")
+            if self._case_pair_loop_summaries_solver_equivalent_core(
+                left_ref,
+                right_ref,
+                left_case=left_case,
+                right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
+            ):
+                return LoopSummaryComparisonResult(
+                    "equivalent",
+                    "loop summaries proved by case-aware solver",
+                    proof_obligation=obligation,
+                )
+            return LoopSummaryComparisonResult(
+                "unknown",
+                "case-aware loop-summary solver proof failed",
+                proof_obligation=obligation,
+            )
+
+        result = compare_loop_summaries(
+            left_summary,
+            right_summary,
+            solver_prover=solver_prover,
+        )
+        return result.is_equivalent() is True and self._case_pair_has_runtime_guard_coverage_or_equivalence(
+            left_case,
+            right_case,
+        )
+
+    def _case_pair_loop_summaries_solver_equivalent_core(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
+    ) -> bool:
+        left_summary = getattr(left_ref, "loop_summary", None)
+        right_summary = getattr(right_ref, "loop_summary", None)
+        if left_summary is None or right_summary is None:
+            return False
         for summary in (left_summary, right_summary):
             requires_effect_proof = getattr(summary, "requires_effect_proof", None)
             if callable(requires_effect_proof) and requires_effect_proof():
@@ -1742,7 +1917,13 @@ class PairwiseStrategy(CheckStrategy):
         if self._loop_summary_constant_bias(left_summary) != self._loop_summary_constant_bias(right_summary):
             return False
         if not self._counted_loop_summary_wrapper_semantics_match(left_ref, right_ref):
-            return False
+            return self._case_pair_counted_loop_summaries_closed_values_equivalent(
+                left_ref,
+                right_ref,
+                left_case=left_case,
+                right_case=right_case,
+                semantic_parameter_sources=semantic_parameter_sources,
+            )
         left_term_key = self._loop_term_descriptor_semantic_key(left_summary)
         right_term_key = self._loop_term_descriptor_semantic_key(right_summary)
         if left_term_key is None or right_term_key is None or left_term_key != right_term_key:
@@ -1800,6 +1981,71 @@ class PairwiseStrategy(CheckStrategy):
         if not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case):
             return False
         return True
+
+    def _case_pair_counted_loop_summaries_closed_values_equivalent(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        semantic_parameter_sources: Sequence[ParameterInfo] = (),
+    ) -> bool:
+        left_expr = getattr(left_case, "value_expr", None)
+        right_expr = getattr(right_case, "value_expr", None)
+        if getattr(left_expr, "runtime_ref", None) is not left_ref:
+            return False
+        if getattr(right_expr, "runtime_ref", None) is not right_ref:
+            return False
+        if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+            return False
+        result_size = self._case_pair_comparison_result_size(left_case, right_case)
+        if result_size is None:
+            return False
+        if not self._counted_loop_refs_allow_affine_value_proof(left_ref, right_ref):
+            return False
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        left_guards, left_guards_complete = self._runtime_summary_guard_conditions_from_expression(left_expr)
+        right_guards, right_guards_complete = self._runtime_summary_guard_conditions_from_expression(right_expr)
+        if not left_guards_complete or not right_guards_complete:
+            return False
+        for guard in tuple(left_guards) + tuple(right_guards):
+            if guard not in conditions:
+                conditions.append(guard)
+        exprs = [left_expr, right_expr]
+        exprs.extend(condition.expression for condition in conditions or [] if condition is not None)
+        parameters = self._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            *exprs,
+            semantic_parameter_sources=semantic_parameter_sources,
+        )
+        if parameters is None:
+            return False
+        if not self._counted_loop_affine_widths_are_safe(left_expr, right_expr, result_size, parameters):
+            return False
+        left_closed = self._counted_loop_affine_closed_expression(
+            left_expr,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        right_closed = self._counted_loop_affine_closed_expression(
+            right_expr,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        if left_closed is None or right_closed is None:
+            return False
+        if not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case):
+            return False
+        return self._prove_intrinsic_equivalence_under_conditions(
+            left_closed,
+            right_closed,
+            conditions,
+            parameters,
+        )
 
     def _loop_summary_constant_bias(self, summary) -> int:
         result_size = int(getattr(summary, "result_size", 0) or 0)
@@ -2749,30 +2995,42 @@ class PairwiseStrategy(CheckStrategy):
         case1: ReturnCase,
         case2: ReturnCase,
     ) -> Tuple[Any, ...]:
-        left_ref = self._method_b_readonly_summary_ref(getattr(case1, "value_expr", None))
-        right_ref = self._method_b_readonly_summary_ref(getattr(case2, "value_expr", None))
-        if left_ref is not None and right_ref is None:
+        left_readonly_ref = self._method_b_readonly_summary_ref(getattr(case1, "value_expr", None))
+        right_readonly_ref = self._method_b_readonly_summary_ref(getattr(case2, "value_expr", None))
+        left_summary_ref = self._method_b_summary_runtime_ref(getattr(case1, "value_expr", None))
+        right_summary_ref = self._method_b_summary_runtime_ref(getattr(case2, "value_expr", None))
+        if left_readonly_ref is not None and right_summary_ref is None:
             return self._method_b_one_sided_summary_relation(
                 summary_side="left",
-                summary_ref=left_ref,
+                summary_ref=left_readonly_ref,
                 exact_side="right",
                 exact_case=case2,
             )
-        if right_ref is not None and left_ref is None:
+        if right_readonly_ref is not None and left_summary_ref is None:
             return self._method_b_one_sided_summary_relation(
                 summary_side="right",
-                summary_ref=right_ref,
+                summary_ref=right_readonly_ref,
                 exact_side="left",
                 exact_case=case1,
             )
-        if left_ref is not None and right_ref is not None:
+        if left_summary_ref is not None and right_summary_ref is not None:
             return (
                 "method_b_closure_relation",
                 ("kind", "dual_summary"),
-                ("left_summary", self._method_b_summary_profile_key(left_ref)),
-                ("right_summary", self._method_b_summary_profile_key(right_ref)),
+                ("left_summary", self._method_b_summary_profile_key(left_summary_ref)),
+                ("right_summary", self._method_b_summary_profile_key(right_summary_ref)),
             )
         return ("method_b_closure_relation", ("kind", "missing_method_b_summary"))
+
+    def _method_b_summary_runtime_ref(self, expr: Optional[Expression]):
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, (ReadonlyReductionRef, CountedLoopSummaryRef)) and getattr(
+            runtime_ref,
+            "loop_summary",
+            None,
+        ) is not None:
+            return runtime_ref
+        return None
 
     def _method_b_readonly_summary_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
         runtime_ref = getattr(expr, "runtime_ref", None)
@@ -2809,22 +3067,145 @@ class PairwiseStrategy(CheckStrategy):
             ("exact_constant_bias", exact_bias),
         )
 
-    def _method_b_summary_profile_key(self, readonly_ref: ReadonlyReductionRef) -> Tuple[Any, ...]:
-        term_contract = self._readonly_reduction_term_sequence_contract_key(
-            readonly_ref,
-            result_size=getattr(readonly_ref, "result_size", None),
-        )
-        term_contract = self._method_b_normalized_term_contract_key(readonly_ref, term_contract)
+    def _method_b_summary_profile_key(self, summary_ref) -> Tuple[Any, ...]:
+        if isinstance(summary_ref, CountedLoopSummaryRef):
+            runtime_ref_key = self._counted_loop_summary_runtime_profile_key(summary_ref)
+            loop_summary_key = self._counted_loop_summary_loop_profile_key(getattr(summary_ref, "loop_summary", None))
+            term_contract = self._counted_loop_summary_contract_key(summary_ref)
+            count_identities = self._counted_loop_summary_count_identities(summary_ref)
+        else:
+            runtime_ref_key = self._semantic_key_or_stable_key_or_none(summary_ref)
+            loop_summary_key = self._semantic_key_or_stable_key_or_none(getattr(summary_ref, "loop_summary", None))
+            term_contract = self._readonly_reduction_term_sequence_contract_key(
+                summary_ref,
+                result_size=getattr(summary_ref, "result_size", None),
+            )
+            term_contract = self._method_b_normalized_term_contract_key(summary_ref, term_contract)
+            count_identities = tuple(sorted(self._readonly_count_identity_keys(summary_ref), key=repr))
         return (
             "method_b_summary_profile",
-            ("runtime_ref", self._semantic_key_or_stable_key_or_none(readonly_ref)),
-            (
-                "loop_summary",
-                self._semantic_key_or_stable_key_or_none(getattr(readonly_ref, "loop_summary", None)),
-            ),
+            ("runtime_ref", runtime_ref_key),
+            ("loop_summary", loop_summary_key),
             ("term_contract", term_contract),
-            ("count_identities", tuple(sorted(self._readonly_count_identity_keys(readonly_ref), key=repr))),
+            ("count_identities", tuple(sorted(count_identities, key=repr))),
         )
+
+    def _counted_loop_summary_runtime_profile_key(self, counted_ref: CountedLoopSummaryRef) -> Tuple[Any, ...]:
+        return (
+            "counted_loop_summary_profile_ref",
+            max(1, int(getattr(counted_ref, "result_size", 0) or 0)),
+            int(getattr(counted_ref, "induction_step", 0) or 0),
+            bool(getattr(counted_ref, "signed_loop", False)),
+            tuple(getattr(counted_ref, "residue_cases", ()) or ()),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    self._method_b_value_key_or_none(bias_expr),
+                )
+                for modulus, residue, bias_expr in tuple(getattr(counted_ref, "residue_bias_terms", ()) or ())
+            ),
+            self._counted_loop_ref_constant_bias(counted_ref),
+        )
+
+    def _counted_loop_summary_loop_profile_key(self, loop_summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
+        if loop_summary is None:
+            return None
+        descriptor = getattr(loop_summary, "term_descriptor", None)
+        descriptor_key = self._method_b_key_with_explicit_optional_none(
+            self._semantic_key_or_stable_key_or_none(descriptor)
+        )
+        side_effect_key = self._method_b_key_with_explicit_optional_none(
+            self._semantic_key_or_stable_key_or_none(getattr(loop_summary, "side_effect_profile", None))
+        )
+        if descriptor_key is None or side_effect_key is None:
+            return None
+        return (
+            "counted_loop_summary_loop_profile",
+            getattr(loop_summary, "loop_var_unit", None) or "unknown_loop_var_unit",
+            self._method_b_value_key_or_none(getattr(loop_summary, "start_expr", None)),
+            self._method_b_value_key_or_none(getattr(loop_summary, "limit_expr", None)),
+            self._method_b_value_key_or_none(getattr(loop_summary, "step_expr", None)),
+            descriptor_key,
+            side_effect_key,
+            tuple(
+                self._method_b_key_with_explicit_optional_none(
+                    getattr(case, "stable_key", lambda: None)()
+                )
+                for case in tuple(getattr(loop_summary, "cases", ()) or ())
+            ),
+        )
+
+    def _counted_loop_summary_contract_key(self, counted_ref: CountedLoopSummaryRef) -> Optional[Tuple[Any, ...]]:
+        runtime_key = self._counted_loop_summary_runtime_profile_key(counted_ref)
+        loop_summary = getattr(counted_ref, "loop_summary", None)
+        loop_key = self._counted_loop_summary_loop_profile_key(loop_summary)
+        if runtime_key is None or loop_key is None:
+            return None
+        residue_bias_terms = tuple(
+            (
+                int(modulus),
+                int(residue),
+                self._method_b_value_key_or_none(bias_expr),
+            )
+            for modulus, residue, bias_expr in tuple(getattr(counted_ref, "residue_bias_terms", ()) or ())
+        )
+        if any(term[2] is None for term in residue_bias_terms):
+            return None
+        return (
+            "counted_loop_summary_contract",
+            runtime_key,
+            loop_key,
+            max(1, int(getattr(counted_ref, "result_size", 0) or 0)),
+            int(getattr(counted_ref, "induction_step", 0) or 0),
+            bool(getattr(counted_ref, "signed_loop", False)),
+            tuple(getattr(counted_ref, "residue_cases", ()) or ()),
+            residue_bias_terms,
+            self._counted_loop_ref_constant_bias(counted_ref),
+            tuple(case.stable_key() for case in tuple(getattr(loop_summary, "cases", ()) or ())),
+        )
+
+    def _counted_loop_summary_count_identities(self, counted_ref: CountedLoopSummaryRef) -> Tuple[Tuple[Any, ...], ...]:
+        identities: List[Tuple[Any, ...]] = []
+        for value in (
+            getattr(counted_ref, "start_expr", None),
+            getattr(counted_ref, "limit_expr", None),
+            getattr(counted_ref, "step_expr", None),
+        ):
+            key = self._method_b_value_key_or_none(value)
+            if key is not None:
+                identities.append(("expression", key))
+        loop_summary = getattr(counted_ref, "loop_summary", None)
+        for value in (
+            getattr(loop_summary, "start_expr", None),
+            getattr(loop_summary, "limit_expr", None),
+            getattr(loop_summary, "step_expr", None),
+        ):
+            key = self._method_b_value_key_or_none(value)
+            if key is not None:
+                identities.append(("loop_expression", key))
+        return tuple(dict.fromkeys(identities))
+
+    def _method_b_value_key_or_none(self, value: Any):
+        key = self._semantic_key_or_stable_key_or_none(value)
+        if key is not None:
+            return self._method_b_key_with_explicit_optional_none(key)
+        structural_key = getattr(value, "structural_key", None)
+        if callable(structural_key):
+            try:
+                return self._method_b_key_with_explicit_optional_none(structural_key(budget=256))
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                return None
+        return None
+
+    def _method_b_key_with_explicit_optional_none(self, value: Any):
+        if value is None:
+            return ("optional_none",)
+        if isinstance(value, tuple):
+            return tuple(self._method_b_key_with_explicit_optional_none(item) for item in value)
+        if isinstance(value, list):
+            return tuple(self._method_b_key_with_explicit_optional_none(item) for item in value)
+        return value
 
     def _method_b_normalized_term_contract_key(
         self,

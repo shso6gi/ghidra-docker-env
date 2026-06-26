@@ -3225,6 +3225,12 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
     )
     assert strategy._cases_have_equivalent_runtime_reductions(positive_left_case, positive_right_case) is True
     _stub_pair_solver_unsat(strategy)
+    assert strategy._case_pair_loop_summaries_solver_equivalent(
+        left_counted.runtime_ref,
+        right_counted.runtime_ref,
+        left_case=positive_left_case,
+        right_case=positive_right_case,
+    ) is True
 
     result = strategy.check(analysis_left, analysis_right)
 
@@ -3232,6 +3238,108 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
     assert result.total_pairs == 4
     assert result.unsat_pairs == 4
     assert result.unknown_pairs == 0
+
+
+def test_counted_loop_summary_dual_solver_proof_completes_method_b_closure():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    five = Expression.constant(5, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    left_summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="affine_residue",
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    left_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            residue_bias_terms=((1, 0, c),),
+            loop_summary=left_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_limit = Expression.binary_op("INT_ADD", Expression.binary_op("INT_MULT", five, n), c)
+    right_limit.size = 4
+    right_summary = LoopSummaryRef(
+        start_expr=c,
+        limit_expr=right_limit,
+        step_expr=five,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="affine_residue",
+            residue_cases=((1, 0, 1, 0),),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    right_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, c, right_limit],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=5,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((1, 0, 1, 0),),
+            loop_summary=right_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analysis_left = FunctionReturnAnalysis(
+        function_name="barthe_step1",
+        entry_point="0x1000",
+        parameters=parameters,
+        returns=[
+            ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
+        ],
+        return_type="int",
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    analysis_right = replace(
+        analysis_left,
+        function_name="barthe_step5",
+        returns=[
+            ReturnInfo(address="0x2000", value=right_counted, conditions=[positive]),
+        ],
+    )
+    strategy = _pairwise_strategy()
+    strategy._collect_return_coverage_unsafety_reasons = Mock(return_value=[])
+    strategy._cases_have_equivalent_runtime_reductions = Mock(return_value=False)
+    strategy._case_pair_loop_summary_safe_fallback_reason = Mock(return_value="loop_summary_guard_mismatch")
+    _stub_pair_solver_unsat(strategy)
+
+    result = strategy.check(analysis_left, analysis_right)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unknown_pairs == 0
+    assert [item["proof_stage"] for item in analysis_left.completed_recovery_proof_evidence] == [
+        "method_b_covering_case",
+        "method_b_guard_partition",
+    ]
+    assert {
+        item["proof_content"]["relation_kind"]
+        for item in analysis_left.completed_recovery_proof_evidence
+    } == {"dual_summary"}
 
 
 def test_loop_summary_solver_comparator_proves_equivalent_seed_expressions():
