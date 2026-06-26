@@ -722,7 +722,7 @@ class StructuralRecurrenceSummarizer:
     ) -> bool:
         if candidate is None or getattr(candidate, "expr_type", None) != ExpressionType.PARAMETER:
             return False
-        expected_storage = counter_param.get("storage_info", counter_param.get("storage"))
+        expected_storage = self._summary_storage_info_from_parameter(counter_param)
         candidate_storage = getattr(candidate, "storage_info", None)
         if expected_storage is not None:
             return (
@@ -908,9 +908,8 @@ class StructuralRecurrenceSummarizer:
                 ),
                 False,
             )
-            try:
-                is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [equality])
-            except Exception:
+            is_unsat = self._condition_conjunction_unsat_with_solver(list(conditions) + [equality])
+            if is_unsat is None:
                 return None
             if is_unsat is False:
                 possible_values.append(value)
@@ -932,13 +931,40 @@ class StructuralRecurrenceSummarizer:
                 disjunction = Expression.binary_op("BOOL_OR", disjunction, equality_expr)
                 disjunction.size = 1
         outside_cover = Condition(disjunction, True)
-        try:
-            cover_complete = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [outside_cover])
-        except Exception:
+        cover_complete = self._condition_conjunction_unsat_with_solver(list(conditions) + [outside_cover])
+        if cover_complete is None:
             return None
         if cover_complete is not True:
             return None
         return tuple(possible_values)
+
+    def _condition_conjunction_unsat_with_solver(
+        self,
+        conditions: Sequence[Condition],
+        *,
+        timeout: int = 2,
+    ) -> Optional[bool]:
+        try:
+            is_unsat = ConditionSMTOracle.conjunction_is_unsat(conditions)
+        except Exception:
+            is_unsat = None
+        if is_unsat is True or is_unsat is False:
+            return bool(is_unsat)
+        try:
+            usable, script = ConditionSMTOracle._build_script(conditions)
+        except Exception:
+            return None
+        if not usable or not script:
+            return None
+        try:
+            result = Z3Solver(timeout=timeout, debug=False).check_equivalence_direct(script)
+        except Exception:
+            return None
+        if result.status == SolverStatus.UNSAT:
+            return True
+        if result.status == SolverStatus.SAT:
+            return False
+        return None
 
     def _implied_counter_constant_expression(
         self,

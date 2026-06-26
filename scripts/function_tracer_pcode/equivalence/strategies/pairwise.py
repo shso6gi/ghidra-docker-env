@@ -5031,7 +5031,17 @@ class PairwiseStrategy(CheckStrategy):
             parameters=parameters,
             shifted_progression=True,
         )
-        candidates = [candidate for candidate in (counted_closed, shifted_closed) if candidate is not None]
+        affine_closed = self._counted_loop_affine_closed_expression_candidate(
+            counted,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        candidates = [
+            candidate
+            for candidate in (counted_closed, shifted_closed, affine_closed)
+            if candidate is not None
+        ]
         if not candidates:
             return False
         for candidate in candidates:
@@ -5043,6 +5053,26 @@ class PairwiseStrategy(CheckStrategy):
             ):
                 return True
         return False
+
+    def _counted_loop_affine_closed_expression_candidate(
+        self,
+        counted: Expression,
+        *,
+        result_size: int,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[Expression]:
+        runtime_ref = getattr(counted, "runtime_ref", None)
+        if not self._counted_loop_refs_allow_affine_value_proof(runtime_ref, runtime_ref):
+            return None
+        if not self._counted_loop_affine_widths_are_safe(counted, counted, result_size, parameters):
+            return None
+        return self._counted_loop_affine_closed_expression(
+            counted,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
 
     def _counted_loop_positive_closed_expression(
         self,
@@ -5456,8 +5486,6 @@ class PairwiseStrategy(CheckStrategy):
         base, start, limit = operands
         step = int(getattr(runtime_ref, "induction_step", 0) or 0)
         if step <= 0:
-            return None
-        if step != 1 and step != 5:
             return None
 
         trip_count = self._counted_loop_affine_trip_count_expression(
