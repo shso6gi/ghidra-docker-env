@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.model import (
     StorageInfo,
     loop_summary_method_b_key,
 )
+from scripts.function_tracer_pcode.model.runtime_refs import UnknownValueRef
 
 
 def _base_param() -> Expression:
@@ -55,6 +56,48 @@ def _count_param() -> Expression:
 
 def _const(value: int) -> Expression:
     return Expression.constant(value, size=4)
+
+
+class _FakePcodeOpRef:
+    def __init__(self, *, seq_time: int, target_offset: int = 0x100C, opcode: int = 60):
+        self.seq_time = int(seq_time)
+        self.target_offset = int(target_offset)
+        self.opcode = int(opcode)
+
+    def stable_key(self):
+        return (
+            "pcode_op",
+            "fake",
+            ("function_entry", "ram", 0x1000),
+            ("seq_target", "ram", self.target_offset),
+            self.seq_time,
+            0,
+            self.opcode,
+            0,
+        )
+
+
+def _phi_circular_unknown(*, seq_time: int, target_offset: int = 0x100C, opcode: int = 60) -> Expression:
+    expr = Expression.unknown(
+        "phi_circular",
+        runtime_ref=UnknownValueRef.phi_circular(
+            pcode_op_ref=_FakePcodeOpRef(
+                seq_time=seq_time,
+                target_offset=target_offset,
+                opcode=opcode,
+            )
+        ),
+    )
+    expr.size = 4
+    return expr
+
+
+def _phi_circular_exit_guard(phi_expr: Expression) -> Condition:
+    minus_one = Expression.binary_op("INT_ADD", phi_expr, Expression.constant(0xFFFFFFFF, size=4))
+    minus_one.size = 4
+    minus_two = Expression.binary_op("INT_ADD", minus_one, Expression.constant(0xFFFFFFFF, size=4))
+    minus_two.size = 4
+    return Condition(Expression.binary_op("INT_EQUAL", minus_two, _const(0)))
 
 
 def _eq_count(value: int) -> Condition:
@@ -2948,6 +2991,318 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
     assert result.unknown_pairs == 0
 
 
+def test_loop_summary_solver_comparator_proves_equivalent_seed_expressions():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    c_plus_zero = Expression.binary_op("INT_ADD", c, zero)
+    c_plus_zero.size = 4
+    term_descriptor = LoopTermDescriptorRef(
+        kind="affine_residue",
+        residue_cases=((1, 0, 5, 0),),
+    )
+    left_summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=term_descriptor,
+        seed_terms=(c_plus_zero,),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    right_summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=term_descriptor,
+        seed_terms=(c,),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    left_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=left_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=right_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    left_case = ReturnCase(
+        0,
+        [positive],
+        left_counted,
+        ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    right_case = ReturnCase(
+        0,
+        [positive],
+        right_counted,
+        ReturnInfo(address="0x2000", value=right_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    strategy = _pairwise_strategy()
+    _stub_pair_solver_unsat(strategy)
+
+    assert strategy._case_pair_loop_summaries_solver_equivalent(
+        left_counted.runtime_ref,
+        right_counted.runtime_ref,
+        left_case=left_case,
+        right_case=right_case,
+    ) is True
+
+
+def test_loop_summary_solver_comparator_keeps_unproved_seed_expressions_unknown():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    c = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    c_plus_one = Expression.binary_op("INT_ADD", c, Expression.constant(1, size=4))
+    c_plus_one.size = 4
+    term_descriptor = LoopTermDescriptorRef(
+        kind="affine_residue",
+        residue_cases=((1, 0, 5, 0),),
+    )
+    left_summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=term_descriptor,
+        seed_terms=(c_plus_one,),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    right_summary = replace(left_summary, seed_terms=(c,))
+    left_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=left_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=right_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    left_case = ReturnCase(
+        0,
+        [positive],
+        left_counted,
+        ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    right_case = ReturnCase(
+        0,
+        [positive],
+        right_counted,
+        ReturnInfo(address="0x2000", value=right_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    strategy = _pairwise_strategy()
+    sat = SolverResult("mock", SolverStatus.SAT, elapsed_time=0.0, model={"param_2_1": 0})
+    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([sat]))
+
+    assert strategy._case_pair_loop_summaries_solver_equivalent(
+        left_counted.runtime_ref,
+        right_counted.runtime_ref,
+        left_case=left_case,
+        right_case=right_case,
+    ) is False
+
+
+def test_loop_summary_solver_comparator_rejects_constant_bias_mismatch():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    term_descriptor = LoopTermDescriptorRef(
+        kind="affine_residue",
+        residue_cases=((1, 0, 5, 0),),
+        result_size=4,
+    )
+    left_summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=term_descriptor,
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+        constant_bias=1,
+    )
+    right_summary = replace(left_summary, constant_bias=0)
+    left_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=left_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=right_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}]
+    left_case = ReturnCase(
+        0,
+        [positive],
+        left_counted,
+        ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    right_case = ReturnCase(
+        0,
+        [positive],
+        right_counted,
+        ReturnInfo(address="0x2000", value=right_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    strategy = _pairwise_strategy()
+    _stub_pair_solver_unsat(strategy)
+
+    assert strategy._case_pair_loop_summaries_solver_equivalent(
+        left_counted.runtime_ref,
+        right_counted.runtime_ref,
+        left_case=left_case,
+        right_case=right_case,
+    ) is False
+
+
+def test_loop_summary_solver_comparator_rejects_counted_wrapper_semantic_mismatch():
+    n = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    positive = Condition(Expression.binary_op("INT_SLESS", zero, n))
+    summary = LoopSummaryRef(
+        start_expr=zero,
+        limit_expr=n,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="affine_residue",
+            residue_cases=((1, 0, 5, 0),),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(positive,),
+        loop_var_unit="induction_value",
+    )
+    left_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 5, 0),),
+            loop_summary=summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [zero, zero, n],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 6, 0),),
+            loop_summary=summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    parameters = [{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}]
+    left_case = ReturnCase(
+        0,
+        [positive],
+        left_counted,
+        ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    right_case = ReturnCase(
+        0,
+        [positive],
+        right_counted,
+        ReturnInfo(address="0x2000", value=right_counted, conditions=[positive]),
+        parameters=parameters,
+        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+    )
+    strategy = _pairwise_strategy()
+    _stub_pair_solver_unsat(strategy)
+
+    assert strategy._case_pair_loop_summaries_solver_equivalent(
+        left_counted.runtime_ref,
+        right_counted.runtime_ref,
+        left_case=left_case,
+        right_case=right_case,
+    ) is False
+
+
 def test_counted_loop_summary_affine_step5_near_miss_is_not_promoted_to_eq():
     n = Expression.parameter("param_1", index=0, data_type="int", size=4)
     c = Expression.parameter("param_2", index=1, data_type="int", size=4)
@@ -3465,3 +3820,161 @@ def test_pure_and_path_sensitive_loop_shape_mismatch_stays_unknown():
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
     strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_phi_circular_lowering_rejects_seq_time_only_origin_drift_without_completed_proof():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
+    value.size = 4
+    left_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        value,
+        ReturnInfo("left", value),
+    )
+    right_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=141))],
+        value,
+        ReturnInfo("right", value),
+    )
+
+    lowering = strategy._try_build_unresolved_phi_circular_lowering(
+        base_ctx={},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+
+    assert lowering is None
+
+
+def test_phi_circular_lowering_rejects_non_seq_time_origin_drift():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
+    value.size = 4
+    left_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        value,
+        ReturnInfo("left", value),
+    )
+    right_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=141, opcode=61))],
+        value,
+        ReturnInfo("right", value),
+    )
+
+    lowering = strategy._try_build_unresolved_phi_circular_lowering(
+        base_ctx={},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+
+    assert lowering is None
+
+
+def test_phi_circular_lowering_rejects_guard_shape_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
+    value.size = 4
+    left_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        value,
+        ReturnInfo("left", value),
+    )
+    right_phi = _phi_circular_unknown(seq_time=141)
+    mismatched_guard = Condition(Expression.binary_op("INT_EQUAL", right_phi, _const(0)))
+    right_case = ReturnCase(
+        0,
+        [_count_gt(0), mismatched_guard],
+        value,
+        ReturnInfo("right", value),
+    )
+
+    lowering = strategy._try_build_unresolved_phi_circular_lowering(
+        base_ctx={},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+
+    assert lowering is None
+
+
+def test_phi_circular_lowering_rejects_unknown_value_shape_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_value = _phi_circular_unknown(seq_time=144)
+    right_value = Expression.binary_op("INT_ADD", _phi_circular_unknown(seq_time=141), _const(1))
+    right_value.size = 4
+    left_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        left_value,
+        ReturnInfo("left", left_value),
+    )
+    right_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=141))],
+        right_value,
+        ReturnInfo("right", right_value),
+    )
+
+    lowering = strategy._try_build_unresolved_phi_circular_lowering(
+        base_ctx={},
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+    )
+
+    assert lowering is None
+
+
+def test_return_coverage_does_not_drop_phi_circular_guard_without_completed_proof():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
+    value.size = 4
+    positive_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        value,
+        ReturnInfo("positive", value),
+    )
+    nonpositive_case = ReturnCase(
+        1,
+        [_count_gt(0).negate()],
+        _const(1),
+        ReturnInfo("base", _const(1)),
+    )
+
+    assert strategy._return_cases_have_object_centric_total_coverage(
+        (positive_case, nonpositive_case)
+    ) is not True
+
+    phi_value = _phi_circular_unknown(seq_time=144)
+    unresolved_value_case = ReturnCase(
+        0,
+        [_count_gt(0), _phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        phi_value,
+        ReturnInfo("unresolved", phi_value),
+    )
+
+    assert strategy._return_cases_have_object_centric_total_coverage(
+        (unresolved_value_case, nonpositive_case)
+    ) is not True
+
+
+def test_return_coverage_does_not_treat_single_phi_circular_guard_case_as_total():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    value = _const(1)
+    guarded_case = ReturnCase(
+        0,
+        [_phi_circular_exit_guard(_phi_circular_unknown(seq_time=144))],
+        value,
+        ReturnInfo("guarded", value),
+    )
+
+    assert strategy._return_cases_have_object_centric_total_coverage((guarded_case,)) is not True

@@ -6575,11 +6575,16 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined state-transition loop summary: loop has side effects outside scalar state")
             return None
 
-        if self._raw_constant_value(model.accumulator_init_expr) != 0:
-            self._debug("Declined state-transition loop summary: accumulator seed is not zero")
-            return None
         result_size = max(1, int(getattr(model.accumulator_phi_output, "getSize", lambda: 4)() or 4))
         state_size = max(1, int(getattr(model.state_phi_output, "getSize", lambda: 4)() or 4))
+        accumulator_init = self._coerce_summary_expression_to_size(
+            self._canonicalize_expression(model.accumulator_init_expr),
+            result_size,
+            signed=self._expression_prefers_signed_extension(model.accumulator_init_expr),
+        )
+        if self._expression_is_unresolved(accumulator_init):
+            self._debug("Declined state-transition loop summary: accumulator seed is unresolved")
+            return None
         transition_cases = self._state_transition_summary_cases(
             transition_expr=model.state_transition_expr,
             state_guard=model.state_guard_expr,
@@ -6638,6 +6643,7 @@ class StructuralRecurrenceSummarizer:
                     model=model,
                     analysis=analysis,
                     result_size=result_size,
+                    accumulator_init=accumulator_init,
                 )
                 if latch_exit_returns is not None:
                     self._debug("Recovered latch-exit decrement accumulator sum summary")
@@ -6647,10 +6653,18 @@ class StructuralRecurrenceSummarizer:
                     "or supported state affine"
                 )
                 return None
+        loop_value = self._add_state_transition_accumulator_seed(
+            accumulator_init,
+            loop_value,
+            result_size,
+        )
+        if loop_value is None:
+            self._debug("Declined state-transition loop summary: accumulator seed could not be combined")
+            return None
         returns = [
             ReturnInfo(
                 address=address,
-                value=Expression.constant(0, result_size),
+                value=accumulator_init,
                 conditions=[Condition(entry_guard_expr, True)],
                 branch_index=0,
                 **site_metadata,
@@ -6665,6 +6679,34 @@ class StructuralRecurrenceSummarizer:
         ]
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
+
+    def _add_state_transition_accumulator_seed(
+        self,
+        accumulator_init: Expression,
+        loop_value: Optional[Expression],
+        result_size: int,
+    ) -> Optional[Expression]:
+        if loop_value is None or accumulator_init is None:
+            return None
+        result_size = max(1, int(result_size or getattr(loop_value, "size", 0) or 4))
+        loop_value = self._coerce_summary_expression_to_size(
+            loop_value,
+            result_size,
+            signed=self._expression_prefers_signed_extension(loop_value),
+        )
+        accumulator_init = self._coerce_summary_expression_to_size(
+            accumulator_init,
+            result_size,
+            signed=self._expression_prefers_signed_extension(accumulator_init),
+        )
+        if self._raw_constant_value(accumulator_init) == 0:
+            loop_value.size = result_size
+            return loop_value
+        combined = self._sum_expression_terms([accumulator_init, loop_value])
+        if combined is None:
+            return None
+        combined.size = result_size
+        return self._canonicalize_expression(combined)
 
     def _build_state_decrement_accumulator_sum_value(
         self,
@@ -6722,6 +6764,7 @@ class StructuralRecurrenceSummarizer:
         model: StateTransitionLoopModel,
         analysis,
         result_size: int,
+        accumulator_init: Expression,
     ) -> Optional[List[ReturnInfo]]:
         if not self._state_guard_is_placeholder_not_equal_one(
             model.state_guard_expr,
@@ -6757,6 +6800,20 @@ class StructuralRecurrenceSummarizer:
         )
         if loop_value is None:
             return None
+        loop_value = self._add_state_transition_accumulator_seed(
+            accumulator_init,
+            loop_value,
+            result_size,
+        )
+        if loop_value is None:
+            return None
+        base_value = self._coerce_summary_expression_to_size(
+            accumulator_init,
+            result_size,
+            signed=self._expression_prefers_signed_extension(accumulator_init),
+        )
+        if self._expression_is_unresolved(base_value):
+            return None
         positive_conditions = self._build_recursive_conditions(model.state_init_expr, 0)
         base_conditions = self._build_base_conditions(model.state_init_expr, 0)
         if positive_conditions is None or base_conditions is None:
@@ -6781,7 +6838,7 @@ class StructuralRecurrenceSummarizer:
         loop_metadata = metadata(loop_anchor, self._find_cbranch_op(model.header_block))
         return [
             ReturnInfo(
-                value=Expression.constant(0, result_size),
+                value=base_value,
                 conditions=base_conditions,
                 branch_index=getattr(base_anchor, "branch_index", 0),
                 **base_metadata,

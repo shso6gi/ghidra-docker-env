@@ -1837,12 +1837,15 @@ def test_counted_loop_continue_guard_accepts_decrementing_counter():
     )
 
     assert normalized is not None
-    condition_expr, bound_expr, signed = normalized
+    condition_expr, entry_condition_expr, bound_expr, signed = normalized
     assert signed is True
     assert bound_expr.equals(_const(0))
     assert condition_expr.operator == "INT_SLESS"
     assert condition_expr.operands[0].equals(_const(0))
     assert condition_expr.operands[1].equals(counter)
+    assert entry_condition_expr.operator == "INT_SLESS"
+    assert entry_condition_expr.operands[0].equals(_const(0))
+    assert entry_condition_expr.operands[1].equals(counter)
 
 
 def test_affine_loop_state_phi_uses_entry_counter_placeholder():
@@ -1993,7 +1996,11 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert all(case.stable_key() is not None for case in loop_summary.cases)
 
 
-def _build_branch_while_state_cfg(*, swap_transition_inputs: bool = False):
+def _build_branch_while_state_cfg(
+    *,
+    swap_transition_inputs: bool = False,
+    accumulator_init_expr: Optional[Expression] = None,
+):
     param = _param("param_1")
     zero_expr = _const(0)
     one_expr = _const(1)
@@ -2018,6 +2025,7 @@ def _build_branch_while_state_cfg(*, swap_transition_inputs: bool = False):
 
     param_vn = _FakeVarnode("param", expr=param)
     zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    acc_init_vn = _FakeVarnode("acc_init", expr=accumulator_init_expr or zero_expr)
     one_vn = _FakeVarnode("one", expr=one_expr)
     three_vn = _FakeVarnode("three", expr=three_expr)
 
@@ -2032,7 +2040,7 @@ def _build_branch_while_state_cfg(*, swap_transition_inputs: bool = False):
     parity_cond_vn = _FakeVarnode("parity_cond", size=1)
 
     state_phi_op = _FakePcodeOp("MULTIEQUAL", [param_vn, state_merge_vn], state_phi_vn)
-    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [acc_init_vn, acc_next_vn], acc_phi_vn)
     guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_phi_vn], guard_vn)
     header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("header_target"), guard_vn], None)
     header._ops[:] = [state_phi_op, acc_phi_op, guard_op, header_branch]
@@ -2363,6 +2371,40 @@ def test_state_transition_loop_summary_recovers_branch_driven_trip_count():
     loop_smt = expression_to_smt(loop_case.value)
     assert "rt_state_transition_loop_count_" in loop_smt
     assert "rtunk_" not in loop_smt
+
+
+def test_state_transition_loop_summary_preserves_nonzero_accumulator_seed():
+    analysis = create_mock_analysis(
+        "branch_while_state_seeded",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(5), conditions=[]),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", _const(5), Expression.unknown("phi_circular")),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state_seeded"),
+        _build_branch_while_state_cfg(accumulator_init_expr=_const(5)),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    base_case = next(ret for ret in summarized_returns if ret.conditions[0].negated is True)
+    positive_case = next(ret for ret in summarized_returns if ret.conditions[0].negated is False)
+    assert base_case.value.structural_key() == _const(5).structural_key()
+    assert expression_has_unresolved_value(positive_case.value) is False
+    positive_smt = expression_to_smt(positive_case.value)
+    assert "rt_state_transition_loop_count_" in positive_smt
+    assert "(bvadd (_ bv5 32)" in positive_smt
 
 
 def test_state_transition_loop_summary_recovers_latch_guarded_state_loop():

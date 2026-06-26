@@ -1739,13 +1739,17 @@ class PairwiseStrategy(CheckStrategy):
                 return False
         if self._loop_summary_surface_blocks_solver_equality(left_summary, right_summary):
             return False
+        if self._loop_summary_constant_bias(left_summary) != self._loop_summary_constant_bias(right_summary):
+            return False
+        if not self._counted_loop_summary_wrapper_semantics_match(left_ref, right_ref):
+            return False
         left_term_key = self._loop_term_descriptor_semantic_key(left_summary)
         right_term_key = self._loop_term_descriptor_semantic_key(right_summary)
         if left_term_key is None or right_term_key is None or left_term_key != right_term_key:
             return False
         left_seed = tuple(getattr(left_summary, "seed_terms", ()) or ())
         right_seed = tuple(getattr(right_summary, "seed_terms", ()) or ())
-        if left_seed != right_seed:
+        if len(left_seed) != len(right_seed):
             return False
         if getattr(left_summary, "seed_term_count", None) != getattr(right_summary, "seed_term_count", None):
             return False
@@ -1755,7 +1759,15 @@ class PairwiseStrategy(CheckStrategy):
             (getattr(left_summary, "limit_expr", None), getattr(right_summary, "limit_expr", None)),
             (getattr(left_summary, "step_expr", None), getattr(right_summary, "step_expr", None)),
         )
+        seed_expr_pairs: List[Tuple[Expression, Expression]] = []
+        for left_term, right_term in zip(left_seed, right_seed):
+            if isinstance(left_term, Expression) and isinstance(right_term, Expression):
+                seed_expr_pairs.append((left_term, right_term))
+                continue
+            if left_term != right_term:
+                return False
         exprs = [expr for pair in expr_pairs for expr in pair if expr is not None]
+        exprs.extend(expr for pair in seed_expr_pairs for expr in pair)
         exprs.extend(condition.expression for condition in conditions or [] if condition is not None)
         parameters = self._collect_intrinsic_parameter_specs(
             left_case,
@@ -1777,9 +1789,57 @@ class PairwiseStrategy(CheckStrategy):
                 parameters,
             ):
                 return False
+        for left_expr, right_expr in seed_expr_pairs:
+            if not self._prove_intrinsic_equivalence_under_conditions(
+                left_expr,
+                right_expr,
+                conditions,
+                parameters,
+            ):
+                return False
         if not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case):
             return False
         return True
+
+    def _loop_summary_constant_bias(self, summary) -> int:
+        result_size = int(getattr(summary, "result_size", 0) or 0)
+        if result_size <= 0:
+            descriptor = getattr(summary, "term_descriptor", None)
+            result_size = int(getattr(descriptor, "result_size", 0) or 0)
+        result_size = max(1, result_size or 4)
+        bits = max(1, result_size * 8)
+        mask = (1 << bits) - 1
+        try:
+            return int(getattr(summary, "constant_bias", 0) or 0) & mask
+        except (TypeError, ValueError):
+            return 0
+
+    def _counted_loop_summary_wrapper_semantics_match(self, left_ref, right_ref) -> bool:
+        if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+            return True
+        left_bias = self._counted_loop_ref_constant_bias(left_ref)
+        right_bias = self._counted_loop_ref_constant_bias(right_ref)
+        return (
+            int(getattr(left_ref, "induction_step", 0) or 0)
+            == int(getattr(right_ref, "induction_step", 0) or 0)
+            and max(1, int(getattr(left_ref, "result_size", 0) or 0))
+            == max(1, int(getattr(right_ref, "result_size", 0) or 0))
+            and bool(getattr(left_ref, "signed_loop", False)) == bool(getattr(right_ref, "signed_loop", False))
+            and tuple(getattr(left_ref, "residue_cases", ()) or ())
+            == tuple(getattr(right_ref, "residue_cases", ()) or ())
+            and tuple(getattr(left_ref, "residue_bias_terms", ()) or ())
+            == tuple(getattr(right_ref, "residue_bias_terms", ()) or ())
+            and left_bias == right_bias
+        )
+
+    def _counted_loop_ref_constant_bias(self, ref) -> int:
+        result_size = max(1, int(getattr(ref, "result_size", 0) or 4))
+        bits = max(1, result_size * 8)
+        mask = (1 << bits) - 1
+        try:
+            return int(getattr(ref, "constant_bias", 0) or 0) & mask
+        except (TypeError, ValueError):
+            return 0
 
     def _loop_summary_surface_blocks_solver_equality(self, left_summary, right_summary) -> bool:
         if getattr(left_summary, "loop_var_unit", None) != getattr(right_summary, "loop_var_unit", None):
@@ -8044,6 +8104,19 @@ class PairwiseStrategy(CheckStrategy):
         lowered_keys_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowered_unknown_keys_by_pair")
         if isinstance(lowered_keys_by_pair, dict):
             lowered_keys_by_pair.pop(pair_id, None)
+
+    def _try_build_unresolved_phi_circular_lowering(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Optional[_UnresolvedDeferredCallLowering]:
+        # A phi-circular equality assertion is a semantic proof obligation, not
+        # a syntactic lowering. Keep this disabled until completed proof
+        # evidence can be checked here.
+        return None
 
     def _try_build_unresolved_deferred_call_lowering(
         self,
