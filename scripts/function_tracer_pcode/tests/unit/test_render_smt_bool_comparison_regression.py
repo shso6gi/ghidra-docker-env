@@ -5,6 +5,7 @@ from typing import Optional
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
 from scripts.function_tracer_pcode.equivalence.formula.returns import coerce_return_value_to_bitvec
+from scripts.function_tracer_pcode.model.intrinsics import COUNTED_STATE_TRANSITION_VALUE_OPCODE
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_float_predicate_smt_declarations,
     expression_contains_unsupported_smt_ops,
@@ -13,6 +14,10 @@ from scripts.function_tracer_pcode.model.render_smt import (
     expression_smt_sort_kind,
     expression_to_smt,
     smt_logic_name,
+)
+from scripts.function_tracer_pcode.model.runtime_refs import (
+    CountedStateTransitionLoopSummaryRef,
+    LoopSideEffectProfileRef,
 )
 
 
@@ -31,6 +36,148 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _binary(op: str, left: Expression, right: Expression) -> Expression:
     return Expression.binary_op(op, left, right)
+
+
+def _state_times_const_summary(
+    multiplier: int,
+    *,
+    side_effect_profile=None,
+    transition_case_multiplier: Optional[int] = None,
+) -> Expression:
+    state = Expression.variable("__state", size=4)
+    one = _const(1)
+    start = _const(1)
+    limit = _param("n")
+    step = _const(1)
+    transition = Expression.binary_op("INT_MULT", state, _const(multiplier))
+    transition.size = 4
+    case_transition = transition
+    if transition_case_multiplier is not None:
+        case_transition = Expression.binary_op("INT_MULT", state, _const(transition_case_multiplier))
+        case_transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=one,
+        start_expr=start,
+        limit_expr=limit,
+        step_expr=step,
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), case_transition.structural_key()),),
+        side_effect_profile=side_effect_profile or LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=(),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    return Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [one, start, limit],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+
+
+def test_counted_state_transition_pure_multiply_lowers_without_uf():
+    expr = _state_times_const_summary(5)
+
+    smt = expression_to_smt(expr)
+
+    assert "rt_counted_state_transition_value" not in smt
+    assert "(bvmul (_ bv1 32)" in smt
+    assert "(ite (= ((_ extract 0 0)" in smt
+    assert not expression_uses_smt_uf(expr)
+
+
+def test_counted_state_transition_effectful_multiply_stays_uf():
+    expr = _state_times_const_summary(
+        5,
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="effectful",
+            memory_reads=True,
+        ),
+    )
+
+    smt = expression_to_smt(expr)
+
+    assert "rt_counted_state_transition_value" in smt
+    assert expression_uses_smt_uf(expr)
+
+
+def test_counted_state_transition_mismatched_case_signature_stays_uf():
+    expr = _state_times_const_summary(5, transition_case_multiplier=6)
+
+    smt = expression_to_smt(expr)
+
+    assert "rt_counted_state_transition_value" in smt
+    assert expression_uses_smt_uf(expr)
+
+
+def test_expression_to_smt_lowers_neon_ext_byte_extract():
+    first = _param("v_first", size=16)
+    second = _param("v_second", size=16)
+    expr = Expression.intrinsic(
+        "NEON_ext",
+        [first, second, _const(8, 1), _const(1, 1)],
+        size=16,
+    )
+
+    smt = expression_to_smt(expr)
+
+    assert "((_ extract 63 56) v_second)" in smt
+    assert "((_ extract 7 0) v_second)" in smt
+    assert "((_ extract 127 120) v_first)" in smt
+    assert "((_ extract 71 64) v_first)" in smt
+    assert not expression_contains_unsupported_smt_ops(expr)
+
+
+def test_expression_to_smt_rejects_neon_ext_nonconstant_offset():
+    expr = Expression.intrinsic(
+        "NEON_ext",
+        [_param("v_first", size=16), _param("v_second", size=16), _param("offset", size=1), _const(1, 1)],
+        size=16,
+    )
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    try:
+        expression_to_smt(expr)
+    except ValueError as exc:
+        assert "constant byte offset" in str(exc)
+    else:
+        raise AssertionError("NEON_ext with nonconstant offset must remain unlowered")
+
+
+def test_expression_to_smt_rejects_neon_ext_element_size_other_than_one():
+    expr = Expression.intrinsic(
+        "NEON_ext",
+        [_param("v_first", size=16), _param("v_second", size=16), _const(8, 1), _const(2, 1)],
+        size=16,
+    )
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    try:
+        expression_to_smt(expr)
+    except ValueError as exc:
+        assert "element_size operand 1" in str(exc)
+    else:
+        raise AssertionError("NEON_ext with element_size != 1 must remain unlowered")
+
+
+def test_expression_to_smt_keeps_raw_callother_id_150_unsupported_without_userop_name():
+    expr = Expression.intrinsic(
+        "CALLOTHER",
+        [_const(150), _param("v_first", size=16), _param("v_second", size=16), _const(8, 1), _const(1, 1)],
+        size=16,
+        opcode=9,
+    )
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    try:
+        expression_to_smt(expr)
+    except ValueError as exc:
+        assert "Unsupported intrinsic" in str(exc)
+    else:
+        raise AssertionError("raw CALLOTHER id 150 must not lower without object-derived userop name")
 
 
 def test_expression_to_smt_coerces_bool_vs_bitvector_equality_without_sort_error():

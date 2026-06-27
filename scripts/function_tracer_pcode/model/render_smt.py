@@ -306,11 +306,14 @@ def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -
     if expr_type == expr_kind.UNARY_OP and expr.operator not in _SUPPORTED_UNARY_OPERATORS:
         return True
 
-    if expr_type == expr_kind.INTRINSIC and not is_supported_pcode_intrinsic(
-        opcode=getattr(expr, "opcode", None),
-        mnemonic=getattr(expr, "name", None),
-    ):
-        return True
+    if expr_type == expr_kind.INTRINSIC:
+        if not is_supported_pcode_intrinsic(
+            opcode=getattr(expr, "opcode", None),
+            mnemonic=getattr(expr, "name", None),
+        ):
+            return True
+        if getattr(expr, "name", None) == "NEON_ext" and not _neon_ext_operands_are_smt_supported(expr):
+            return True
 
     if getattr(expr, "operands", None):
         for operand in expr.operands:
@@ -328,6 +331,32 @@ def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -
                 return True
 
     return False
+
+
+def _neon_ext_operands_are_smt_supported(expr) -> bool:
+    operands = list(getattr(expr, "operands", None) or [])
+    if len(operands) != 4:
+        return False
+    first, second, byte_offset_expr, element_size_expr = operands
+    byte_offset = _expr_constant_int(byte_offset_expr)
+    element_size = _expr_constant_int(element_size_expr)
+    if byte_offset is None or element_size != 1:
+        return False
+    try:
+        first_bits = expression_smt_bit_width(first)
+        second_bits = expression_smt_bit_width(second)
+        result_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+    except Exception:
+        return False
+    if first_bits <= 0 or second_bits <= 0:
+        return False
+    if first_bits != second_bits:
+        return False
+    if first_bits % 8 != 0 or second_bits % 8 != 0 or result_bits % 8 != 0:
+        return False
+    source_bytes = (first_bits + second_bits) // 8
+    result_bytes = result_bits // 8
+    return 0 <= int(byte_offset) and int(byte_offset) + result_bytes <= source_bytes
 
 
 def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
@@ -1230,6 +1259,172 @@ def _counted_state_transition_value_function_name(expr) -> str:
     )
 
 
+def _counted_state_transition_value_has_exact_lowering(expr) -> bool:
+    return _counted_state_transition_exact_multiplier(expr) is not None
+
+
+def _counted_state_transition_exact_multiplier(expr) -> Optional[int]:
+    runtime_ref = _counted_state_transition_value_ref(expr)
+    if runtime_ref is None:
+        return None
+    step_expr = getattr(runtime_ref, "step_expr", None)
+    if _expr_constant_int(step_expr) != 1:
+        return None
+    profile = getattr(runtime_ref, "side_effect_profile", None)
+    if profile is None:
+        return None
+    requires_effect_proof = getattr(profile, "requires_effect_proof", None)
+    if callable(requires_effect_proof):
+        try:
+            if requires_effect_proof():
+                return None
+        except Exception:
+            return None
+    for flag in (
+        "memory_reads",
+        "memory_writes",
+        "calls",
+        "escapes",
+        "context_memory_writes",
+        "context_calls",
+        "context_escapes",
+        "context_conditional_guards",
+    ):
+        if bool(getattr(profile, flag, False)):
+            return None
+    if tuple(getattr(profile, "context_descriptors", ()) or ()):
+        return None
+    effect_descriptors = tuple(getattr(profile, "effect_descriptors", ()) or ())
+    if any(getattr(effect, "kind", None) != "conditional_guard" for effect in effect_descriptors):
+        return None
+    transition_cases = tuple(getattr(runtime_ref, "transition_cases", ()) or ())
+    if len(transition_cases) != 1:
+        return None
+    case = transition_cases[0]
+    if not isinstance(case, tuple) or len(case) != 2:
+        return None
+    condition_signature, transition_signature = case
+    if condition_signature not in {(), (("none",),), None}:
+        return None
+    transition_expr = getattr(runtime_ref, "transition_expr", None)
+    state_placeholder = getattr(runtime_ref, "state_placeholder", None)
+    if transition_expr is None or state_placeholder is None:
+        return None
+    if not _counted_state_transition_case_signature_matches_expr(
+        transition_signature,
+        transition_expr,
+    ):
+        return None
+    if getattr(transition_expr, "expr_type", None) != transition_expr.expr_type.__class__.BINARY_OP:
+        return None
+    if getattr(transition_expr, "operator", None) != "INT_MULT":
+        return None
+    operands = list(getattr(transition_expr, "operands", ()) or ())
+    if len(operands) != 2:
+        return None
+    for maybe_state, maybe_const in ((operands[0], operands[1]), (operands[1], operands[0])):
+        try:
+            state_matches = maybe_state.equals(state_placeholder)
+        except Exception:
+            state_matches = False
+        if not state_matches:
+            continue
+        multiplier = _expr_constant_int(maybe_const)
+        if multiplier is None:
+            return None
+        return int(multiplier)
+    return None
+
+
+def _counted_state_transition_case_signature_matches_expr(
+    transition_signature: Any,
+    transition_expr,
+) -> bool:
+    if transition_signature is None or transition_expr is None:
+        return False
+    try:
+        expr_signature = transition_expr.structural_key()
+    except Exception:
+        return False
+    return _normalize_signature_tuple(transition_signature) == _normalize_signature_tuple(expr_signature)
+
+
+def _normalize_signature_tuple(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_normalize_signature_tuple(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_normalize_signature_tuple(item) for item in value)
+    return value
+
+
+def _counted_state_transition_exact_smt(
+    expr,
+    *,
+    init_smt: str,
+    start_smt: str,
+    limit_smt: str,
+    init_bits: int,
+    start_bits: int,
+    limit_bits: int,
+    result_bits: int,
+) -> Optional[str]:
+    multiplier = _counted_state_transition_exact_multiplier(expr)
+    if multiplier is None:
+        return None
+    runtime_ref = _counted_state_transition_value_ref(expr)
+    if runtime_ref is None:
+        return None
+    count_bits = max(1, int(start_bits), int(limit_bits))
+    start_count = _coerce_smt_bitvec_width(start_smt, start_bits, count_bits, prefer_sign_extension=False)
+    limit_count = _coerce_smt_bitvec_width(limit_smt, limit_bits, count_bits, prefer_sign_extension=False)
+    zero_count = f"(_ bv0 {count_bits})"
+    if bool(getattr(runtime_ref, "signed_loop", False)):
+        active_count = f"(ite (bvsle {limit_count} {start_count}) {zero_count} (bvsub {limit_count} {start_count}))"
+    else:
+        active_count = f"(ite (bvule {limit_count} {start_count}) {zero_count} (bvsub {limit_count} {start_count}))"
+    init_result = _coerce_smt_bitvec_width(
+        init_smt,
+        init_bits,
+        result_bits,
+        prefer_sign_extension=False,
+    )
+    pow_smt = _constant_multiplier_pow_smt(
+        int(multiplier),
+        active_count,
+        count_bits=count_bits,
+        result_bits=result_bits,
+    )
+    return f"(bvmul {init_result} {pow_smt})"
+
+
+def _constant_multiplier_pow_smt(
+    multiplier: int,
+    count_smt: str,
+    *,
+    count_bits: int,
+    result_bits: int,
+) -> str:
+    result_bits = max(1, int(result_bits))
+    modulus = 1 << result_bits
+    factor = int(multiplier) % modulus
+    factors: List[int] = []
+    for _bit_index in range(max(1, int(count_bits))):
+        factors.append(factor)
+        factor = (factor * factor) % modulus
+    body = f"pow_acc_{len(factors)}"
+    for index in range(len(factors), -1, -1):
+        if index == 0:
+            value = f"(_ bv1 {result_bits})"
+        else:
+            bit_index = index - 1
+            selected = f"(= ((_ extract {bit_index} {bit_index}) {count_smt}) #b1)"
+            factor_term = f"(_ bv{factors[bit_index]} {result_bits})"
+            previous = f"pow_acc_{index - 1}"
+            value = f"(ite {selected} (bvmul {previous} {factor_term}) {previous})"
+        body = f"(let ((pow_acc_{index} {value})) {body})"
+    return body
+
+
 def _counted_loop_sum_function_name(expr) -> str:
     operands = getattr(expr, "operands", None) or []
     base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
@@ -1273,6 +1468,84 @@ def _counted_loop_sum_has_exact_lowering(expr) -> bool:
 def _smt_bv_const(value: int, bits: int) -> str:
     mask = (1 << bits) - 1
     return f"(_ bv{int(value) & mask} {bits})"
+
+
+def _smt_extract(high_bit: int, low_bit: int, value_smt: str) -> str:
+    return f"((_ extract {int(high_bit)} {int(low_bit)}) {value_smt})"
+
+
+def _smt_concat(parts: List[str]) -> str:
+    if not parts:
+        raise ValueError("SMT concat requires at least one part")
+    result = parts[0]
+    for part in parts[1:]:
+        result = f"(concat {result} {part})"
+    return result
+
+
+def _lower_neon_ext_operands_to_smt(
+    expr,
+    operands,
+    *,
+    prefer_signed_arithmetic: bool,
+    symbol_name_mapping: Optional[Mapping[str, str]],
+    address_context: bool,
+    float_mode: str,
+    result_bits: int,
+) -> str:
+    if len(operands) != 4:
+        raise ValueError(f"NEON_ext expects 4 operands, got {len(operands)}")
+    first, second, byte_offset_expr, element_size_expr = operands
+    byte_offset = _expr_constant_int(byte_offset_expr)
+    if byte_offset is None:
+        raise ValueError("NEON_ext requires a constant byte offset")
+    element_size = _expr_constant_int(element_size_expr)
+    if element_size != 1:
+        raise ValueError("NEON_ext requires element_size operand 1")
+    first_bits = expression_smt_bit_width(first)
+    second_bits = expression_smt_bit_width(second)
+    result_bits = max(1, int(result_bits or expression_smt_bit_width(expr) or 0))
+    if first_bits <= 0 or second_bits <= 0:
+        raise ValueError("NEON_ext requires sized vector operands")
+    if first_bits != second_bits:
+        raise ValueError("NEON_ext requires equal-width vector operands")
+    if first_bits % 8 != 0 or second_bits % 8 != 0 or result_bits % 8 != 0:
+        raise ValueError("NEON_ext requires byte-aligned vectors")
+    byte_offset = int(byte_offset)
+    source_bytes = (first_bits + second_bits) // 8
+    result_bytes = result_bits // 8
+    if byte_offset < 0 or byte_offset + result_bytes > source_bytes:
+        raise ValueError("NEON_ext byte offset exceeds concatenated vector width")
+    first_smt = _to_smt_internal(
+        first,
+        prefer_signed_arithmetic,
+        symbol_name_mapping,
+        address_context,
+        float_mode,
+    )
+    second_smt = _to_smt_internal(
+        second,
+        prefer_signed_arithmetic,
+        symbol_name_mapping,
+        address_context,
+        float_mode,
+    )
+    first_smt = _coerce_expr_to_bitvec_width(first, first_smt, first_bits, float_mode=float_mode)
+    second_smt = _coerce_expr_to_bitvec_width(second, second_smt, second_bits, float_mode=float_mode)
+
+    pieces: List[str] = []
+    first_bytes = first_bits // 8
+    for out_index in range(result_bytes - 1, -1, -1):
+        source_index = byte_offset + out_index
+        if source_index < first_bytes:
+            source_smt = first_smt
+            local_index = source_index
+        else:
+            source_smt = second_smt
+            local_index = source_index - first_bytes
+        low_bit = local_index * 8
+        pieces.append(_smt_extract(low_bit + 7, low_bit, source_smt))
+    return _smt_concat(pieces)
 
 
 def _smt_extend_to_width(expr, expr_smt: str, target_bits: int, *, signed: bool) -> str:
@@ -1520,6 +1793,8 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         )
 
     if opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE or mnemonic == "COUNTED_STATE_TRANSITION_VALUE":
+        if _counted_state_transition_value_has_exact_lowering(expr):
+            return None
         if len(operands) != 3:
             raise ValueError(f"COUNTED_STATE_TRANSITION_VALUE expects 3 operands, got {len(operands)}")
         init_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
@@ -2163,8 +2438,9 @@ def _lower_intrinsic_to_smt(
         if len(operands) != 3:
             raise ValueError(f"COUNTED_STATE_TRANSITION_VALUE expects 3 operands, got {len(operands)}")
         rendered = []
+        operand_bits = []
         for operand in operands:
-            operand_bits = max(1, int(expression_smt_bit_width(operand) or 1))
+            bits = max(1, int(expression_smt_bit_width(operand) or 1))
             operand_smt = _to_smt_internal(
                 operand,
                 prefer_signed_arithmetic,
@@ -2176,12 +2452,36 @@ def _lower_intrinsic_to_smt(
                 _coerce_expr_to_bitvec_width(
                     operand,
                     operand_smt,
-                    operand_bits,
+                    bits,
                     prefer_sign_extension=_expr_prefers_signed_extension(operand),
                     float_mode=float_mode,
                 )
             )
+            operand_bits.append(bits)
+        exact_smt = _counted_state_transition_exact_smt(
+            expr,
+            init_smt=rendered[0],
+            start_smt=rendered[1],
+            limit_smt=rendered[2],
+            init_bits=operand_bits[0],
+            start_bits=operand_bits[1],
+            limit_bits=operand_bits[2],
+            result_bits=max(1, int(expression_smt_bit_width(expr) or 1)),
+        )
+        if exact_smt is not None:
+            return exact_smt
         return f"({_counted_state_transition_value_function_name(expr)} {' '.join(rendered)})"
+
+    if mnemonic == "NEON_ext":
+        return _lower_neon_ext_operands_to_smt(
+            expr,
+            operands,
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+            float_mode=float_mode,
+            result_bits=result_bits,
+        )
 
     raise ValueError(
         f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"

@@ -441,6 +441,7 @@ class PhiHandler:
             input_expansions,
             conditions,
             opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+            pcode_op=pcode_op,
             output_size=output_size,
             origin_ref=self._phi_expansion_budget_origin(
                 mnemonic,
@@ -457,6 +458,7 @@ class PhiHandler:
         input_expansions: List[List[ExpandedBranch]],
         base_conditions: List[Condition],
         opcode: Optional[int] = None,
+        pcode_op: Optional[Any] = None,
         output_size: int = 0,
         origin_ref: Optional[Any] = None,
     ) -> List[ExpandedBranch]:
@@ -493,6 +495,7 @@ class PhiHandler:
                         [left_exp.value, right_exp.value],
                         output_size=output_size,
                         opcode=opcode,
+                        pcode_op=pcode_op,
                     )
                     result.append(ExpandedBranch(combined_conds, new_value))
             
@@ -526,6 +529,7 @@ class PhiHandler:
                 operands,
                 output_size=output_size,
                 opcode=opcode,
+                pcode_op=pcode_op,
             )
             if output_size > 0 and getattr(new_value, "size", 0) == 0:
                 new_value.size = output_size
@@ -609,7 +613,25 @@ class PhiHandler:
         *,
         output_size: int = 0,
         opcode: Optional[int] = None,
+        pcode_op: Optional[Any] = None,
     ) -> Expression:
+        if mnemonic == "CALLOTHER":
+            userop_name = None
+            resolver = getattr(self.tracer, "_resolve_callother_userop_name", None)
+            if callable(resolver) and pcode_op is not None:
+                try:
+                    userop_name = resolver(pcode_op)
+                except Exception:
+                    userop_name = None
+            if userop_name:
+                intrinsic = resolve_pcode_intrinsic(mnemonic=userop_name)
+                if intrinsic is not None:
+                    return Expression.intrinsic(
+                        intrinsic.mnemonic,
+                        operands[1:] if operands else [],
+                        size=output_size,
+                        opcode=intrinsic.opcode,
+                    )
         intrinsic = resolve_pcode_intrinsic(opcode=opcode, mnemonic=mnemonic)
         if intrinsic is not None:
             return Expression.intrinsic(

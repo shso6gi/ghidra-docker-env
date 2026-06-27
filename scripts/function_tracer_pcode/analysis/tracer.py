@@ -22,6 +22,7 @@ from ..model import (
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
 )
+from ..model.intrinsics import resolve_pcode_intrinsic
 from ..model.signature import get_data_type_display_name, is_unsigned_data_type
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
@@ -158,6 +159,26 @@ class PcodeTracer:
         self._parameter_descriptors = self._collect_parameter_descriptors()
         
         self._collect_debug_info()
+
+    def _resolve_callother_userop_name(self, pcode_op: Any) -> Optional[str]:
+        if pcode_op is None:
+            return None
+        try:
+            if pcode_op.getNumInputs() < 1:
+                return None
+            userop_id = int(pcode_op.getInput(0).getOffset())
+        except Exception:
+            return None
+        language = getattr(self.program, "getLanguage", lambda: None)()
+        get_name = getattr(language, "getUserDefinedOpName", None)
+        if callable(get_name):
+            try:
+                name = get_name(userop_id)
+            except Exception:
+                name = None
+            if name:
+                return str(name)
+        return None
 
     def _get_op_order_key(self, pcode_op) -> Optional[int]:
         """Return a comparable intra-address P-code op order, if available.
@@ -2371,7 +2392,25 @@ class PcodeTracer:
                     intrinsic = intrinsic.clone_with(runtime_ref=runtime_ref)
                 return intrinsic
             return Expression.unknown("ptrsub_insufficient_inputs")
-        
+
+        if mnemonic == "CALLOTHER":
+            userop_name = self._resolve_callother_userop_name(pcode_op)
+            if userop_name:
+                intrinsic_spec = resolve_pcode_intrinsic(mnemonic=userop_name)
+                if intrinsic_spec is not None and len(inputs) >= 1:
+                    operands = [
+                        self.trace_varnode(inp, depth, use_cache)
+                        for inp in inputs[1:]
+                    ]
+                    output = pcode_op.getOutput()
+                    output_size = output.getSize() if output is not None else 0
+                    return Expression.intrinsic(
+                        intrinsic_spec.mnemonic,
+                        operands,
+                        size=output_size,
+                        opcode=intrinsic_spec.opcode,
+                    )
+
         # PIECE - サイズ情報を保持
         if mnemonic == "PIECE":
             if len(inputs) >= 2:

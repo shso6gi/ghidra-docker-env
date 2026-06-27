@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInf
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
+from scripts.function_tracer_pcode.analysis.condition import ConditionNormalizer
 from scripts.function_tracer_pcode.analysis.recurrence_summary import ResidueLoopCase, StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
@@ -24,6 +25,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     Condition,
     ComposedLoopSummaryRef,
@@ -4428,3 +4430,372 @@ def test_return_coverage_does_not_treat_single_phi_circular_guard_case_as_total(
     )
 
     assert strategy._return_cases_have_object_centric_total_coverage((guarded_case,)) is not True
+
+
+def test_bounded_state_transition_unroll_rejects_multi_case_transition():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(
+            ((), ("binary", "INT_MULT", 4, "state", 5)),
+            ((("guard", "alternate"),), ("binary", "INT_ADD", 4, "state", 1)),
+        ),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), _count_param()],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    assert strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[],
+        parameters=[],
+    ) is None
+
+
+def test_bounded_state_transition_unroll_rejects_transition_signature_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ("binary", "INT_ADD", 4, "state", 1)),),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), _count_param()],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    assert strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[],
+        parameters=[],
+    ) is None
+
+
+def test_bounded_state_transition_unroll_accepts_small_nonwrapping_counted_case():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), _count_param()],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    candidate = strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[_eq_count(5)],
+        parameters=[],
+    )
+
+    assert candidate is not None
+    assert candidate.operands[0].opcode != COUNTED_STATE_TRANSITION_VALUE_OPCODE
+    assert not candidate.operands[0].equals(state)
+
+
+def test_bounded_state_transition_unroll_rejects_intrinsic_operand_ref_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    mismatched_limit = Expression.parameter("other_count", index=2, data_type="int", size=4)
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), mismatched_limit],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    assert strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[_eq_count(5)],
+        parameters=[],
+    ) is None
+
+
+def test_bounded_state_transition_unroll_rejects_effectful_summary():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="writes_memory",
+            memory_writes=True,
+            effect_count=1,
+        ),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), _count_param()],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    assert strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[_eq_count(5)],
+        parameters=[],
+    ) is None
+
+
+def test_bounded_state_transition_unroll_allows_pure_conditional_guard_summary():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op("INT_MULT", state, _const(5))
+    transition.size = 4
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=_const(1),
+        start_expr=_const(1),
+        limit_expr=_count_param(),
+        step_expr=_const(1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="pure_conditional",
+            conditional_guards=True,
+            guard_count=1,
+            effect_descriptors=(LoopBodyEffectRef(kind="conditional_guard"),),
+        ),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [_const(1), _const(1), _count_param()],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, _const(0), _count_param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    candidate = strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=4,
+        conditions=[_eq_count(5)],
+        parameters=[],
+    )
+
+    assert candidate is not None
+    assert candidate.operands[0].opcode != COUNTED_STATE_TRANSITION_VALUE_OPCODE
+
+
+def test_bounded_state_transition_unroll_rejects_wrapping_trip_count_match():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state8", size=1)
+    transition = Expression.binary_op("INT_ADD", state, Expression.constant(1, size=1))
+    transition.size = 1
+    limit = Expression.parameter("limit8", index=1, data_type="uchar", size=1)
+    runtime_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=Expression.constant(0, size=1),
+        start_expr=Expression.constant(250, size=1),
+        limit_expr=limit,
+        step_expr=Expression.constant(10, size=1),
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        state_size=1,
+        result_size=1,
+        signed_loop=False,
+    )
+    base = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [Expression.constant(0, size=1), Expression.constant(250, size=1), limit],
+        size=1,
+        runtime_ref=runtime_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    counted = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [base, Expression.constant(250, size=1), limit],
+        size=1,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=10,
+            result_size=1,
+            signed_loop=False,
+            residue_cases=(),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    assert strategy._counted_loop_bounded_state_transition_base_candidate(
+        counted,
+        result_size=1,
+        conditions=[Condition(Expression.binary_op("INT_EQUAL", limit, Expression.constant(4, size=1)))],
+        parameters=[],
+    ) is None
+
+
+def test_bounded_state_transition_unroll_preserves_phi_condition_negation():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    state = Expression.variable("__state", size=4)
+    replacement = _const(7)
+    positive_condition = Condition(
+        Expression.binary_op("INT_EQUAL", state, _const(1)),
+        negated=False,
+    )
+    negated_condition = Condition(
+        Expression.binary_op("INT_NOTEQUAL", state, _const(2)),
+        negated=True,
+    )
+    phi = Expression.phi(
+        [
+            (positive_condition, Expression.binary_op("INT_ADD", state, _const(1))),
+            (negated_condition, Expression.binary_op("INT_MULT", state, _const(5))),
+        ]
+    )
+
+    rewritten = strategy._replace_expression_node(phi, state, replacement)
+
+    first_condition, first_value = rewritten.value[0]
+    second_condition, second_value = rewritten.value[1]
+    assert first_condition.negated is False
+    assert second_condition.negated is True
+    assert first_condition.expression.operands[0].equals(replacement)
+    assert second_condition.expression.operands[0].equals(replacement)
+    assert first_value.operands[0].equals(replacement)
+    assert second_value.operands[0].equals(replacement)

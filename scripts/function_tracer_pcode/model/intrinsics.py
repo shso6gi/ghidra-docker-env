@@ -62,10 +62,16 @@ _INTRINSIC_SPECS = (
         arity=3,
         smt_lowerable=True,
     ),
+    PcodeIntrinsicSpec(
+        opcode=-1,
+        mnemonic="NEON_ext",
+        arity=4,
+        smt_lowerable=True,
+    ),
 )
 
 _BY_OPCODE: Dict[int, PcodeIntrinsicSpec] = {
-    spec.opcode: spec for spec in _INTRINSIC_SPECS
+    spec.opcode: spec for spec in _INTRINSIC_SPECS if spec.opcode >= 0
 }
 _BY_MNEMONIC: Dict[str, PcodeIntrinsicSpec] = {
     spec.mnemonic: spec for spec in _INTRINSIC_SPECS

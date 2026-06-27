@@ -9,7 +9,9 @@ import time
 
 from ...model import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     Condition,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
@@ -36,6 +38,7 @@ from ...model.render_smt import (
     _counted_loop_sum_has_exact_lowering,
 )
 from ...analysis.condition.simplifier import ConditionSimplifier
+from ...analysis.condition.normalizer import ConditionNormalizer
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from ...smt.solvers.z3 import Z3Solver
@@ -5418,9 +5421,15 @@ class PairwiseStrategy(CheckStrategy):
             conditions=conditions,
             parameters=parameters,
         )
+        bounded_state_closed = self._counted_loop_bounded_state_transition_base_candidate(
+            counted,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
         candidates = [
             candidate
-            for candidate in (counted_closed, shifted_closed, affine_closed)
+            for candidate in (counted_closed, shifted_closed, affine_closed, bounded_state_closed)
             if candidate is not None
         ]
         if not candidates:
@@ -5434,6 +5443,278 @@ class PairwiseStrategy(CheckStrategy):
             ):
                 return True
         return False
+
+    def _counted_loop_bounded_state_transition_base_candidate(
+        self,
+        counted: Expression,
+        *,
+        result_size: int,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[Expression]:
+        operands = getattr(counted, "operands", None) or []
+        if len(operands) != 3:
+            return None
+        base, start, limit = operands
+        if getattr(base, "opcode", None) != COUNTED_STATE_TRANSITION_VALUE_OPCODE:
+            return None
+        runtime_ref = getattr(base, "runtime_ref", None)
+        if not isinstance(runtime_ref, CountedStateTransitionLoopSummaryRef):
+            return None
+        if not self._counted_state_transition_side_effects_allow_bounded_unroll(runtime_ref):
+            return None
+        if not self._counted_state_transition_value_operands_match_ref(
+            getattr(base, "operands", None) or (),
+            runtime_ref,
+        ):
+            return None
+        if not self._counted_state_transition_cases_allow_bounded_unroll(runtime_ref):
+            return None
+        iteration_count = self._bounded_state_transition_iteration_count_from_conditions(
+            runtime_ref,
+            conditions=conditions,
+            parameters=parameters,
+            max_iterations=32,
+        )
+        if iteration_count is None:
+            return None
+        unrolled_base = self._unroll_counted_state_transition_value(runtime_ref, iteration_count)
+        if unrolled_base is None:
+            return None
+        unrolled_base = self._coerce_expression_to_size(
+            unrolled_base,
+            max(1, int(getattr(base, "size", 0) or result_size or 0)),
+            signed=bool(getattr(runtime_ref, "signed_loop", False)),
+        )
+        candidate = counted.clone_with(operands=[unrolled_base, start, limit])
+        candidate.size = max(1, int(getattr(counted, "size", 0) or result_size or 0))
+        return candidate
+
+    def _counted_state_transition_side_effects_allow_bounded_unroll(
+        self,
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+    ) -> bool:
+        profile = getattr(runtime_ref, "side_effect_profile", None)
+        if profile is None:
+            return False
+        requires_effect_proof = getattr(profile, "requires_effect_proof", None)
+        if callable(requires_effect_proof):
+            try:
+                if requires_effect_proof():
+                    return False
+            except Exception:
+                return False
+        guarded_or_effectful_flags = (
+            "memory_reads",
+            "memory_writes",
+            "calls",
+            "escapes",
+            "context_memory_writes",
+            "context_calls",
+            "context_escapes",
+            "context_conditional_guards",
+        )
+        if any(bool(getattr(profile, flag, False)) for flag in guarded_or_effectful_flags):
+            return False
+        effect_descriptors = tuple(getattr(profile, "effect_descriptors", ()) or ())
+        if any(getattr(effect, "kind", None) != "conditional_guard" for effect in effect_descriptors):
+            return False
+        if int(getattr(profile, "effect_count", 0) or 0) > len(effect_descriptors):
+            return False
+        if tuple(getattr(profile, "context_descriptors", ()) or ()):
+            return False
+        return True
+
+    def _counted_state_transition_value_operands_match_ref(
+        self,
+        operands: Sequence[Expression],
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+    ) -> bool:
+        if len(operands) != 3:
+            return False
+        expected = (
+            getattr(runtime_ref, "initial_state", None),
+            getattr(runtime_ref, "start_expr", None),
+            getattr(runtime_ref, "limit_expr", None),
+        )
+        for actual, expected_expr in zip(operands, expected):
+            if not isinstance(actual, Expression) or not isinstance(expected_expr, Expression):
+                return False
+            try:
+                if not actual.equals(expected_expr):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _bounded_state_transition_iteration_count_from_conditions(
+        self,
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+        *,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+        max_iterations: int,
+    ) -> Optional[int]:
+        start = getattr(runtime_ref, "start_expr", None)
+        limit = getattr(runtime_ref, "limit_expr", None)
+        step = getattr(runtime_ref, "step_expr", None)
+        if not isinstance(start, Expression) or not isinstance(limit, Expression) or not isinstance(step, Expression):
+            return None
+        if getattr(step, "expr_type", None) != ExpressionType.CONSTANT:
+            return None
+        try:
+            step_value = int(getattr(step, "value", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if step_value <= 0:
+            return None
+        expr_size = max(
+            1,
+            int(getattr(start, "size", 0) or 0),
+            int(getattr(limit, "size", 0) or 0),
+            int(getattr(step, "size", 0) or 0),
+        )
+        start_sized = self._coerce_expression_to_size(
+            start,
+            expr_size,
+            signed=bool(getattr(runtime_ref, "signed_loop", False)),
+        )
+        limit_sized = self._coerce_expression_to_size(
+            limit,
+            expr_size,
+            signed=bool(getattr(runtime_ref, "signed_loop", False)),
+        )
+        for iteration_count in range(0, int(max_iterations) + 1):
+            offset = Expression.constant(step_value * iteration_count, size=expr_size)
+            expected_limit = Expression.binary_op("INT_ADD", start_sized, offset)
+            expected_limit.size = expr_size
+            equality = Condition(Expression.binary_op("INT_EQUAL", limit_sized, expected_limit))
+            if self._condition_set_implies(conditions, [equality], parameters) and self._bounded_state_transition_trip_count_is_proved(
+                runtime_ref,
+                iteration_count,
+                start_value=self._raw_constant_value(start),
+                step_value=step_value,
+                limit_sized=limit_sized,
+                expr_size=expr_size,
+                conditions=conditions,
+                parameters=parameters,
+            ):
+                return iteration_count
+        return None
+
+    def _bounded_state_transition_trip_count_is_proved(
+        self,
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+        iteration_count: int,
+        *,
+        start_value: Optional[int],
+        step_value: int,
+        limit_sized: Expression,
+        expr_size: int,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        if start_value is None or step_value <= 0 or iteration_count < 0:
+            return False
+        bits = max(1, int(expr_size or 0) * 8)
+        if bool(getattr(runtime_ref, "signed_loop", False)):
+            min_value = 0
+            max_value = (1 << (bits - 1)) - 1
+            guard_op = "INT_SLESS"
+        else:
+            min_value = 0
+            max_value = (1 << bits) - 1
+            guard_op = "INT_LESS"
+        concrete_values: List[int] = []
+        for index in range(int(iteration_count) + 1):
+            value = int(start_value) + int(step_value) * index
+            if value < min_value or value > max_value:
+                return False
+            concrete_values.append(value)
+        guard_conclusions: List[Condition] = []
+        for value in concrete_values[: int(iteration_count)]:
+            current = Expression.constant(value, size=expr_size)
+            guard = Expression.binary_op(guard_op, current, limit_sized)
+            guard.size = 1
+            guard_conclusions.append(Condition(guard))
+        exit_value = Expression.constant(concrete_values[int(iteration_count)], size=expr_size)
+        exit_equality = Expression.binary_op("INT_EQUAL", exit_value, limit_sized)
+        exit_equality.size = 1
+        guard_conclusions.append(Condition(exit_equality))
+        return self._condition_set_implies(conditions, guard_conclusions, parameters)
+
+    def _counted_state_transition_cases_allow_bounded_unroll(
+        self,
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+    ) -> bool:
+        transition_cases = getattr(runtime_ref, "transition_cases", None)
+        if not transition_cases:
+            return False
+        cases = tuple(transition_cases)
+        if len(cases) != 1:
+            return False
+        only_case = cases[0]
+        if not isinstance(only_case, tuple) or len(only_case) != 2:
+            return False
+        condition_signature, transition_signature = only_case
+        if condition_signature is not None and condition_signature != () and condition_signature != (("none",),):
+            return False
+        transition_expr = getattr(runtime_ref, "transition_expr", None)
+        if not isinstance(transition_expr, Expression):
+            return False
+        try:
+            expected_transition_signature = ConditionNormalizer.expression_signature(transition_expr)
+        except Exception:
+            return False
+        if transition_signature != expected_transition_signature:
+            return False
+        return True
+
+    def _unroll_counted_state_transition_value(
+        self,
+        runtime_ref: CountedStateTransitionLoopSummaryRef,
+        iteration_count: int,
+    ) -> Optional[Expression]:
+        if iteration_count < 0:
+            return None
+        state_placeholder = getattr(runtime_ref, "state_placeholder", None)
+        transition_expr = getattr(runtime_ref, "transition_expr", None)
+        value = getattr(runtime_ref, "initial_state", None)
+        if not isinstance(state_placeholder, Expression) or not isinstance(transition_expr, Expression) or not isinstance(value, Expression):
+            return None
+        for _ in range(int(iteration_count)):
+            value = self._replace_expression_node(transition_expr, state_placeholder, value)
+            value.size = max(1, int(getattr(runtime_ref, "result_size", 0) or getattr(value, "size", 0) or 0))
+        return value
+
+    def _replace_expression_node(
+        self,
+        expr: Expression,
+        target: Expression,
+        replacement: Expression,
+    ) -> Expression:
+        if expr.equals(target):
+            return replacement
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+            branches = []
+            for cond, value in getattr(expr, "value", None) or []:
+                new_cond = cond
+                if cond is not None and getattr(cond, "expression", None) is not None:
+                    new_cond = Condition(
+                        self._replace_expression_node(cond.expression, target, replacement),
+                        getattr(cond, "negated", False),
+                    )
+                branches.append((new_cond, self._replace_expression_node(value, target, replacement)))
+            return expr.clone_with(value=branches)
+        operands = getattr(expr, "operands", None) or []
+        if not operands:
+            return expr
+        return expr.clone_with(
+            operands=[
+                self._replace_expression_node(operand, target, replacement)
+                for operand in operands
+            ]
+        )
 
     def _counted_loop_affine_closed_expression_candidate(
         self,

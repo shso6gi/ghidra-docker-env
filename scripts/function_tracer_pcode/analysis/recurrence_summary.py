@@ -3792,12 +3792,21 @@ class StructuralRecurrenceSummarizer:
             ]
             if len(phi_ops) < 2:
                 continue
+            header_key = self._block_key(header)
             induction_candidates = [
                 info for info in (self._match_counted_loop_induction(phi_op) for phi_op in phi_ops)
                 if info is not None
             ]
+            if not induction_candidates:
+                self._debug(f"Declined counted state-transition loop at {header_key}: no counted induction")
+                continue
             for induction in induction_candidates:
-                for guard in self._candidate_counted_loop_guards(header, cbranch, induction):
+                guards = list(self._candidate_counted_loop_guards(header, cbranch, induction))
+                if not guards:
+                    self._debug(
+                        f"Declined counted state-transition loop at {header_key}: no compatible guard"
+                    )
+                for guard in guards:
                     loop_body_blocks = self._collect_loop_body_blocks(header_block=header, guard=guard)
                     loop_block_guard_info = self._loop_block_guard_effect_info(
                         header_block=header,
@@ -3816,19 +3825,31 @@ class StructuralRecurrenceSummarizer:
                         block_guard_info=loop_block_guard_info,
                     )
                     if side_effect_profile.memory_writes or side_effect_profile.calls or side_effect_profile.escapes:
+                        self._debug(
+                            f"Declined counted state-transition loop at {header_key}: side effects require proof"
+                        )
                         continue
-                    for accumulator in self._match_counted_loop_accumulators(
+                    accumulators = self._match_counted_loop_accumulators(
                         phi_ops,
                         induction,
                         guard.body_block,
                         function_body_ranges=function_body_ranges,
-                    ):
+                    )
+                    if not accumulators:
+                        self._debug(
+                            f"Declined counted state-transition loop at {header_key}: no accumulator"
+                        )
+                    for accumulator in accumulators:
                         transition_cases = self._extract_counted_state_transition_cases(
                             accumulator,
                             induction,
                             guard,
                         )
                         if not transition_cases:
+                            self._debug(
+                                f"Declined counted state-transition loop at {header_key}: "
+                                "no state transition cases"
+                            )
                             continue
                         models.append(
                             CountedStateTransitionLoopModel(

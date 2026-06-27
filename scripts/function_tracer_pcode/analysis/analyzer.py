@@ -2,10 +2,10 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from functools import cmp_to_key
-from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, Sequence, cast
+from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, Sequence, Mapping, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.call_target import CallTargetRef, coerce_call_target_ref
@@ -30,6 +30,8 @@ from ..model.signature import (
     get_declared_type_signedness,
     is_void_data_type,
 )
+from ..model.render_smt import expression_contains_unsupported_smt_ops
+from ..model.intrinsics import resolve_pcode_intrinsic
 from ..config.settings import (
     BOUNDED_CALL_MAX_CASES,
     BOUNDED_CALL_REFINEMENT_ENABLED,
@@ -39,6 +41,7 @@ from . import PcodeTracer
 from .bounded_refinement import BoundedCallRefiner
 from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalizer
 from .condition.bitvector import eval_constant_raw
+from .condition.smt_oracle import ConditionSMTOracle
 from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .summary_returns import accept_summary_return_candidates
@@ -1372,10 +1375,118 @@ class ReturnAnalyzer:
     def _normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
         if analysis is None:
             return
+        self._normalize_return_callother_userops(analysis)
         analysis.returns = self._strip_stack_protector_only_conditions(analysis.returns)
         if "control_region_return_recovery" not in analysis.analysis_notes:
             analysis.returns = self._exclusivize_return_regions(analysis.returns)
         analysis.returns = self._merge_equivalent_return_infos(analysis.returns)
+
+    def _normalize_return_callother_userops(self, analysis: FunctionReturnAnalysis) -> None:
+        if analysis is None or not analysis.returns:
+            return
+        rewritten_returns: List[ReturnInfo] = []
+        changed = False
+        for info in analysis.returns or []:
+            rewritten_value, value_changed = self._normalize_callother_userop_expression(info.value)
+            rewritten_conditions: List[Condition] = []
+            conditions_changed = False
+            for condition in info.conditions or []:
+                rewritten_expr, expr_changed = self._normalize_callother_userop_expression(condition.expression)
+                rewritten_conditions.append(Condition(rewritten_expr, condition.negated))
+                conditions_changed = conditions_changed or expr_changed
+            if value_changed or conditions_changed:
+                changed = True
+                rewritten_returns.append(
+                    replace(
+                        info,
+                        value=rewritten_value,
+                        conditions=rewritten_conditions,
+                    )
+                )
+            else:
+                rewritten_returns.append(info)
+        if not changed:
+            return
+        analysis.returns = rewritten_returns
+        note = "object_centric_callother_userop_normalization"
+        if note not in analysis.analysis_notes:
+            analysis.analysis_notes.append(note)
+
+    def _normalize_callother_userop_expression(self, expr: Optional[Expression]) -> Tuple[Optional[Expression], bool]:
+        if expr is None:
+            return expr, False
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+            changed = False
+            branches = []
+            for condition, value in getattr(expr, "value", None) or []:
+                rewritten_condition = condition
+                if condition is not None:
+                    rewritten_condition_expr, condition_changed = self._normalize_callother_userop_expression(
+                        condition.expression,
+                    )
+                    rewritten_condition = Condition(rewritten_condition_expr, condition.negated)
+                    changed = changed or condition_changed
+                rewritten_value, value_changed = self._normalize_callother_userop_expression(value)
+                branches.append((rewritten_condition, rewritten_value))
+                changed = changed or value_changed
+            if changed:
+                return expr.clone_with(value=branches), True
+            return expr, False
+
+        operands = list(getattr(expr, "operands", None) or [])
+        changed = False
+        rewritten_operands = []
+        for operand in operands:
+            rewritten_operand, operand_changed = self._normalize_callother_userop_expression(operand)
+            rewritten_operands.append(rewritten_operand)
+            changed = changed or operand_changed
+
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.INTRINSIC
+            and getattr(expr, "name", None) == "CALLOTHER"
+            and getattr(expr, "opcode", None) == 9
+            and rewritten_operands
+        ):
+            userop_id = self._constant_expression_value(rewritten_operands[0])
+            userop_name = self._program_userop_name(userop_id)
+            intrinsic = resolve_pcode_intrinsic(mnemonic=userop_name) if userop_name else None
+            if intrinsic is not None:
+                return (
+                    Expression.intrinsic(
+                        intrinsic.mnemonic,
+                        rewritten_operands[1:],
+                        size=max(1, int(getattr(expr, "size", 0) or 0)),
+                        runtime_ref=getattr(expr, "runtime_ref", None),
+                        opcode=intrinsic.opcode,
+                    ),
+                    True,
+                )
+
+        if changed:
+            return expr.clone_with(operands=rewritten_operands), True
+        return expr, False
+
+    def _program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
+        if userop_id is None:
+            return None
+        language = getattr(self.program, "getLanguage", lambda: None)()
+        get_name = getattr(language, "getUserDefinedOpName", None)
+        if not callable(get_name):
+            return None
+        try:
+            name = get_name(int(userop_id))
+        except Exception:
+            return None
+        return str(name) if name else None
+
+    @staticmethod
+    def _constant_expression_value(expr: Optional[Expression]) -> Optional[int]:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
+            return None
+        try:
+            return int(getattr(expr, "value", 0) or 0)
+        except (TypeError, ValueError):
+            return None
 
     def _strip_stack_protector_only_conditions(
         self,
@@ -7342,6 +7453,7 @@ class ReturnAnalyzer:
     ) -> Optional[List[ReturnInfo]]:
         """`call foo(...); return;` 形式の wrapper を callee summary から復元する。"""
         from ..transform import ExpressionExpander
+        from ..transform.expander import ExpandedValue
 
         expander = ExpressionExpander(
             tracer,
@@ -7480,6 +7592,16 @@ class ReturnAnalyzer:
             return_index,
             site_metadata=value_site_metadata,
         )
+        if has_multiequal and results:
+            results = self._append_smt_lowerable_phi_return_fallback_infos(
+                results,
+                tracer=tracer,
+                return_varnode=return_varnode,
+                path_condition_sets=all_path_conditions or ([path_conditions] if path_conditions else [[]]),
+                address=address,
+                return_index=return_index,
+                site_metadata=value_site_metadata,
+            )
         
         if not results:
             self._debug_print("WARNING: No valid expansions, falling back to simple trace")
@@ -7497,6 +7619,463 @@ class ReturnAnalyzer:
             )]
         
         return results
+
+    def _append_smt_lowerable_phi_return_fallback_infos(
+        self,
+        return_infos: List[ReturnInfo],
+        *,
+        tracer,
+        return_varnode,
+        path_condition_sets: Sequence[Sequence[Condition]],
+        address: str,
+        return_index: int,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ):
+        try:
+            fallback_value = tracer.trace_varnode(return_varnode, use_cache=False)
+        except Exception:
+            return return_infos
+        if not isinstance(fallback_value, Expression):
+            return return_infos
+        if not self._expression_contains_phi(fallback_value):
+            return return_infos
+        rewritten_value, _changed = self._normalize_callother_userop_expression(fallback_value)
+        fallback_value = rewritten_value
+        if fallback_value is None or expression_contains_unsupported_smt_ops(fallback_value):
+            return return_infos
+        fallback_conditions = list(path_condition_sets or ())
+        if not fallback_conditions:
+            fallback_conditions = [[]]
+        additions = []
+        union_condition = self._path_condition_sets_union_condition(fallback_conditions)
+        if union_condition is not None:
+            union_conditions = ConditionSimplifier.simplify_conditions_object_centric([union_condition])
+            if not ConditionSimplifier.object_centric_is_contradiction(union_conditions):
+                union_value = self._normalize_expanded_return_value(
+                    fallback_value,
+                    union_conditions,
+                )
+                if union_value is None:
+                    union_value = fallback_value
+                if (
+                    union_value is not None
+                    and not expression_contains_unsupported_smt_ops(union_value)
+                ):
+                    info = self._make_return_info(
+                        address=address,
+                        value=union_value,
+                        conditions=union_conditions,
+                        branch_index=return_index * 100 + 80,
+                        site_metadata=site_metadata,
+                    )
+                    info = replace(info, return_kind="phi_union_reachability_fallback")
+                    additions.append(info)
+        for index, conditions in enumerate(fallback_conditions):
+            reachability_conditions, selector_conditions = (
+                self._split_phi_selector_conditions_from_return_reachability(
+                    fallback_value,
+                    list(conditions or []),
+                )
+            )
+            if self.debug and selector_conditions:
+                self._debug_print(
+                    "Separated PHI selector fallback conditions: "
+                    f"reachability={len(reachability_conditions)}, selectors={len(selector_conditions)}"
+                )
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(
+                reachability_conditions
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(simplified):
+                continue
+            normalized_value = self._normalize_expanded_return_value(
+                fallback_value,
+                simplified,
+            )
+            if normalized_value is None:
+                normalized_value = fallback_value
+
+            if self._expression_contains_phi(normalized_value):
+                finite_candidates = self._phi_free_finite_fallback_candidates(
+                    fallback_value,
+                    simplified,
+                )
+                if not finite_candidates and selector_conditions:
+                    finite_candidates = [(simplified, normalized_value)]
+            else:
+                finite_candidates = [(simplified, normalized_value)]
+
+            for finite_index, (finite_conditions, finite_value) in enumerate(finite_candidates):
+                if self._expression_contains_phi(finite_value) and not selector_conditions:
+                    continue
+                branch_index = return_index * 100 + 90 + index
+                if len(finite_candidates) > 1:
+                    branch_index = branch_index * 100 + finite_index
+                info = self._make_return_info(
+                    address=address,
+                    value=finite_value,
+                    conditions=finite_conditions,
+                    branch_index=branch_index,
+                    site_metadata=site_metadata,
+                )
+                info = replace(
+                    info,
+                    return_kind=(
+                        "phi_selector_split_fallback"
+                        if selector_conditions
+                        else "phi_reachability_fallback"
+                    ),
+                )
+                additions.append(info)
+        if not additions:
+            return return_infos
+        if self.debug:
+            self._debug_print(
+                "Preserved SMT-lowerable PHI return fallback for broad return-path coverage"
+            )
+        return self._merge_equivalent_return_infos(
+            self._prune_less_precise_return_infos(list(return_infos or []) + additions)
+        )
+
+    def _path_condition_sets_union_condition(
+        self,
+        path_condition_sets: Sequence[Sequence[Condition]],
+    ) -> Optional[Condition]:
+        disjuncts: List[Expression] = []
+        for conditions in path_condition_sets or ():
+            conjunct = self._condition_set_conjunction_expression(conditions)
+            if conjunct is None:
+                return None
+            disjuncts.append(conjunct)
+        if len(disjuncts) <= 1:
+            return None
+        union_expr = disjuncts[0]
+        for disjunct in disjuncts[1:]:
+            union_expr = Expression.binary_op("BOOL_OR", union_expr, disjunct)
+            union_expr.size = 1
+        return Condition(union_expr)
+
+    def _condition_set_conjunction_expression(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Expression]:
+        terms = [self._condition_to_expression(condition) for condition in conditions or ()]
+        terms = [term for term in terms if term is not None]
+        if not terms:
+            one = Expression.constant(1, size=1)
+            return one
+        result = terms[0]
+        for term in terms[1:]:
+            result = Expression.binary_op("BOOL_AND", result, term)
+            result.size = 1
+        return result
+
+    def _condition_to_expression(self, condition: Condition) -> Optional[Expression]:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return None
+        if not bool(getattr(condition, "negated", False)):
+            return expr
+        negated = Expression.unary_op("BOOL_NEGATE", expr)
+        negated.size = 1
+        return negated
+
+    def _split_phi_selector_conditions_from_return_reachability(
+        self,
+        fallback_value: Expression,
+        conditions: Sequence[Condition],
+    ) -> Tuple[List[Condition], List[Condition]]:
+        """Separate PHI branch selectors already carried by the fallback value.
+
+        The fallback value is a PHI expression whose branch conditions encode
+        value selection.  ReturnInfo.conditions should describe reachability of
+        the return site.  We only remove a path condition when it is structurally
+        identical to a selector condition embedded in that same fallback PHI.
+        """
+
+        selector_conditions = self._phi_selector_conditions(fallback_value)
+        selector_keys = self._condition_key_set(selector_conditions)
+        if not selector_conditions:
+            return list(conditions or []), []
+
+        reachability: List[Condition] = []
+        selectors: List[Condition] = []
+        for condition in conditions or []:
+            if self._condition_matches_phi_selector(
+                condition,
+                selector_conditions=selector_conditions,
+                selector_keys=selector_keys,
+            ):
+                selectors.append(condition)
+                continue
+            reachability.append(condition)
+        return reachability, selectors
+
+    def _condition_matches_phi_selector(
+        self,
+        condition: Condition,
+        *,
+        selector_conditions: Sequence[Condition],
+        selector_keys: Set[Tuple[Any, ...]],
+    ) -> bool:
+        try:
+            key = condition.structural_key(budget=256)
+        except Exception:
+            key = None
+        if key is not None and key in selector_keys:
+            return True
+        condition_key = self._normalized_condition_key(condition)
+        if condition_key is not None:
+            for selector in selector_conditions:
+                if condition_key == self._normalized_condition_key(selector):
+                    return True
+        for selector in selector_conditions:
+            if self._conditions_are_smt_equivalent(condition, selector):
+                return True
+        return False
+
+    def _normalized_condition_key(self, condition: Condition) -> Optional[Tuple[Any, ...]]:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return None
+        normalized_expr, normalized_negated = self._normalize_condition_term(
+            expr,
+            bool(getattr(condition, "negated", False)),
+        )
+        try:
+            return Condition(normalized_expr, normalized_negated).structural_key(budget=256)
+        except Exception:
+            return None
+
+    def _normalize_condition_term(
+        self,
+        expr: Expression,
+        negated: bool,
+    ) -> Tuple[Expression, bool]:
+        current = expr
+        current_negated = bool(negated)
+        changed = True
+        while changed and current is not None:
+            changed = False
+            if (
+                current.expr_type == ExpressionType.UNARY_OP
+                and current.operator == "BOOL_NEGATE"
+                and len(current.operands) == 1
+            ):
+                current = current.operands[0]
+                current_negated = not current_negated
+                changed = True
+                continue
+            if (
+                current.expr_type == ExpressionType.BINARY_OP
+                and current.operator == "INT_NOTEQUAL"
+                and len(current.operands) == 2
+            ):
+                current = Expression.binary_op("INT_EQUAL", current.operands[0], current.operands[1])
+                current.size = 1
+                current_negated = not current_negated
+                changed = True
+                continue
+        return current, current_negated
+
+    def _conditions_are_smt_equivalent(self, left: Condition, right: Condition) -> bool:
+        left_expr = getattr(left, "expression", None)
+        right_expr = getattr(right, "expression", None)
+        if left_expr is None or right_expr is None:
+            return False
+        if expression_contains_unsupported_smt_ops(left_expr) or expression_contains_unsupported_smt_ops(right_expr):
+            return False
+        left_implies_right = ConditionSMTOracle.conjunction_is_unsat(
+            [left, right.negate()],
+            cache_key=(
+                "phi_selector_condition_implies",
+                self._condition_cache_key(left),
+                self._condition_cache_key(right),
+            ),
+        )
+        if left_implies_right is not True:
+            return False
+        right_implies_left = ConditionSMTOracle.conjunction_is_unsat(
+            [left.negate(), right],
+            cache_key=(
+                "phi_selector_condition_implies",
+                self._condition_cache_key(right),
+                self._condition_cache_key(left),
+            ),
+        )
+        return right_implies_left is True
+
+    def _condition_cache_key(self, condition: Condition) -> Tuple[Any, ...]:
+        try:
+            return condition.structural_key(budget=256)
+        except Exception:
+            return ("condition", id(condition))
+
+    def _phi_free_finite_fallback_candidates(
+        self,
+        fallback_value: Expression,
+        conditions: Sequence[Condition],
+    ) -> List[Tuple[List[Condition], Expression]]:
+        finite_condition_sets = self._split_small_finite_parameter_reachability_conditions(
+            conditions,
+        )
+        if len(finite_condition_sets) <= 1:
+            return []
+        candidates: List[Tuple[List[Condition], Expression]] = []
+        skipped_phi = 0
+        skipped_none = 0
+        for finite_conditions in finite_condition_sets:
+            finite_value = self._normalize_expanded_return_value(
+                fallback_value,
+                finite_conditions,
+            )
+            if finite_value is None:
+                skipped_none += 1
+                continue
+            if self._expression_contains_phi(finite_value):
+                skipped_phi += 1
+                continue
+            candidates.append((finite_conditions, finite_value))
+        if self.debug and (skipped_phi or skipped_none):
+            self._debug_print(
+                "Finite PHI fallback split retained "
+                f"{len(candidates)}/{len(finite_condition_sets)} cases "
+                f"(skipped_phi={skipped_phi}, skipped_none={skipped_none})"
+            )
+        return candidates
+
+    def _condition_key_set(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+        for condition in conditions or ():
+            try:
+                keys.add(condition.structural_key(budget=256))
+            except Exception:
+                pass
+        return keys
+
+    def _phi_selector_conditions(
+        self,
+        expr: Optional[Expression],
+    ) -> Tuple[Condition, ...]:
+        conditions: List[Condition] = []
+        seen: Set[Tuple[Any, ...]] = set()
+
+        def visit(node: Optional[Expression]) -> None:
+            if node is None:
+                return
+            if getattr(node, "expr_type", None) == ExpressionType.PHI:
+                for condition, value in getattr(node, "value", None) or []:
+                    if condition is not None:
+                        try:
+                            key = condition.structural_key(budget=256)
+                        except Exception:
+                            key = ("condition", id(condition))
+                        if key not in seen:
+                            seen.add(key)
+                            conditions.append(condition)
+                        visit(getattr(condition, "expression", None))
+                    visit(value)
+                return
+            for operand in getattr(node, "operands", None) or []:
+                visit(operand)
+
+        visit(expr)
+        return tuple(conditions)
+
+    def _split_small_finite_parameter_reachability_conditions(
+        self,
+        conditions: Sequence[Condition],
+        *,
+        search_min: int = -8,
+        search_max: int = 64,
+        max_cases: int = 16,
+    ) -> List[List[Condition]]:
+        parameter = self._single_parameter_expression_in_conditions(conditions)
+        if parameter is None:
+            return [list(conditions or [])]
+        feasible_values: List[int] = []
+        for value in range(int(search_min), int(search_max) + 1):
+            equality = self._parameter_equals_condition(parameter, value)
+            if not self._conditions_are_unsat(list(conditions or []) + [equality]):
+                feasible_values.append(value)
+                if len(feasible_values) > int(max_cases):
+                    return [list(conditions or [])]
+        if len(feasible_values) <= 1:
+            return [list(conditions or [])]
+        uncovered_conditions = list(conditions or [])
+        for value in feasible_values:
+            uncovered_conditions.append(self._parameter_equals_condition(parameter, value).negate())
+        if not self._conditions_are_unsat(uncovered_conditions):
+            return [list(conditions or [])]
+        result: List[List[Condition]] = []
+        for value in feasible_values:
+            split_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                list(conditions or []) + [self._parameter_equals_condition(parameter, value)]
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(split_conditions):
+                continue
+            result.append(split_conditions)
+        return result or [list(conditions or [])]
+
+    def _single_parameter_expression_in_conditions(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Expression]:
+        parameters: Dict[Tuple[Any, ...], Expression] = {}
+        for condition in conditions or []:
+            for node in _iter_expression_nodes(getattr(condition, "expression", None), include_phi_conditions=True):
+                if getattr(node, "expr_type", None) != ExpressionType.PARAMETER:
+                    continue
+                try:
+                    key = node.structural_key()
+                except Exception:
+                    continue
+                parameters[key] = node
+                if len(parameters) > 1:
+                    return None
+        return next(iter(parameters.values()), None)
+
+    def _parameter_equals_condition(self, parameter: Expression, value: int) -> Condition:
+        size = max(1, int(getattr(parameter, "size", 0) or 4))
+        expr = Expression.binary_op("INT_EQUAL", parameter, Expression.constant(int(value), size=size))
+        expr.size = 1
+        return Condition(expr)
+
+    def _conditions_are_unsat(self, conditions: Sequence[Condition]) -> bool:
+        try:
+            solver_result = ConditionSMTOracle.conjunction_is_unsat(list(conditions or []))
+        except Exception:
+            solver_result = None
+        if solver_result is not None:
+            return bool(solver_result)
+        return ConditionSimplifier.object_centric_is_contradiction(list(conditions or []))
+
+    def _phi_expression_key_set(
+        self,
+        expr: Optional[Expression],
+    ) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+
+        def visit(node: Optional[Expression]) -> None:
+            if node is None:
+                return
+            if getattr(node, "expr_type", None) == ExpressionType.PHI:
+                try:
+                    keys.add(node.structural_key(budget=256))
+                except Exception:
+                    pass
+                for condition, value in getattr(node, "value", None) or []:
+                    if condition is not None:
+                        visit(getattr(condition, "expression", None))
+                    visit(value)
+                return
+            for operand in getattr(node, "operands", None) or []:
+                visit(operand)
+
+        visit(expr)
+        return keys
 
     def _build_return_infos_from_expansions(
         self,
@@ -8903,12 +9482,11 @@ class ReturnAnalyzer:
 
             for split_index, region in enumerate(current_regions):
                 preserved.append(
-                    self._make_return_info(
-                        address=info.address,
+                    replace(
+                        info,
                         value=info.value,
                         conditions=region,
                         branch_index=self._split_branch_index(info.branch_index, original_index, split_index),
-                        site_metadata=self._return_site_metadata_from_info(info),
                     )
                 )
         return preserved
@@ -9501,12 +10079,11 @@ class ReturnAnalyzer:
             self._debug_print(
                 f"{reason}: value={self._debug_expr_summary(primary.value)} conditions={cond_dump}"
             )
-        return self._make_return_info(
-            address=primary.address,
+        return replace(
+            primary,
             value=primary.value,
             conditions=normalized_conditions,
             branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
-            site_metadata=self._return_site_metadata_from_info(primary),
         )
 
     def _min_branch_index(
@@ -9532,11 +10109,39 @@ class ReturnAnalyzer:
 
         if started_with_phi:
             reduced_value = _reduce_expression_under_conditions(value, conditions)
+            reduced_value = self._reduce_phi_expression_under_conditions_with_smt(
+                reduced_value if reduced_value is not None else value,
+                conditions,
+            )
             if reduced_value is not None:
                 normalized_value = reduced_value
             if self.debug and normalized_value is not value:
                 self._debug_print(
                     "Reduced PHI-bearing expanded return under active conditions: "
+                    f"{self._debug_expr_summary(value)} -> {self._debug_expr_summary(normalized_value)}"
+                )
+
+        substituted_value = self._substitute_parameter_constants_under_conditions(
+            normalized_value,
+            conditions,
+        )
+        if substituted_value is not None and substituted_value is not normalized_value:
+            normalized_value = substituted_value
+            if self.debug:
+                self._debug_print(
+                    "Specialized expanded return under exact parameter conditions: "
+                    f"{self._debug_expr_summary(value)} -> {self._debug_expr_summary(normalized_value)}"
+                )
+        assignments = self._parameter_constant_assignments_from_conditions(conditions)
+        evaluated_value = self._evaluate_expression_under_parameter_assignments(
+            normalized_value,
+            assignments,
+        )
+        if evaluated_value is not None and evaluated_value is not normalized_value:
+            normalized_value = evaluated_value
+            if self.debug:
+                self._debug_print(
+                    "Evaluated expanded return PHI selectors under exact parameter conditions: "
                     f"{self._debug_expr_summary(value)} -> {self._debug_expr_summary(normalized_value)}"
                 )
 
@@ -9557,6 +10162,398 @@ class ReturnAnalyzer:
                 normalized_value = canonicalized
 
         return normalized_value
+
+    def _substitute_parameter_constants_under_conditions(
+        self,
+        expr: Optional[Expression],
+        conditions: Sequence[Condition],
+    ) -> Optional[Expression]:
+        assignments = self._parameter_constant_assignments_from_conditions(conditions)
+        if not assignments:
+            return expr
+        substituted = self._substitute_parameter_constants(expr, assignments)
+        if substituted is None:
+            return expr
+        folded = self._fold_constant_expression(substituted, fallback_expr=expr)
+        return folded if folded is not None else substituted
+
+    def _parameter_constant_assignments_from_conditions(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Dict[Tuple[Any, ...], Tuple[Expression, int]]:
+        assignments: Dict[Tuple[Any, ...], Tuple[Expression, int]] = {}
+        for condition in conditions or ():
+            if getattr(condition, "negated", False):
+                continue
+            expr = getattr(condition, "expression", None)
+            if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(expr, "operator", None) != "INT_EQUAL":
+                continue
+            operands = list(getattr(expr, "operands", None) or [])
+            if len(operands) != 2:
+                continue
+            for parameter, constant in ((operands[0], operands[1]), (operands[1], operands[0])):
+                if getattr(parameter, "expr_type", None) != ExpressionType.PARAMETER:
+                    continue
+                if getattr(constant, "expr_type", None) != ExpressionType.CONSTANT:
+                    continue
+                try:
+                    key = parameter.structural_key()
+                    value = int(getattr(constant, "value", 0) or 0)
+                except Exception:
+                    continue
+                existing = assignments.get(key)
+                if existing is not None and existing[1] != value:
+                    assignments.pop(key, None)
+                    continue
+                assignments[key] = (parameter, value)
+        return assignments
+
+    def _substitute_parameter_constants(
+        self,
+        expr: Optional[Expression],
+        assignments: Mapping[Tuple[Any, ...], Tuple[Expression, int]],
+    ) -> Optional[Expression]:
+        if expr is None:
+            return expr
+        if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+            try:
+                key = expr.structural_key()
+            except Exception:
+                key = None
+            assigned = assignments.get(key) if key is not None else None
+            if assigned is None:
+                return expr
+            parameter, value = assigned
+            return Expression.constant(
+                int(value),
+                size=max(1, int(getattr(parameter, "size", 0) or getattr(expr, "size", 0) or 4)),
+            )
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+            changed = False
+            branches = []
+            for condition, value in getattr(expr, "value", None) or []:
+                rewritten_condition = condition
+                if condition is not None:
+                    rewritten_condition_expr = self._substitute_parameter_constants(
+                        getattr(condition, "expression", None),
+                        assignments,
+                    )
+                    if rewritten_condition_expr is not getattr(condition, "expression", None):
+                        rewritten_condition = Condition(
+                            rewritten_condition_expr,
+                            getattr(condition, "negated", False),
+                        )
+                        changed = True
+                rewritten_value = self._substitute_parameter_constants(value, assignments)
+                if rewritten_value is not value:
+                    changed = True
+                branches.append((rewritten_condition, rewritten_value if rewritten_value is not None else value))
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = getattr(expr, "size", 0)
+            return rebuilt
+        operands = list(getattr(expr, "operands", None) or [])
+        if not operands:
+            return expr
+        rewritten_operands = []
+        changed = False
+        for operand in operands:
+            rewritten = self._substitute_parameter_constants(operand, assignments)
+            if rewritten is None:
+                rewritten = operand
+            rewritten_operands.append(rewritten)
+            changed = changed or rewritten is not operand
+        if not changed:
+            return expr
+        rebuilt = expr.clone_with(operands=rewritten_operands)
+        folded = self._fold_constant_expression(rebuilt, fallback_expr=expr)
+        return folded if folded is not None else rebuilt
+
+    def _reduce_phi_expression_under_conditions_with_smt(
+        self,
+        expr: Optional[Expression],
+        conditions: Sequence[Condition],
+        *,
+        _active_ids: Optional[Set[int]] = None,
+    ) -> Optional[Expression]:
+        """Reduce PHI branches whose selector reachability is SMT-proved.
+
+        PHI rendering is ordered: the first true condition wins, and the final
+        branch is the fallback.  A branch can be selected only when active
+        return reachability proves all earlier selectors false and proves this
+        selector true.  Ambiguous selectors are preserved.
+        """
+
+        if expr is None:
+            return expr
+        active_ids = set() if _active_ids is None else set(_active_ids)
+        expr_id = id(expr)
+        if expr_id in active_ids:
+            return expr
+        active_ids.add(expr_id)
+
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type == ExpressionType.PHI:
+            branches = list(getattr(expr, "value", None) or [])
+            if not branches:
+                return expr
+
+            prior_conditions: List[Condition] = []
+            surviving: List[Tuple[Optional[Condition], Expression]] = []
+            changed = False
+            active_conditions = list(conditions or [])
+            assignments = self._parameter_constant_assignments_from_conditions(active_conditions)
+
+            for branch_condition, branch_value in branches:
+                branch_reachability = [
+                    prior.negate()
+                    for prior in prior_conditions
+                    if prior is not None
+                ]
+                if branch_condition is not None:
+                    branch_reachability.append(branch_condition)
+
+                if branch_reachability and (
+                    self._conditions_conjunction_is_false_under_assignments(
+                        branch_reachability,
+                        assignments,
+                    )
+                    or self._conditions_are_unsat(active_conditions + branch_reachability)
+                ):
+                    changed = True
+                    if branch_condition is not None:
+                        prior_conditions.append(branch_condition)
+                    continue
+
+                if self._active_conditions_imply_all(
+                    active_conditions,
+                    branch_reachability,
+                    assignments=assignments,
+                ):
+                    return self._reduce_phi_expression_under_conditions_with_smt(
+                        branch_value,
+                        active_conditions + branch_reachability,
+                        _active_ids=active_ids,
+                    )
+
+                reduced_branch = self._reduce_phi_expression_under_conditions_with_smt(
+                    branch_value,
+                    active_conditions + branch_reachability,
+                    _active_ids=active_ids,
+                )
+                if reduced_branch is None:
+                    reduced_branch = branch_value
+                if reduced_branch is not branch_value:
+                    changed = True
+                surviving.append((branch_condition, reduced_branch))
+                if branch_condition is not None:
+                    prior_conditions.append(branch_condition)
+
+            if not surviving:
+                return expr
+            if len(surviving) == 1:
+                return surviving[0][1]
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(surviving)
+            rebuilt.size = getattr(expr, "size", 0)
+            return rebuilt
+
+        operands = list(getattr(expr, "operands", None) or [])
+        if not operands:
+            return expr
+        rewritten_operands = []
+        changed = False
+        for operand in operands:
+            rewritten = self._reduce_phi_expression_under_conditions_with_smt(
+                operand,
+                conditions,
+                _active_ids=active_ids,
+            )
+            if rewritten is None:
+                rewritten = operand
+            rewritten_operands.append(rewritten)
+            changed = changed or rewritten is not operand
+        if not changed:
+            return expr
+        return expr.clone_with(operands=rewritten_operands)
+
+    def _active_conditions_imply_all(
+        self,
+        active_conditions: Sequence[Condition],
+        conclusions: Sequence[Condition],
+        *,
+        assignments: Optional[Mapping[Tuple[Any, ...], Tuple[Expression, int]]] = None,
+    ) -> bool:
+        for conclusion in conclusions or ():
+            truth = self._condition_truth_under_parameter_assignments(
+                conclusion,
+                assignments or {},
+            )
+            if truth is True:
+                continue
+            if truth is False:
+                return False
+            try:
+                negated = conclusion.negate()
+            except Exception:
+                return False
+            if not self._conditions_are_unsat(list(active_conditions or []) + [negated]):
+                return False
+        return True
+
+    def _conditions_conjunction_is_false_under_assignments(
+        self,
+        conditions: Sequence[Condition],
+        assignments: Mapping[Tuple[Any, ...], Tuple[Expression, int]],
+    ) -> bool:
+        if not assignments:
+            return False
+        for condition in conditions or ():
+            truth = self._condition_truth_under_parameter_assignments(condition, assignments)
+            if truth is False:
+                return True
+        return False
+
+    def _condition_truth_under_parameter_assignments(
+        self,
+        condition: Optional[Condition],
+        assignments: Mapping[Tuple[Any, ...], Tuple[Expression, int]],
+        *,
+        _active_ids: Optional[Set[int]] = None,
+    ) -> Optional[bool]:
+        if condition is None or not assignments:
+            return None
+        substituted = self._evaluate_expression_under_parameter_assignments(
+            getattr(condition, "expression", None),
+            assignments,
+            _active_ids=_active_ids,
+        )
+        evaluated = eval_constant_raw(substituted) if substituted is not None else None
+        if evaluated is None:
+            return None
+        raw_value, _bits = evaluated
+        truth = bool(raw_value)
+        if getattr(condition, "negated", False):
+            truth = not truth
+        return truth
+
+    def _evaluate_expression_under_parameter_assignments(
+        self,
+        expr: Optional[Expression],
+        assignments: Mapping[Tuple[Any, ...], Tuple[Expression, int]],
+        *,
+        _active_ids: Optional[Set[int]] = None,
+    ) -> Optional[Expression]:
+        if expr is None or not assignments:
+            return expr
+        active_ids = set() if _active_ids is None else set(_active_ids)
+        expr_id = id(expr)
+        if expr_id in active_ids:
+            return expr
+        active_ids.add(expr_id)
+
+        if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+            try:
+                key = expr.structural_key()
+            except Exception:
+                key = None
+            assigned = assignments.get(key) if key is not None else None
+            if assigned is None:
+                return expr
+            parameter, value = assigned
+            return Expression.constant(
+                int(value),
+                size=max(1, int(getattr(parameter, "size", 0) or getattr(expr, "size", 0) or 4)),
+            )
+
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+            branches = list(getattr(expr, "value", None) or [])
+            if not branches:
+                return expr
+            rewritten_branches: List[Tuple[Optional[Condition], Expression]] = []
+            changed = False
+            for condition, value in branches:
+                if condition is None:
+                    selected = self._evaluate_expression_under_parameter_assignments(
+                        value,
+                        assignments,
+                        _active_ids=active_ids,
+                    )
+                    if not rewritten_branches:
+                        return selected if selected is not None else value
+                    if selected is not None and selected is not value:
+                        changed = True
+                    rewritten_branches.append((None, selected if selected is not None else value))
+                    continue
+                truth = self._condition_truth_under_parameter_assignments(
+                    condition,
+                    assignments,
+                    _active_ids=active_ids,
+                )
+                if truth is True:
+                    selected = self._evaluate_expression_under_parameter_assignments(
+                        value,
+                        assignments,
+                        _active_ids=active_ids,
+                    )
+                    return selected if selected is not None else value
+                if truth is False:
+                    changed = True
+                    continue
+                rewritten_condition = condition
+                rewritten_condition_expr = self._evaluate_expression_under_parameter_assignments(
+                    getattr(condition, "expression", None),
+                    assignments,
+                    _active_ids=active_ids,
+                )
+                if rewritten_condition_expr is not None and rewritten_condition_expr is not getattr(condition, "expression", None):
+                    rewritten_condition = Condition(
+                        rewritten_condition_expr,
+                        bool(getattr(condition, "negated", False)),
+                    )
+                    changed = True
+                rewritten_value = self._evaluate_expression_under_parameter_assignments(
+                    value,
+                    assignments,
+                    _active_ids=active_ids,
+                )
+                if rewritten_value is not None and rewritten_value is not value:
+                    changed = True
+                rewritten_branches.append((rewritten_condition, rewritten_value if rewritten_value is not None else value))
+            if not rewritten_branches:
+                return expr
+            if len(rewritten_branches) == 1:
+                return rewritten_branches[0][1]
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(rewritten_branches)
+            rebuilt.size = getattr(expr, "size", 0)
+            return rebuilt
+
+        operands = list(getattr(expr, "operands", None) or [])
+        if not operands:
+            return expr
+        rewritten_operands = []
+        changed = False
+        for operand in operands:
+            rewritten = self._evaluate_expression_under_parameter_assignments(
+                operand,
+                assignments,
+                _active_ids=active_ids,
+            )
+            if rewritten is None:
+                rewritten = operand
+            rewritten_operands.append(rewritten)
+            changed = changed or rewritten is not operand
+        if not changed:
+            return expr
+        rebuilt = expr.clone_with(operands=rewritten_operands)
+        folded = self._fold_constant_expression(rebuilt, fallback_expr=expr)
+        return folded if folded is not None else rebuilt
 
     def _normalize_return_value_with_effect_summary(
         self,

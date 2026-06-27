@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
     LocationBaseRef,
     ReturnInfo,
     StorageInfo,
@@ -48,6 +49,521 @@ def _cond(operator: str, left: Expression, right: Expression, negated: bool = Fa
         ),
         negated=negated,
     )
+
+
+def test_callother_userop_normalization_preserves_summary_return_evidence():
+    language = Mock()
+    language.getUserDefinedOpName.return_value = "NEON_ext"
+    program = Mock()
+    program.getLanguage.return_value = language
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+
+    raw_callother = Expression.intrinsic(
+        "CALLOTHER",
+        [
+            Expression.constant(150, size=4),
+            Expression.parameter("v_first", index=0, size=16),
+            Expression.parameter("v_second", index=1, size=16),
+            Expression.constant(8, size=1),
+            Expression.constant(1, size=1),
+        ],
+        size=16,
+        opcode=9,
+    )
+    condition_expr = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.intrinsic(
+            "CALLOTHER",
+            [
+                Expression.constant(150, size=4),
+                Expression.parameter("c_first", index=2, size=16),
+                Expression.parameter("c_second", index=3, size=16),
+                Expression.constant(8, size=1),
+                Expression.constant(1, size=1),
+            ],
+            size=16,
+            opcode=9,
+        ),
+        Expression.constant(0, size=16),
+    )
+    original = ReturnInfo(
+        address="0x1000",
+        value=raw_callother,
+        conditions=[Condition(condition_expr)],
+        branch_index=7,
+        pcode_identity="0x1000:t7",
+        return_kind="summary_derived",
+        acceptance_status="accepted",
+        summary_candidate_id=("candidate", "summary"),
+        summary_candidate_source_key=("source", "key"),
+        summary_transition_evidence_key=("transition", "evidence"),
+        validation_blockers=("kept_for_audit",),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[original],
+    )
+
+    analyzer._normalize_return_callother_userops(analysis)
+
+    rewritten = analysis.returns[0]
+    assert rewritten is not original
+    assert rewritten.value.name == "NEON_ext"
+    assert rewritten.conditions[0].expression.operands[0].name == "NEON_ext"
+    assert rewritten.address == original.address
+    assert rewritten.branch_index == original.branch_index
+    assert rewritten.pcode_identity == original.pcode_identity
+    assert rewritten.return_kind == "summary_derived"
+    assert rewritten.acceptance_status == "accepted"
+    assert rewritten.summary_candidate_id == ("candidate", "summary")
+    assert rewritten.summary_candidate_source_key == ("source", "key")
+    assert rewritten.summary_transition_evidence_key == ("transition", "evidence")
+    assert rewritten.validation_blockers == ("kept_for_audit",)
+
+
+def test_phi_return_fallback_preserves_broad_path_coverage_as_return_info():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    phi = Expression.phi(
+        [
+            (Condition(Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, size=4))), Expression.constant(1, size=4)),
+            (None, Expression.constant(2, size=4)),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+    narrow_condition = Condition(Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, size=4)))
+    broad_condition = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), selector))
+
+    existing = ReturnInfo(
+        address="0x1000",
+        value=Expression.constant(1, size=4),
+        conditions=[narrow_condition],
+        branch_index=1,
+    )
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [existing],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[broad_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 2
+    assert expanded[1].value.equals(Expression.constant(2, size=4))
+    assert expanded[1].conditions == [broad_condition]
+    assert expanded[1].branch_index == 190
+
+
+def test_phi_return_fallback_separates_selector_from_reachability_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    count = Expression.parameter("count", index=1, size=4)
+    selector_condition = Condition(
+        Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, size=4))
+    )
+    reachability_condition = Condition(
+        Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), count)
+    )
+    phi = Expression.phi(
+        [
+            (selector_condition, Expression.constant(1, size=4)),
+            (None, Expression.constant(2, size=4)),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[reachability_condition, selector_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.equals(phi)
+    assert expanded[0].conditions == [reachability_condition]
+    assert expanded[0].return_kind == "phi_selector_split_fallback"
+
+
+def test_phi_return_fallback_adds_union_reachability_candidate_for_path_partition():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    selector_condition = Condition(
+        Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, size=4))
+    )
+    fallback_phi = Expression.phi(
+        [
+            (selector_condition, Expression.constant(1, size=4)),
+            (None, Expression.constant(2, size=4)),
+        ]
+    )
+    fallback_phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = fallback_phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[selector_condition], [selector_condition.negate()]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    union_cases = [
+        info
+        for info in expanded
+        if info.return_kind == "phi_union_reachability_fallback"
+    ]
+    assert len(union_cases) == 1
+    assert union_cases[0].value.equals(fallback_phi)
+    assert len(union_cases[0].conditions) == 1
+
+
+def test_phi_return_fallback_separates_wrapped_selector_phi_condition():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    count = Expression.parameter("count", index=1, size=4)
+    inner_selector = Expression.phi(
+        [
+            (
+                Condition(Expression.binary_op("INT_SLESS", selector, Expression.constant(8, size=4))),
+                Expression.constant(0, size=4),
+            ),
+            (None, Expression.constant(8, size=4)),
+        ]
+    )
+    inner_selector.size = 4
+    wrapped_selector_condition = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op("INT_SUB", inner_selector, Expression.constant(8, size=4)),
+            Expression.constant(0, size=4),
+        )
+    )
+    reachability_condition = Condition(
+        Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), count)
+    )
+    fallback_phi = Expression.phi(
+        [
+            (Condition(Expression.binary_op("INT_EQUAL", inner_selector, Expression.constant(8, size=4))), Expression.constant(9, size=4)),
+            (None, Expression.constant(1, size=4)),
+        ]
+    )
+    fallback_phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = fallback_phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[reachability_condition, wrapped_selector_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].conditions == [reachability_condition]
+    assert expanded[0].return_kind == "phi_selector_split_fallback"
+
+
+def test_phi_return_fallback_keeps_same_phi_non_equivalent_condition_as_reachability():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    inner_selector = Expression.phi(
+        [
+            (
+                Condition(Expression.binary_op("INT_SLESS", selector, Expression.constant(8, size=4))),
+                Expression.constant(0, size=4),
+            ),
+            (None, Expression.constant(8, size=4)),
+        ]
+    )
+    inner_selector.size = 4
+    non_equivalent_condition = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op("INT_SUB", inner_selector, Expression.constant(7, size=4)),
+            Expression.constant(0, size=4),
+        )
+    )
+    fallback_phi = Expression.phi(
+        [
+            (Condition(Expression.binary_op("INT_EQUAL", inner_selector, Expression.constant(8, size=4))), Expression.constant(9, size=4)),
+            (None, Expression.constant(1, size=4)),
+        ]
+    )
+    fallback_phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = fallback_phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[non_equivalent_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert expanded == []
+
+
+def test_phi_return_fallback_reduces_value_from_reachability_without_dropping_reachability():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    count = Expression.parameter("count", index=0, size=4)
+    selector_condition = Condition(
+        Expression.binary_op("INT_SLESS", count, Expression.constant(1, size=4))
+    )
+    reachability_condition = Condition(
+        Expression.binary_op("INT_EQUAL", count, Expression.constant(0, size=4))
+    )
+    phi = Expression.phi(
+        [
+            (selector_condition, Expression.constant(7, size=4)),
+            (None, Expression.constant(9, size=4)),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[reachability_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].conditions == [reachability_condition]
+    assert expanded[0].value.equals(Expression.constant(7, size=4))
+    assert expanded[0].return_kind == "phi_reachability_fallback"
+
+
+def test_phi_return_fallback_splits_small_finite_reachability_before_value_reduction():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    n = Expression.parameter("n", index=0, size=4)
+    lower = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), n))
+    upper = Condition(Expression.binary_op("INT_SLESS", n, Expression.constant(8, size=4)))
+    not_one = Condition(
+        Expression.binary_op("INT_EQUAL", n, Expression.constant(1, size=4)),
+        negated=True,
+    )
+    phi = Expression.phi(
+        [
+            (Condition(Expression.binary_op("INT_EQUAL", n, Expression.constant(2, size=4))), Expression.constant(20, size=4)),
+            (Condition(Expression.binary_op("INT_EQUAL", n, Expression.constant(3, size=4))), Expression.constant(30, size=4)),
+            (None, Expression.constant(99, size=4)),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[lower, upper, not_one]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 6
+    values_by_n = {}
+    for info in expanded:
+        equality_conditions = [
+            condition
+            for condition in info.conditions
+            if condition.expression.operator == "INT_EQUAL"
+            and condition.expression.operands[0].equals(n)
+            and not condition.negated
+        ]
+        assert len(equality_conditions) == 1
+        n_value = equality_conditions[0].expression.operands[1].value
+        values_by_n[n_value] = info.value.value
+    assert values_by_n == {2: 20, 3: 30, 4: 99, 5: 99, 6: 99, 7: 99}
+
+
+def test_phi_return_fallback_reduces_bitmask_selector_with_smt_reachability():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    n = Expression.parameter("n", index=0, size=4)
+    selector = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op("INT_AND", n, Expression.constant(0xFFFFFFF8, size=4)),
+            n,
+        )
+    )
+    phi = Expression.phi(
+        [
+            (selector, Expression.constant(80, size=4)),
+            (
+                None,
+                Expression.binary_op(
+                    "INT_MULT",
+                    n,
+                    Expression.constant(2, size=4),
+                ),
+            ),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+    reachability = Condition(Expression.binary_op("INT_EQUAL", n, Expression.constant(4, size=4)))
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[reachability]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].conditions == [reachability]
+    assert expanded[0].value.equals(Expression.constant(8, size=4))
+
+
+def test_phi_return_fallback_does_not_finite_split_when_value_keeps_phi():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    n = Expression.parameter("n", index=0, size=4)
+    hidden = Expression.parameter("hidden", index=1, size=4)
+    lower = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), n))
+    upper = Condition(Expression.binary_op("INT_SLESS", n, Expression.constant(4, size=4)))
+    unresolved_selector = Condition(
+        Expression.binary_op("INT_EQUAL", hidden, Expression.constant(0, size=4))
+    )
+    phi = Expression.phi(
+        [
+            (unresolved_selector, Expression.constant(10, size=4)),
+            (None, Expression.binary_op("INT_ADD", n, Expression.constant(1, size=4))),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[lower, upper]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert expanded == []
+
+
+def test_phi_return_fallback_keeps_only_phi_free_finite_split_cases():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    n = Expression.parameter("n", index=0, size=4)
+    hidden = Expression.parameter("hidden", index=1, size=4)
+    lower = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), n))
+    upper = Condition(Expression.binary_op("INT_SLESS", n, Expression.constant(4, size=4)))
+    selector_two = Condition(Expression.binary_op("INT_EQUAL", n, Expression.constant(2, size=4)))
+    hidden_selector = Condition(Expression.binary_op("INT_EQUAL", hidden, Expression.constant(0, size=4)))
+    phi = Expression.phi(
+        [
+            (selector_two, Expression.constant(20, size=4)),
+            (hidden_selector, Expression.constant(99, size=4)),
+            (None, Expression.binary_op("INT_ADD", n, Expression.constant(1, size=4))),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[lower, upper]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert len(expanded) == 1
+    equality_conditions = [
+        condition
+        for condition in expanded[0].conditions
+        if condition.expression.operator == "INT_EQUAL"
+        and condition.expression.operands[0].equals(n)
+        and not condition.negated
+    ]
+    assert len(equality_conditions) == 1
+    assert equality_conditions[0].expression.operands[1].value == 2
+    assert expanded[0].value.equals(Expression.constant(20, size=4))
+
+
+def test_phi_return_fallback_keeps_unrelated_phi_condition_as_reachability():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    selector = Expression.parameter("selector", index=0, size=4)
+    other_selector = Expression.parameter("other_selector", index=1, size=4)
+    selector_condition = Condition(
+        Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, size=4))
+    )
+    unrelated_phi = Expression.phi(
+        [
+            (
+                Condition(Expression.binary_op("INT_EQUAL", other_selector, Expression.constant(0, size=4))),
+                Expression.constant(1, size=4),
+            ),
+            (None, Expression.constant(2, size=4)),
+        ]
+    )
+    unrelated_phi.size = 4
+    unrelated_phi_condition = Condition(
+        Expression.binary_op("INT_EQUAL", unrelated_phi, Expression.constant(1, size=4))
+    )
+    phi = Expression.phi(
+        [
+            (selector_condition, Expression.constant(1, size=4)),
+            (None, Expression.constant(2, size=4)),
+        ]
+    )
+    phi.size = 4
+    tracer = Mock()
+    tracer.trace_varnode.return_value = phi
+
+    expanded = analyzer._append_smt_lowerable_phi_return_fallback_infos(
+        [],
+        tracer=tracer,
+        return_varnode=Mock(),
+        path_condition_sets=[[unrelated_phi_condition]],
+        address="0x1000",
+        return_index=1,
+        site_metadata={},
+    )
+
+    assert expanded == []
 
 
 def test_condition_tracker_collects_all_valid_paths_to_return():
