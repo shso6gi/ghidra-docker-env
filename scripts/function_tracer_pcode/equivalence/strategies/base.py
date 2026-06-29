@@ -271,12 +271,16 @@ class CheckStrategy(ABC):
                 label,
             )
             if coverage_result.status == "gap":
+                if coverage_result.detail:
+                    self._debug_print(coverage_result.detail)
                 reasons.append(f"{label}:return_coverage_gap")
                 reasons.extend(
                     f"{label}:{reason_id}"
                     for reason_id in self._summary_return_candidate_blocker_reason_ids(analysis)
                 )
             elif coverage_result.status == "inconclusive":
+                if coverage_result.detail:
+                    self._debug_print(coverage_result.detail)
                 blocker_reason = coverage_result.reason_id or UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
                 reasons.append(f"{label}:{blocker_reason.value}")
                 if (
@@ -7178,6 +7182,8 @@ class CheckStrategy(ABC):
             detail = f"{label} has uncovered return-condition region"
             if model:
                 detail += f" under model {model}"
+            if getattr(self, "debug", False):
+                detail += self._return_coverage_case_debug_suffix(cases)
             return ReturnCoverageCheckResult(status="gap", detail=detail)
         if result.is_equivalent is None:
             return ReturnCoverageCheckResult(
@@ -7192,6 +7198,25 @@ class CheckStrategy(ABC):
             coverage_proof_method="smt_coverage_query",
             solver_status="unsat",
         )
+
+    def _return_coverage_case_debug_suffix(self, cases: Sequence[Any]) -> str:
+        lines: List[str] = []
+        for case in cases or ():
+            case_index = getattr(case, "index", "?")
+            rendered_conditions = []
+            for condition in getattr(case, "conditions", []) or []:
+                to_string = getattr(condition, "to_string", None)
+                if callable(to_string):
+                    try:
+                        rendered_conditions.append(to_string())
+                        continue
+                    except Exception:
+                        pass
+                rendered_conditions.append(repr(condition))
+            lines.append(f"case[{case_index}] conditions={rendered_conditions}")
+        if not lines:
+            return ""
+        return "\n  coverage cases:\n  " + "\n  ".join(lines)
 
     @staticmethod
     def _base_context_has_return_coverage_domain_assumptions(

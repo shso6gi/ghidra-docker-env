@@ -7660,6 +7660,7 @@ class ReturnAnalyzer:
                 if (
                     union_value is not None
                     and not expression_contains_unsupported_smt_ops(union_value)
+                    and not self._expression_contains_phi(union_value)
                 ):
                     info = self._make_return_info(
                         address=address,
@@ -7671,19 +7672,8 @@ class ReturnAnalyzer:
                     info = replace(info, return_kind="phi_union_reachability_fallback")
                     additions.append(info)
         for index, conditions in enumerate(fallback_conditions):
-            reachability_conditions, selector_conditions = (
-                self._split_phi_selector_conditions_from_return_reachability(
-                    fallback_value,
-                    list(conditions or []),
-                )
-            )
-            if self.debug and selector_conditions:
-                self._debug_print(
-                    "Separated PHI selector fallback conditions: "
-                    f"reachability={len(reachability_conditions)}, selectors={len(selector_conditions)}"
-                )
             simplified = ConditionSimplifier.simplify_conditions_object_centric(
-                reachability_conditions
+                list(conditions or [])
             )
             if ConditionSimplifier.object_centric_is_contradiction(simplified):
                 continue
@@ -7699,13 +7689,17 @@ class ReturnAnalyzer:
                     fallback_value,
                     simplified,
                 )
-                if not finite_candidates and selector_conditions:
-                    finite_candidates = [(simplified, normalized_value)]
             else:
                 finite_candidates = [(simplified, normalized_value)]
 
             for finite_index, (finite_conditions, finite_value) in enumerate(finite_candidates):
-                if self._expression_contains_phi(finite_value) and not selector_conditions:
+                if self._expression_contains_phi(finite_value):
+                    continue
+                if any(
+                    self._expression_contains_phi(getattr(condition, "expression", None))
+                    or self._expression_contains_unknown_or_call(getattr(condition, "expression", None))
+                    for condition in finite_conditions or ()
+                ):
                     continue
                 branch_index = return_index * 100 + 90 + index
                 if len(finite_candidates) > 1:
@@ -7719,11 +7713,7 @@ class ReturnAnalyzer:
                 )
                 info = replace(
                     info,
-                    return_kind=(
-                        "phi_selector_split_fallback"
-                        if selector_conditions
-                        else "phi_reachability_fallback"
-                    ),
+                    return_kind="phi_reachability_fallback",
                 )
                 additions.append(info)
         if not additions:
@@ -7779,137 +7769,6 @@ class ReturnAnalyzer:
         negated.size = 1
         return negated
 
-    def _split_phi_selector_conditions_from_return_reachability(
-        self,
-        fallback_value: Expression,
-        conditions: Sequence[Condition],
-    ) -> Tuple[List[Condition], List[Condition]]:
-        """Separate PHI branch selectors already carried by the fallback value.
-
-        The fallback value is a PHI expression whose branch conditions encode
-        value selection.  ReturnInfo.conditions should describe reachability of
-        the return site.  We only remove a path condition when it is structurally
-        identical to a selector condition embedded in that same fallback PHI.
-        """
-
-        selector_conditions = self._phi_selector_conditions(fallback_value)
-        selector_keys = self._condition_key_set(selector_conditions)
-        if not selector_conditions:
-            return list(conditions or []), []
-
-        reachability: List[Condition] = []
-        selectors: List[Condition] = []
-        for condition in conditions or []:
-            if self._condition_matches_phi_selector(
-                condition,
-                selector_conditions=selector_conditions,
-                selector_keys=selector_keys,
-            ):
-                selectors.append(condition)
-                continue
-            reachability.append(condition)
-        return reachability, selectors
-
-    def _condition_matches_phi_selector(
-        self,
-        condition: Condition,
-        *,
-        selector_conditions: Sequence[Condition],
-        selector_keys: Set[Tuple[Any, ...]],
-    ) -> bool:
-        try:
-            key = condition.structural_key(budget=256)
-        except Exception:
-            key = None
-        if key is not None and key in selector_keys:
-            return True
-        condition_key = self._normalized_condition_key(condition)
-        if condition_key is not None:
-            for selector in selector_conditions:
-                if condition_key == self._normalized_condition_key(selector):
-                    return True
-        for selector in selector_conditions:
-            if self._conditions_are_smt_equivalent(condition, selector):
-                return True
-        return False
-
-    def _normalized_condition_key(self, condition: Condition) -> Optional[Tuple[Any, ...]]:
-        expr = getattr(condition, "expression", None)
-        if expr is None:
-            return None
-        normalized_expr, normalized_negated = self._normalize_condition_term(
-            expr,
-            bool(getattr(condition, "negated", False)),
-        )
-        try:
-            return Condition(normalized_expr, normalized_negated).structural_key(budget=256)
-        except Exception:
-            return None
-
-    def _normalize_condition_term(
-        self,
-        expr: Expression,
-        negated: bool,
-    ) -> Tuple[Expression, bool]:
-        current = expr
-        current_negated = bool(negated)
-        changed = True
-        while changed and current is not None:
-            changed = False
-            if (
-                current.expr_type == ExpressionType.UNARY_OP
-                and current.operator == "BOOL_NEGATE"
-                and len(current.operands) == 1
-            ):
-                current = current.operands[0]
-                current_negated = not current_negated
-                changed = True
-                continue
-            if (
-                current.expr_type == ExpressionType.BINARY_OP
-                and current.operator == "INT_NOTEQUAL"
-                and len(current.operands) == 2
-            ):
-                current = Expression.binary_op("INT_EQUAL", current.operands[0], current.operands[1])
-                current.size = 1
-                current_negated = not current_negated
-                changed = True
-                continue
-        return current, current_negated
-
-    def _conditions_are_smt_equivalent(self, left: Condition, right: Condition) -> bool:
-        left_expr = getattr(left, "expression", None)
-        right_expr = getattr(right, "expression", None)
-        if left_expr is None or right_expr is None:
-            return False
-        if expression_contains_unsupported_smt_ops(left_expr) or expression_contains_unsupported_smt_ops(right_expr):
-            return False
-        left_implies_right = ConditionSMTOracle.conjunction_is_unsat(
-            [left, right.negate()],
-            cache_key=(
-                "phi_selector_condition_implies",
-                self._condition_cache_key(left),
-                self._condition_cache_key(right),
-            ),
-        )
-        if left_implies_right is not True:
-            return False
-        right_implies_left = ConditionSMTOracle.conjunction_is_unsat(
-            [left.negate(), right],
-            cache_key=(
-                "phi_selector_condition_implies",
-                self._condition_cache_key(right),
-                self._condition_cache_key(left),
-            ),
-        )
-        return right_implies_left is True
-
-    def _condition_cache_key(self, condition: Condition) -> Tuple[Any, ...]:
-        try:
-            return condition.structural_key(budget=256)
-        except Exception:
-            return ("condition", id(condition))
-
     def _phi_free_finite_fallback_candidates(
         self,
         fallback_value: Expression,
@@ -7942,47 +7801,6 @@ class ReturnAnalyzer:
                 f"(skipped_phi={skipped_phi}, skipped_none={skipped_none})"
             )
         return candidates
-
-    def _condition_key_set(
-        self,
-        conditions: Sequence[Condition],
-    ) -> Set[Tuple[Any, ...]]:
-        keys: Set[Tuple[Any, ...]] = set()
-        for condition in conditions or ():
-            try:
-                keys.add(condition.structural_key(budget=256))
-            except Exception:
-                pass
-        return keys
-
-    def _phi_selector_conditions(
-        self,
-        expr: Optional[Expression],
-    ) -> Tuple[Condition, ...]:
-        conditions: List[Condition] = []
-        seen: Set[Tuple[Any, ...]] = set()
-
-        def visit(node: Optional[Expression]) -> None:
-            if node is None:
-                return
-            if getattr(node, "expr_type", None) == ExpressionType.PHI:
-                for condition, value in getattr(node, "value", None) or []:
-                    if condition is not None:
-                        try:
-                            key = condition.structural_key(budget=256)
-                        except Exception:
-                            key = ("condition", id(condition))
-                        if key not in seen:
-                            seen.add(key)
-                            conditions.append(condition)
-                        visit(getattr(condition, "expression", None))
-                    visit(value)
-                return
-            for operand in getattr(node, "operands", None) or []:
-                visit(operand)
-
-        visit(expr)
-        return tuple(conditions)
 
     def _split_small_finite_parameter_reachability_conditions(
         self,

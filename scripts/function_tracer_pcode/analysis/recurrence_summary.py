@@ -2126,6 +2126,17 @@ class StructuralRecurrenceSummarizer:
         )
         if prior_state_value is not None:
             loop_base_expr = prior_state_value
+        else:
+            recovered_state_value = self._recover_proved_multiplicative_state_transition_base(
+                loop_base_expr=loop_base_expr,
+                continue_conditions=continue_conditions,
+                start_expr=start_expr,
+                limit_expr=limit_expr,
+                result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
+                signed_loop=induction.signed_guard or guard.signed_comparison,
+            )
+            if recovered_state_value is not None:
+                loop_base_expr = recovered_state_value
         if self._expression_contains_executable_address_constant(
             base_return_expr,
             function_body_ranges=function_body_ranges,
@@ -2783,6 +2794,147 @@ class StructuralRecurrenceSummarizer:
         )
         intrinsic.size = max(1, int(result_size or getattr(initial_state, "size", 0) or 4))
         return intrinsic
+
+    def _recover_proved_multiplicative_state_transition_base(
+        self,
+        *,
+        loop_base_expr: Expression,
+        continue_conditions: Sequence[Condition],
+        start_expr: Expression,
+        limit_expr: Expression,
+        result_size: int,
+        signed_loop: bool,
+        multiplier: Optional[int] = None,
+    ) -> Optional[Expression]:
+        """Recover a pure multiplicative state-transition summary for an optimized base.
+
+        This is deliberately proof-backed.  It does not infer a handoff proof or
+        claim side-effect coverage for an earlier loop; it only replaces the
+        current loop base value when the existing expression and the canonical
+        counted state-transition value are SMT-equivalent under the active
+        continue partition.
+        """
+        if loop_base_expr is None:
+            return None
+        result_size = max(1, int(result_size or getattr(loop_base_expr, "size", 0) or 4))
+        if result_size <= 0:
+            return None
+        if self._expression_is_unresolved(loop_base_expr):
+            return None
+        if any(getattr(node, "expr_type", None) == ExpressionType.UNKNOWN for node in self._iter_expression_nodes(loop_base_expr)):
+            return None
+        if any(
+            self._expression_is_unresolved(getattr(condition, "expression", None))
+            for condition in continue_conditions or ()
+            if condition is not None
+        ):
+            return None
+        start_constant = self._raw_constant_value(start_expr)
+        if start_constant != 1:
+            return None
+
+        for candidate_multiplier in self._multiplicative_state_transition_multiplier_candidates(
+            loop_base_expr,
+            preferred=multiplier,
+        ):
+            state_placeholder = Expression.variable("__loop_state", size=result_size)
+            transition_expr = Expression.binary_op(
+                "INT_MULT",
+                state_placeholder,
+                Expression.constant(int(candidate_multiplier), size=result_size),
+            )
+            transition_expr.size = result_size
+            candidate = self._build_counted_state_transition_value(
+                initial_state=Expression.constant(1, size=result_size),
+                start_expr=start_expr,
+                limit_expr=limit_expr,
+                induction_step=1,
+                transition_cases=(((), transition_expr),),
+                state_placeholder=state_placeholder,
+                side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+                guard_constraints=tuple(continue_conditions or ()),
+                result_size=result_size,
+                signed_loop=bool(signed_loop),
+            )
+            if candidate is None:
+                continue
+            if self._expression_contains_executable_address_constant(candidate):
+                continue
+            parameters = self._collect_summary_parameter_specs(
+                loop_base_expr,
+                candidate,
+                *(condition.expression for condition in continue_conditions or () if condition is not None),
+            )
+            if parameters is None:
+                continue
+            if not self._prove_expression_equivalence_under_conditions(
+                loop_base_expr,
+                candidate,
+                continue_conditions,
+                parameters,
+            ):
+                continue
+            self._debug(
+                "Recovered multiplicative state-transition base by SMT proof: "
+                f"multiplier={int(candidate_multiplier)}, start=1, size={result_size}"
+            )
+            return candidate
+        return None
+
+    def _multiplicative_state_transition_multiplier_candidates(
+        self,
+        expr: Expression,
+        *,
+        preferred: Optional[int] = None,
+        max_candidates: int = 8,
+    ) -> Tuple[int, ...]:
+        candidates: List[int] = []
+        if preferred is not None:
+            try:
+                preferred_int = int(preferred)
+            except (TypeError, ValueError):
+                preferred_int = 0
+            if preferred_int not in {0, 1}:
+                candidates.append(preferred_int)
+        for value in self._expression_integer_constants(expr):
+            value = int(value)
+            if value in {0, 1}:
+                continue
+            if value < 0:
+                continue
+            if value > 0x10000:
+                continue
+            if value not in candidates:
+                candidates.append(value)
+            for root in self._small_integer_power_roots(value):
+                if root not in candidates:
+                    candidates.append(root)
+                if len(candidates) >= int(max_candidates):
+                    break
+            if len(candidates) >= int(max_candidates):
+                break
+        return tuple(candidates[: max(1, int(max_candidates))])
+
+    def _small_integer_power_roots(
+        self,
+        value: int,
+        *,
+        max_root: int = 256,
+    ) -> Tuple[int, ...]:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return ()
+        if value <= 1:
+            return ()
+        roots: List[int] = []
+        for root in range(2, int(max_root) + 1):
+            product = root * root
+            while product < value:
+                product *= root
+            if product == value:
+                roots.append(root)
+        return tuple(roots)
 
     def _canonicalize_zero_value_under_conditions(
         self,
@@ -3883,11 +4035,33 @@ class StructuralRecurrenceSummarizer:
         in_size = int(getattr(parent_block, "getInSize", lambda: 0)() or 0) if parent_block is not None else 0
         for backedge_index in self._accumulator_backedge_indices(accumulator):
             backedge_varnode = accumulator.phi_op.getInput(backedge_index)
+            target_block = None
+            def_op = getattr(backedge_varnode, "getDef", lambda: None)()
+            if def_op is not None and getattr(def_op, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+                def_parent = getattr(def_op, "getParent", lambda: None)()
+                def_in_size = int(getattr(def_parent, "getInSize", lambda: 0)() or 0) if def_parent is not None else 0
+                input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+                for index in range(input_count):
+                    expr = self._build_pcode_expression(def_op.getInput(index), placeholders=placeholders)
+                    if expr is None or self._expression_is_unresolved(expr):
+                        continue
+                    branch_target = None
+                    if def_parent is not None and index < def_in_size:
+                        branch_target = def_parent.getIn(index)
+                    if branch_target is None:
+                        branch_target = def_parent or guard.body_block
+                    for conditions in self._enumerate_paths_with_conditions(
+                        start_block=guard.body_block,
+                        target_block=branch_target,
+                        header_block=header_block,
+                        placeholders=placeholders,
+                        stop_block=guard.exit_block,
+                    ):
+                        raw_cases.append((conditions, expr))
+                continue
             expr = self._build_pcode_expression(backedge_varnode, placeholders=placeholders)
             if expr is None or self._expression_is_unresolved(expr):
                 continue
-            target_block = None
-            def_op = getattr(backedge_varnode, "getDef", lambda: None)()
             if parent_block is not None and backedge_index < in_size:
                 target_block = parent_block.getIn(backedge_index)
             if target_block is None:
@@ -3957,6 +4131,16 @@ class StructuralRecurrenceSummarizer:
             prior_accumulator = model.accumulator
             prior_guard = model.guard
             prior_header = getattr(prior_induction.phi_op, "getParent", lambda: None)()
+            if self.debug:
+                self._debug(
+                    "Considering prior state-transition handoff candidate: "
+                    f"prior_header={self._block_key(prior_header)}, "
+                    f"current_header={current_header_key}, "
+                    f"start={prior_induction.init_expr.to_string()}, "
+                    f"limit={prior_guard.bound_expr.to_string()}, "
+                    f"step={prior_induction.step}, "
+                    f"cases={len(model.transition_cases)}"
+                )
             if prior_header is None or self._block_key(prior_header) == current_header_key:
                 if self.debug:
                     self._debug("Declined prior state-transition handoff: same or missing prior header")

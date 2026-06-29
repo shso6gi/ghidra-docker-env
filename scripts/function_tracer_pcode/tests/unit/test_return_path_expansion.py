@@ -192,9 +192,9 @@ def test_phi_return_fallback_separates_selector_from_reachability_conditions():
     )
 
     assert len(expanded) == 1
-    assert expanded[0].value.equals(phi)
-    assert expanded[0].conditions == [reachability_condition]
-    assert expanded[0].return_kind == "phi_selector_split_fallback"
+    assert expanded[0].value.equals(Expression.constant(1, size=4))
+    assert expanded[0].conditions == [reachability_condition, selector_condition]
+    assert expanded[0].return_kind == "phi_reachability_fallback"
 
 
 def test_phi_return_fallback_adds_union_reachability_candidate_for_path_partition():
@@ -223,17 +223,17 @@ def test_phi_return_fallback_adds_union_reachability_candidate_for_path_partitio
         site_metadata={},
     )
 
-    union_cases = [
-        info
+    assert [
+        info.return_kind
         for info in expanded
-        if info.return_kind == "phi_union_reachability_fallback"
-    ]
-    assert len(union_cases) == 1
-    assert union_cases[0].value.equals(fallback_phi)
-    assert len(union_cases[0].conditions) == 1
+    ] == ["phi_reachability_fallback", "phi_reachability_fallback"]
+    assert expanded[0].value.equals(Expression.constant(1, size=4))
+    assert expanded[0].conditions == [selector_condition]
+    assert expanded[1].value.equals(Expression.constant(2, size=4))
+    assert expanded[1].conditions == [selector_condition.negate()]
 
 
-def test_phi_return_fallback_separates_wrapped_selector_phi_condition():
+def test_phi_return_fallback_rejects_wrapped_selector_phi_condition():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     selector = Expression.parameter("selector", index=0, size=4)
     count = Expression.parameter("count", index=1, size=4)
@@ -277,9 +277,7 @@ def test_phi_return_fallback_separates_wrapped_selector_phi_condition():
         site_metadata={},
     )
 
-    assert len(expanded) == 1
-    assert expanded[0].conditions == [reachability_condition]
-    assert expanded[0].return_kind == "phi_selector_split_fallback"
+    assert expanded == []
 
 
 def test_phi_return_fallback_keeps_same_phi_non_equivalent_condition_as_reachability():

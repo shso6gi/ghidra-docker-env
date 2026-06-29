@@ -22,9 +22,11 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
 )
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
+    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
     CallTargetRef,
     Condition,
+    CountedStateTransitionLoopSummaryRef,
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
@@ -2746,6 +2748,70 @@ def test_state_transition_loop_summary_does_not_rewrite_shifted_negative_candida
         state_guard=signed_guard,
     )
     assert canonical_shifted_subtract.operator == "INT_RIGHT"
+
+
+def test_multiplicative_state_transition_base_recovery_proves_chunked_constant_case():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    n = _param("param_1")
+    start = _const(1)
+    limit = Expression.binary_op("INT_ADD", n, _const(1))
+    condition = _cond("INT_EQUAL", n, _const(4))
+
+    recovered = summarizer._recover_proved_multiplicative_state_transition_base(
+        loop_base_expr=_const(625),
+        continue_conditions=[condition],
+        start_expr=start,
+        limit_expr=limit,
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert recovered is not None
+    assert recovered.opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE
+    assert isinstance(recovered.runtime_ref, CountedStateTransitionLoopSummaryRef)
+    assert recovered.runtime_ref.initial_state.equals(_const(1))
+    assert recovered.runtime_ref.start_expr.equals(start)
+    assert recovered.runtime_ref.limit_expr.equals(limit)
+
+
+def test_multiplicative_state_transition_base_recovery_rejects_near_misses():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    n = _param("param_1")
+    start = _const(1)
+    limit = Expression.binary_op("INT_ADD", n, _const(1))
+
+    assert summarizer._recover_proved_multiplicative_state_transition_base(
+        loop_base_expr=_const(1295),
+        continue_conditions=[_cond("INT_EQUAL", n, _const(4))],
+        start_expr=start,
+        limit_expr=limit,
+        result_size=4,
+        signed_loop=True,
+    ) is None
+    assert summarizer._recover_proved_multiplicative_state_transition_base(
+        loop_base_expr=_const(125),
+        continue_conditions=[_cond("INT_EQUAL", n, _const(4))],
+        start_expr=start,
+        limit_expr=limit,
+        result_size=4,
+        signed_loop=True,
+    ) is None
+    assert summarizer._recover_proved_multiplicative_state_transition_base(
+        loop_base_expr=_const(625),
+        continue_conditions=[_cond("INT_EQUAL", n, _const(3))],
+        start_expr=start,
+        limit_expr=limit,
+        result_size=4,
+        signed_loop=True,
+    ) is None
+    assert summarizer._recover_proved_multiplicative_state_transition_base(
+        loop_base_expr=Expression.unknown("chunked_state"),
+        continue_conditions=[_cond("INT_EQUAL", n, _const(4))],
+        start_expr=start,
+        limit_expr=limit,
+        result_size=4,
+        signed_loop=True,
+    ) is None
 
 
 def test_state_transition_loop_summary_rejects_non_state_transition_condition():

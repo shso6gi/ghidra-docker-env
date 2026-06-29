@@ -4435,21 +4435,29 @@ class UnknownValueRef:
 
     def stable_key(self) -> Tuple[Any, ...]:
         target_key = self.target_ref.stable_key() if self.target_ref is not None else None
+        origin_key = None
+        stable_key = getattr(self.origin_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                candidate_key = stable_key()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                candidate_key = None
+            if candidate_key is not None:
+                origin_key = ("stable", candidate_key)
         return (
             self.kind,
             self.reason,
             target_key,
             self.deferred_call_ref.stable_key() if self.deferred_call_ref is not None else None,
+            self.origin_kind,
+            origin_key,
         )
 
     def diagnostic_key(self) -> Tuple[Any, ...]:
         key = self.stable_key()
         if self.origin_kind is None and self.origin_ref is None:
             return key
-        return key + (
-            self.origin_kind,
-            _runtime_ref_stable_key_or_repr(self.origin_ref),
-        )
+        return key + (("diagnostic_origin", _runtime_ref_stable_key_or_repr(self.origin_ref)),)
 
     def display_name(self) -> str:
         if self.display_hint:

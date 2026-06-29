@@ -105,6 +105,30 @@ def _phi_circular_exit_guard(phi_expr: Expression) -> Condition:
     return Condition(Expression.binary_op("INT_EQUAL", minus_two, _const(0)))
 
 
+def test_phi_circular_unknown_stable_key_includes_origin_ref():
+    left = _phi_circular_unknown(seq_time=144)
+    right = _phi_circular_unknown(seq_time=145)
+
+    assert left.runtime_ref.stable_key() != right.runtime_ref.stable_key()
+
+
+def test_unknown_value_ref_stable_key_does_not_use_origin_repr_fallback():
+    class _RunLocalOrigin:
+        pass
+
+    ref = UnknownValueRef.opaque(
+        reason="phi_circular",
+        origin_kind="synthetic_origin",
+        origin_ref=_RunLocalOrigin(),
+    )
+
+    stable_key = ref.stable_key()
+    diagnostic_key = ref.diagnostic_key()
+    assert stable_key[-1] is None
+    assert "repr" not in repr(stable_key)
+    assert "repr" in repr(diagnostic_key)
+
+
 def _eq_count(value: int) -> Condition:
     return Condition(Expression.binary_op("INT_EQUAL", _count_param(), _const(value)))
 
