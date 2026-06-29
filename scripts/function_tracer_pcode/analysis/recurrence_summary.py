@@ -240,6 +240,9 @@ class StructuralRecurrenceSummarizer:
         if self._has_state_transition_loop_candidate(high_function):
             return True
 
+        if self._has_proved_return_region_state_transition_candidate(analysis):
+            return True
+
         if self._has_branch_accumulator_candidate(analysis):
             return True
 
@@ -263,6 +266,14 @@ class StructuralRecurrenceSummarizer:
             return summary
 
         summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
+        if summary is not None:
+            return summary
+
+        summary = self._try_summarize_proved_return_region_state_transition_composition(
+            function,
+            high_function,
+            analysis,
+        )
         if summary is not None:
             return summary
 
@@ -2879,6 +2890,515 @@ class StructuralRecurrenceSummarizer:
                 f"multiplier={int(candidate_multiplier)}, start=1, size={result_size}"
             )
             return candidate
+        return None
+
+    def _has_proved_return_region_state_transition_candidate(self, analysis) -> bool:
+        parameters = list(getattr(analysis, "parameters", []) or [])
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        if len(parameters) != 1 or len(returns) < 2:
+            return False
+        return any(
+            self._raw_constant_value(getattr(ret, "value", None)) == 1
+            for ret in returns
+        )
+
+    def _try_summarize_proved_return_region_state_transition_composition(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        parameters = list(getattr(analysis, "parameters", []) or [])
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        if len(parameters) != 1 or not returns:
+            return None
+        count_param = parameters[0]
+        count_expr = self._parameter_expression(count_param)
+        result_size = max(
+            1,
+            max(int(getattr(getattr(ret, "value", None), "size", 0) or 0) for ret in returns),
+            int(getattr(count_expr, "size", 0) or 4),
+        )
+        count_expr = self._coerce_summary_expression_to_size(
+            count_expr,
+            max(1, int(getattr(count_expr, "size", 0) or result_size or 4)),
+            signed=True,
+        )
+        positive_conditions = self._build_recursive_conditions(count_expr, 0)
+        if not positive_conditions:
+            return None
+        if any(
+            self._expression_is_unresolved(getattr(condition, "expression", None))
+            for condition in positive_conditions
+        ):
+            return None
+        for multiplier in self._return_region_state_transition_multiplier_candidates(returns):
+            summary_value = self._build_multiplicative_state_then_triangular_sum_value(
+                count_expr=count_expr,
+                multiplier=int(multiplier),
+                result_size=result_size,
+                guard_constraints=positive_conditions,
+            )
+            if summary_value is None:
+                continue
+            proof_ref = self._record_return_region_summary_proof(
+                analysis=analysis,
+                summary_value=summary_value,
+                summary_conditions=positive_conditions,
+                exact_returns=returns,
+                source="return_region_state_transition_composition",
+                allow_summary_region_coverage=True,
+            )
+            if proof_ref is None:
+                continue
+            preserved_returns = [
+                ret for ret in returns
+                if not self._return_overlaps_conditions(ret, positive_conditions)
+            ]
+            anchor = self._first_return_overlapping_conditions(returns, positive_conditions) or returns[0]
+            source_key = self._summary_value_source_key(summary_value)
+            if source_key is None:
+                source_key = (
+                    "return_region_state_transition_composition",
+                    _runtime_expression_signature(summary_value),
+                    int(multiplier),
+                )
+            summary_return = ReturnInfo(
+                address=str(getattr(anchor, "address", None) or getattr(function, "getEntryPoint", lambda: "0x0")()),
+                value=summary_value,
+                conditions=list(positive_conditions),
+                branch_index=30_100,
+                pcode_identity=getattr(anchor, "pcode_identity", None),
+                pcode_order=getattr(anchor, "pcode_order", None),
+                pcode_time=getattr(anchor, "pcode_time", None),
+                pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
+                return_kind="summary_derived",
+                summary_candidate_source_key=source_key,
+                summary_transition_evidence_key=proof_ref,
+            )
+            self._debug(
+                "Recovered return-region state-transition composition summary "
+                f"(multiplier={int(multiplier)})"
+            )
+            return preserved_returns + [summary_return], "return_region_state_transition_composition"
+        self._debug("Declined return-region state-transition composition summary: proof unavailable")
+        return None
+
+    def _return_region_state_transition_multiplier_candidates(
+        self,
+        returns: Sequence[ReturnInfo],
+        *,
+        max_candidates: int = 8,
+    ) -> Tuple[int, ...]:
+        candidates: List[int] = []
+        for ret in returns or ():
+            value = getattr(ret, "value", None)
+            for candidate in self._multiplicative_state_transition_multiplier_candidates(
+                value,
+                max_candidates=max_candidates,
+            ):
+                candidate = int(candidate)
+                if candidate in {0, 1}:
+                    continue
+                if candidate not in candidates:
+                    candidates.append(candidate)
+                if len(candidates) >= int(max_candidates):
+                    return tuple(candidates)
+        return tuple(candidates)
+
+    def _build_multiplicative_state_then_triangular_sum_value(
+        self,
+        *,
+        count_expr: Expression,
+        multiplier: int,
+        result_size: int,
+        guard_constraints: Sequence[Condition],
+    ) -> Optional[Expression]:
+        result_size = max(1, int(result_size or getattr(count_expr, "size", 0) or 4))
+        count_size = max(1, int(getattr(count_expr, "size", 0) or result_size or 4))
+        one = Expression.constant(1, size=count_size)
+        limit = Expression.binary_op("INT_ADD", count_expr, one)
+        limit.size = count_size
+        state_placeholder = Expression.variable("__loop_state", size=result_size)
+        transition = Expression.binary_op(
+            "INT_MULT",
+            state_placeholder,
+            Expression.constant(int(multiplier), size=result_size),
+        )
+        transition.size = result_size
+        state_value = self._build_counted_state_transition_value(
+            initial_state=Expression.constant(1, size=result_size),
+            start_expr=one,
+            limit_expr=limit,
+            induction_step=1,
+            transition_cases=(((), transition),),
+            state_placeholder=state_placeholder,
+            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+            guard_constraints=tuple(guard_constraints or ()),
+            result_size=result_size,
+            signed_loop=True,
+        )
+        if state_value is None:
+            return None
+        return self._build_counted_loop_summary_value(
+            base_expr=state_value,
+            start_expr=one,
+            limit_expr=limit,
+            induction_step=1,
+            residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+            result_size=result_size,
+            signed_loop=True,
+            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+            guard_constraints=tuple(guard_constraints or ()),
+            cases=(),
+        )
+
+    def _record_return_region_summary_proof(
+        self,
+        *,
+        analysis,
+        summary_value: Expression,
+        summary_conditions: Sequence[Condition],
+        exact_returns: Sequence[ReturnInfo],
+        source: str,
+        allow_summary_region_coverage: bool = False,
+    ) -> Optional[Tuple[Any, ...]]:
+        if not self.enable_completed_recovery_proofs:
+            return None
+        witnesses = self._prove_return_region_summary_witnesses(
+            analysis=analysis,
+            summary_value=summary_value,
+            summary_conditions=summary_conditions,
+            exact_returns=exact_returns,
+            allow_summary_region_coverage=allow_summary_region_coverage,
+        )
+        if witnesses is None:
+            return None
+        witness_key, coverage_key, coverage_status = witnesses
+        source_key = self._summary_value_source_key(summary_value)
+        if source_key is None:
+            source_key = ("summary_value", _runtime_expression_signature(summary_value))
+        object_target_key = (
+            "return_region_summary_target",
+            _runtime_expression_signature(summary_value),
+            _runtime_conditions_signature(tuple(summary_conditions or ())),
+            witness_key,
+            coverage_key,
+            source_key,
+        )
+        proof_id = ("proof_obligation_id", "return_region_summary", object_target_key)
+        proof_ref = ("return_region_summary_proof_ref", proof_id, object_target_key)
+        existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        if any(item.get("proof_obligation_id") == proof_id for item in existing if isinstance(item, dict)):
+            return proof_ref
+        evidence = {
+            "proof_obligation_id": proof_id,
+            "reason_id": "return_region_summary",
+            "status": "complete",
+            "proof_stage": "return_region_summary",
+            "evidence_kind": "smt_value_equivalence",
+            "object_target_key": object_target_key,
+            "proof_source": str(source or "return_region_summary"),
+            "proof_content": {
+                "proof_status": "proved",
+                "object_target_key": object_target_key,
+                "summary_value_key": object_target_key[1],
+                "summary_conditions_key": object_target_key[2],
+                "exact_witnesses_key": witness_key,
+                "coverage_key": coverage_key,
+                "source_key": source_key,
+                "checks": (
+                    ("summary_value_equivalence", "proved"),
+                    ("summary_region_coverage", coverage_status),
+                    ("summary_side_effects", "pure"),
+                ),
+            },
+        }
+        analysis.completed_recovery_proof_evidence = existing + (evidence,)
+        return proof_ref
+
+    def _prove_return_region_summary_witnesses(
+        self,
+        *,
+        analysis,
+        summary_value: Expression,
+        summary_conditions: Sequence[Condition],
+        exact_returns: Sequence[ReturnInfo],
+        allow_summary_region_coverage: bool = False,
+    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...], str]]:
+        overlapping: List[ReturnInfo] = []
+        witness_entries: List[Tuple[Any, ...]] = []
+        for ret in exact_returns or ():
+            conditions = list(getattr(ret, "conditions", None) or [])
+            if not self._return_overlaps_conditions(ret, summary_conditions):
+                continue
+            self._debug(
+                "Return-region summary witness candidate: "
+                f"branch={getattr(ret, 'branch_index', None)}, "
+                f"conditions={len(conditions)}, value={self._safe_expr_text(getattr(ret, 'value', None))}"
+            )
+            if any(
+                self._expression_is_unresolved(getattr(condition, "expression", None))
+                for condition in conditions
+            ):
+                self._debug(
+                    "Declined return-region summary proof: overlapping exact return has unresolved condition "
+                    f"(branch={getattr(ret, 'branch_index', None)})"
+                )
+                return None
+            parameters = self._collect_summary_parameter_specs(
+                getattr(ret, "value", None),
+                summary_value,
+                *(condition.expression for condition in conditions + list(summary_conditions or ()) if condition is not None),
+            )
+            if parameters is None:
+                self._debug(
+                    "Declined return-region summary proof: parameter collection failed "
+                    f"(branch={getattr(ret, 'branch_index', None)})"
+                )
+                return None
+            if not self._prove_expression_equivalence_under_conditions(
+                getattr(ret, "value", None),
+                summary_value,
+                conditions + list(summary_conditions or ()),
+                parameters,
+            ):
+                self._debug(
+                    "Declined return-region summary proof: value equivalence failed "
+                    f"(branch={getattr(ret, 'branch_index', None)})"
+                )
+                return None
+            overlapping.append(ret)
+            witness_entries.append(
+                (
+                    "exact_return_value_witness",
+                    _runtime_conditions_signature(tuple(conditions)),
+                    _runtime_expression_signature(getattr(ret, "value", None)),
+                    getattr(ret, "pcode_identity", None),
+                    getattr(ret, "branch_index", None),
+                )
+            )
+        if not overlapping:
+            self._debug("Declined return-region summary proof: no overlapping exact positive returns")
+            return None
+        coverage_key = self._prove_return_conditions_cover_region(
+            region_conditions=summary_conditions,
+            returns=overlapping,
+        )
+        coverage_status = "proved"
+        if coverage_key is None:
+            if allow_summary_region_coverage:
+                coverage_key = self._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+                    active_preconditions=self._analysis_active_preconditions(analysis),
+                    summary_conditions=summary_conditions,
+                    exact_returns=exact_returns,
+                )
+                if coverage_key is not None:
+                    self._debug(
+                        "Proved return-region summary coverage with summary conditions plus disjoint exact returns "
+                        f"(witnesses={len(overlapping)})"
+                    )
+            if coverage_key is None:
+                self._debug(
+                    "Declined return-region summary proof: exact witnesses do not cover summary region "
+                    f"(witnesses={len(overlapping)})"
+                )
+                return None
+        return ("exact_return_witnesses", tuple(witness_entries)), coverage_key, coverage_status
+
+    def _prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        self,
+        *,
+        active_preconditions: Sequence[Condition] = (),
+        summary_conditions: Sequence[Condition],
+        exact_returns: Sequence[ReturnInfo],
+    ) -> Optional[Tuple[Any, ...]]:
+        summary_clause = Condition.combine_and(list(summary_conditions or ()))
+        if summary_clause is None:
+            return None
+        disjuncts: List[Expression] = []
+        summary_expr = summary_clause.expression
+        if bool(getattr(summary_clause, "negated", False)):
+            summary_expr = Expression.unary_op("BOOL_NEGATE", summary_expr)
+            summary_expr.size = 1
+        disjuncts.append(summary_expr)
+        disjoint_returns: List[ReturnInfo] = []
+        positive_param_key = self._positive_summary_parameter_key(summary_conditions)
+        for ret in exact_returns or ():
+            if not (
+                self._return_conditions_are_disjoint_from_conditions(ret, summary_conditions)
+                or (
+                    positive_param_key is not None
+                    and self._return_covers_nonpositive_parameter_region(ret, positive_param_key)
+                )
+            ):
+                continue
+            disjoint_returns.append(ret)
+            combined = Condition.combine_and(list(getattr(ret, "conditions", None) or []))
+            if combined is None:
+                return None
+            expr = combined.expression
+            if bool(getattr(combined, "negated", False)):
+                expr = Expression.unary_op("BOOL_NEGATE", expr)
+                expr.size = 1
+            disjuncts.append(expr)
+        covered_expr = disjuncts[0]
+        for disjunct in disjuncts[1:]:
+            covered_expr = Expression.binary_op("BOOL_OR", covered_expr, disjunct)
+            covered_expr.size = 1
+        miss_condition = Condition(covered_expr, True)
+        try:
+            miss_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(active_preconditions or ()) + [miss_condition]
+            )
+        except Exception:
+            miss_unsat = None
+        if miss_unsat is not True:
+            self._debug(
+                "Declined summary-region coverage proof: summary plus disjoint exact returns is not total "
+                f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat})"
+            )
+            return None
+        return (
+            "return_region_coverage",
+            "summary_conditions_plus_exact_returns",
+            _runtime_conditions_signature(tuple(active_preconditions or ())),
+            _runtime_conditions_signature(tuple(summary_conditions or ())),
+            tuple(
+                _runtime_conditions_signature(tuple(getattr(ret, "conditions", None) or ()))
+                for ret in disjoint_returns
+            ),
+        )
+
+    def _return_conditions_are_disjoint_from_conditions(
+        self,
+        ret: ReturnInfo,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        try:
+            return ConditionSMTOracle.conjunction_is_unsat(
+                list(getattr(ret, "conditions", None) or []) + list(conditions or ())
+            ) is True
+        except Exception:
+            return False
+
+    def _analysis_active_preconditions(self, analysis) -> Tuple[Condition, ...]:
+        preconditions = getattr(analysis, "active_function_preconditions", None)
+        if preconditions is None:
+            preconditions = getattr(analysis, "active_preconditions", None)
+        return tuple(condition for condition in (preconditions or ()) if isinstance(condition, Condition))
+
+    def _positive_summary_parameter_key(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        if len(tuple(conditions or ())) != 1:
+            return None
+        condition = tuple(conditions or ())[0]
+        if bool(getattr(condition, "negated", False)):
+            return None
+        expr = getattr(condition, "expression", None)
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(expr, "operator", None) not in {"INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"}:
+            return None
+        operands = list(getattr(expr, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        left, right = operands
+        if getattr(right, "expr_type", None) != ExpressionType.PARAMETER:
+            return None
+        left_value = self._raw_constant_value(left)
+        if left_value is None:
+            return None
+        operator = getattr(expr, "operator", None)
+        if operator in {"INT_SLESS", "INT_LESS"} and int(left_value) != 0:
+            return None
+        if operator in {"INT_SLESSEQUAL", "INT_LESSEQUAL"} and int(left_value) != 1:
+            return None
+        return _runtime_expression_signature(right)
+
+    def _return_covers_nonpositive_parameter_region(
+        self,
+        ret: ReturnInfo,
+        positive_param_key: Tuple[Any, ...],
+    ) -> bool:
+        for condition in getattr(ret, "conditions", None) or ():
+            if bool(getattr(condition, "negated", False)):
+                continue
+            expr = getattr(condition, "expression", None)
+            if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(expr, "operator", None) not in {"INT_SLESS", "INT_LESS", "INT_SLESSEQUAL", "INT_LESSEQUAL"}:
+                continue
+            operands = list(getattr(expr, "operands", ()) or ())
+            if len(operands) != 2:
+                continue
+            left, right = operands
+            if _runtime_expression_signature(left) != positive_param_key:
+                continue
+            right_value = self._raw_constant_value(right)
+            if right_value is None:
+                continue
+            operator = getattr(expr, "operator", None)
+            if operator in {"INT_SLESS", "INT_LESS"} and int(right_value) == 1:
+                return True
+            if operator in {"INT_SLESSEQUAL", "INT_LESSEQUAL"} and int(right_value) == 0:
+                return True
+        return False
+
+    def _prove_return_conditions_cover_region(
+        self,
+        *,
+        region_conditions: Sequence[Condition],
+        returns: Sequence[ReturnInfo],
+    ) -> Optional[Tuple[Any, ...]]:
+        region_clause = Condition.combine_and(list(region_conditions or ()))
+        if region_clause is None:
+            return None
+        disjuncts: List[Expression] = []
+        for ret in returns or ():
+            combined = Condition.combine_and(list(getattr(ret, "conditions", None) or []))
+            if combined is None:
+                return None
+            expr = combined.expression
+            if bool(getattr(combined, "negated", False)):
+                expr = Expression.unary_op("BOOL_NEGATE", expr)
+                expr.size = 1
+            disjuncts.append(expr)
+        if not disjuncts:
+            return None
+        covered_expr = disjuncts[0]
+        for disjunct in disjuncts[1:]:
+            covered_expr = Expression.binary_op("BOOL_OR", covered_expr, disjunct)
+            covered_expr.size = 1
+        miss_condition = Condition(covered_expr, True)
+        try:
+            miss_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(region_conditions or ()) + [miss_condition]
+            )
+        except Exception:
+            miss_unsat = None
+        if miss_unsat is not True:
+            return None
+        return (
+            "return_region_coverage",
+            _runtime_conditions_signature(tuple(region_conditions or ())),
+            tuple(
+                _runtime_conditions_signature(tuple(getattr(ret, "conditions", None) or ()))
+                for ret in returns or ()
+            ),
+        )
+
+    def _first_return_overlapping_conditions(
+        self,
+        returns: Sequence[ReturnInfo],
+        conditions: Sequence[Condition],
+    ) -> Optional[ReturnInfo]:
+        for ret in returns or ():
+            if self._return_overlaps_conditions(ret, conditions):
+                return ret
         return None
 
     def _multiplicative_state_transition_multiplier_candidates(

@@ -156,6 +156,48 @@ def _with_summary_proof(ret: ReturnInfo) -> ReturnInfo:
     return ret
 
 
+def _with_return_region_summary_proof(
+    ret: ReturnInfo,
+    *,
+    coverage_status: str = "proved",
+    exact_witnesses_key=("exact_return_witnesses", ()),
+):
+    object_target_key = (
+        "return_region_summary_target",
+        ("summary_value", "unit_test"),
+        ("summary_conditions", "unit_test"),
+        exact_witnesses_key,
+        ("coverage", "unit_test", coverage_status),
+        ("source", "unit_test"),
+    )
+    proof_id = ("proof_obligation_id", "return_region_summary", object_target_key)
+    proof_ref = ("return_region_summary_proof_ref", proof_id, object_target_key)
+    evidence = {
+        "proof_obligation_id": proof_id,
+        "status": "complete",
+        "proof_stage": "return_region_summary",
+        "evidence_kind": "smt_value_equivalence",
+        "object_target_key": object_target_key,
+        "proof_content": {
+            "proof_status": "proved",
+            "object_target_key": object_target_key,
+            "summary_value_key": object_target_key[1],
+            "summary_conditions_key": object_target_key[2],
+            "exact_witnesses_key": exact_witnesses_key,
+            "coverage_key": object_target_key[4],
+            "source_key": object_target_key[5],
+            "checks": (
+                ("summary_value_equivalence", "proved"),
+                ("summary_region_coverage", coverage_status),
+                ("summary_side_effects", "pure"),
+            ),
+        },
+    }
+    ret.summary_candidate_source_key = _SUMMARY_SOURCE_KEY
+    ret.summary_transition_evidence_key = proof_ref
+    return ret, evidence
+
+
 def _param(name: str = "n", index: int = 0, size: int = 4):
     return {
         "name": name,
@@ -312,6 +354,55 @@ def test_summary_candidate_overlap_requires_value_equality_proof():
     assert result.accepted_returns == ()
     assert "summary_return_overlap_unproven:value_equality_not_proved" in result.blockers
     assert len(analysis.returns) == 2
+
+
+def test_return_region_production_object_proved_is_not_completed_coverage_proof():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    summary_return, evidence = _with_return_region_summary_proof(
+        ReturnInfo(
+            address="0x1008",
+            value=_summary_const(2),
+            conditions=[_cond("INT_SLESS", _const(1), n)],
+            pcode_identity="summary:n_gt_one",
+        ),
+        coverage_status="production_object_proved",
+    )
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_candidate_invalid:transition_evidence_incomplete" in result.blockers
+
+
+def test_return_region_proof_does_not_skip_overlap_value_for_non_witness_exact_return():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    overlapping_summary, evidence = _with_return_region_summary_proof(
+        ReturnInfo(
+            address="0x1008",
+            value=_summary_const(2),
+            conditions=[_cond("INT_SLESS", _const(0), n)],
+            pcode_identity="summary:n_positive",
+        ),
+        coverage_status="proved",
+        exact_witnesses_key=("exact_return_witnesses", ()),
+    )
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, overlapping_summary],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_return_overlap_unproven:value_equality_not_proved" in result.blockers
 
 
 def test_summary_candidate_non_total_partition_keeps_coverage_gap():

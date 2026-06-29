@@ -83,6 +83,58 @@ def test_condition_implication_keeps_named_parameters_with_placeholder_indices_d
     )] == ["(param_2 < param_3)", "((param_2 & 1) == 0)"]
 
 
+def test_return_region_summary_coverage_proves_positive_and_nonpositive_partition():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    n = _param()
+    exact_nonpositive = ReturnInfo(
+        address="0x1000",
+        value=_const(1),
+        conditions=[_cond("INT_SLESS", n, _const(1))],
+    )
+
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=[_cond("INT_SLESSEQUAL", _const(1), n)],
+        exact_returns=[exact_nonpositive],
+    )
+
+    assert coverage_key is not None
+
+
+def test_return_region_summary_coverage_rejects_positive_guard_with_one_gap():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    n = _param()
+    exact_nonpositive = ReturnInfo(
+        address="0x1000",
+        value=_const(1),
+        conditions=[_cond("INT_SLESS", n, _const(1))],
+    )
+
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=[_cond("INT_SLESS", _const(1), n)],
+        exact_returns=[exact_nonpositive],
+    )
+
+    assert coverage_key is None
+
+
+def test_return_region_summary_coverage_uses_active_preconditions():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    n = _param()
+    exact_nonpositive = ReturnInfo(
+        address="0x1000",
+        value=_const(1),
+        conditions=[_cond("INT_SLESS", n, _const(1))],
+    )
+
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        active_preconditions=[_cond("INT_NOTEQUAL", n, _const(1))],
+        summary_conditions=[_cond("INT_SLESS", _const(1), n)],
+        exact_returns=[exact_nonpositive],
+    )
+
+    assert coverage_key is not None
+
+
 def _readonly_accumulator_proof(
     *,
     base_ref: LocationBaseRef,

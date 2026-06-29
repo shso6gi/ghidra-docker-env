@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from ..model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo, SummaryReturnCandidate
 from ..model import ExpressionType
 from ..model.structural import key_contains_placeholder
+from .condition.normalizer import ConditionNormalizer
 from .condition.simplifier import ConditionSimplifier
 from .condition.smt_oracle import ConditionSMTOracle
 
@@ -102,6 +103,7 @@ def accept_summary_return_candidates(
         analysis,
         valid_candidates.values(),
         exact_returns,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     )
     blockers.extend(overlap_blockers)
 
@@ -220,6 +222,12 @@ def _validate_candidate(
         blockers.append("summary_return_candidate_invalid:unstable_loop_summary_identity")
     if not candidate.transition_evidence_key:
         blockers.append("summary_return_candidate_invalid:transition_evidence_missing")
+    elif _return_region_summary_proof_ref_is_strong(
+        candidate.transition_evidence_key,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    ):
+        pass
     elif _key_contains_forbidden_identity(candidate.transition_evidence_key):
         blockers.append("summary_return_candidate_invalid:unstable_transition_evidence")
     elif _key_contains_incomplete_summary_metadata(candidate.transition_evidence_key):
@@ -230,7 +238,14 @@ def _validate_candidate(
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     ):
         blockers.append("summary_return_candidate_invalid:transition_evidence_incomplete")
-    if _key_contains_incomplete_summary_metadata(candidate.loop_summary_structural_key):
+    if (
+        not _return_region_summary_proof_ref_is_strong(
+            candidate.transition_evidence_key,
+            analysis,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        )
+        and _key_contains_incomplete_summary_metadata(candidate.loop_summary_structural_key)
+    ):
         blockers.append("summary_effect_unmodeled:side_effect_provenance_incomplete")
     if _key_contains_incomplete_summary_metadata(candidate.effect_region_key):
         blockers.append("summary_effect_unmodeled:effect_region_incomplete")
@@ -250,6 +265,8 @@ def _check_candidate_overlaps(
     analysis: FunctionReturnAnalysis,
     candidates: Iterable[SummaryReturnCandidate],
     exact_returns: Sequence[ReturnInfo],
+    *,
+    enable_completed_recovery_proofs: bool,
 ) -> Tuple[str, ...]:
     blockers: List[str] = []
     active_preconditions = _active_preconditions(analysis)
@@ -262,6 +279,8 @@ def _check_candidate_overlaps(
                     candidate_return,
                     exact_return,
                     active_preconditions,
+                    analysis=analysis,
+                    enable_completed_recovery_proofs=enable_completed_recovery_proofs,
                 )
             )
     for left_index, left_candidate in enumerate(candidate_list):
@@ -271,6 +290,8 @@ def _check_candidate_overlaps(
                     left_candidate.return_info,
                     right_candidate.return_info,
                     active_preconditions,
+                    analysis=analysis,
+                    enable_completed_recovery_proofs=enable_completed_recovery_proofs,
                 )
             )
     return tuple(dict.fromkeys(blockers))
@@ -280,7 +301,17 @@ def _check_return_overlap_value_equality(
     left: ReturnInfo,
     right: ReturnInfo,
     active_preconditions: Sequence[Condition],
+    *,
+    analysis: FunctionReturnAnalysis,
+    enable_completed_recovery_proofs: bool,
 ) -> Tuple[str, ...]:
+    if _return_region_summary_overlap_is_proved_by_completed_evidence(
+        left,
+        right,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    ):
+        return ()
     overlap_conditions = (
         list(left.conditions or [])
         + list(right.conditions or [])
@@ -302,6 +333,79 @@ def _check_return_overlap_value_equality(
     if equality_unsat is not True:
         return ("summary_return_overlap_unproven:value_equality_not_proved",)
     return ()
+
+
+def _return_region_summary_overlap_is_proved_by_completed_evidence(
+    left: ReturnInfo,
+    right: ReturnInfo,
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
+    for summary_ret, exact_ret in ((left, right), (right, left)):
+        if str(getattr(summary_ret, "return_kind", "exact") or "exact") != "summary_derived":
+            continue
+        proof_ref = getattr(summary_ret, "summary_transition_evidence_key", None)
+        if not _return_region_summary_proof_ref_is_strong(
+            proof_ref,
+            analysis,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        ):
+            continue
+        if _return_region_summary_proof_witnesses_include_return(
+            proof_ref,
+            exact_ret,
+            analysis,
+        ):
+            return True
+    return False
+
+
+def _return_region_summary_proof_witnesses_include_return(
+    proof_ref: Any,
+    exact_ret: ReturnInfo,
+    analysis: FunctionReturnAnalysis,
+) -> bool:
+    if not isinstance(proof_ref, tuple) or len(proof_ref) != 3:
+        return False
+    proof_id = proof_ref[1]
+    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+        if not isinstance(evidence, Mapping):
+            continue
+        if evidence.get("proof_obligation_id") != proof_id:
+            continue
+        proof_content = evidence.get("proof_content") or {}
+        if not isinstance(proof_content, Mapping):
+            return False
+        witnesses_key = proof_content.get("exact_witnesses_key")
+        return _exact_witnesses_key_contains_return(witnesses_key, exact_ret)
+    return False
+
+
+def _exact_witnesses_key_contains_return(
+    witnesses_key: Any,
+    exact_ret: ReturnInfo,
+) -> bool:
+    if not isinstance(witnesses_key, tuple) or len(witnesses_key) != 2:
+        return False
+    if witnesses_key[0] != "exact_return_witnesses":
+        return False
+    target = (
+        ConditionNormalizer.conditions_signature(tuple(getattr(exact_ret, "conditions", None) or ())),
+        ConditionNormalizer.expression_signature(getattr(exact_ret, "value", None)),
+        getattr(exact_ret, "pcode_identity", None),
+        getattr(exact_ret, "branch_index", None),
+    )
+    for entry in witnesses_key[1] or ():
+        if not isinstance(entry, tuple) or len(entry) != 5:
+            continue
+        if entry[0] != "exact_return_value_witness":
+            continue
+        if entry[4] == getattr(exact_ret, "branch_index", None):
+            return True
+        if tuple(entry[1:]) == target:
+            return True
+    return False
 
 
 def _return_partition_covers_active_precondition(
@@ -505,6 +609,12 @@ def _transition_evidence_has_required_parts(
     *,
     enable_completed_recovery_proofs: bool,
 ) -> bool:
+    if _return_region_summary_proof_ref_is_strong(
+        value,
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    ):
+        return True
     evidence = _unwrap_counted_loop_transition_evidence(value)
     if evidence is None:
         return False
@@ -630,6 +740,120 @@ def _accumulator_base_dependency_is_proved(
         analysis,
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     )
+
+
+def _return_region_summary_proof_ref_is_strong(
+    value: Any,
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> bool:
+    if not enable_completed_recovery_proofs:
+        return False
+    if not isinstance(value, tuple) or len(value) != 3:
+        return False
+    if value[0] != "return_region_summary_proof_ref":
+        return False
+    proof_obligation_id = value[1]
+    object_target_key = value[2]
+    if not _return_region_summary_target_key_is_strong(object_target_key):
+        return False
+    if not _return_region_summary_proof_id_matches_target(proof_obligation_id, object_target_key):
+        return False
+    return proof_obligation_id in _completed_return_region_summary_proof_ids(analysis)
+
+
+def _return_region_summary_target_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 6:
+        return False
+    if value[0] != "return_region_summary_target":
+        return False
+    if _key_contains_forbidden_identity(value):
+        return False
+    return True
+
+
+def _completed_return_region_summary_proof_ids(
+    analysis: FunctionReturnAnalysis,
+) -> Tuple[Tuple[Any, ...], ...]:
+    completed: List[Tuple[Any, ...]] = []
+    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+        proof_id = _return_region_summary_proof_id_from_evidence(evidence)
+        if proof_id is not None:
+            completed.append(proof_id)
+    return tuple(completed)
+
+
+def _return_region_summary_proof_id_from_evidence(evidence: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(evidence, Mapping):
+        return None
+    if str(evidence.get("status") or "") != "complete":
+        return None
+    if str(evidence.get("proof_stage") or "") != "return_region_summary":
+        return None
+    if str(evidence.get("evidence_kind") or "") != "smt_value_equivalence":
+        return None
+    object_target_key = evidence.get("object_target_key")
+    proof_id = evidence.get("proof_obligation_id")
+    if not _return_region_summary_target_key_is_strong(object_target_key):
+        return None
+    if not _return_region_summary_proof_id_matches_target(proof_id, object_target_key):
+        return None
+    proof_content = evidence.get("proof_content")
+    if not _return_region_summary_proof_content_matches_target(proof_content, object_target_key):
+        return None
+    return proof_id
+
+
+def _return_region_summary_proof_id_matches_target(
+    proof_id: Any,
+    object_target_key: Any,
+) -> bool:
+    return (
+        isinstance(proof_id, tuple)
+        and len(proof_id) == 3
+        and proof_id[0] == "proof_obligation_id"
+        and proof_id[1] == "return_region_summary"
+        and proof_id[2] == object_target_key
+    )
+
+
+def _return_region_summary_proof_content_matches_target(
+    proof_content: Any,
+    object_target_key: Any,
+) -> bool:
+    if not isinstance(proof_content, Mapping):
+        return False
+    if proof_content.get("object_target_key") != object_target_key:
+        return False
+    if str(proof_content.get("proof_status") or "") != "proved":
+        return False
+    (
+        _tag,
+        summary_value_key,
+        summary_conditions_key,
+        exact_witnesses_key,
+        coverage_key,
+        source_key,
+    ) = object_target_key
+    expected = {
+        "summary_value_key": summary_value_key,
+        "summary_conditions_key": summary_conditions_key,
+        "exact_witnesses_key": exact_witnesses_key,
+        "coverage_key": coverage_key,
+        "source_key": source_key,
+    }
+    for key, expected_value in expected.items():
+        if proof_content.get(key) != expected_value:
+            return False
+    checks = tuple(proof_content.get("checks") or ())
+    required = {
+        ("summary_value_equivalence", "proved"),
+        ("summary_side_effects", "pure"),
+    }
+    if not required.issubset(set(checks)):
+        return False
+    return ("summary_region_coverage", "proved") in set(checks)
 
 
 def _tag_has_scoped_pcode_block_payload(value: Any) -> bool:

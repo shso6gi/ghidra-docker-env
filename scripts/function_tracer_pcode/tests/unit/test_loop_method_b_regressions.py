@@ -874,6 +874,131 @@ def _counted_loop(summary: LoopSummaryRef) -> Expression:
     )
 
 
+class _OuterSummarySurface:
+    def __init__(self, side_effect_profile: LoopSideEffectProfileRef):
+        self.side_effect_profile = side_effect_profile
+
+
+_DEFAULT_OUTER_SIDE_EFFECT_PROFILE = object()
+
+
+def _composed_counted_state_transition_sum(
+    *,
+    multiplier: int = 5,
+    residue_cases=((1, 0, 1, 0),),
+    outer_side_effect_profile=_DEFAULT_OUTER_SIDE_EFFECT_PROFILE,
+    guard_constraints: tuple[Condition, ...] | None = None,
+) -> Expression:
+    count = _count_param()
+    zero = _const(0)
+    one = _const(1)
+    state = Expression.variable("__state", size=4)
+    transition = Expression.binary_op(
+        "INT_MULT",
+        state,
+        Expression.constant(int(multiplier), size=4),
+    )
+    transition.size = 4
+    state_ref = CountedStateTransitionLoopSummaryRef(
+        initial_state=one,
+        start_expr=zero,
+        limit_expr=count,
+        step_expr=one,
+        transition_expr=transition,
+        state_placeholder=state,
+        transition_cases=(((), ConditionNormalizer.expression_signature(transition)),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+        guard_constraints=tuple(guard_constraints if guard_constraints is not None else (_count_gt(0),)),
+        state_size=4,
+        result_size=4,
+        signed_loop=True,
+    )
+    state_value = Expression.intrinsic(
+        "COUNTED_STATE_TRANSITION_VALUE",
+        [one, zero, count],
+        size=4,
+        runtime_ref=state_ref,
+        opcode=COUNTED_STATE_TRANSITION_VALUE_OPCODE,
+    )
+    loop_summary = None
+    if outer_side_effect_profile is _DEFAULT_OUTER_SIDE_EFFECT_PROFILE:
+        outer_side_effect_profile = LoopSideEffectProfileRef(profile="pure")
+    if outer_side_effect_profile is not None:
+        loop_summary = _OuterSummarySurface(outer_side_effect_profile)
+    return Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [state_value, zero, count],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=tuple(residue_cases),
+            loop_summary=loop_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+
+def test_composed_counted_state_transition_shortcut_accepts_matching_semantics():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(multiplier=5),
+        _composed_counted_state_transition_sum(multiplier=5),
+    ) is True
+
+
+def test_composed_counted_state_transition_shortcut_rejects_multiplier_mismatch():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(multiplier=5),
+        _composed_counted_state_transition_sum(multiplier=6),
+    ) is False
+
+
+def test_composed_counted_state_transition_shortcut_rejects_outer_residue_mismatch():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(residue_cases=((1, 0, 1, 0),)),
+        _composed_counted_state_transition_sum(residue_cases=((2, 0, 1, 0),)),
+    ) is False
+
+
+def test_composed_counted_state_transition_shortcut_rejects_outer_side_effects():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(),
+        _composed_counted_state_transition_sum(
+            outer_side_effect_profile=LoopSideEffectProfileRef(
+                profile="impure",
+                memory_writes=True,
+            )
+        ),
+    ) is False
+
+
+def test_composed_counted_state_transition_shortcut_rejects_unrecorded_outer_profile():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(),
+        _composed_counted_state_transition_sum(outer_side_effect_profile=None),
+    ) is False
+
+
+def test_composed_counted_state_transition_shortcut_rejects_guard_mismatch():
+    strategy = _pairwise_strategy()
+
+    assert strategy._composed_counted_state_transition_summaries_match(
+        _composed_counted_state_transition_sum(guard_constraints=(_count_gt(0),)),
+        _composed_counted_state_transition_sum(guard_constraints=(_count_gt(1),)),
+    ) is False
+
+
 def _triangular_closed_form(*, inclusive: bool = False) -> Expression:
     n64 = Expression.unary_op("INT_ZEXT", _count_param())
     n64.size = 8

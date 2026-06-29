@@ -538,6 +538,25 @@ class PairwiseStrategy(CheckStrategy):
                                 f"-> UNSAT ({unsat_count}/{total_pairs})"
                             )
                             continue
+                    if self._case_pair_counted_loop_summaries_match_by_closed_values(
+                        case1,
+                        case2,
+                        base_ctx=base_ctx,
+                    ) or self._counted_loop_values_are_provably_equivalent(
+                        case1.value_expr,
+                        case2.value_expr,
+                        left_case=case1,
+                        right_case=case2,
+                        semantic_parameter_sources=semantic_parameter_sources,
+                    ):
+                        unsat_count += 1
+                        resolved_pairs.add((i, j))
+                        if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
+                            self._debug_print(
+                                f"  Pair {pair_id}: counted loop summaries closed by SMT value proof "
+                                f"-> UNSAT ({unsat_count}/{total_pairs})"
+                            )
+                        continue
                     unknown_count += 1
                     unknown_reasons.append(reason_record)
                     self._debug_print(
@@ -2162,7 +2181,10 @@ class PairwiseStrategy(CheckStrategy):
                 "readonly_contract_type_mismatch",
                 "readonly_contract_result_width_mismatch",
                 "readonly_contract_mismatch",
-            }:
+            } and (
+                isinstance(left_ref, ReadonlyReductionRef)
+                or isinstance(right_ref, ReadonlyReductionRef)
+            ):
                 return readonly_decision
             loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
             decisive = loop_result.is_equivalent()
@@ -5327,6 +5349,297 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print(f"counted-vs-closed proof SMT result: {proved}")
         return proved
 
+    def _case_pair_counted_loop_summaries_match_by_closed_values(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        *,
+        base_ctx: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        left = getattr(left_case, "value_expr", None)
+        right = getattr(right_case, "value_expr", None)
+        if not self._is_provable_counted_loop_summary_value(left, left_case):
+            return False
+        if not self._is_provable_counted_loop_summary_value(right, right_case):
+            return False
+        comparison_result_size = self._case_pair_comparison_result_size(left_case, right_case)
+        if comparison_result_size is None:
+            return False
+
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        any_runtime_guard = False
+        for case in (left_case, right_case):
+            guards, guards_complete = self._runtime_summary_guard_conditions_from_expression(case.value_expr)
+            if not guards_complete:
+                return False
+            if guards:
+                any_runtime_guard = True
+            for guard in guards:
+                if guard not in conditions:
+                    conditions.append(guard)
+        if not any_runtime_guard:
+            if self.debug:
+                self._debug_print("counted-vs-counted value proof skipped: no runtime summary guards")
+            return False
+        parameters = self._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            left,
+            right,
+            *(condition.expression for condition in conditions or [] if condition is not None),
+            semantic_parameter_sources=self._auxiliary_semantic_parameter_sources(base_ctx),
+        )
+        if parameters is None:
+            if self.debug:
+                self._debug_print("counted-vs-counted value proof skipped: missing parameter specs")
+            return False
+        if self._condition_set_is_unsat(conditions, parameters):
+            return True
+        if self._composed_counted_state_transition_summaries_match(left, right):
+            if self.debug:
+                self._debug_print("counted-vs-counted proof discharged by composed state-transition semantic key")
+            return True
+
+        left_candidates = self._counted_loop_closed_expression_candidates(
+            left,
+            counted_case=left_case,
+            result_size=comparison_result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        right_candidates = self._counted_loop_closed_expression_candidates(
+            right,
+            counted_case=right_case,
+            result_size=comparison_result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        if not left_candidates or not right_candidates:
+            if self.debug:
+                self._debug_print(
+                    "counted-vs-counted value proof skipped: no closed candidates "
+                    f"(left={len(left_candidates)}, right={len(right_candidates)})"
+                )
+            direct_proved = self._prove_intrinsic_equivalence_under_conditions(
+                left,
+                right,
+                conditions,
+                parameters,
+                timeout=10,
+            )
+            if self.debug:
+                self._debug_print(f"counted-vs-counted direct SMT proof result: {direct_proved}")
+            return direct_proved
+        for left_candidate in left_candidates:
+            for right_candidate in right_candidates:
+                if self._prove_intrinsic_equivalence_under_conditions(
+                    left_candidate,
+                    right_candidate,
+                    conditions,
+                    parameters,
+                ):
+                    if self.debug:
+                        self._debug_print("counted-vs-counted proof discharged by SMT candidate pair")
+                    return True
+        if self._prove_intrinsic_equivalence_under_conditions(
+            left,
+            right,
+            conditions,
+            parameters,
+            timeout=10,
+        ):
+            if self.debug:
+                self._debug_print("counted-vs-counted proof discharged by direct SMT summary equality")
+            return True
+        if self.debug:
+            self._debug_print("counted-vs-counted proof failed for all candidate pairs")
+            self._debug_print(
+                "counted-vs-counted failed context: "
+                f"left_case={getattr(left_case, 'index', None)}:"
+                f"{getattr(left_case, 'branch_index', None)} "
+                f"right_case={getattr(right_case, 'index', None)}:"
+                f"{getattr(right_case, 'branch_index', None)} "
+                f"conditions={ConditionNormalizer.conditions_signature(tuple(conditions))}"
+            )
+        return False
+
+    def _composed_counted_state_transition_summaries_match(
+        self,
+        left: Expression,
+        right: Expression,
+    ) -> bool:
+        left_key = self._composed_counted_state_transition_summary_key(left)
+        right_key = self._composed_counted_state_transition_summary_key(right)
+        return left_key is not None and left_key == right_key
+
+    def _composed_counted_state_transition_summary_key(
+        self,
+        expr: Expression,
+    ) -> Optional[Tuple[Any, ...]]:
+        if getattr(expr, "opcode", None) != COUNTED_LOOP_SUM_OPCODE:
+            return None
+        operands = list(getattr(expr, "operands", ()) or ())
+        if len(operands) != 3:
+            return None
+        base, start, limit = operands
+        if getattr(base, "opcode", None) != COUNTED_STATE_TRANSITION_VALUE_OPCODE:
+            return None
+        counted_ref = getattr(expr, "runtime_ref", None)
+        state_ref = getattr(base, "runtime_ref", None)
+        if not isinstance(counted_ref, CountedLoopSummaryRef):
+            return None
+        if not isinstance(state_ref, CountedStateTransitionLoopSummaryRef):
+            return None
+        outer_side_effect_key = self._counted_loop_outer_side_effect_key(counted_ref)
+        if outer_side_effect_key is None:
+            return None
+        if not self._counted_state_transition_value_operands_match_ref(
+            getattr(base, "operands", None) or (),
+            state_ref,
+        ):
+            return None
+        if not self._counted_state_transition_cases_allow_bounded_unroll(state_ref):
+            return None
+        state_key = self._counted_state_transition_semantic_core_key(state_ref)
+        if state_key is None:
+            return None
+        residue_cases = tuple(
+            (
+                int(modulus),
+                int(residue),
+                int(coeff),
+                int(bias),
+            )
+            for modulus, residue, coeff, bias in tuple(getattr(counted_ref, "residue_cases", ()) or ())
+        )
+        residue_bias_terms = tuple(getattr(counted_ref, "residue_bias_terms", ()) or ())
+        if residue_bias_terms:
+            return None
+        start_key = self._canonical_counted_state_transition_outer_start_key(start, residue_cases)
+        if start_key is None:
+            return None
+        try:
+            limit_key = ConditionNormalizer.expression_signature(limit)
+        except Exception:
+            return None
+        return (
+            "composed_counted_state_transition_sum",
+            state_key,
+            int(getattr(counted_ref, "induction_step", 0) or 0),
+            max(1, int(getattr(counted_ref, "result_size", 0) or 0)),
+            bool(getattr(counted_ref, "signed_loop", False)),
+            outer_side_effect_key,
+            residue_cases,
+            start_key,
+            limit_key,
+        )
+
+    def _counted_loop_outer_side_effect_key(
+        self,
+        counted_ref: CountedLoopSummaryRef,
+    ) -> Optional[Tuple[Any, ...]]:
+        loop_summary = getattr(counted_ref, "loop_summary", None)
+        if loop_summary is None:
+            return None
+        profile = getattr(loop_summary, "side_effect_profile", None)
+        if profile is None:
+            return None
+        if getattr(profile, "requires_effect_proof", lambda: True)():
+            return None
+        try:
+            profile_key = profile.stable_key()
+        except Exception:
+            return None
+        if profile_key is None:
+            return None
+        return ("outer_loop_side_effect_profile", profile_key)
+
+    def _counted_state_transition_semantic_core_key(
+        self,
+        state_ref: CountedStateTransitionLoopSummaryRef,
+    ) -> Optional[Tuple[Any, ...]]:
+        profile = getattr(state_ref, "side_effect_profile", None)
+        if profile is None:
+            return None
+        effectful_flags = (
+            "memory_reads",
+            "memory_writes",
+            "calls",
+            "escapes",
+            "context_memory_writes",
+            "context_calls",
+            "context_escapes",
+        )
+        if any(bool(getattr(profile, flag, False)) for flag in effectful_flags):
+            return None
+        placeholder = getattr(state_ref, "state_placeholder", None)
+        transition_expr = getattr(state_ref, "transition_expr", None)
+        if not isinstance(placeholder, Expression) or not isinstance(transition_expr, Expression):
+            return None
+        canonical_state = Expression.variable(
+            "__state",
+            size=max(1, int(getattr(placeholder, "size", 0) or getattr(state_ref, "state_size", 0) or 4)),
+        )
+        normalized_transition = self._replace_expression_node(
+            transition_expr,
+            placeholder,
+            canonical_state,
+        )
+        try:
+            transition_key = ConditionNormalizer.expression_signature(normalized_transition)
+            init_key = ConditionNormalizer.expression_signature(getattr(state_ref, "initial_state", None))
+            start_key = ConditionNormalizer.expression_signature(getattr(state_ref, "start_expr", None))
+            limit_key = ConditionNormalizer.expression_signature(getattr(state_ref, "limit_expr", None))
+            step_key = ConditionNormalizer.expression_signature(getattr(state_ref, "step_expr", None))
+            guard_keys = tuple(
+                ConditionNormalizer.conditions_signature((guard,))
+                for guard in tuple(getattr(state_ref, "guard_constraints", ()) or ())
+            )
+        except Exception:
+            return None
+        return (
+            "counted_state_transition_core",
+            init_key,
+            start_key,
+            limit_key,
+            step_key,
+            transition_key,
+            max(1, int(getattr(state_ref, "state_size", 0) or 0)),
+            max(1, int(getattr(state_ref, "result_size", 0) or 0)),
+            bool(getattr(state_ref, "signed_loop", False)),
+            guard_keys,
+        )
+
+    def _canonical_counted_state_transition_outer_start_key(
+        self,
+        start: Expression,
+        residue_cases: Tuple[Tuple[int, int, int, int], ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        start_value = self._raw_constant_value(start)
+        if start_value is None:
+            try:
+                return ConditionNormalizer.expression_signature(start)
+            except Exception:
+                return None
+        if int(start_value) == 0:
+            return ("const", 0)
+        if int(start_value) == 1 and self._counted_residue_term_at_zero_is_zero(residue_cases):
+            return ("const", 0)
+        return ("const", int(start_value))
+
+    @staticmethod
+    def _counted_residue_term_at_zero_is_zero(
+        residue_cases: Tuple[Tuple[int, int, int, int], ...],
+    ) -> bool:
+        if not residue_cases:
+            return False
+        for modulus, residue, _coeff, bias in residue_cases:
+            if int(modulus) <= 0:
+                return False
+            if 0 % int(modulus) == int(residue) and int(bias) != 0:
+                return False
+        return True
+
     def _case_pair_has_one_sided_counted_loop_summary(
         self,
         left: Expression,
@@ -5400,6 +5713,34 @@ class PairwiseStrategy(CheckStrategy):
         conditions: Sequence[Condition],
         parameters: Sequence[Dict[str, Any]],
     ) -> bool:
+        candidates = self._counted_loop_closed_expression_candidates(
+            counted,
+            counted_case=counted_case,
+            result_size=result_size,
+            conditions=conditions,
+            parameters=parameters,
+        )
+        if not candidates:
+            return False
+        for candidate in candidates:
+            if self._prove_intrinsic_equivalence_under_conditions(
+                candidate,
+                closed,
+                conditions,
+                parameters,
+            ):
+                return True
+        return False
+
+    def _counted_loop_closed_expression_candidates(
+        self,
+        counted: Expression,
+        *,
+        counted_case: ReturnCase,
+        result_size: int,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Tuple[Expression, ...]:
         counted_closed = self._counted_loop_positive_closed_expression(
             counted,
             counted_case=counted_case,
@@ -5432,17 +5773,7 @@ class PairwiseStrategy(CheckStrategy):
             for candidate in (counted_closed, shifted_closed, affine_closed, bounded_state_closed)
             if candidate is not None
         ]
-        if not candidates:
-            return False
-        for candidate in candidates:
-            if self._prove_intrinsic_equivalence_under_conditions(
-                candidate,
-                closed,
-                conditions,
-                parameters,
-            ):
-                return True
-        return False
+        return tuple(candidates)
 
     def _counted_loop_bounded_state_transition_base_candidate(
         self,
@@ -6655,11 +6986,13 @@ class PairwiseStrategy(CheckStrategy):
         right: Expression,
         conditions: Sequence[Condition],
         parameters: Sequence[Dict[str, Any]],
+        *,
+        timeout: int = 2,
     ) -> bool:
         query = self._build_intrinsic_equivalence_query(left, right, conditions, parameters)
         if not query:
             return False
-        result = Z3Solver(timeout=2, debug=self.debug).check_equivalence_direct(query)
+        result = Z3Solver(timeout=max(1, int(timeout)), debug=self.debug).check_equivalence_direct(query)
         return result.status == SolverStatus.UNSAT
 
     def _build_intrinsic_equivalence_query(
@@ -7326,14 +7659,171 @@ class PairwiseStrategy(CheckStrategy):
         conditions: Sequence[Condition],
         parameters: Sequence[Dict[str, Any]],
     ) -> bool:
+        if self._conditions_have_parameter_mask_constant_conflict(list(conditions or ())):
+            return True
         identity_conditions = self._conditions_with_object_identity_parameter_symbols(
             list(conditions or []),
             parameters,
         )
+        if self._conditions_have_parameter_mask_constant_conflict(identity_conditions):
+            return True
         solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
         if solver_result is not None:
             return solver_result
         return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
+
+    def _conditions_have_parameter_mask_constant_conflict(
+        self,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        constants: Dict[Tuple[Any, ...], Tuple[int, int]] = {}
+        mask_equalities: List[Tuple[Tuple[Any, ...], int, int, int]] = []
+        for condition in conditions or ():
+            equality = self._condition_positive_equality_operands(condition)
+            if equality is None:
+                continue
+            left, right = equality
+            constant_equality = self._parameter_constant_equality(left, right)
+            if constant_equality is None:
+                constant_equality = self._parameter_constant_equality(right, left)
+            if constant_equality is not None:
+                key, value, bits = constant_equality
+                previous = constants.get(key)
+                if previous is not None and previous != (value, bits):
+                    return True
+                constants[key] = (value, bits)
+                continue
+            mask_equality = self._parameter_mask_equality(left, right)
+            if mask_equality is None:
+                mask_equality = self._parameter_mask_equality(right, left)
+            if mask_equality is not None:
+                mask_equalities.append(mask_equality)
+        for key, mask, expected, bits in mask_equalities:
+            known = constants.get(key)
+            if known is None:
+                continue
+            known_value, known_bits = known
+            width_bits = max(1, int(bits or known_bits or 0))
+            width_mask = (1 << width_bits) - 1
+            if (known_value & mask & width_mask) != (expected & width_mask):
+                return True
+        return False
+
+    def _condition_positive_equality_operands(
+        self,
+        condition: Condition,
+    ) -> Optional[Tuple[Expression, Expression]]:
+        expr = getattr(condition, "expression", None)
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        operator = getattr(expr, "operator", None)
+        negated = bool(getattr(condition, "negated", False))
+        if operator == "INT_NOTEQUAL" and negated:
+            pass
+        elif operator == "INT_EQUAL" and not negated:
+            pass
+        else:
+            return None
+        operands = list(getattr(expr, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        return operands[0], operands[1]
+
+    def _parameter_constant_equality(
+        self,
+        maybe_param_expr: Expression,
+        maybe_const_expr: Expression,
+    ) -> Optional[Tuple[Tuple[Any, ...], int, int]]:
+        const_value = self._raw_constant_value(maybe_const_expr)
+        if const_value is None:
+            return None
+        affine = self._parameter_plus_constant_affine(maybe_param_expr)
+        if affine is None:
+            return None
+        key, offset, bits = affine
+        width_mask = (1 << max(1, bits)) - 1
+        return key, (int(const_value) - int(offset)) & width_mask, bits
+
+    def _parameter_mask_equality(
+        self,
+        maybe_mask_expr: Expression,
+        maybe_const_expr: Expression,
+    ) -> Optional[Tuple[Tuple[Any, ...], int, int, int]]:
+        const_value = self._raw_constant_value(maybe_const_expr)
+        if const_value is None:
+            return None
+        mask_expr = maybe_mask_expr
+        if (
+            getattr(mask_expr, "expr_type", None) == ExpressionType.BINARY_OP
+            and getattr(mask_expr, "operator", None) == "INT_SUB"
+        ):
+            operands = list(getattr(mask_expr, "operands", ()) or ())
+            if len(operands) != 2:
+                return None
+            sub_const = self._raw_constant_value(operands[1])
+            if sub_const is None:
+                return None
+            mask_expr = operands[0]
+            const_value = int(const_value) + int(sub_const)
+        if getattr(mask_expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(mask_expr, "operator", None) != "INT_AND":
+            return None
+        operands = list(getattr(mask_expr, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        for maybe_mask, maybe_param in ((operands[0], operands[1]), (operands[1], operands[0])):
+            mask_value = self._raw_constant_value(maybe_mask)
+            key = self._parameter_expression_key(maybe_param)
+            if mask_value is None or key is None:
+                continue
+            bits = max(1, int(getattr(maybe_param, "size", 0) or getattr(mask_expr, "size", 0) or 4) * 8)
+            width_mask = (1 << bits) - 1
+            return key, int(mask_value) & width_mask, int(const_value) & width_mask, bits
+        return None
+
+    def _parameter_plus_constant_affine(
+        self,
+        expr: Expression,
+    ) -> Optional[Tuple[Tuple[Any, ...], int, int]]:
+        key = self._parameter_expression_key(expr)
+        if key is not None:
+            bits = max(1, int(getattr(expr, "size", 0) or 4) * 8)
+            return key, 0, bits
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        operator = getattr(expr, "operator", None)
+        operands = list(getattr(expr, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        bits = max(1, int(getattr(expr, "size", 0) or 4) * 8)
+        width_mask = (1 << bits) - 1
+        if operator == "INT_ADD":
+            for left, right in ((operands[0], operands[1]), (operands[1], operands[0])):
+                affine = self._parameter_plus_constant_affine(left)
+                const_value = self._raw_constant_value(right)
+                if affine is None or const_value is None:
+                    continue
+                key, offset, affine_bits = affine
+                return key, (int(offset) + int(const_value)) & width_mask, max(bits, affine_bits)
+        if operator == "INT_SUB":
+            affine = self._parameter_plus_constant_affine(operands[0])
+            const_value = self._raw_constant_value(operands[1])
+            if affine is None or const_value is None:
+                return None
+            key, offset, affine_bits = affine
+            return key, (int(offset) - int(const_value)) & width_mask, max(bits, affine_bits)
+        return None
+
+    def _parameter_expression_key(self, expr: Expression) -> Optional[Tuple[Any, ...]]:
+        if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return None
+        return (
+            "parameter",
+            str(getattr(expr, "name", "") or ""),
+            int(getattr(expr, "value", -1) or -1),
+            max(1, int(getattr(expr, "size", 0) or 4)),
+        )
 
     def _conditions_are_semantically_equivalent(
         self,
