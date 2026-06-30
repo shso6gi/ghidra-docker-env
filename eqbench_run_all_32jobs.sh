@@ -30,6 +30,7 @@ EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-10}"
 DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
 PAIRWISE_TIMEOUT_HARD="${PAIRWISE_TIMEOUT_HARD:-30}"
+SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
 
 COMPILE_TEMPLATE="$SCRIPT_DIR/scripts/eqbench/compile_all_arm_mips.sh"
 FUNCTION_LISTER="$SCRIPT_DIR/scripts/eqbench/list_c_functions.py"
@@ -70,9 +71,16 @@ declare -A OPT_BY_ID=(
 active_jobs=0
 RUN_PAIR_FAILURES=0
 TOTAL_PAIR_JOBS=0
+TOTAL_SKIPPED_PAIR_JOBS=0
 TOTAL_FUNCTIONS=0
 TOTAL_SAMPLES=0
 SKIPPED_SAMPLES=0
+
+result_log_is_complete() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || return 1
+    grep -qE "^Result: (EQUIVALENT|NOT EQUIVALENT|ERROR|TIMEOUT|UNKNOWN)" "$log_file"
+}
 
 status_from_log() {
     local log_file="$1"
@@ -207,6 +215,7 @@ equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
+skip_completed_results=$SKIP_COMPLETED_RESULTS
 compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
 target_sources=${#SAMPLE_SOURCES[@]}
 function_policy=all top-level source-defined functions except main
@@ -225,6 +234,7 @@ echo "Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL
 echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
+echo "Skip completed results: $SKIP_COMPLETED_RESULTS"
 echo "Target sources: ${#SAMPLE_SOURCES[@]}"
 echo "Dry run: $DRY_RUN"
 echo "============================================================"
@@ -304,6 +314,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             continue
         fi
 
+        skipped_completed_pairs=0
         for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
             left_id="${IDS[$i]}"
             left_name="$(binary_name_for_id "$source_base" "$left_id")"
@@ -317,6 +328,13 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 [[ -f "$right_bin" ]] || continue
 
                 pair_count=$((pair_count + 1))
+                log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
+                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && result_log_is_complete "$log_file"; then
+                    skipped_completed_pairs=$((skipped_completed_pairs + 1))
+                    TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                    continue
+                fi
+
                 TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
                 wait_for_slot
                 run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
@@ -324,6 +342,10 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 active_jobs=$((active_jobs + 1))
             done
         done
+
+        if (( skipped_completed_pairs > 0 )); then
+            echo "[$sample_label] [$function_name] Skipped completed pairs: $skipped_completed_pairs/$total_pairs"
+        fi
 
         wait_for_all_jobs
 
@@ -359,6 +381,7 @@ completed_samples=$TOTAL_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
 total_functions=$TOTAL_FUNCTIONS
 total_pair_jobs=$TOTAL_PAIR_JOBS
+total_skipped_pair_jobs=$TOTAL_SKIPPED_PAIR_JOBS
 run_pair_failures=$RUN_PAIR_FAILURES
 EOF
 
