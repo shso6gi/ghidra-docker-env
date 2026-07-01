@@ -117,20 +117,10 @@ run_pair() {
         > "$LOG_FILE" 2>&1
     local ec=$?
 
+    validation_ensure_final_result_line "$LOG_FILE" "$ec"
+
     local status
-    if grep -q "^Result: EQUIVALENT" "$LOG_FILE"; then
-        status="EQUIVALENT ✓"
-    elif grep -q "^Result: NOT EQUIVALENT" "$LOG_FILE"; then
-        status="NOT EQUIVALENT ✗"
-    elif grep -q "^Result: ERROR" "$LOG_FILE"; then
-        status="ERROR !"
-    elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
-        status="TIMEOUT"
-    elif grep -q "^Result: UNKNOWN" "$LOG_FILE"; then
-        status="UNKNOWN"
-    else
-        status="INCOMPLETE"
-    fi
+    status="$(validation_classify_log_display "$LOG_FILE")"
 
     local msg="[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $status"
     (( ec != 0 )) && msg+="  (exit=$ec)"
@@ -189,21 +179,7 @@ format_duration() {
 }
 
 classify_log_result() {
-    local log_file="$1"
-
-    if grep -q "^Result: EQUIVALENT" "$log_file"; then
-        echo "EQ"
-    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
-        echo "NOT_EQ"
-    elif grep -q "^Result: ERROR" "$log_file"; then
-        echo "ERROR"
-    elif grep -q "^Result: TIMEOUT" "$log_file"; then
-        echo "TIMEOUT"
-    elif grep -q "^Result: UNKNOWN" "$log_file"; then
-        echo "UNKNOWN"
-    else
-        echo "INCOMPLETE"
-    fi
+    validation_classify_log_result "$1"
 }
 
 summarize_log_time_lines() {

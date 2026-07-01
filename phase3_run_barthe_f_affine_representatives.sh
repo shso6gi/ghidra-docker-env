@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 
 DEFAULT_PYTHON_BIN="python3"
 if [[ -x "$SCRIPT_DIR/.venv-pyghidra/bin/python" ]]; then
@@ -136,19 +137,12 @@ failures=0
 skips=0
 
 classify_result() {
-    local log_file="$1"
-    if grep -q "^Result: EQUIVALENT" "$log_file"; then
+    local result
+    result="$(validation_classify_log_result "$1")"
+    if [[ "$result" == "EQ" ]]; then
         echo "EQUIVALENT"
-    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
-        echo "NOT_EQ"
-    elif grep -q "^Result: TIMEOUT" "$log_file"; then
-        echo "TIMEOUT"
-    elif grep -q "^Result: UNKNOWN" "$log_file"; then
-        echo "UNKNOWN"
-    elif grep -q "^Result: ERROR" "$log_file"; then
-        echo "ERROR"
     else
-        echo "INCOMPLETE"
+        echo "$result"
     fi
 }
 
@@ -306,6 +300,7 @@ for entry in "${CASES[@]}"; do
     command_status=$?
     set -e
 
+    validation_ensure_final_result_line "$log_file" "$command_status"
     actual="$(classify_result "$log_file")"
     json_check_output=""
     json_check_status=1

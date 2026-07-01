@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "Error: bash 4.3 or newer is required for wait -n" >&2
@@ -92,27 +93,28 @@ TOTAL_FUNCTIONS=0
 TOTAL_SAMPLES=0
 SKIPPED_SAMPLES=0
 
-result_log_is_complete() {
-    local log_file="$1"
-    [[ -f "$log_file" ]] || return 1
-    grep -qE "^Result: (EQUIVALENT|NOT EQUIVALENT|ERROR|TIMEOUT|UNKNOWN)" "$log_file"
-}
-
 status_from_log() {
     local log_file="$1"
-    if grep -q "^Result: EQUIVALENT" "$log_file"; then
-        echo "EQUIVALENT"
-    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
-        echo "NOT EQUIVALENT"
-    elif grep -q "^Result: ERROR" "$log_file"; then
-        echo "ERROR"
-    elif grep -q "^Result: TIMEOUT" "$log_file"; then
-        echo "TIMEOUT"
-    elif grep -q "^Result: UNKNOWN" "$log_file"; then
-        echo "UNKNOWN"
-    else
-        echo "INCOMPLETE"
-    fi
+    case "$(validation_classify_log_result "$log_file")" in
+        EQ)
+            echo "EQUIVALENT"
+            ;;
+        NOT_EQ)
+            echo "NOT EQUIVALENT"
+            ;;
+        ERROR)
+            echo "ERROR"
+            ;;
+        TIMEOUT)
+            echo "TIMEOUT"
+            ;;
+        UNKNOWN)
+            echo "UNKNOWN"
+            ;;
+        *)
+            echo "INCOMPLETE"
+            ;;
+    esac
 }
 
 run_pair() {
@@ -154,6 +156,8 @@ run_pair() {
             echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
         } >> "$log_file"
     fi
+
+    validation_ensure_final_result_line "$log_file" "$ec"
 
     local status
     status="$(status_from_log "$log_file")"
@@ -347,7 +351,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
 
                 pair_count=$((pair_count + 1))
                 log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
-                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && result_log_is_complete "$log_file"; then
+                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && validation_result_log_is_complete "$log_file"; then
                     skipped_completed_pairs=$((skipped_completed_pairs + 1))
                     TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                     continue

@@ -54,3 +54,71 @@ validation_finalize_before_after_config() {
 
     export VALIDATION_BEFORE_LABEL
 }
+
+validation_result_log_is_complete() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || return 1
+    grep -qE "^Result: (EQUIVALENT|NOT EQUIVALENT|ERROR|TIMEOUT|UNKNOWN)" "$log_file"
+}
+
+validation_ensure_final_result_line() {
+    local log_file="$1"
+    local exit_code="$2"
+
+    if (( exit_code == 0 )) || validation_result_log_is_complete "$log_file"; then
+        return 0
+    fi
+
+    {
+        echo ""
+        echo "Pair process failed before emitting a final result line."
+        echo "Exit code: $exit_code"
+        echo "Result: ERROR (pair process exited before emitting a final result)"
+    } >> "$log_file"
+}
+
+validation_classify_log_result() {
+    local log_file="$1"
+
+    if grep -q "^Result: EQUIVALENT" "$log_file"; then
+        echo "EQ"
+    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
+        echo "NOT_EQ"
+    elif grep -q "^Result: ERROR" "$log_file"; then
+        echo "ERROR"
+    elif grep -q "^Result: TIMEOUT" "$log_file"; then
+        echo "TIMEOUT"
+    elif grep -q "^Result: UNKNOWN" "$log_file"; then
+        echo "UNKNOWN"
+    else
+        echo "INCOMPLETE"
+    fi
+}
+
+validation_classify_log_display() {
+    case "$(validation_classify_log_result "$1")" in
+        EQ)
+            echo "EQUIVALENT ✓"
+            ;;
+        NOT_EQ)
+            echo "NOT EQUIVALENT ✗"
+            ;;
+        ERROR)
+            echo "ERROR !"
+            ;;
+        TIMEOUT)
+            echo "TIMEOUT"
+            ;;
+        UNKNOWN)
+            echo "UNKNOWN"
+            ;;
+        *)
+            echo "INCOMPLETE"
+            ;;
+    esac
+}
+
+export -f validation_result_log_is_complete
+export -f validation_ensure_final_result_line
+export -f validation_classify_log_result
+export -f validation_classify_log_display
