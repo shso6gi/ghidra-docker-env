@@ -31,6 +31,11 @@ DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
 PAIRWISE_TIMEOUT_HARD="${PAIRWISE_TIMEOUT_HARD:-30}"
 SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
+DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
+if [[ -d /workspace && -w /workspace ]]; then
+    DEFAULT_TMPDIR="/workspace/tmp"
+fi
+EQBENCH_TMPDIR="${EQBENCH_TMPDIR:-$DEFAULT_TMPDIR}"
 
 COMPILE_TEMPLATE="$SCRIPT_DIR/scripts/eqbench/compile_all_arm_mips.sh"
 FUNCTION_LISTER="$SCRIPT_DIR/scripts/eqbench/list_c_functions.py"
@@ -47,6 +52,17 @@ if ! command -v timeout >/dev/null 2>&1; then
     echo "Error: GNU coreutils timeout command is required for pair process timeouts" >&2
     exit 1
 fi
+
+mkdir -p "$EQBENCH_TMPDIR"
+chmod 1777 "$EQBENCH_TMPDIR" 2>/dev/null || true
+if ! tmp_probe="$(mktemp "$EQBENCH_TMPDIR/eqbench-tmp.XXXXXX" 2>/dev/null)"; then
+    echo "Error: cannot create temporary files in EQBENCH_TMPDIR=$EQBENCH_TMPDIR" >&2
+    exit 1
+fi
+rm -f "$tmp_probe"
+export TMPDIR="$EQBENCH_TMPDIR"
+export TEMP="$EQBENCH_TMPDIR"
+export TMP="$EQBENCH_TMPDIR"
 
 IDS=(B1 B2 B3 B4 B5 B6 B7 B8 B9 B10 B11 B12 B13 B14 B15 B16)
 declare -A ARCH_BY_ID=(
@@ -216,6 +232,7 @@ decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
 skip_completed_results=$SKIP_COMPLETED_RESULTS
+eqbench_tmpdir=$EQBENCH_TMPDIR
 compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
 target_sources=${#SAMPLE_SOURCES[@]}
 function_policy=all top-level source-defined functions except main
@@ -235,6 +252,7 @@ echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
 echo "Skip completed results: $SKIP_COMPLETED_RESULTS"
+echo "Temporary directory: $EQBENCH_TMPDIR"
 echo "Target sources: ${#SAMPLE_SOURCES[@]}"
 echo "Dry run: $DRY_RUN"
 echo "============================================================"

@@ -4,6 +4,23 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
+if [[ -d /workspace && -w /workspace ]]; then
+    DEFAULT_TMPDIR="/workspace/tmp"
+fi
+EQBENCH_TMPDIR="${EQBENCH_TMPDIR:-${TMPDIR:-$DEFAULT_TMPDIR}}"
+mkdir -p "$EQBENCH_TMPDIR"
+chmod 1777 "$EQBENCH_TMPDIR" 2>/dev/null || true
+if ! tmp_probe="$(mktemp "$EQBENCH_TMPDIR/eqbench-compile.XXXXXX" 2>/dev/null)"; then
+    echo "Error: cannot create temporary files in EQBENCH_TMPDIR=$EQBENCH_TMPDIR" >&2
+    exit 1
+fi
+rm -f "$tmp_probe"
+export TMPDIR="$EQBENCH_TMPDIR"
+export TEMP="$EQBENCH_TMPDIR"
+export TMP="$EQBENCH_TMPDIR"
+
 SOURCE_FILE="${1:-$(find . -maxdepth 1 -type f -name '*.c' -printf '%f\n' | sort | head -n 1)}"
 
 if [[ -z "$SOURCE_FILE" || ! -f "$SOURCE_FILE" ]]; then
@@ -34,6 +51,7 @@ echo "EqBench compile_all.sh"
 echo "========================================="
 echo "Source file: $SOURCE_FILE"
 echo "Output kind: $OUTPUT_KIND"
+echo "Temporary directory: $EQBENCH_TMPDIR"
 echo "Axes: ${ARCHITECTURES[*]} / ${COMPILERS[*]} / ${OPTIMIZATION_LEVELS[*]}"
 echo "Total patterns: $((${#ARCHITECTURES[@]} * ${#COMPILERS[@]} * ${#OPTIMIZATION_LEVELS[@]}))"
 echo "========================================="
