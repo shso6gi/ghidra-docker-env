@@ -6,15 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    ComparisonSurface,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 from scripts.function_tracer_pcode.model.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
     build_return_width_bridge_high_bit_query,
+    extract_return_cases,
 )
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
@@ -882,6 +892,124 @@ def test_return_width_bridge_completed_evidence_is_accepted_by_decision_gate():
         CheckStrategy._normalize_nested_tuple(action["proof_obligation_id"])
         for action in actions
     }
+
+
+def _monolithic_bridge_analysis_pair():
+    left_expr = Expression.parameter("left_value", 0, data_type="int", size=4)
+    right_expr = Expression.parameter("right_value", 0, data_type="int", size=4)
+    left = FunctionReturnAnalysis(
+        function_name="foo",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x1010", value=left_expr)],
+        function_ref=CallTargetRef.from_name("foo", program_id=1, entry_offset=0x1000),
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=32,
+            type_name="int",
+        ),
+    )
+    left.binary_id = "B1"
+    left.return_type = "int"
+    right = FunctionReturnAnalysis(
+        function_name="foo",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x2010",
+                value=right_expr,
+                return_value_pcode_op_refs=(
+                    PcodeOpRef(
+                        binary_id="B2",
+                        function_entry_offset=0x2000,
+                        target_offset=0x2010,
+                        seq_time=1,
+                        seq_order=0,
+                        mnemonic="INT_SEXT",
+                        input_sizes=(4,),
+                        output_size=8,
+                    ),
+                ),
+            )
+        ],
+        function_ref=CallTargetRef.from_name("foo", program_id=2, entry_offset=0x2000),
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=64,
+            type_name="long",
+        ),
+    )
+    right.binary_id = "B2"
+    right.return_type = "long"
+    return left, right
+
+
+def _record_monolithic_bridge_evidence(strategy, left, right):
+    base_ctx = FormulaBuilder().build_base_context(left, right)
+    left_case = extract_return_cases(left)[0]
+    right_case = extract_return_cases(right)[0]
+    mismatch = ReturnWidthMismatchError(
+        "test mismatch",
+        return_size1=32,
+        return_size2=64,
+    )
+    target = strategy._return_width_bridge_object_target_key(
+        analysis1=left,
+        analysis2=right,
+        base_ctx=base_ctx,
+        case1=left_case,
+        case2=right_case,
+        pair_id="(0,0)",
+        mismatch=mismatch,
+    )
+    reason = make_unknown_reason(
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        object_target_key=target,
+        detail=str(mismatch),
+    )
+    assert strategy._record_completed_return_width_bridge_proofs(
+        reason,
+        left,
+        right,
+        query_stage="return-width-bridge-high-bit-extension",
+        narrow_width=32,
+    )
+
+
+def test_monolithic_uses_completed_return_width_bridge_when_wide_cases_are_covered():
+    strategy = MonolithicStrategy(FormulaBuilder(), None)
+    left, right = _monolithic_bridge_analysis_pair()
+    _record_monolithic_bridge_evidence(strategy, left, right)
+
+    narrow_bits = strategy._completed_return_width_bridge_narrow_bits_for_monolithic(
+        left,
+        right,
+        ReturnWidthMismatchError("test mismatch", return_size1=32, return_size2=64),
+    )
+
+    assert narrow_bits == 32
+
+
+def test_monolithic_rejects_return_width_bridge_when_high_bit_proof_is_missing():
+    strategy = MonolithicStrategy(FormulaBuilder(), None)
+    left, right = _monolithic_bridge_analysis_pair()
+    _record_monolithic_bridge_evidence(strategy, left, right)
+    left.completed_recovery_proof_evidence = tuple(
+        record
+        for record in left.completed_recovery_proof_evidence
+        if record.get("proof_kind") != "high_bit_proof"
+    )
+
+    narrow_bits = strategy._completed_return_width_bridge_narrow_bits_for_monolithic(
+        left,
+        right,
+        ReturnWidthMismatchError("test mismatch", return_size1=32, return_size2=64),
+    )
+
+    assert narrow_bits is None
 
 
 def test_return_width_bridge_high_bit_completed_content_requires_narrow_extension_op():

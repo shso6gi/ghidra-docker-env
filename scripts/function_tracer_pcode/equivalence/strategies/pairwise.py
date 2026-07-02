@@ -948,6 +948,13 @@ class PairwiseStrategy(CheckStrategy):
         self._debug_print(f"  Total time: {elapsed_time:.3f}s")
         self._debug_print("=" * 60)
 
+        self._merge_completed_recovery_proofs_from_solver_analyses(
+            analysis1,
+            solver_analysis1,
+            analysis2,
+            solver_analysis2,
+        )
+
         aggregate_result = self._create_aggregate_result(
             final_is_equiv,
             elapsed_time,
@@ -976,6 +983,42 @@ class PairwiseStrategy(CheckStrategy):
         finally:
             self._active_safety_checker = None
             self._active_normalization_stats = None
+
+    @staticmethod
+    def _merge_completed_recovery_proofs_from_solver_analyses(
+        analysis1: FunctionReturnAnalysis,
+        solver_analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        solver_analysis2: FunctionReturnAnalysis,
+    ) -> None:
+        for target, source in (
+            (analysis1, solver_analysis1),
+            (analysis2, solver_analysis2),
+        ):
+            source_records = [
+                dict(record)
+                for record in getattr(source, "completed_recovery_proof_evidence", ()) or ()
+                if isinstance(record, Mapping)
+            ]
+            if not source_records:
+                continue
+            target_records = [
+                dict(record)
+                for record in getattr(target, "completed_recovery_proof_evidence", ()) or ()
+                if isinstance(record, Mapping)
+            ]
+            existing_ids = {record.get("proof_obligation_id") for record in target_records}
+            changed = False
+            for record in source_records:
+                proof_id = record.get("proof_obligation_id")
+                if proof_id is not None and proof_id in existing_ids:
+                    continue
+                target_records.append(record)
+                if proof_id is not None:
+                    existing_ids.add(proof_id)
+                changed = True
+            if changed:
+                target.completed_recovery_proof_evidence = tuple(target_records)
 
     @staticmethod
     def _blocking_unknown_reasons_should_replace_pair_unknowns(

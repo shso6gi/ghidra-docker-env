@@ -5896,6 +5896,49 @@ def test_model_validation_query_keeps_raw_width_mismatch_value_equality():
     assert "(bvand x_1 (_ bv4294967295 32))" not in query
 
 
+def test_model_validation_query_uses_completed_return_width_bridge_for_value_equality():
+    class _FakeCase:
+        def __init__(self, value):
+            self.value = value
+
+        def get_conditions_smt(self, _param_replace_fn):
+            return []
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return self.value
+
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=64, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 64))",
+            "(declare-const x_2 (_ BitVec 32))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 64,
+        "return_size2": 32,
+        "return_width_bridge_narrow_bits": 32,
+    }
+
+    query = _build_model_validation_query(
+        base_ctx,
+        _FakeCase("x_1"),
+        _FakeCase("x_2"),
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        model_assertions=[],
+        equality=True,
+    )
+
+    assert "(assert (= ((_ extract 31 0) x_1) x_2))" in query
+
+
 def test_validate_counterexample_globally_reports_inconclusive_for_raw_width_mismatch_condition():
     class _Solver:
         def __init__(self):

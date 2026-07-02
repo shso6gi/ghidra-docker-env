@@ -986,6 +986,9 @@ def _build_model_validation_query(
                 value2_smt,
                 return_size1,
                 return_size2,
+                return_width_bridge_narrow_bits=base_ctx.get(
+                    "return_width_bridge_narrow_bits"
+                ),
             )
         )
     lines.append("(check-sat)")
@@ -1004,13 +1007,62 @@ def _build_value_equality_assertions(
     value2_smt: str,
     return_size1: int,
     return_size2: int,
+    *,
+    return_width_bridge_narrow_bits: Optional[int] = None,
 ) -> List[str]:
-    require_equal_return_bit_widths(
-        return_size1,
-        return_size2,
-        context="counterexample validation value equality",
-    )
+    try:
+        require_equal_return_bit_widths(
+            return_size1,
+            return_size2,
+            context="counterexample validation value equality",
+        )
+    except ReturnWidthMismatchError:
+        narrow_bits = _validated_return_width_bridge_narrow_bits(
+            return_size1,
+            return_size2,
+            return_width_bridge_narrow_bits,
+        )
+        if narrow_bits is None:
+            raise
+        value1_smt = _return_width_bridge_comparison_term(
+            value1_smt,
+            return_size1,
+            narrow_bits,
+        )
+        value2_smt = _return_width_bridge_comparison_term(
+            value2_smt,
+            return_size2,
+            narrow_bits,
+        )
     return [f"(assert (= {value1_smt} {value2_smt}))"]
+
+
+def _validated_return_width_bridge_narrow_bits(
+    return_size1: int,
+    return_size2: int,
+    narrow_bits: Optional[int],
+) -> Optional[int]:
+    try:
+        bits1 = int(return_size1)
+        bits2 = int(return_size2)
+        candidate = int(narrow_bits or 0)
+    except (TypeError, ValueError):
+        return None
+    if bits1 <= 0 or bits2 <= 0 or bits1 == bits2:
+        return None
+    if candidate <= 0 or candidate != min(bits1, bits2):
+        return None
+    return candidate
+
+
+def _return_width_bridge_comparison_term(
+    value_smt: str,
+    return_bits: int,
+    narrow_bits: int,
+) -> str:
+    if int(return_bits) == int(narrow_bits):
+        return value_smt
+    return f"((_ extract {int(narrow_bits) - 1} 0) {value_smt})"
 
 
 def _build_model_assertions(base_ctx: Dict[str, Any], counterexample_raw: Dict[str, Any]) -> List[str]:

@@ -93,6 +93,28 @@ class TestExtraAssertions:
 
         assert custom_section_found
 
+    def test_return_width_mismatch_still_requires_explicit_bridge(self):
+        builder = FormulaBuilder(debug=False)
+        analysis1 = _analysis("func1", "x", 4)
+        analysis2 = _analysis("func2", "y", 8)
+
+        with pytest.raises(ReturnWidthMismatchError):
+            builder.build_equivalence_formula_extended(analysis1, analysis2)
+
+    def test_completed_return_width_bridge_compares_on_proven_narrow_width(self):
+        builder = FormulaBuilder(debug=False)
+        analysis1 = _analysis("func1", "x", 4)
+        analysis2 = _analysis("func2", "y", 8)
+
+        result = builder.build_equivalence_formula_extended(
+            analysis1,
+            analysis2,
+            return_width_bridge_narrow_bits=32,
+        )
+
+        assert "Completed return-width bridge proof" in result.formula
+        assert "(assert (not (= return_1 ((_ extract 31 0) return_2))))" in result.formula
+
 
 class TestABIConstraints:
     """ABI制約生成のテスト"""

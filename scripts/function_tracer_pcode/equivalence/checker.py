@@ -761,6 +761,11 @@ class EquivalenceChecker:
             
             # stage_path を記録
             result.stage_path = stage_path.copy()
+            self._merge_completed_recovery_proofs_from_result(
+                analysis1,
+                analysis2,
+                result,
+            )
             last_result = result
             
             # 結果判定
@@ -1004,6 +1009,43 @@ class EquivalenceChecker:
                     }
                 )
         return records
+
+    def _merge_completed_recovery_proofs_from_result(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        result: EquivalenceResult,
+    ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
+        payload = getattr(result, "completed_recovery_proof_evidence", None) or ()
+        if not payload:
+            return
+        by_side = {
+            "function1": analysis1,
+            "function2": analysis2,
+        }
+        for item in payload:
+            if not isinstance(item, Mapping):
+                continue
+            side = str(item.get("side") or "")
+            analysis = by_side.get(side)
+            if analysis is None:
+                continue
+            evidence = item.get("evidence")
+            if not isinstance(evidence, Mapping):
+                continue
+            records = [
+                dict(record)
+                for record in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+                if isinstance(record, Mapping)
+            ]
+            proof_id = evidence.get("proof_obligation_id")
+            existing_ids = {record.get("proof_obligation_id") for record in records}
+            if proof_id is not None and proof_id in existing_ids:
+                continue
+            records.append(dict(evidence))
+            analysis.completed_recovery_proof_evidence = tuple(records)
     
     def _format_counterexample(
         self,

@@ -3,7 +3,7 @@
 
 import time
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Set
 
 from ...model import FunctionReturnAnalysis
 from ...smt import ParallelResult
@@ -52,6 +52,14 @@ class MonolithicStrategy(CheckStrategy):
 
         normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
         base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        bridge_narrow_bits = self._completed_return_width_bridge_narrow_bits_for_sizes(
+            analysis1,
+            analysis2,
+            base_ctx.get("return_size1"),
+            base_ctx.get("return_size2"),
+        )
+        if bridge_narrow_bits is not None:
+            base_ctx["return_width_bridge_narrow_bits"] = bridge_narrow_bits
         self._last_counterexample_replay_fixed_model_assertion_count = (
             count_counterexample_model_assertions(base_ctx, counterexample_raw)
         )
@@ -92,6 +100,27 @@ class MonolithicStrategy(CheckStrategy):
             replace1,
             replace2,
             counterexample_raw,
+        )
+
+    def _completed_return_width_bridge_narrow_bits_for_sizes(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        return_size1,
+        return_size2,
+    ) -> Optional[int]:
+        try:
+            mismatch = ReturnWidthMismatchError(
+                "validation return width mismatch",
+                return_size1=int(return_size1),
+                return_size2=int(return_size2),
+            )
+        except (TypeError, ValueError):
+            return None
+        return self._completed_return_width_bridge_narrow_bits_for_monolithic(
+            analysis1,
+            analysis2,
+            mismatch,
         )
 
     def _build_validation_analyses(
@@ -186,9 +215,29 @@ class MonolithicStrategy(CheckStrategy):
         
         try:
             # SMT式を構築
-            result = self.formula_builder.build_equivalence_formula_extended(
-                analysis1, analysis2
-            )
+            try:
+                result = self.formula_builder.build_equivalence_formula_extended(
+                    analysis1, analysis2
+                )
+            except ReturnWidthMismatchError as width_mismatch:
+                bridge_narrow_bits = (
+                    self._completed_return_width_bridge_narrow_bits_for_monolithic(
+                        analysis1,
+                        analysis2,
+                        width_mismatch,
+                    )
+                )
+                if bridge_narrow_bits is None:
+                    raise
+                self._debug_print(
+                    "Monolithic return-width mismatch bridged by completed pairwise "
+                    f"proofs at {bridge_narrow_bits} bits"
+                )
+                result = self.formula_builder.build_equivalence_formula_extended(
+                    analysis1,
+                    analysis2,
+                    return_width_bridge_narrow_bits=bridge_narrow_bits,
+                )
             smt_formula = result.formula
             return_var1 = result.return_var1
             return_var2 = result.return_var2
@@ -440,3 +489,107 @@ class MonolithicStrategy(CheckStrategy):
                     )
                 ],
             )
+
+    def _completed_return_width_bridge_narrow_bits_for_monolithic(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        mismatch: ReturnWidthMismatchError,
+    ) -> Optional[int]:
+        try:
+            return_size1 = int(getattr(mismatch, "return_size1"))
+            return_size2 = int(getattr(mismatch, "return_size2"))
+        except (TypeError, ValueError):
+            return None
+        if return_size1 <= 0 or return_size2 <= 0 or return_size1 == return_size2:
+            return None
+
+        narrow_bits = min(return_size1, return_size2)
+        if return_size1 > return_size2:
+            wide_side_label = "left"
+            wide_analysis = analysis1
+        else:
+            wide_side_label = "right"
+            wide_analysis = analysis2
+        expected_widths = (return_size1, return_size2)
+
+        required_wide_members = self._monolithic_return_case_members_for_bridge(
+            wide_analysis,
+        )
+        if not required_wide_members:
+            return None
+
+        completed_targets = self._completed_return_width_bridge_targets_by_proof_kind(
+            analysis1,
+            analysis2,
+        )
+        covered_wide_members: Set[tuple] = set()
+        for target, proof_kinds in completed_targets.items():
+            if proof_kinds != {"abi_relation_proof", "high_bit_proof"}:
+                continue
+            if self._return_width_bridge_target_widths(target) != expected_widths:
+                continue
+            if self._return_width_bridge_target_narrow_width(target) != narrow_bits:
+                continue
+            wide_side = self._return_width_bridge_find_side(target, wide_side_label)
+            if wide_side is None:
+                continue
+            if (
+                self._return_width_bridge_find_tagged_entry(wide_side, "function_ref")
+                != self._analysis_entry_key(wide_analysis)
+            ):
+                continue
+            if (
+                self._return_width_bridge_find_tagged_entry(wide_side, "return_storage")
+                != self._return_storage_object_key(wide_analysis)
+            ):
+                continue
+            member = self._return_width_bridge_find_tagged_entry(
+                wide_side,
+                "return_case_partition_member",
+            )
+            if member in required_wide_members:
+                covered_wide_members.add(member)
+
+        if required_wide_members.issubset(covered_wide_members):
+            return narrow_bits
+        return None
+
+    def _monolithic_return_case_members_for_bridge(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> Set[tuple]:
+        try:
+            cases = extract_return_cases(analysis, self.normalization_settings)
+        except Exception:
+            return set()
+        members: Set[tuple] = set()
+        for case in cases:
+            return_info = getattr(case, "return_info", None)
+            member = self._return_case_partition_member_object_key(case, return_info)
+            if member is not None:
+                members.add(self._normalize_nested_tuple(member))
+        return members
+
+    def _completed_return_width_bridge_targets_by_proof_kind(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Dict[tuple, Set[str]]:
+        completed: Dict[tuple, Set[str]] = {}
+        for evidence in self._completed_recovery_proof_evidence(analysis1, analysis2):
+            if self._return_width_bridge_proof_id_from_evidence(evidence) is None:
+                continue
+            target = self._normalize_nested_tuple(
+                self._evidence_get(evidence, "object_target_key")
+            )
+            if not self._return_width_bridge_target_is_specific(target):
+                continue
+            proof_kind = self._evidence_text(evidence, "proof_kind") or self._evidence_text(
+                evidence,
+                "recovery_proof_kind",
+            )
+            if proof_kind not in {"abi_relation_proof", "high_bit_proof"}:
+                continue
+            completed.setdefault(target, set()).add(proof_kind)
+        return completed
