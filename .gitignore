@@ -32,6 +32,7 @@ solver_cvc5.py
 *.txt
 !requirements-test.txt
 *.log
+*.pdf
 logs/equivalence_all/*/phase2_gate/*.json
 logs/equivalence_all/*/phase3_*_gate/*.json
 logs/equivalence_all/phase3_lane_index/*.json
@@ -48,6 +49,5 @@ artifacts/baselines/*/raw/logs/
 !artifacts/baselines/*/raw/workspace_state/*.json
 !artifacts/baselines/*/raw/workspace_state/*.txt
 !artifacts/baselines/*/raw/workspace_state/*.patch
-LoopSCC Towards Summarizing Multi-branch Loops within Determinate Cycles.pdf
 airy_Eq_new.sh
 targets/EqBench/

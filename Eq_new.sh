@@ -10,10 +10,10 @@ source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 # ---------------------- 設定 ----------------------
 # 対象関数を配列で指定
 TARGET_FUNCS=(
-    "bessk"
-    # "bessk0"
-    # "bessk1"
-    # "bessi0"
+    # "bessk" UNKNOWN
+    # "bessk0" UNKNOWN
+    # "bessk1" UNKNOWN
+    "f"
     # "bessi1"
     # "bessi"
     # "bessj"
@@ -21,8 +21,8 @@ TARGET_FUNCS=(
     # "bessj1"
 )
 
-OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/EqBench/benchmarks/bess/bess/Eq/source/newV"}
-BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/EqBench/benchmarks/bess/bess/Eq/source"}
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/EqBench/benchmarks/REVE/barthe2big/Eq/source/new"}
+BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/EqBench/benchmarks/REVE/barthe2big/Eq/source"}
 PYTHON_BIN=${PYTHON_BIN:-"$SCRIPT_DIR/.venv-pyghidra/bin/python"}
 PARALLEL_JOBS=${PARALLEL_JOBS:-2}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
@@ -43,23 +43,23 @@ fi
 
 # ---------------------- バイナリ定義 ----------------------
 declare -A BINARY_MAP=(
-    [B1]="newV-arm64-clang-O0"
-    [B2]="newV-arm64-clang-O1"
-    [B3]="newV-arm64-clang-O2"
-    [B4]="newV-arm64-clang-O3"
-    [B5]="newV-arm64-gcc-O0"
-    [B6]="newV-arm64-gcc-O1"
-    [B7]="newV-arm64-gcc-O2"
-    [B8]="newV-arm64-gcc-O3"
+    [B1]="new-arm64-clang-O0"
+    [B2]="new-arm64-clang-O1"
+    [B3]="new-arm64-clang-O2"
+    [B4]="new-arm64-clang-O3"
+    [B5]="new-arm64-gcc-O0"
+    [B6]="new-arm64-gcc-O1"
+    [B7]="new-arm64-gcc-O2"
+    [B8]="new-arm64-gcc-O3"
 
-    [B9]="newV-mips64-clang-O0"
-    [B10]="newV-mips64-clang-O1"
-    [B11]="newV-mips64-clang-O2"
-    [B12]="newV-mips64-clang-O3"
-    [B13]="newV-mips64-gcc-O0"
-    [B14]="newV-mips64-gcc-O1"
-    [B15]="newV-mips64-gcc-O2"
-    [B16]="newV-mips64-gcc-O3"
+    [B9]="new-mips64-clang-O0"
+    [B10]="new-mips64-clang-O1"
+    [B11]="new-mips64-clang-O2"
+    [B12]="new-mips64-clang-O3"
+    [B13]="new-mips64-gcc-O0"
+    [B14]="new-mips64-gcc-O1"
+    [B15]="new-mips64-gcc-O2"
+    [B16]="new-mips64-gcc-O3"
 
     # [B17]="newV-x86_64-clang-O0"
     # [B18]="newV-x86_64-clang-O1"
