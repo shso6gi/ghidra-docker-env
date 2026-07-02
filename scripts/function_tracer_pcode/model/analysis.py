@@ -354,9 +354,9 @@ def _target_ref_has_external_library_provenance(target_ref: CallTargetRef) -> bo
     if target_ref is None or not target_ref.is_function():
         return False
     if getattr(target_ref, "is_external", None) is True:
-        return True
+        return bool(getattr(target_ref, "library_name", None))
     if getattr(target_ref, "is_thunk", None) is True and getattr(target_ref, "thunked_is_external", None) is True:
-        return True
+        return bool(getattr(target_ref, "thunked_library_name", None))
     return False
 
 

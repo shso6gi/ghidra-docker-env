@@ -567,9 +567,13 @@ def _pure_target_identity_key(info: DeferredCallInfo) -> Optional[Tuple[Any, ...
         return None
     if getattr(target_ref, "is_external", None) is True:
         library_name = str(getattr(target_ref, "library_name", "") or "").lower()
+        if not library_name:
+            return None
         return ("external_library_function", target_name, library_name)
     if getattr(target_ref, "is_thunk", None) is True and getattr(target_ref, "thunked_is_external", None) is True:
         library_name = str(getattr(target_ref, "thunked_library_name", "") or "").lower()
+        if not library_name:
+            return None
         return ("external_library_thunk", target_name, library_name)
     return None
 
@@ -580,11 +584,15 @@ def _call_target_identity_policy(target_ref) -> Dict[str, Any]:
     if getattr(target_ref, "is_unknown", lambda: False)():
         return {"status": "unresolved_target"}
     if getattr(target_ref, "is_external", None) is True:
+        if not getattr(target_ref, "library_name", None):
+            return {"status": "unscoped_external_library_function_rejected"}
         return {
             "status": "external_library_function",
             "library_name": getattr(target_ref, "library_name", None),
         }
     if getattr(target_ref, "is_thunk", None) is True and getattr(target_ref, "thunked_is_external", None) is True:
+        if not getattr(target_ref, "thunked_library_name", None):
+            return {"status": "unscoped_external_library_thunk_rejected"}
         return {
             "status": "external_library_thunk",
             "library_name": getattr(target_ref, "thunked_library_name", None),
@@ -614,18 +622,10 @@ def _recursive_target_key(
 ) -> Optional[Tuple[object, ...]]:
     target_ref = getattr(info, "target_ref", None)
     function_ref = getattr(analysis, "function_ref", None)
-    if (
-        function_ref is not None
-        and target_ref is not None
-        and target_ref.analysis_key() == function_ref.analysis_key()
-    ):
-        return ("self_recursive",)
-    if (
-        target_ref is not None
-        and getattr(target_ref, "function_name", None)
-        and getattr(target_ref, "function_name", None) == getattr(analysis, "function_name", None)
-    ):
-        return ("self_recursive",)
+    if function_ref is not None and target_ref is not None:
+        target_key = target_ref.analysis_key()
+        if target_key is not None and target_key == function_ref.analysis_key():
+            return ("self_recursive",)
     return None
 
 

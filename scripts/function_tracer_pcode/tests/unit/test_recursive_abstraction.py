@@ -32,6 +32,15 @@ def _external_sqrt_target():
     return CallTargetRef.from_name("sqrt", is_external=True, library_name="libm")
 
 
+def _self_recursive_target(function_name: str):
+    synthetic_program_id = sum(ord(ch) for ch in function_name) & 0xFFFFFFFF
+    return CallTargetRef.from_name(
+        function_name,
+        program_id=synthetic_program_id,
+        entry_offset=0x00401000,
+    )
+
+
 def _deferred_unknown(info: DeferredCallInfo):
     return Expression.unknown(info.placeholder_name, runtime_ref=info.unknown_ref)
 
@@ -70,13 +79,13 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     placeholder2 = "call_out_of_scope:right#0"
     info1 = DeferredCallInfo(
         placeholder1,
-        CallTargetRef.from_name("left"),
+        _self_recursive_target("left"),
         [Expression.binary_op("INT_SUB", n1, _const(1))],
         sequence=0,
     )
     info2 = DeferredCallInfo(
         placeholder2,
-        CallTargetRef.from_name("right"),
+        _self_recursive_target("right"),
         [Expression.binary_op("INT_SUB", n2, _const(1))],
         sequence=0,
     )
@@ -122,7 +131,7 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     assert any(param.get("synthetic_recursive_summary") for param in result.analysis2.parameters)
 
 
-def test_recursive_abstraction_matches_structurally_equivalent_arguments_without_string_keys():
+def test_recursive_abstraction_rejects_name_only_self_target_even_when_display_name_matches():
     n1 = _param("n", 0)
     n2 = _param("m", 0)
     placeholder1 = "call_out_of_scope:left#0"
@@ -130,12 +139,48 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
     info1 = DeferredCallInfo(
         placeholder1,
         CallTargetRef.from_name("left"),
-        [Expression.binary_op("INT_ADD", n1, _const(1))],
+        [Expression.binary_op("INT_SUB", n1, _const(1))],
         sequence=0,
     )
     info2 = DeferredCallInfo(
         placeholder2,
         CallTargetRef.from_name("right"),
+        [Expression.binary_op("INT_SUB", n2, _const(1))],
+        sequence=0,
+    )
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(info1), conditions=[])],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[{"name": "m", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x2000", value=_deferred_unknown(info2), conditions=[])],
+    )
+    analysis1.deferred_calls = {placeholder1: info1}
+    analysis2.deferred_calls = {placeholder2: info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, debug=False)
+
+    assert result.applied is False
+    assert result.matches == []
+
+
+def test_recursive_abstraction_matches_structurally_equivalent_arguments_without_string_keys():
+    n1 = _param("n", 0)
+    n2 = _param("m", 0)
+    placeholder1 = "call_out_of_scope:left#0"
+    placeholder2 = "call_out_of_scope:right#0"
+    info1 = DeferredCallInfo(
+        placeholder1,
+        _self_recursive_target("left"),
+        [Expression.binary_op("INT_ADD", n1, _const(1))],
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        placeholder2,
+        _self_recursive_target("right"),
         [Expression.binary_op("INT_ADD", _const(1), n2)],
         sequence=0,
     )
@@ -234,13 +279,13 @@ def test_recursive_abstraction_rewrites_deferred_unknowns_inside_return_guards_o
     placeholder2 = "call_out_of_scope:right#0"
     info1 = DeferredCallInfo(
         placeholder1,
-        CallTargetRef.from_name("left"),
+        _self_recursive_target("left"),
         [Expression.binary_op("INT_SUB", n1, _const(1))],
         sequence=0,
     )
     info2 = DeferredCallInfo(
         placeholder2,
-        CallTargetRef.from_name("right"),
+        _self_recursive_target("right"),
         [Expression.binary_op("INT_SUB", n2, _const(1))],
         sequence=0,
     )
@@ -417,6 +462,45 @@ def test_deferred_call_abstraction_rejects_name_only_sqrt_without_library_proven
 
     assert result.applied is False
     assert info1.effect_class == "unknown_effect"
+
+
+def test_deferred_call_abstraction_rejects_external_sqrt_without_library_scope():
+    info1 = DeferredCallInfo("sqrt@0x1000", CallTargetRef.from_name("sqrt", is_external=True), [_param("x", 0, size=8)], sequence=0)
+    info2 = DeferredCallInfo("sqrt@0x2000", CallTargetRef.from_name("sqrt", is_external=True), [_param("y", 0, size=8)], sequence=0)
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
+    assert info1.effect_class == "unknown_effect"
+
+
+def test_deferred_call_abstraction_rejects_forced_pure_external_sqrt_without_library_scope():
+    info1 = DeferredCallInfo(
+        "sqrt@0x1000",
+        CallTargetRef.from_name("sqrt", is_external=True),
+        [_param("x", 0, size=8)],
+        sequence=0,
+        effect_class="pure_return",
+    )
+    info2 = DeferredCallInfo(
+        "sqrt@0x2000",
+        CallTargetRef.from_name("sqrt", is_external=True),
+        [_param("y", 0, size=8)],
+        sequence=0,
+        effect_class="pure_return",
+    )
+    analysis1 = _analysis_with_deferred_value("left", info1)
+    analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
+    analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
+
+    assert result.applied is False
 
 
 def test_deferred_call_abstraction_rejects_sqrt_when_errno_or_fenv_is_observed():

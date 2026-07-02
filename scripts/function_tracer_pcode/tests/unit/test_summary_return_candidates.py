@@ -2,13 +2,25 @@
 
 from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.analysis.summary_returns import accept_summary_return_candidates
+from scripts.function_tracer_pcode.analysis.summary_returns import (
+    _return_is_exact_seed,
+    accept_summary_return_candidates,
+)
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     get_unknown_reason_definition,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    Condition,
+    DeferredCallRef,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    UnknownValueRef,
+)
 
 
 class _ReasonMappingHarness:
@@ -21,6 +33,59 @@ class _FakeLoopSummaryRuntimeRef:
 
     def stable_key(self):
         return ("counted_loop_summary", self.name, "header", "latch", "exit")
+
+
+class _ResolvedCallRuntimeRef:
+    def stable_key(self):
+        return ("resolved_call", "helper", 0x2000)
+
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _AnalysisKeyNoneResolvedCallRuntimeRef:
+    def analysis_key(self):
+        return None
+
+    def stable_key(self):
+        return ("resolved_call", "helper", 0x2000)
+
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _MarkerOnlyResolvedCallRuntimeRef:
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _PlaceholderResolvedCallRuntimeRef:
+    def stable_key(self):
+        return ("opaque", "resolved_call")
+
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _StringKeyResolvedCallRuntimeRef:
+    def stable_key(self):
+        return "resolved_call"
+
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _EmptyTupleKeyResolvedCallRuntimeRef:
+    def stable_key(self):
+        return ()
+
+    def is_resolved_call(self) -> bool:
+        return True
+
+
+class _UnresolvedCallRuntimeRef:
+    def is_unresolved_call(self) -> bool:
+        return True
 
 
 _SUMMARY_SOURCE_KEY = (
@@ -252,6 +317,247 @@ def _analysis_with_exact_returns(effect_summary=None) -> FunctionReturnAnalysis:
         effect_summary=effect_summary,
         binary_id="barthe2big-test-binary",
     )
+
+
+def test_unresolved_exact_return_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(ExpressionType.UNKNOWN, name="unresolved_return", size=4),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_cyclic_exact_return_expression_is_not_used_as_summary_seed():
+    phi = Expression.phi([])
+    phi.value.append((None, phi))
+    ret = ReturnInfo(address="0x1000", value=phi, return_kind="exact")
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_resolved_call_exact_return_can_remain_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="resolved_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=CallTargetRef.from_name("resolved_helper", entry_offset=0x2000),
+        ),
+        return_kind="exact",
+    )
+
+    assert _return_is_exact_seed(ret)
+
+
+def test_call_without_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression.call("maybe_unresolved_helper", [Expression.parameter("x", 0, size=4)]),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_unknown_call_target_exact_return_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="unknown_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=CallTargetRef.unknown("unknown_helper"),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_name_only_call_target_exact_return_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="name_only_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=CallTargetRef.from_name("name_only_helper"),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_external_call_target_with_library_can_remain_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="external_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=CallTargetRef.from_name("external_helper", is_external=True, library_name="libhelper"),
+        ),
+        return_kind="exact",
+    )
+
+    assert _return_is_exact_seed(ret)
+
+
+def test_external_call_target_without_library_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="external_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=CallTargetRef.from_name("external_helper", is_external=True),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_custom_resolved_call_runtime_ref_can_remain_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="resolved_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_ResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert _return_is_exact_seed(ret)
+
+
+def test_analysis_key_none_resolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="analysis_key_none_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_AnalysisKeyNoneResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_marker_only_resolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="marker_only_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_MarkerOnlyResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_placeholder_resolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="placeholder_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_PlaceholderResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_string_key_resolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="string_key_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_StringKeyResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_empty_tuple_key_resolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="empty_tuple_key_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_EmptyTupleKeyResolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_custom_unresolved_call_runtime_ref_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="unresolved_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=_UnresolvedCallRuntimeRef(),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_deferred_call_exact_return_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="deferred_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=UnknownValueRef.deferred_call(placeholder_name="deferred_helper"),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
+
+
+def test_deferred_call_ref_exact_return_is_not_used_as_summary_seed():
+    ret = ReturnInfo(
+        address="0x1000",
+        value=Expression(
+            ExpressionType.CALL,
+            name="deferred_helper",
+            operands=[Expression.parameter("x", 0, size=4)],
+            runtime_ref=DeferredCallRef(
+                target_ref=CallTargetRef.from_name("deferred_helper"),
+                sequence=1,
+            ),
+        ),
+        return_kind="exact",
+    )
+
+    assert not _return_is_exact_seed(ret)
 
 
 def _empty_effect_summary() -> EffectSummary:

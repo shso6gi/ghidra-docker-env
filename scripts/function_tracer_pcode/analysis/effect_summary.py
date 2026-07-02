@@ -299,7 +299,7 @@ class CallArgumentEvidence:
     def target_matches(self, target_ref: Optional[CallTargetRef]) -> bool:
         if not _call_target_ref_is_resolved(self.target_ref) or not _call_target_ref_is_resolved(target_ref):
             return False
-        return self.target_ref.stable_key() == target_ref.stable_key()
+        return _call_target_ref_analysis_key(self.target_ref) == _call_target_ref_analysis_key(target_ref)
 
 
 @dataclass(frozen=True)
@@ -1676,22 +1676,32 @@ def _call_evidence_callee_param_identities(
 
 
 def _call_target_ref_is_resolved(target_ref: Optional[CallTargetRef]) -> bool:
+    return _call_target_ref_analysis_key(target_ref) is not None
+
+
+def _call_target_ref_analysis_key(target_ref: Optional[CallTargetRef]) -> Optional[Tuple[object, ...]]:
     if target_ref is None:
-        return False
+        return None
     is_unknown = getattr(target_ref, "is_unknown", None)
     if callable(is_unknown):
         try:
             if is_unknown():
-                return False
+                return None
         except Exception:
-            return False
+            return None
+    analysis_key = getattr(target_ref, "analysis_key", None)
+    if callable(analysis_key):
+        try:
+            return analysis_key()
+        except Exception:
+            return None
     stable_key = getattr(target_ref, "stable_key", None)
     if not callable(stable_key):
-        return False
+        return None
     try:
-        return stable_key() is not None
+        return stable_key()
     except Exception:
-        return False
+        return None
 
 
 def _callee_param_identities_are_object_proven(

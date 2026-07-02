@@ -6,7 +6,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from ..model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo, SummaryReturnCandidate
+from ..model import (
+    Condition,
+    CallTargetRef,
+    DeferredCallRef,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    SummaryReturnCandidate,
+    UnknownValueRef,
+)
 from ..model import ExpressionType
 from ..model.structural import key_contains_placeholder
 from .condition.normalizer import ConditionNormalizer
@@ -193,7 +202,117 @@ def _return_has_summary_provenance(ret: ReturnInfo) -> bool:
 
 
 def _return_is_exact_seed(ret: ReturnInfo) -> bool:
-    return str(getattr(ret, "return_kind", "exact") or "exact") == "exact"
+    if str(getattr(ret, "return_kind", "exact") or "exact") != "exact":
+        return False
+    return not _expression_contains_unresolved_value(getattr(ret, "value", None))
+
+
+def _expression_contains_unresolved_value(
+    expr: Optional[Expression],
+    _active_stack: Optional[set[int]] = None,
+) -> bool:
+    if expr is None:
+        return True
+    active_stack = _active_stack if _active_stack is not None else set()
+    expr_id = id(expr)
+    if expr_id in active_stack:
+        return True
+    active_stack.add(expr_id)
+    try:
+        return _expression_contains_unresolved_value_inner(expr, active_stack)
+    finally:
+        active_stack.discard(expr_id)
+
+
+def _expression_contains_unresolved_value_inner(
+    expr: Expression,
+    active_stack: set[int],
+) -> bool:
+    expr_type = getattr(expr, "expr_type", None)
+    if expr_type == ExpressionType.UNKNOWN:
+        return True
+    if expr_type == ExpressionType.CALL and _call_expression_is_unresolved(expr):
+        return True
+    for operand in getattr(expr, "operands", ()) or ():
+        if _expression_contains_unresolved_value(operand, active_stack):
+            return True
+    if expr_type == ExpressionType.PHI:
+        for cond, value in getattr(expr, "value", ()) or ():
+            cond_expr = getattr(cond, "expression", None) if cond is not None else None
+            if cond_expr is not None and _expression_contains_unresolved_value(cond_expr, active_stack):
+                return True
+            if _expression_contains_unresolved_value(value, active_stack):
+                return True
+    return False
+
+
+def _call_expression_is_unresolved(expr: Expression) -> bool:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if runtime_ref is None:
+        return True
+    if isinstance(runtime_ref, (UnknownValueRef, DeferredCallRef)):
+        return True
+    if isinstance(runtime_ref, CallTargetRef):
+        return not _call_target_ref_is_resolved(runtime_ref)
+    unresolved = _call_resolution_flag(runtime_ref, "is_unresolved_call")
+    if unresolved is True:
+        return True
+    resolved = _call_resolution_flag(runtime_ref, "is_resolved_call")
+    if resolved is True and _runtime_ref_has_stable_call_identity(runtime_ref):
+        return False
+    return True
+
+
+def _call_target_ref_is_resolved(ref: CallTargetRef) -> bool:
+    if ref.is_unknown():
+        return False
+    if ref.is_code_address():
+        return getattr(ref, "address_offset", None) is not None
+    if ref.is_function():
+        if getattr(ref, "entry_offset", None) is not None:
+            return True
+        if getattr(ref, "is_external", None) is True:
+            return bool(getattr(ref, "function_name", None) and getattr(ref, "library_name", None))
+        return False
+    return False
+
+
+def _runtime_ref_has_stable_call_identity(runtime_ref: Any) -> bool:
+    analysis_key = getattr(runtime_ref, "analysis_key", None)
+    if callable(analysis_key):
+        try:
+            key = analysis_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return False
+        return _runtime_ref_key_is_stable_call_identity(key)
+
+    stable_key = getattr(runtime_ref, "stable_key", None)
+    if not callable(stable_key):
+        return False
+    try:
+        key = stable_key()
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return False
+    return _runtime_ref_key_is_stable_call_identity(key)
+
+
+def _runtime_ref_key_is_stable_call_identity(key: Any) -> bool:
+    if not isinstance(key, tuple) or not key:
+        return False
+    return not key_contains_placeholder(key)
+
+
+def _call_resolution_flag(runtime_ref: Any, name: str) -> Optional[bool]:
+    marker = getattr(runtime_ref, name, None)
+    if marker is None:
+        return None
+    try:
+        value = marker() if callable(marker) else marker
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _validate_candidate(

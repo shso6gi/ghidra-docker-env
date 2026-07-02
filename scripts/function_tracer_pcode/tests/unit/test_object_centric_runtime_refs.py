@@ -264,14 +264,11 @@ def test_unknown_value_ref_phi_circular_keeps_pcode_origin():
         "phi_circular",
         None,
         None,
-    )
-    assert ref.diagnostic_key() == (
-        "opaque_unknown",
-        "phi_circular",
-        None,
-        None,
         "multiequal_pcode_op",
         ("stable", pcode_ref.stable_key()),
+    )
+    assert ref.diagnostic_key() == ref.stable_key() + (
+        ("diagnostic_origin", ("stable", pcode_ref.stable_key())),
     )
     assert ref.to_dict()["origin_kind"] == "multiequal_pcode_op"
     assert ref.to_dict()["origin_ref"]["kind"] == "pcode_op"
@@ -306,6 +303,35 @@ def test_pcode_op_ref_full_key_uses_seq_time_and_excludes_program_uid():
     assert ref.stable_key() == same_import_ref.stable_key()
     assert ref.stable_key() != moved_time_ref.stable_key()
     assert ref.to_dict()["program_uid"] == 12345
+
+
+def test_external_call_target_stable_key_marks_unscoped_symbol_without_library():
+    ref = CallTargetRef.from_name("puts", is_external=True)
+    other = CallTargetRef.from_name("printf", is_external=True)
+    scoped = CallTargetRef.from_name("puts", is_external=True, library_name="libc")
+    local_name_only = CallTargetRef.from_name("puts")
+
+    assert ref.stable_key() == ("external_function_unscoped", "puts", None)
+    assert ref.analysis_key() is None
+    assert scoped.stable_key() == ("external_function", "libc", "puts", None)
+    assert scoped.analysis_key() == scoped.stable_key()
+    assert ref.stable_key() != other.stable_key()
+    assert ref.stable_key() != scoped.stable_key()
+    assert ref.stable_key() != local_name_only.stable_key()
+
+
+def test_local_name_only_call_target_stable_key_distinguishes_symbol_but_not_analysis_key():
+    first = CallTargetRef.from_name("a")
+    second = CallTargetRef.from_name("b")
+    scoped_name = CallTargetRef.from_name("a", program_id=123)
+
+    assert first.stable_key() == ("function_name_only", None, "a")
+    assert second.stable_key() == ("function_name_only", None, "b")
+    assert scoped_name.stable_key() == ("function_name_only", 123, "a")
+    assert first.stable_key() != second.stable_key()
+    assert first.stable_key() != scoped_name.stable_key()
+    assert first.analysis_key() is None
+    assert second.analysis_key() is None
 
 
 def test_pcode_op_ref_derives_local_ordinal_from_equivalent_parent_wrapper():

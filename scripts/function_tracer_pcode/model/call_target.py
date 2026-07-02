@@ -220,6 +220,17 @@ class CallTargetRef:
         if self.is_function():
             if self.entry_offset is not None:
                 return ("function", self.program_id, self.entry_offset)
+            if self.is_external is True and self.function_name:
+                if not self.library_name:
+                    return ("external_function_unscoped", self.function_name, self.program_id)
+                return (
+                    "external_function",
+                    self.library_name,
+                    self.function_name,
+                    self.program_id,
+                )
+            if self.function_name:
+                return ("function_name_only", self.program_id, self.function_name)
             return ("function", self.program_id, None)
         if self.is_code_address():
             return ("code_address", self.program_id, self.address_offset)
@@ -227,6 +238,15 @@ class CallTargetRef:
 
     def analysis_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_unknown():
+            return None
+        if self.is_code_address() and self.address_offset is None:
+            return None
+        if (
+            self.is_function()
+            and self.entry_offset is None
+        ):
+            if self.is_external is True and self.function_name and self.library_name:
+                return self.stable_key()
             return None
         return self.stable_key()
 

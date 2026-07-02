@@ -3771,11 +3771,11 @@ def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_b
     pcode_ref = PcodeOpRef(address_offset=0x1008, seq_time=1, seq_order=0, mnemonic="CALL")
     deferred = DeferredCallInfo(
         placeholder_name="call_out_of_scope:callee#0",
-        target_ref=CallTargetRef.from_name("callee"),
+        target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
         arguments=[Expression.parameter("existing_arg", 0, size=4)],
         deferred_call_ref=DeferredCallRef(
             pcode_op_ref=pcode_ref,
-            target_ref=CallTargetRef.from_name("callee"),
+            target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
             sequence=0,
         ),
     )
@@ -3792,7 +3792,7 @@ def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_b
         call_argument_evidence={
             pcode_ref.stable_key(): CallArgumentEvidence(
                 pcode_op_ref=pcode_ref,
-                target_ref=CallTargetRef.from_name("callee"),
+                target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
                 callee_param_identities=(("parameter", 0), ("parameter", 1)),
                 arguments=(Expression.parameter("param_1", 0, size=4),),
                 sources=("explicit_input",),
@@ -3864,10 +3864,10 @@ def test_complete_call_argument_evidence_is_applied_to_deferred_call_and_marked_
     pcode_ref = PcodeOpRef(address_offset=0x1018, seq_time=1, seq_order=0, mnemonic="CALL")
     deferred = DeferredCallInfo(
         placeholder_name="call_out_of_scope:callee#0",
-        target_ref=CallTargetRef.from_name("callee"),
+        target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
         deferred_call_ref=DeferredCallRef(
             pcode_op_ref=pcode_ref,
-            target_ref=CallTargetRef.from_name("callee"),
+            target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
             sequence=0,
         ),
     )
@@ -3884,7 +3884,7 @@ def test_complete_call_argument_evidence_is_applied_to_deferred_call_and_marked_
         call_argument_evidence={
             pcode_ref.stable_key(): CallArgumentEvidence(
                 pcode_op_ref=pcode_ref,
-                target_ref=CallTargetRef.from_name("callee"),
+                target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
                 callee_param_identities=(("parameter", 0),),
                 arguments=(Expression.parameter("param_1", 0, size=4),),
                 sources=("explicit_input",),
@@ -3930,10 +3930,10 @@ def test_recoverable_partial_call_argument_evidence_state_is_not_decisive():
     pcode_ref = PcodeOpRef(address_offset=0x1010, seq_time=1, seq_order=0, mnemonic="CALL")
     deferred = DeferredCallInfo(
         placeholder_name="call_out_of_scope:callee#0",
-        target_ref=CallTargetRef.from_name("callee"),
+        target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
         deferred_call_ref=DeferredCallRef(
             pcode_op_ref=pcode_ref,
-            target_ref=CallTargetRef.from_name("callee"),
+            target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
             sequence=0,
         ),
     )
@@ -3950,7 +3950,7 @@ def test_recoverable_partial_call_argument_evidence_state_is_not_decisive():
         call_argument_evidence={
             pcode_ref.stable_key(): CallArgumentEvidence(
                 pcode_op_ref=pcode_ref,
-                target_ref=CallTargetRef.from_name("callee"),
+                target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
                 callee_param_identities=(("parameter", 0), ("parameter", 1)),
                 arguments=(Expression.parameter("param_1", 0, size=4),),
                 sources=("explicit_input",),
@@ -4045,7 +4045,7 @@ def test_tri_state_call_argument_evidence_merge_preserves_usable_evidence():
     arg1 = Expression.parameter("param_2", 1, size=4)
     complete = CallArgumentEvidence(
         pcode_op_ref=pcode_ref,
-        target_ref=CallTargetRef.from_name("callee"),
+        target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
         callee_param_identities=(("parameter", 0), ("parameter", 1)),
         arguments=(arg0, arg1),
         sources=("explicit_input", "explicit_input"),
@@ -4054,7 +4054,7 @@ def test_tri_state_call_argument_evidence_merge_preserves_usable_evidence():
     )
     recoverable_partial = CallArgumentEvidence(
         pcode_op_ref=pcode_ref,
-        target_ref=CallTargetRef.from_name("callee"),
+        target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
         callee_param_identities=(("parameter", 0), ("parameter", 1)),
         arguments=(arg0,),
         sources=("explicit_input",),
@@ -4090,7 +4090,7 @@ def test_zero_argument_call_evidence_is_usable_for_true_no_arg_callee():
         evidence_map,
         FakeTracer(pcode_ref),
         object(),
-        CallTargetRef.from_name("callee"),
+        CallTargetRef.from_name("callee", entry_offset=0x2000),
         [],
         [],
         [],
@@ -4379,6 +4379,33 @@ def test_call_argument_evidence_target_match_requires_resolved_targets():
     assert evidence.is_usable() is False
     assert evidence.target_matches(CallTargetRef.from_name("callee")) is False
 
+    unscoped_external = CallTargetRef.from_name("puts", is_external=True)
+    scoped_external = CallTargetRef.from_name("puts", is_external=True, library_name="libc")
+    scoped_evidence = CallArgumentEvidence(
+        pcode_op_ref=PcodeOpRef(address_offset=0x1224, seq_time=6, seq_order=0, mnemonic="CALL"),
+        target_ref=scoped_external,
+        callee_param_identities=((("parameter", 0),),),
+        arguments=(Expression.parameter("param_1", 0, size=4),),
+        sources=("explicit_input",),
+        coverage_complete=True,
+    )
+
+    assert scoped_evidence.is_usable() is True
+    assert scoped_evidence.target_matches(scoped_external) is True
+    assert scoped_evidence.target_matches(unscoped_external) is False
+
+    local_name_only_evidence = CallArgumentEvidence(
+        pcode_op_ref=PcodeOpRef(address_offset=0x1228, seq_time=7, seq_order=0, mnemonic="CALL"),
+        target_ref=CallTargetRef.from_name("a"),
+        callee_param_identities=((("parameter", 0),),),
+        arguments=(Expression.parameter("param_1", 0, size=4),),
+        sources=("explicit_input",),
+        coverage_complete=True,
+    )
+
+    assert local_name_only_evidence.is_usable() is False
+    assert local_name_only_evidence.target_matches(CallTargetRef.from_name("b")) is False
+
 
 def test_storage_location_base_matches_descriptor_storage_identity_key():
     register_base = LocationBaseRef.storage(
@@ -4474,7 +4501,7 @@ def test_missing_callee_parameter_identity_keeps_call_evidence_incomplete():
         evidence_map,
         FakeTracer(pcode_ref),
         object(),
-        CallTargetRef.from_name("callee"),
+        CallTargetRef.from_name("callee", entry_offset=0x2000),
         [{"name": "param_1"}],
         [Expression.parameter("param_1", 0, size=4)],
         [],
