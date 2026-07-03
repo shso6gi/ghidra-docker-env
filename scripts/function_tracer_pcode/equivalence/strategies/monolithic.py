@@ -3,7 +3,7 @@
 
 import time
 
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Mapping, Set
 
 from ...model import FunctionReturnAnalysis
 from ...smt import ParallelResult
@@ -519,13 +519,13 @@ class MonolithicStrategy(CheckStrategy):
         if not required_wide_members:
             return None
 
-        completed_targets = self._completed_return_width_bridge_targets_by_proof_kind(
+        completed_targets = self._completed_return_width_bridge_targets_by_slot(
             analysis1,
             analysis2,
         )
         covered_wide_members: Set[tuple] = set()
-        for target, proof_kinds in completed_targets.items():
-            if proof_kinds != {"abi_relation_proof", "high_bit_proof"}:
+        for target, slot_evidence in completed_targets.items():
+            if set(slot_evidence) != {"abi_relation", "high_bit_relation"}:
                 continue
             if self._return_width_bridge_target_widths(target) != expected_widths:
                 continue
@@ -550,6 +550,24 @@ class MonolithicStrategy(CheckStrategy):
             )
             if member in required_wide_members:
                 covered_wide_members.add(member)
+            high_bit_evidence = slot_evidence.get("high_bit_relation")
+            if (
+                self._evidence_text(high_bit_evidence, "discharge_proof_kind")
+                == "semantic_return_width_narrowing_proof"
+            ):
+                profile = self._evidence_get(
+                    self._evidence_get(high_bit_evidence, "proof_content") or {},
+                    "wide_surface_profile",
+                )
+                semantic_members = self._normalize_nested_tuple(
+                    self._evidence_get(profile or {}, "required_wide_members")
+                )
+                if isinstance(semantic_members, tuple):
+                    covered_wide_members.update(
+                        member
+                        for member in semantic_members
+                        if member in required_wide_members
+                    )
 
         if required_wide_members.issubset(covered_wide_members):
             return narrow_bits
@@ -571,25 +589,31 @@ class MonolithicStrategy(CheckStrategy):
                 members.add(self._normalize_nested_tuple(member))
         return members
 
-    def _completed_return_width_bridge_targets_by_proof_kind(
+    def _completed_return_width_bridge_targets_by_slot(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
-    ) -> Dict[tuple, Set[str]]:
-        completed: Dict[tuple, Set[str]] = {}
+    ) -> Dict[tuple, Dict[str, Mapping[str, object]]]:
+        completed: Dict[tuple, Dict[str, Mapping[str, object]]] = {}
         for evidence in self._completed_recovery_proof_evidence(analysis1, analysis2):
-            if self._return_width_bridge_proof_id_from_evidence(evidence) is None:
+            if self._return_width_bridge_slot_id_from_evidence(evidence) is None:
+                continue
+            if not self._return_width_bridge_slot_evidence_matches_current_analyses(
+                evidence,
+                analysis1,
+                analysis2,
+            ):
                 continue
             target = self._normalize_nested_tuple(
                 self._evidence_get(evidence, "object_target_key")
             )
             if not self._return_width_bridge_target_is_specific(target):
                 continue
-            proof_kind = self._evidence_text(evidence, "proof_kind") or self._evidence_text(
+            slot_stage = self._evidence_text(evidence, "slot_stage") or self._evidence_text(
                 evidence,
-                "recovery_proof_kind",
+                "proof_stage",
             )
-            if proof_kind not in {"abi_relation_proof", "high_bit_proof"}:
+            if slot_stage not in {"abi_relation", "high_bit_relation"}:
                 continue
-            completed.setdefault(target, set()).add(proof_kind)
+            completed.setdefault(target, {})[slot_stage] = evidence
         return completed

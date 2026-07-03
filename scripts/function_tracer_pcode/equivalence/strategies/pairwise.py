@@ -9811,6 +9811,50 @@ class PairwiseStrategy(CheckStrategy):
         )
         if high_bit_query is None:
             if not self._return_width_bridge_has_summary_parameter_extension_evidence(target):
+                widths = self._return_width_bridge_target_widths(target)
+                wide_param_replace_fn = (
+                    param_replace_fn1
+                    if widths is not None and widths[0] > widths[1]
+                    else param_replace_fn2
+                )
+                if self._record_completed_return_width_bridge_semantic_narrowing_proofs(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                    narrow_width=narrow_width,
+                    base_ctx=base_ctx,
+                    wide_param_replace_fn=wide_param_replace_fn,
+                ) and self._return_width_bridge_proof_is_complete(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                    base_ctx=base_ctx,
+                    wide_param_replace_fn=wide_param_replace_fn,
+                ):
+                    proof_result.last_query = narrow_query
+                    proof_result.pair_stage = "return-width-bridge-narrow-ineq"
+                    self._debug_print(
+                        "  Pair "
+                        f"{pair_id}: return-width bridge completed by semantic return-width narrowing proof"
+                    )
+                    return proof_result
+                if self._record_completed_return_width_bridge_member_narrow_producer_proofs(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                    narrow_width=narrow_width,
+                ) and self._return_width_bridge_proof_is_complete(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                ):
+                    proof_result.last_query = narrow_query
+                    proof_result.pair_stage = "return-width-bridge-narrow-ineq"
+                    self._debug_print(
+                        "  Pair "
+                        f"{pair_id}: return-width bridge completed by target member narrow producer proof"
+                    )
+                    return proof_result
                 self._debug_print(
                     f"  Pair {pair_id} return-width bridge proof skipped: high-bit query unavailable"
                 )

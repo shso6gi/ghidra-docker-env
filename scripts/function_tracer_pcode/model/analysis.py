@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple, Mapping
 
 if TYPE_CHECKING:
     from .condition import Condition
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .signature import SignatureHypothesis, FunctionSignature
 from .signature import (
     get_data_type_display_name,
+    get_declared_type_size_bits,
     is_void_data_type,
     is_unsigned_data_type,
     parameters_without_runtime_objects,
@@ -702,6 +703,7 @@ class FunctionReturnAnalysis:
     deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = field(default_factory=dict)
     effect_summary: Optional["EffectSummary"] = None
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    return_type_provenance: Dict[str, Any] = field(default_factory=dict)
     comparison_surface: Optional[ComparisonSurface] = None
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
     program_is_big_endian: Optional[bool] = None
@@ -723,7 +725,32 @@ class FunctionReturnAnalysis:
             )
         if self.binary_id is None:
             self.binary_id = self._infer_binary_id_from_object_evidence()
+        if not self.return_type_provenance:
+            self.return_type_provenance = self._build_return_type_provenance()
         self.normalize_deferred_calls()
+
+    def _build_return_type_provenance(self) -> Dict[str, Any]:
+        return_type = get_data_type_display_name(self.return_type_obj, self.return_type)
+        normalized_return_type = str(return_type or "").strip().lower()
+        return_type_source = (
+            "undefined_decompiler_type"
+            if normalized_return_type.startswith("undefined")
+            else "decompiler_return_type"
+        )
+        return {
+            "object_derived": True,
+            "return_type": return_type,
+            "return_type_source": return_type_source,
+            "signature_hypothesis_phase": None,
+            "resolved_return_override_source": None,
+            "counterpart_return_type": None,
+            "source_declared_return_type_known": False,
+            "source_declared_return_type_width": None,
+            "declared_return_type_width": get_declared_type_size_bits(
+                self.return_type_obj,
+                return_type,
+            ),
+        }
 
     def _infer_binary_id_from_object_evidence(self) -> Optional[str]:
         for ret in self.returns or ():
@@ -813,6 +840,10 @@ class FunctionReturnAnalysis:
             result["signedness"] = self.signedness_result.to_dict()
         if self.signature_hypotheses:
             result["signature_hypotheses"] = list(self.signature_hypotheses)
+        if self.return_type_provenance:
+            result["return_type_provenance"] = _jsonable_nested_tuple(
+                self.return_type_provenance
+            )
         if self.comparison_surface is not None:
             result["comparison_surface"] = self.comparison_surface.to_dict()
         
@@ -1074,7 +1105,8 @@ class FunctionReturnAnalysis:
             updated_notes.append(description)
 
         updated_hypotheses = list(self.signature_hypotheses)
-        updated_hypotheses.append(hypothesis.to_dict())
+        hypothesis_payload = hypothesis.to_dict()
+        updated_hypotheses.append(hypothesis_payload)
 
         updated_returns = list(self.returns or [])
         updated_return_type_name = str(updated_signature.return_type or "").strip().lower()
@@ -1122,6 +1154,13 @@ class FunctionReturnAnalysis:
             if returns_changed:
                 updated_returns = rewritten_returns
 
+        updated_return_type_provenance = self._return_type_provenance_with_hypothesis(
+            hypothesis_payload,
+            updated_signature.return_type,
+            updated_signature.return_type_obj,
+            return_changed=return_changed,
+        )
+
         return replace(
             self,
             return_type=updated_signature.return_type,
@@ -1131,7 +1170,54 @@ class FunctionReturnAnalysis:
             comparison_surface=None if return_changed else self.comparison_surface,
             analysis_notes=updated_notes,
             signature_hypotheses=updated_hypotheses,
+            return_type_provenance=updated_return_type_provenance,
         )
+
+    def _return_type_provenance_with_hypothesis(
+        self,
+        hypothesis_payload: Mapping[str, Any],
+        return_type: Any,
+        return_type_obj: Any,
+        *,
+        return_changed: bool,
+    ) -> Dict[str, Any]:
+        provenance = dict(self.return_type_provenance or self._build_return_type_provenance())
+        provenance["object_derived"] = True
+        provenance["return_type"] = get_data_type_display_name(return_type_obj, return_type)
+        provenance["declared_return_type_width"] = get_declared_type_size_bits(
+            return_type_obj,
+            provenance.get("return_type"),
+        )
+        if not return_changed:
+            return provenance
+        phase = hypothesis_payload.get("phase")
+        resolved = hypothesis_payload.get("resolved_return_override")
+        resolved_source = resolved.get("source") if isinstance(resolved, Mapping) else None
+        evidence = hypothesis_payload.get("evidence")
+        if not isinstance(evidence, Mapping):
+            evidence = {}
+        provenance["signature_hypothesis_phase"] = phase
+        provenance["resolved_return_override_source"] = resolved_source
+        if resolved_source:
+            provenance["return_type_source"] = resolved_source
+        elif phase:
+            provenance["return_type_source"] = phase
+        if phase == "P0_SOURCE_DECLARATION":
+            declared_name = evidence.get("declared_return_type") or hypothesis_payload.get(
+                "return_type_override"
+            )
+            provenance["source_declared_return_type_known"] = True
+            provenance["source_declared_return_type_width"] = evidence.get(
+                "declared_return_type_width"
+            )
+            if provenance["source_declared_return_type_width"] is None:
+                provenance["source_declared_return_type_width"] = get_declared_type_size_bits(
+                    None,
+                    declared_name,
+                )
+        if "counterpart_return_type" in evidence:
+            provenance["counterpart_return_type"] = evidence.get("counterpart_return_type")
+        return provenance
 
     def get_decisive_sat_unsafety_reasons(self) -> List[str]:
         """

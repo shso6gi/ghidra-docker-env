@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """解析と再解析のヘルパー"""
 
+from dataclasses import replace
 from typing import Optional, Tuple
 import time
 
 from ..model import FunctionReturnAnalysis, FunctionSignature, SignatureHypothesis
+from ..model.signature import get_declared_type_size_bits
 from .phases.handler import PhaseContext, PhaseResult
 from .result import EquivalenceResult
 from .result_factory import create_context_error_result, create_reanalysis_error
@@ -117,8 +119,19 @@ def _apply_declared_return_type_hypothesis(
     declared = str(declared_return_type or "").strip()
     if not declared:
         return analysis
+    declared_width = get_declared_type_size_bits(None, declared, program=program)
     if declared != "void":
-        return analysis
+        provenance = dict(getattr(analysis, "return_type_provenance", {}) or {})
+        provenance.update(
+            {
+                "object_derived": True,
+                "source_declared_return_type_known": True,
+                "source_declared_return_type_width": declared_width,
+                "source_declared_return_type": declared,
+                "source_declared_return_type_source": "adjacent_c_declaration",
+            }
+        )
+        return replace(analysis, return_type_provenance=provenance)
 
     type_fixer = TypeFixer(
         program,
@@ -137,6 +150,7 @@ def _apply_declared_return_type_hypothesis(
             "binary_name": binary_name,
             "function_name": analysis.function_name,
             "declared_return_type": declared,
+            "declared_return_type_width": declared_width,
         },
     )
     if not return_changed:

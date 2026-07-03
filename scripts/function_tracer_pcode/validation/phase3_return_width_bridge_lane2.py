@@ -82,6 +82,50 @@ RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS: Mapping[Tuple[str, str], Mapping[str, A
         ),
     },
 }
+RETURN_WIDTH_BRIDGE_ACCEPTED_DISCHARGES: Mapping[str, Mapping[str, Any]] = {
+    "abi_relation": {
+        "canonical_action": "abi_relation_proof",
+        "evidence_kind": "calling_convention",
+        "accepted_discharge_proof_kinds": frozenset({"abi_relation_proof"}),
+    },
+    "high_bit_relation": {
+        "canonical_action": "high_bit_proof",
+        "evidence_kind": "producer_width",
+        "accepted_discharge_proof_kinds": frozenset(
+            {
+                "high_bit_proof",
+                "semantic_return_width_narrowing_proof",
+                "return_member_narrow_producer_high_bit_proof",
+            }
+        ),
+    },
+}
+RETURN_WIDTH_BRIDGE_DISCHARGE_REQUIREMENTS: Mapping[Tuple[str, str], Mapping[str, Any]] = {
+    ("abi_relation_proof", "abi_relation"): RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS[
+        ("abi_relation_proof", "abi_relation")
+    ],
+    ("high_bit_proof", "high_bit_relation"): RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS[
+        ("high_bit_proof", "high_bit_relation")
+    ],
+    ("semantic_return_width_narrowing_proof", "high_bit_relation"): {
+        "status": "planned",
+        "evidence_kind": "producer_width",
+        "required_evidence": (
+            "wide_return_surface",
+            "return_type_provenance",
+            "partition_member_coverage",
+        ),
+    },
+    ("return_member_narrow_producer_high_bit_proof", "high_bit_relation"): {
+        "status": "planned",
+        "evidence_kind": "producer_width",
+        "required_evidence": (
+            "target_return_member",
+            "producer_width",
+            "return_type_provenance",
+        ),
+    },
+}
 ABI_CALLING_CONVENTION_RELATIONS = frozenset({"same_return_abi_family"})
 ABI_RETURN_STORAGE_RELATIONS = frozenset({"abi_related_return_storage"})
 HIGH_BIT_EXTENSION_RELATIONS = frozenset({"compatible_under_narrow_width"})
@@ -99,10 +143,18 @@ COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE = "return_width_bridge_narrow_and_hig
 COMPLETED_RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_PROOF_SOURCE = (
     "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension"
 )
+COMPLETED_RETURN_WIDTH_BRIDGE_SEMANTIC_NARROWING_PROOF_SOURCE = (
+    "return_width_bridge_narrow_query_unsat_and_semantic_return_width_narrowing"
+)
+COMPLETED_RETURN_WIDTH_BRIDGE_MEMBER_NARROW_PRODUCER_PROOF_SOURCE = (
+    "return_width_bridge_narrow_query_unsat_and_return_member_narrow_producer"
+)
 COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCES = frozenset(
     {
         COMPLETED_RETURN_WIDTH_BRIDGE_PROOF_SOURCE,
         COMPLETED_RETURN_WIDTH_BRIDGE_SUMMARY_PARAMETER_PROOF_SOURCE,
+        COMPLETED_RETURN_WIDTH_BRIDGE_SEMANTIC_NARROWING_PROOF_SOURCE,
+        COMPLETED_RETURN_WIDTH_BRIDGE_MEMBER_NARROW_PRODUCER_PROOF_SOURCE,
     }
 )
 RETURN_WIDTH_BRIDGE_HIGH_BIT_QUERY_STAGE = "return-width-bridge-high-bit-extension"
@@ -1268,20 +1320,35 @@ def _completed_evidence_matches_action(
         or evidence.get("recovery_proof_kind")
         or evidence.get("proof_kind")
     )
+    slot_stage = str(
+        evidence_summary.get("slot_stage")
+        or evidence.get("slot_stage")
+        or evidence_summary.get("proof_stage")
+        or evidence.get("proof_stage")
+        or MISSING_SENTINEL
+    )
+    discharge_kind = str(
+        evidence_summary.get("discharge_proof_kind")
+        or evidence.get("discharge_proof_kind")
+        or proof_kind
+        or MISSING_SENTINEL
+    )
     object_target_key = _normalize_nested_tuple(
         evidence_summary.get("object_target_key") or evidence.get("object_target_key")
     )
     if not _object_target_key_is_specific_width_bridge(object_target_key):
         return False
+    slot_info = RETURN_WIDTH_BRIDGE_ACCEPTED_DISCHARGES.get(slot_stage)
+    if slot_info is None:
+        return False
     if (
         str(evidence_summary.get("reason_id") or evidence.get("reason_id") or MISSING_SENTINEL)
         != str(action.get("reason_id") or MISSING_SENTINEL)
-        or str(evidence_summary.get("proof_stage") or evidence.get("proof_stage") or MISSING_SENTINEL)
-        != str(action.get("proof_stage") or MISSING_SENTINEL)
-        or str(proof_kind or MISSING_SENTINEL)
-        != str(action.get("proof_kind") or MISSING_SENTINEL)
+        or slot_stage != str(action.get("proof_stage") or MISSING_SENTINEL)
+        or str(action.get("proof_kind") or MISSING_SENTINEL) != str(slot_info["canonical_action"])
+        or discharge_kind not in slot_info["accepted_discharge_proof_kinds"]
         or str(evidence_summary.get("evidence_kind") or evidence.get("evidence_kind") or MISSING_SENTINEL)
-        != str(action.get("evidence_kind") or MISSING_SENTINEL)
+        != str(slot_info["evidence_kind"])
     ):
         return False
     if _completed_evidence_has_active_blocker(evidence):
@@ -1294,9 +1361,54 @@ def _completed_evidence_matches_action(
     ):
         return False
     expected_id = _expected_proof_obligation_id(action, object_target_key=object_target_key)
+    expected_slot_id = _expected_slot_obligation_id(action, object_target_key=object_target_key)
     provided_id = _normalize_nested_tuple(
         evidence_summary.get("proof_obligation_id") or evidence.get("proof_obligation_id")
     )
+    provided_slot_id = _normalize_nested_tuple(
+        evidence_summary.get("slot_obligation_id") or evidence.get("slot_obligation_id")
+    )
+    proof_source = str(
+        evidence_summary.get("proof_source")
+        or evidence.get("proof_source")
+        or MISSING_SENTINEL
+    )
+    if discharge_kind == "semantic_return_width_narrowing_proof":
+        provided_discharge_id = _normalize_nested_tuple(
+            evidence_summary.get("discharge_proof_id") or evidence.get("discharge_proof_id")
+        )
+        return (
+            proof_source == COMPLETED_RETURN_WIDTH_BRIDGE_SEMANTIC_NARROWING_PROOF_SOURCE
+            and provided_slot_id == expected_slot_id
+            and provided_id == expected_slot_id
+            and provided_discharge_id
+            == _expected_discharge_proof_id(
+                slot_stage=slot_stage,
+                discharge_proof_kind=discharge_kind,
+                evidence_kind=str(slot_info["evidence_kind"]),
+                object_target_key=object_target_key,
+            )
+            and object_target_key == _normalize_nested_tuple(action.get("object_target_key"))
+            and expected_id == _normalize_nested_tuple(action.get("proof_obligation_id"))
+        )
+    if discharge_kind == "return_member_narrow_producer_high_bit_proof":
+        provided_discharge_id = _normalize_nested_tuple(
+            evidence_summary.get("discharge_proof_id") or evidence.get("discharge_proof_id")
+        )
+        return (
+            proof_source == COMPLETED_RETURN_WIDTH_BRIDGE_MEMBER_NARROW_PRODUCER_PROOF_SOURCE
+            and provided_slot_id == expected_slot_id
+            and provided_id == expected_slot_id
+            and provided_discharge_id
+            == _expected_discharge_proof_id(
+                slot_stage=slot_stage,
+                discharge_proof_kind=discharge_kind,
+                evidence_kind=str(slot_info["evidence_kind"]),
+                object_target_key=object_target_key,
+            )
+            and object_target_key == _normalize_nested_tuple(action.get("object_target_key"))
+            and expected_id == _normalize_nested_tuple(action.get("proof_obligation_id"))
+        )
     return (
         provided_id == expected_id
         and object_target_key == _normalize_nested_tuple(action.get("object_target_key"))
@@ -1310,10 +1422,24 @@ def _completed_evidence_has_required_proof_content(
     action: Mapping[str, Any],
     object_target_key: Any,
 ) -> bool:
-    requirement = RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS.get(
+    slot_stage = str(
+        evidence_summary.get("slot_stage")
+        or evidence.get("slot_stage")
+        or action.get("proof_stage")
+        or MISSING_SENTINEL
+    )
+    discharge_kind = str(
+        evidence_summary.get("discharge_proof_kind")
+        or evidence.get("discharge_proof_kind")
+        or evidence_summary.get("proof_kind")
+        or evidence.get("recovery_proof_kind")
+        or evidence.get("proof_kind")
+        or MISSING_SENTINEL
+    )
+    requirement = RETURN_WIDTH_BRIDGE_DISCHARGE_REQUIREMENTS.get(
         (
-            str(action.get("proof_kind") or MISSING_SENTINEL),
-            str(action.get("proof_stage") or MISSING_SENTINEL),
+            discharge_kind,
+            slot_stage,
         )
     )
     if requirement is None:
@@ -1329,7 +1455,7 @@ def _completed_evidence_has_required_proof_content(
     )
     if actual_required != expected_required:
         return False
-    content = _completed_proof_content(evidence_summary, evidence, str(action.get("proof_kind")))
+    content = _completed_proof_content(evidence_summary, evidence, discharge_kind)
     if not isinstance(content, Mapping):
         return False
     if content.get("object_derived") is not True or content.get("status") != "proven":
@@ -1338,9 +1464,9 @@ def _completed_evidence_has_required_proof_content(
         return False
     if _nested_completed_proof_has_active_blocker(content):
         return False
-    if str(action.get("proof_kind") or MISSING_SENTINEL) == "abi_relation_proof":
+    if discharge_kind == "abi_relation_proof":
         return _abi_relation_proof_content_is_specific(content, object_target_key)
-    if str(action.get("proof_kind") or MISSING_SENTINEL) == "high_bit_proof":
+    if discharge_kind == "high_bit_proof":
         proof_source = str(
             evidence_summary.get("proof_source")
             or evidence.get("proof_source")
@@ -1351,6 +1477,24 @@ def _completed_evidence_has_required_proof_content(
             object_target_key,
             proof_source=proof_source,
         )
+    if discharge_kind == "semantic_return_width_narrowing_proof":
+        proof_source = str(
+            evidence_summary.get("proof_source")
+            or evidence.get("proof_source")
+            or MISSING_SENTINEL
+        )
+        if proof_source != COMPLETED_RETURN_WIDTH_BRIDGE_SEMANTIC_NARROWING_PROOF_SOURCE:
+            return False
+        return _semantic_narrowing_proof_content_is_specific(content, object_target_key)
+    if discharge_kind == "return_member_narrow_producer_high_bit_proof":
+        proof_source = str(
+            evidence_summary.get("proof_source")
+            or evidence.get("proof_source")
+            or MISSING_SENTINEL
+        )
+        if proof_source != COMPLETED_RETURN_WIDTH_BRIDGE_MEMBER_NARROW_PRODUCER_PROOF_SOURCE:
+            return False
+        return _member_narrow_producer_proof_content_is_specific(content, object_target_key)
     return False
 
 
@@ -1413,6 +1557,180 @@ def _high_bit_proof_content_is_specific(
             target,
         )
     )
+
+
+def _semantic_narrowing_proof_content_is_specific(
+    content: Mapping[str, Any],
+    object_target_key: Any,
+) -> bool:
+    target = _normalize_nested_tuple(object_target_key)
+    wide_side = _wide_width_side(target)
+    if not isinstance(wide_side, tuple):
+        return False
+    wide_function = _find_tagged_entry(wide_side, "function_ref")
+    wide_storage = _find_tagged_entry(wide_side, "return_storage")
+    wide_member = _find_tagged_entry(wide_side, "return_case_partition_member")
+    semantic_width = content.get("semantic_return_width")
+    profile = content.get("wide_surface_profile")
+    if not (
+        isinstance(content, Mapping)
+        and content.get("object_derived") is True
+        and content.get("status") == "proven"
+        and _normalize_nested_tuple(content.get("object_target_key")) == target
+        and isinstance(semantic_width, Mapping)
+        and isinstance(profile, Mapping)
+    ):
+        return False
+    if not (
+        semantic_width.get("object_derived") is True
+        and semantic_width.get("status") == "proven"
+        and semantic_width.get("relation") == "wide_storage_semantic_surface_is_narrow"
+        and semantic_width.get("proven") is True
+    ):
+        return False
+    if not (
+        profile.get("object_derived") is True
+        and profile.get("status") == "proven"
+        and profile.get("coverage_status") == "total_under_comparison_precondition"
+        and profile.get("unsupported_or_unresolved") is False
+    ):
+        return False
+    try:
+        narrow_width = int(profile.get("narrow_width"))
+        max_producer_width = int(profile.get("max_producer_width"))
+    except (TypeError, ValueError):
+        return False
+    if narrow_width <= 0 or max_producer_width <= 0 or max_producer_width > narrow_width:
+        return False
+    if (
+        _normalize_nested_tuple(profile.get("function_ref")) != _normalize_nested_tuple(wide_function)
+        or _normalize_nested_tuple(profile.get("return_storage")) != _normalize_nested_tuple(wide_storage)
+    ):
+        return False
+    coverage_identity = profile.get("coverage_identity")
+    coverage_identity_digest = profile.get("coverage_identity_digest")
+    if not _coverage_identity_is_specific(coverage_identity, wide_side) or not isinstance(coverage_identity_digest, str):
+        return False
+    expected_coverage_digest = hashlib.sha256(
+        repr(_normalize_nested_tuple(coverage_identity)).encode("utf-8")
+    ).hexdigest()
+    if coverage_identity_digest != expected_coverage_digest:
+        return False
+    required_wide_members = _normalize_nested_tuple(profile.get("required_wide_members"))
+    member_profiles = _normalize_nested_tuple(profile.get("member_profiles"))
+    if not isinstance(required_wide_members, tuple) or required_wide_members == ():
+        return False
+    if _normalize_nested_tuple(wide_member) not in set(required_wide_members):
+        return False
+    expected_partition_digest = hashlib.sha256(
+        repr(_normalize_nested_tuple(required_wide_members)).encode("utf-8")
+    ).hexdigest()
+    if profile.get("partition_member_digest") != expected_partition_digest:
+        return False
+    if not isinstance(member_profiles, tuple) or member_profiles == ():
+        return False
+    if not any(
+        _normalize_nested_tuple(_find_tagged_entry(member_profile, "member_id"))
+        == _normalize_nested_tuple(("member_id", wide_member))
+        for member_profile in member_profiles
+        if isinstance(member_profile, tuple)
+    ):
+        return False
+    type_provenance = profile.get("return_type_provenance")
+    return isinstance(type_provenance, Mapping) and type_provenance.get("narrowing_allowed") is True
+
+
+def _member_narrow_producer_proof_content_is_specific(
+    content: Mapping[str, Any],
+    object_target_key: Any,
+) -> bool:
+    target = _normalize_nested_tuple(object_target_key)
+    wide_side = _wide_width_side(target)
+    if not isinstance(wide_side, tuple):
+        return False
+    wide_function = _find_tagged_entry(wide_side, "function_ref")
+    wide_storage = _find_tagged_entry(wide_side, "return_storage")
+    wide_member = _find_tagged_entry(wide_side, "return_case_partition_member")
+    relation = content.get("member_high_bit_relation")
+    profile = content.get("target_member_profile")
+    if not (
+        isinstance(content, Mapping)
+        and content.get("object_derived") is True
+        and content.get("status") == "proven"
+        and _normalize_nested_tuple(content.get("object_target_key")) == target
+        and isinstance(relation, Mapping)
+        and isinstance(profile, Mapping)
+    ):
+        return False
+    if not (
+        relation.get("object_derived") is True
+        and relation.get("status") == "proven"
+        and relation.get("relation") == "target_return_member_high_bits_irrelevant_by_narrow_producer"
+        and relation.get("proven") is True
+    ):
+        return False
+    if not (
+        profile.get("object_derived") is True
+        and profile.get("status") == "proven"
+        and profile.get("unsupported_or_unresolved") is False
+    ):
+        return False
+    try:
+        narrow_width = int(profile.get("narrow_width"))
+        max_producer_width = int(profile.get("max_producer_width"))
+    except (TypeError, ValueError):
+        return False
+    if narrow_width <= 0 or max_producer_width <= 0 or max_producer_width > narrow_width:
+        return False
+    member_profile = _normalize_nested_tuple(profile.get("member_profile"))
+    if (
+        _normalize_nested_tuple(profile.get("function_ref")) != _normalize_nested_tuple(wide_function)
+        or _normalize_nested_tuple(profile.get("return_storage")) != _normalize_nested_tuple(wide_storage)
+        or _normalize_nested_tuple(profile.get("required_wide_member")) != _normalize_nested_tuple(wide_member)
+        or _normalize_nested_tuple(_find_tagged_entry(member_profile, "member_id")) != _normalize_nested_tuple(("member_id", wide_member))
+    ):
+        return False
+    if member_profile == ():
+        return False
+    if _normalize_nested_tuple(profile.get("unresolved_widths")) not in {(), None}:
+        return False
+    type_provenance = profile.get("return_type_provenance")
+    return isinstance(type_provenance, Mapping) and type_provenance.get("narrowing_allowed") is True
+
+
+def _wide_width_side(target: tuple) -> Any:
+    widths = _find_tagged_entry(target, "return_widths")
+    if not isinstance(widths, tuple) or len(widths) != 3:
+        return None
+    try:
+        left_width = int(widths[1])
+        right_width = int(widths[2])
+    except (TypeError, ValueError):
+        return None
+    if left_width == right_width:
+        return None
+    return _find_width_side(target, "left" if left_width > right_width else "right")
+
+
+def _coverage_identity_is_specific(value: Any, wide_side: tuple) -> bool:
+    identity = _normalize_nested_tuple(value)
+    if not isinstance(identity, tuple) or not identity or identity[0] != "wide_surface_coverage_identity":
+        return False
+    if _find_tagged_entry(identity, "normalization_schema_version") is None:
+        return False
+    identity_function = _normalize_nested_tuple(_find_tagged_entry(identity, "function_ref"))
+    wide_function = _normalize_nested_tuple(_find_tagged_entry(wide_side, "function_ref"))
+    if identity_function not in {
+        wide_function,
+        _normalize_nested_tuple(("function_ref", wide_function)),
+    }:
+        return False
+    if _find_tagged_entry(identity, "return_partition_identity") is None:
+        return False
+    if _find_tagged_entry(identity, "guard_disjunction_identity") is None:
+        return False
+    cases = _find_tagged_entry(identity, "cases")
+    return isinstance(cases, tuple) and len(cases) >= 2 and bool(cases[1])
 
 
 def _calling_convention_evidence_is_specific(value: Any, left: tuple, right: tuple) -> bool:
@@ -1905,6 +2223,39 @@ def _expected_proof_obligation_id(
         action.get("proof_kind"),
         action.get("evidence_kind"),
         object_target_key,
+    )
+
+
+def _expected_slot_obligation_id(
+    action: Mapping[str, Any],
+    *,
+    object_target_key: Any,
+) -> Optional[Tuple[Any, ...]]:
+    slot_stage = str(action.get("proof_stage") or MISSING_SENTINEL)
+    slot_info = RETURN_WIDTH_BRIDGE_ACCEPTED_DISCHARGES.get(slot_stage)
+    if slot_info is None:
+        return None
+    return (
+        "return_width_bridge_missing",
+        slot_stage,
+        str(slot_info["evidence_kind"]),
+        _normalize_nested_tuple(object_target_key),
+    )
+
+
+def _expected_discharge_proof_id(
+    *,
+    slot_stage: str,
+    discharge_proof_kind: str,
+    evidence_kind: str,
+    object_target_key: Any,
+) -> Tuple[Any, ...]:
+    return (
+        "return_width_bridge_missing",
+        str(slot_stage),
+        str(discharge_proof_kind),
+        str(evidence_kind),
+        _normalize_nested_tuple(object_target_key),
     )
 
 

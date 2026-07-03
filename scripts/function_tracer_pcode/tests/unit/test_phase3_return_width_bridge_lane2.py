@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -8,8 +9,10 @@ import pytest
 
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
+    Condition,
     ComparisonSurface,
     Expression,
+    ExpressionType,
     FunctionReturnAnalysis,
     ReturnInfo,
 )
@@ -34,6 +37,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
 )
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2 import (
+    _member_narrow_producer_proof_content_is_specific,
     build_phase3_return_width_bridge_lane2_manifest,
     build_phase3_return_width_bridge_lane2_post_fix_gate,
     main as phase3_return_width_bridge_lane2_main,
@@ -496,6 +500,124 @@ def _completed_evidence(actions, *, include_proof_content=True):
             {
                 "evidence": {
                     **evidence,
+                }
+            }
+        )
+    return records
+
+
+def _semantic_completed_evidence(actions):
+    records = []
+    for action in actions:
+        if action["proof_stage"] != "high_bit_relation":
+            records.extend(_completed_evidence([action]))
+            continue
+        target = CheckStrategy._normalize_nested_tuple(action["object_target_key"])
+        widths = target[2]
+        wide_side = target[3] if widths[1] > widths[2] else target[4]
+        wide_member = wide_side[5]
+        slot_id = CheckStrategy._return_width_bridge_slot_obligation_id(
+            "high_bit_relation",
+            target,
+        )
+        discharge_id = CheckStrategy._return_width_bridge_discharge_proof_id(
+            slot_stage="high_bit_relation",
+            discharge_proof_kind="semantic_return_width_narrowing_proof",
+            evidence_kind="producer_width",
+            object_target_key=target,
+        )
+        coverage_identity = (
+            "wide_surface_coverage_identity",
+            ("normalization_schema_version", 1),
+            ("function_ref", wide_side[2][1]),
+            ("return_partition_identity", ("return_partition_identity", ("test", "partition"))),
+            ("guard_disjunction_identity", ("guard_disjunction_identity", ("test", "guards"))),
+            (
+                "cases",
+                (
+                    (
+                        "wide_surface_coverage_case",
+                        ("member", wide_member),
+                    ),
+                ),
+            ),
+        )
+        coverage_identity_digest = hashlib.sha256(
+            repr(CheckStrategy._normalize_nested_tuple(coverage_identity)).encode("utf-8")
+        ).hexdigest()
+        required_wide_members = (wide_member,)
+        partition_member_digest = hashlib.sha256(
+            repr(CheckStrategy._normalize_nested_tuple(required_wide_members)).encode("utf-8")
+        ).hexdigest()
+        records.append(
+            {
+                "evidence": {
+                    "reason_id": action["reason_id"],
+                    "proof_stage": "high_bit_relation",
+                    "proof_kind": "semantic_return_width_narrowing_proof",
+                    "recovery_proof_kind": "semantic_return_width_narrowing_proof",
+                    "slot_stage": "high_bit_relation",
+                    "evidence_kind": "producer_width",
+                    "required_evidence": (
+                        "wide_return_surface",
+                        "return_type_provenance",
+                        "partition_member_coverage",
+                    ),
+                    "status": "complete",
+                    "object_derived": True,
+                    "object_target_key": action["object_target_key"],
+                    "proof_obligation_id": slot_id,
+                    "slot_obligation_id": slot_id,
+                    "discharge_proof_kind": "semantic_return_width_narrowing_proof",
+                    "discharge_proof_id": discharge_id,
+                    "proof_source": (
+                        "return_width_bridge_narrow_query_unsat_and_semantic_return_width_narrowing"
+                    ),
+                    "proof_content": {
+                        "object_derived": True,
+                        "status": "proven",
+                        "object_target_key": target,
+                        "semantic_return_width": {
+                            "object_derived": True,
+                            "status": "proven",
+                            "narrow_width": min(widths[1], widths[2]),
+                            "wide_width": max(widths[1], widths[2]),
+                            "relation": "wide_storage_semantic_surface_is_narrow",
+                            "proven": True,
+                        },
+                        "wide_surface_profile": {
+                            "object_derived": True,
+                            "status": "proven",
+                            "function_ref": wide_side[2],
+                            "return_storage": wide_side[4],
+                            "return_type_provenance": {
+                                "object_derived": True,
+                                "return_type_source": "undefined_decompiler_type",
+                                "source_declared_return_type_known": False,
+                                "source_declared_return_type_width": None,
+                                "narrowing_allowed": True,
+                            },
+                            "coverage_status": "total_under_comparison_precondition",
+                            "coverage_identity": coverage_identity,
+                            "coverage_identity_digest": coverage_identity_digest,
+                            "partition_member_digest": partition_member_digest,
+                            "required_wide_members": required_wide_members,
+                            "member_profiles": (
+                                (
+                                    "member_profile",
+                                    ("member_id", wide_member),
+                                    ("producer_width", min(widths[1], widths[2])),
+                                ),
+                            ),
+                            "max_producer_width": min(widths[1], widths[2]),
+                            "load_widths": (),
+                            "call_result_widths": (),
+                            "constant_widths": (min(widths[1], widths[2]),),
+                            "unsupported_or_unresolved": False,
+                            "wide_return_bits": max(widths[1], widths[2]),
+                            "narrow_width": min(widths[1], widths[2]),
+                        },
+                    },
                 }
             }
         )
@@ -1010,6 +1132,677 @@ def test_monolithic_rejects_return_width_bridge_when_high_bit_proof_is_missing()
     )
 
     assert narrow_bits is None
+
+
+def _semantic_narrowing_analyses(
+    *,
+    wide_expr=None,
+    wide_return_type="undefined8",
+    wide_hypotheses=None,
+    wide_conditions=None,
+):
+    wide_expr = wide_expr or Expression.constant(1, size=4)
+    narrow_expr = Expression.constant(1, size=4)
+    wide_ref = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    narrow_ref = PcodeOpRef(
+        binary_id="Bnarrow",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(4,),
+        output_size=None,
+    )
+    wide = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1010",
+                value=wide_expr,
+                conditions=list(wide_conditions or ()),
+                pcode_op_ref=wide_ref,
+            )
+        ],
+        return_type=wide_return_type,
+        binary_id="Bwide",
+        signature_hypotheses=list(wide_hypotheses or ()),
+    )
+    narrow = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x1010", value=narrow_expr, pcode_op_ref=narrow_ref)],
+        return_type="int",
+        binary_id="Bnarrow",
+    )
+    strategy = _DummyStrategy(None, None)
+    wide_case = extract_return_cases(wide)[0]
+    narrow_case = extract_return_cases(narrow)[0]
+    target = strategy._return_width_bridge_object_target_key(
+        analysis1=wide,
+        analysis2=narrow,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        case1=wide_case,
+        case2=narrow_case,
+        pair_id="semantic",
+    )
+    reason = _width_reason(target)
+    return strategy, wide, narrow, reason
+
+
+def test_return_width_bridge_semantic_narrowing_discharges_high_bit_slot():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses()
+
+    assert strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+    evidence = list(wide.completed_recovery_proof_evidence)
+    semantic = next(
+        record
+        for record in evidence
+        if record.get("discharge_proof_kind") == "semantic_return_width_narrowing_proof"
+    )
+    assert semantic["slot_stage"] == "high_bit_relation"
+    assert semantic["proof_obligation_id"] == semantic["slot_obligation_id"]
+    assert semantic["discharge_proof_id"] != semantic["slot_obligation_id"]
+    assert (
+        semantic["proof_source"]
+        == "return_width_bridge_narrow_query_unsat_and_semantic_return_width_narrowing"
+    )
+    assert CheckStrategy._return_width_bridge_slot_id_from_evidence(semantic) == tuple(
+        semantic["slot_obligation_id"]
+    )
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_source_level_wide_return():
+    source_long_hypothesis = {
+        "phase": "P0_SOURCE_DECLARATION",
+        "return_type_override": "long",
+        "evidence": {"declared_return_type": "long", "declared_return_type_width": 64},
+    }
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.constant(1, size=4),
+        wide_return_type="long",
+        wide_hypotheses=[source_long_hypothesis],
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_source_level_unknown_width_return():
+    source_unknown_width_hypothesis = {
+        "phase": "P0_SOURCE_DECLARATION",
+        "return_type_override": "long",
+        "evidence": {"declared_return_type": "long"},
+    }
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.constant(1, size=4),
+        wide_return_type="undefined8",
+        wide_hypotheses=[source_unknown_width_hypothesis],
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_wide_load():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.memory(Expression.constant(0x1000, size=8), size=8),
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_wide_arithmetic():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.binary_op(
+            "INT_ADD",
+            Expression.constant(1, size=8),
+            Expression.constant(2, size=8),
+        ),
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_wide_call_result():
+    wide_call = Expression(ExpressionType.CALL, name="callee", operands=[], size=8)
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(wide_expr=wide_call)
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_coverage_inconclusive():
+    condition = Condition(Expression.parameter("flag", 0, size=1))
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_conditions=[condition],
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_accepts_guarded_total_coverage():
+    param = Expression.parameter("param_1", 0, data_type="int", size=4)
+    cond_expr = Expression.binary_op(
+        "INT_EQUAL",
+        param,
+        Expression.constant(0, size=4),
+    )
+    cond = Condition(cond_expr)
+    wide_ref1 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    wide_ref2 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1020,
+        seq_time=2,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    narrow_ref = PcodeOpRef(
+        binary_id="Bnarrow",
+        function_entry_space="ram",
+        function_entry_offset=0x2000,
+        target_space="ram",
+        target_offset=0x2010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(4,),
+        output_size=None,
+    )
+    wide = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1010",
+                value=Expression.constant(1, size=4),
+                conditions=[cond],
+                pcode_op_ref=wide_ref1,
+            ),
+            ReturnInfo(
+                address="0x1020",
+                value=Expression.constant(0, size=4),
+                conditions=[cond.negate()],
+                pcode_op_ref=wide_ref2,
+            ),
+        ],
+        return_type="undefined8",
+        binary_id="Bwide",
+    )
+    narrow = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x2010", value=Expression.constant(1, size=4), pcode_op_ref=narrow_ref)],
+        return_type="int",
+        binary_id="Bnarrow",
+    )
+    strategy = _DummyStrategy(None, None)
+    wide_case = extract_return_cases(wide)[0]
+    narrow_case = extract_return_cases(narrow)[0]
+    target = strategy._return_width_bridge_object_target_key(
+        analysis1=wide,
+        analysis2=narrow,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        case1=wide_case,
+        case2=narrow_case,
+        pair_id="guarded",
+    )
+    reason = _width_reason(target)
+
+    assert strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        wide_param_replace_fn=lambda value: value,
+    )
+    assert strategy._return_width_bridge_proof_is_complete(
+        reason,
+        wide,
+        narrow,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        wide_param_replace_fn=lambda value: value,
+    )
+
+
+def test_monolithic_reuses_guarded_semantic_narrowing_evidence_without_coverage_context():
+    param = Expression.parameter("param_1", 0, data_type="int", size=4)
+    cond = Condition(Expression.binary_op("INT_EQUAL", param, Expression.constant(0, size=4)))
+    wide_ref1 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    wide_ref2 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1020,
+        seq_time=2,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    narrow_ref = PcodeOpRef(
+        binary_id="Bnarrow",
+        function_entry_space="ram",
+        function_entry_offset=0x2000,
+        target_space="ram",
+        target_offset=0x2010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(4,),
+        output_size=None,
+    )
+    wide = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo("0x1010", Expression.constant(1, size=4), conditions=[cond], pcode_op_ref=wide_ref1),
+            ReturnInfo("0x1020", Expression.constant(0, size=4), conditions=[cond.negate()], pcode_op_ref=wide_ref2),
+        ],
+        return_type="undefined8",
+        binary_id="Bwide",
+    )
+    narrow = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[ReturnInfo("0x2010", Expression.constant(1, size=4), pcode_op_ref=narrow_ref)],
+        return_type="int",
+        binary_id="Bnarrow",
+    )
+    strategy = MonolithicStrategy(FormulaBuilder(), None)
+    target = strategy._return_width_bridge_object_target_key(
+        analysis1=wide,
+        analysis2=narrow,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        case1=extract_return_cases(wide)[0],
+        case2=extract_return_cases(narrow)[0],
+        pair_id="guarded",
+    )
+    reason = _width_reason(target)
+    assert strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        wide_param_replace_fn=lambda value: value,
+    )
+
+    assert strategy._completed_return_width_bridge_narrow_bits_for_monolithic(
+        wide,
+        narrow,
+        ReturnWidthMismatchError("test mismatch", return_size1=64, return_size2=32),
+    ) == 32
+
+
+def test_monolithic_rejects_guarded_semantic_narrowing_evidence_with_stale_coverage_identity():
+    param = Expression.parameter("param_1", 0, data_type="int", size=4)
+    cond = Condition(Expression.binary_op("INT_EQUAL", param, Expression.constant(0, size=4)))
+    wide_ref1 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    wide_ref2 = PcodeOpRef(
+        binary_id="Bwide",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1020,
+        seq_time=2,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(8,),
+        output_size=None,
+    )
+    narrow_ref = PcodeOpRef(
+        binary_id="Bnarrow",
+        function_entry_space="ram",
+        function_entry_offset=0x2000,
+        target_space="ram",
+        target_offset=0x2010,
+        seq_time=1,
+        seq_order=0,
+        opcode=10,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+        input_sizes=(4,),
+        output_size=None,
+    )
+    wide = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo("0x1010", Expression.constant(1, size=4), conditions=[cond], pcode_op_ref=wide_ref1),
+            ReturnInfo("0x1020", Expression.constant(0, size=4), conditions=[cond.negate()], pcode_op_ref=wide_ref2),
+        ],
+        return_type="undefined8",
+        binary_id="Bwide",
+    )
+    narrow = FunctionReturnAnalysis(
+        function_name="factorial",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[ReturnInfo("0x2010", Expression.constant(1, size=4), pcode_op_ref=narrow_ref)],
+        return_type="int",
+        binary_id="Bnarrow",
+    )
+    strategy = MonolithicStrategy(FormulaBuilder(), None)
+    target = strategy._return_width_bridge_object_target_key(
+        analysis1=wide,
+        analysis2=narrow,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        case1=extract_return_cases(wide)[0],
+        case2=extract_return_cases(narrow)[0],
+        pair_id="guarded",
+    )
+    reason = _width_reason(target)
+    assert strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+        base_ctx={"return_size1": 64, "return_size2": 32},
+        wide_param_replace_fn=lambda value: value,
+    )
+
+    tampered = []
+    for record in wide.completed_recovery_proof_evidence:
+        record = dict(record)
+        if record.get("discharge_proof_kind") == "semantic_return_width_narrowing_proof":
+            content = dict(record["proof_content"])
+            profile = dict(content["wide_surface_profile"])
+            profile["coverage_identity_digest"] = "stale-coverage-digest"
+            content["wide_surface_profile"] = profile
+            record["proof_content"] = content
+        tampered.append(record)
+    wide.completed_recovery_proof_evidence = tuple(tampered)
+
+    assert (
+        strategy._completed_return_width_bridge_narrow_bits_for_monolithic(
+            wide,
+            narrow,
+            ReturnWidthMismatchError("test mismatch", return_size1=64, return_size2=32),
+        )
+        is None
+    )
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_wide_constant():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.constant(0x1_0000_0000, size=8),
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_fallback_width_unresolved_target_member():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.unknown("phi_circular"),
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_object_derived_narrow_unresolved_member():
+    object_derived_unknown = Expression(
+        ExpressionType.UNKNOWN,
+        name="deferred_call_result",
+        size=4,
+        runtime_ref=("stable_runtime_ref", "deferred_call_result"),
+    )
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=object_derived_unknown,
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_member_narrow_producer_discharges_high_bit_slot():
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(1, size=4),
+            Expression.parameter("param_1", 0, data_type="int", size=4),
+        ),
+    )
+
+    assert strategy._record_completed_return_width_bridge_member_narrow_producer_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+    semantic = next(
+        record
+        for record in wide.completed_recovery_proof_evidence
+        if record.get("discharge_proof_kind") == "return_member_narrow_producer_high_bit_proof"
+    )
+    assert semantic["slot_stage"] == "high_bit_relation"
+    assert semantic["proof_obligation_id"] == semantic["slot_obligation_id"]
+    assert semantic["discharge_proof_id"] != semantic["slot_obligation_id"]
+    assert (
+        semantic["proof_source"]
+        == "return_width_bridge_narrow_query_unsat_and_return_member_narrow_producer"
+    )
+
+
+def test_return_width_bridge_member_narrow_producer_rejects_unknown_member():
+    object_derived_unknown = Expression(
+        ExpressionType.UNKNOWN,
+        name="deferred_call_result",
+        size=4,
+        runtime_ref=("stable_runtime_ref", "deferred_call_result"),
+    )
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=object_derived_unknown,
+    )
+
+    assert not strategy._record_completed_return_width_bridge_member_narrow_producer_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["wrong_function_ref", "wrong_return_storage", "wrong_required_member", "wrong_member_profile_id"],
+)
+def test_phase3_validation_rejects_member_narrow_producer_profile_not_anchored_to_target(mutation):
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(1, size=4),
+            Expression.parameter("param_1", 0, data_type="int", size=4),
+        ),
+    )
+    assert strategy._record_completed_return_width_bridge_member_narrow_producer_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    evidence = next(
+        record
+        for record in wide.completed_recovery_proof_evidence
+        if record.get("discharge_proof_kind") == "return_member_narrow_producer_high_bit_proof"
+    )
+    content = copy.deepcopy(evidence["proof_content"])
+    assert _member_narrow_producer_proof_content_is_specific(
+        content,
+        reason.object_target_key,
+    )
+    profile = content["target_member_profile"]
+    if mutation == "wrong_function_ref":
+        profile["function_ref"] = ("function", "wrong", 0)
+    elif mutation == "wrong_return_storage":
+        profile["return_storage"] = ("return_storage", "return_value", 64, None, "wrong")
+    elif mutation == "wrong_required_member":
+        profile["required_wide_member"] = ("return_case_partition_member", "wrong")
+    elif mutation == "wrong_member_profile_id":
+        member_profile = list(profile["member_profile"])
+        member_profile[1] = ("member_id", ("return_case_partition_member", "wrong"))
+        profile["member_profile"] = tuple(member_profile)
+
+    assert not _member_narrow_producer_proof_content_is_specific(
+        content,
+        reason.object_target_key,
+    )
+
+
+def test_return_width_bridge_semantic_narrowing_rejects_wide_unresolved_target_member():
+    wide_unknown = Expression(ExpressionType.UNKNOWN, name="wide_unknown", size=8)
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=wide_unknown,
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
 
 
 def test_return_width_bridge_high_bit_completed_content_requires_narrow_extension_op():
@@ -2472,6 +3265,172 @@ def test_phase3_return_width_bridge_lane2_post_fix_accepts_eq_with_completed_pro
     assert gate["phase3_lane2_post_fix_ready"] is True
     assert gate["entries"][0]["post_fix_status"] == "completed_recovery"
     validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
+def test_phase3_return_width_bridge_lane2_post_fix_accepts_semantic_narrowing_discharge(tmp_path):
+    current_payload = _payload(reasons=[_width_reason(_target())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    pre_fix = json.loads(pre_fix_path.read_text())
+    required_actions = pre_fix["entries"][0]["required_completion_actions"]
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=_semantic_completed_evidence(required_actions),
+        ),
+    )
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane2_post_fix_ready"] is True
+    assert gate["entries"][0]["post_fix_status"] == "completed_recovery"
+    validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_semantic_source",
+        "wrong_discharge_id",
+        "wrong_coverage_identity_digest",
+        "wrong_coverage_identity_function",
+        "empty_coverage_identity_cases",
+        "missing_coverage_partition_identity",
+        "missing_coverage_guard_identity",
+        "wrong_required_wide_members",
+        "wrong_member_profile_id",
+        "wrong_partition_member_digest",
+    ],
+)
+def test_phase3_return_width_bridge_lane2_post_fix_rejects_malformed_semantic_discharge(
+    tmp_path,
+    mutation,
+):
+    current_payload = _payload(reasons=[_width_reason(_target())])
+    raw_dir, baseline_root, current_root = _setup_logs(tmp_path, current_payload=current_payload)
+    pre_fix_path = build_phase3_return_width_bridge_lane2_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    pre_fix = json.loads(pre_fix_path.read_text())
+    required_actions = pre_fix["entries"][0]["required_completion_actions"]
+    completed_evidence = _semantic_completed_evidence(required_actions)
+    for record in completed_evidence:
+        evidence = record["evidence"]
+        if evidence.get("discharge_proof_kind") != "semantic_return_width_narrowing_proof":
+            continue
+        if mutation == "wrong_semantic_source":
+            evidence["proof_source"] = "return_width_bridge_narrow_and_high_bit_queries_unsat"
+        elif mutation == "wrong_discharge_id":
+            evidence["discharge_proof_id"] = ("return_width_bridge_missing", "bogus")
+        elif mutation == "wrong_coverage_identity_digest":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["coverage_identity_digest"] = "0" * 64
+        elif mutation == "wrong_coverage_identity_function":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["coverage_identity"] = (
+                "wide_surface_coverage_identity",
+                ("normalization_schema_version", 1),
+                ("function_ref", ("function", "wrong", 0)),
+                ("return_partition_identity", ("return_partition_identity", ("test", "partition"))),
+                ("guard_disjunction_identity", ("guard_disjunction_identity", ("test", "guards"))),
+                ("cases", (("wide_surface_coverage_case",),)),
+            )
+            profile["coverage_identity_digest"] = hashlib.sha256(
+                repr(CheckStrategy._normalize_nested_tuple(profile["coverage_identity"])).encode("utf-8")
+            ).hexdigest()
+        elif mutation == "empty_coverage_identity_cases":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["coverage_identity"] = (
+                "wide_surface_coverage_identity",
+                ("normalization_schema_version", 1),
+                ("function_ref", profile["function_ref"]),
+                ("return_partition_identity", ("return_partition_identity", ("test", "partition"))),
+                ("guard_disjunction_identity", ("guard_disjunction_identity", ("test", "guards"))),
+                ("cases", ()),
+            )
+            profile["coverage_identity_digest"] = hashlib.sha256(
+                repr(CheckStrategy._normalize_nested_tuple(profile["coverage_identity"])).encode("utf-8")
+            ).hexdigest()
+        elif mutation == "missing_coverage_partition_identity":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["coverage_identity"] = (
+                "wide_surface_coverage_identity",
+                ("normalization_schema_version", 1),
+                ("function_ref", profile["function_ref"]),
+                ("guard_disjunction_identity", ("guard_disjunction_identity", ("test", "guards"))),
+                ("cases", (("wide_surface_coverage_case",),)),
+            )
+            profile["coverage_identity_digest"] = hashlib.sha256(
+                repr(CheckStrategy._normalize_nested_tuple(profile["coverage_identity"])).encode("utf-8")
+            ).hexdigest()
+        elif mutation == "missing_coverage_guard_identity":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["coverage_identity"] = (
+                "wide_surface_coverage_identity",
+                ("normalization_schema_version", 1),
+                ("function_ref", profile["function_ref"]),
+                ("return_partition_identity", ("return_partition_identity", ("test", "partition"))),
+                ("cases", (("wide_surface_coverage_case",),)),
+            )
+            profile["coverage_identity_digest"] = hashlib.sha256(
+                repr(CheckStrategy._normalize_nested_tuple(profile["coverage_identity"])).encode("utf-8")
+            ).hexdigest()
+        elif mutation == "wrong_required_wide_members":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["required_wide_members"] = (("return_case_partition_member", "wrong"),)
+            profile["partition_member_digest"] = hashlib.sha256(
+                repr(CheckStrategy._normalize_nested_tuple(profile["required_wide_members"])).encode("utf-8")
+            ).hexdigest()
+        elif mutation == "wrong_member_profile_id":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            member_profile = list(profile["member_profiles"][0])
+            member_profile[1] = ("member_id", ("return_case_partition_member", "wrong"))
+            profile["member_profiles"] = (tuple(member_profile),)
+        elif mutation == "wrong_partition_member_digest":
+            profile = evidence["proof_content"]["wide_surface_profile"]
+            profile["partition_member_digest"] = "0" * 64
+    _write_log(
+        current_root,
+        _payload(
+            reasons=[],
+            actions=[],
+            is_equivalent=True,
+            completed_evidence=completed_evidence,
+        ),
+    )
+
+    post_fix_path = build_phase3_return_width_bridge_lane2_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+    assert gate["phase3_lane2_post_fix_ready"] is False
+    assert gate["entries"][0]["post_fix_status"] == "failed"
+    assert {
+        failure["kind"] for failure in gate["entries"][0]["post_fix_failures"]
+    } == {"return_width_bridge_completed_proof_required"}
 
 
 def test_phase3_return_width_bridge_lane2_post_fix_rejects_eq_with_changed_return_value_width(

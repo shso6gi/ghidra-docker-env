@@ -90,7 +90,7 @@ def test_declared_void_overlay_normalizes_artifact_return_values(mock_program_x8
     assert all(getattr(ret.value, "name", None) == "void" for ret in updated.returns)
 
 
-def test_declared_nonvoid_overlay_is_not_applied(mock_program_x86):
+def test_declared_nonvoid_overlay_records_return_type_provenance(mock_program_x86):
     analysis = create_mock_analysis(
         function_name="sphbes",
         return_type="ulong",
@@ -111,5 +111,8 @@ def test_declared_nonvoid_overlay_is_not_applied(mock_program_x86):
         declared_return_type="int",
     )
 
-    assert updated is analysis
+    assert updated is not analysis
     assert not updated.signature_hypotheses
+    assert updated.return_type == "ulong"
+    assert updated.return_type_provenance["source_declared_return_type_known"] is True
+    assert updated.return_type_provenance["source_declared_return_type"] == "int"
