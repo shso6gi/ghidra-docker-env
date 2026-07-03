@@ -7,6 +7,7 @@ import pytest
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import UnknownReasonId, make_unknown_reason
 from scripts.function_tracer_pcode.validation.phase0c_observed_baseline_census_gate import (
+    EXPECTED_COMBINED_UNKNOWN_BY_REASON,
     build_phase0c_observed_baseline_census_gate,
     validate_phase0c_observed_baseline_census_gate,
 )
@@ -34,6 +35,7 @@ def test_phase0c_observed_baseline_census_gate_accepts_fixture_counts(tmp_path):
         },
         expected_combined_validation_unknown_units=2,
         expected_combined_unknown_by_reason={
+            "outcome_partition_unknown": 0,
             "return_coverage_gap": 1,
             "solver_unknown_timeout": 1,
         },
@@ -42,9 +44,15 @@ def test_phase0c_observed_baseline_census_gate_accepts_fixture_counts(tmp_path):
 
     assert gate["phase0c_observed_baseline_census_ready"] is True
     assert gate["count_model"]["primary_census_count_kind"] == "validation_unknown_unit"
+    assert gate["expected"]["combined_unknown_by_reason"]["outcome_partition_unknown"] == 0
+    assert "outcome_partition_unknown" in gate["expected"]["known_unknown_reason_ids"]
     assert gate["observed"]["combined_pair_log_count"] == 4
     assert gate["observed"]["combined_validation_unknown_units"] == 2
     validate_phase0c_observed_baseline_census_gate(gate)
+
+
+def test_phase0c_default_expected_reasons_include_outcome_partition_unknown():
+    assert EXPECTED_COMBINED_UNKNOWN_BY_REASON["outcome_partition_unknown"] == 0
 
 
 def test_phase0c_observed_baseline_census_gate_rejects_reason_drift(tmp_path):

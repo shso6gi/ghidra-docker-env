@@ -78,6 +78,7 @@ EXPECTED_COMBINED_VALIDATION_UNKNOWN_UNITS = 3788
 EXPECTED_COMBINED_UNKNOWN_BY_REASON = {
     "equivalence_blocking_unsafety": 132,
     "method_b_closure_blocked": 443,
+    "outcome_partition_unknown": 0,
     "readonly_identity_missing": 143,
     "return_coverage_gap": 316,
     "return_coverage_inconclusive": 1,
@@ -119,6 +120,7 @@ def build_phase0c_observed_baseline_census_gate(
     expected_combined_reasons = dict(
         expected_combined_unknown_by_reason or EXPECTED_COMBINED_UNKNOWN_BY_REASON
     )
+    expected_combined_reasons_for_compare = _positive_count_reason_expectations(expected_combined_reasons)
 
     category_summaries: Dict[str, Any] = {}
     checks = []
@@ -219,10 +221,10 @@ def build_phase0c_observed_baseline_census_gate(
                 actual=combined_unknown_units,
             ),
             _ok("combined_unknown_by_reason_expected", counts=combined_unknown_by_reason_dict)
-            if combined_unknown_by_reason_dict == expected_combined_reasons
+            if combined_unknown_by_reason_dict == expected_combined_reasons_for_compare
             else _failed(
                 "combined_unknown_by_reason_expected",
-                expected=expected_combined_reasons,
+                expected=expected_combined_reasons_for_compare,
                 actual=combined_unknown_by_reason_dict,
             ),
             _ok("primary_census_count_kind", count_kind=PRIMARY_CENSUS_COUNT_KIND),
@@ -267,6 +269,7 @@ def build_phase0c_observed_baseline_census_gate(
             "combined_pair_log_count": expected_combined_pair_log_count,
             "combined_validation_unknown_units": expected_combined_validation_unknown_units,
             "combined_unknown_by_reason": expected_combined_reasons,
+            "known_unknown_reason_ids": sorted(expected_combined_reasons),
         },
         "observed": {
             "categories": category_summaries,
@@ -390,6 +393,10 @@ def _materialize_phase0c_census_from_manifest(manifest: Mapping[str, Any]) -> Op
         str(reason): int(count)
         for reason, count in (expected.get("combined_unknown_by_reason") or {}).items()
     }
+    expected_combined_reasons_for_compare = _positive_count_reason_expectations(expected_combined_reasons)
+    expected_known_reason_ids = expected.get("known_unknown_reason_ids")
+    if expected_known_reason_ids is not None:
+        expected_known_reason_ids = sorted(str(reason) for reason in expected_known_reason_ids)
 
     checks = list(_baseline_identity_checks(raw_manifest))
     category_summaries: Dict[str, Any] = {}
@@ -488,15 +495,27 @@ def _materialize_phase0c_census_from_manifest(manifest: Mapping[str, Any]) -> Op
                 actual=combined_unknown_units,
             ),
             _ok("combined_unknown_by_reason_expected", counts=combined_unknown_by_reason_dict)
-            if combined_unknown_by_reason_dict == expected_combined_reasons
+            if combined_unknown_by_reason_dict == expected_combined_reasons_for_compare
             else _failed(
                 "combined_unknown_by_reason_expected",
-                expected=expected_combined_reasons,
+                expected=expected_combined_reasons_for_compare,
                 actual=combined_unknown_by_reason_dict,
             ),
             _ok("primary_census_count_kind", count_kind=PRIMARY_CENSUS_COUNT_KIND),
         ]
     )
+    expected_manifest = {
+        "category_final_result_counts": expected_counts,
+        "category_pair_log_counts": expected_pair_log_counts,
+        "category_validation_unknown_units": expected_unknown_units,
+        "combined_final_result_counts": _normalize_status_counts(expected_combined_counts),
+        "combined_pair_log_count": expected_combined_pair_log_count,
+        "combined_validation_unknown_units": expected_combined_validation_unknown_units,
+        "combined_unknown_by_reason": expected_combined_reasons,
+    }
+    if expected_known_reason_ids is not None:
+        expected_manifest["known_unknown_reason_ids"] = expected_known_reason_ids
+
     return {
         "baseline_id": raw_manifest.get("baseline_id"),
         "baseline_git_head": raw_manifest.get("git_head"),
@@ -519,15 +538,7 @@ def _materialize_phase0c_census_from_manifest(manifest: Mapping[str, Any]) -> Op
             ],
             "optional_field_missing_sentinel": UNKNOWN_TUPLE_MISSING,
         },
-        "expected": {
-            "category_final_result_counts": expected_counts,
-            "category_pair_log_counts": expected_pair_log_counts,
-            "category_validation_unknown_units": expected_unknown_units,
-            "combined_final_result_counts": _normalize_status_counts(expected_combined_counts),
-            "combined_pair_log_count": expected_combined_pair_log_count,
-            "combined_validation_unknown_units": expected_combined_validation_unknown_units,
-            "combined_unknown_by_reason": expected_combined_reasons,
-        },
+        "expected": expected_manifest,
         "observed": {
             "categories": category_summaries,
             "combined_final_result_counts": combined_final_result_counts,
@@ -696,6 +707,14 @@ def _correspondence_classification_checks(category: str, summary: Mapping[str, A
 
 def _normalize_status_counts(counts: Mapping[str, int]) -> Dict[str, int]:
     return {status: int(counts.get(status, 0) or 0) for status in STATUS_ORDER}
+
+
+def _positive_count_reason_expectations(counts: Mapping[str, int]) -> Dict[str, int]:
+    return {
+        str(reason): int(count)
+        for reason, count in sorted((counts or {}).items())
+        if int(count or 0) > 0
+    }
 
 
 def _diff_counts(before: Mapping[str, int], after: Mapping[str, int]) -> Dict[str, int]:

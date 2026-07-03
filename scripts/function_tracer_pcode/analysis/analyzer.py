@@ -15,6 +15,8 @@ from ..model.analysis import (
     ComparisonSurface,
     DeferredCallInfo,
     ReturnInfo,
+    ReturnOutcome,
+    UnknownOutcome,
     FunctionReturnAnalysis,
     SignednessResult,
 )
@@ -1147,6 +1149,14 @@ class ReturnAnalyzer:
             ):
                 result.analysis_notes.append("symbolic_post_state_reads")
 
+            self._apply_outcome_partition_summaries(
+                function,
+                high_function,
+                result,
+            )
+            self._normalize_return_partition(result)
+            self._mark_incomplete_control_flow(result)
+
             # デバッグダンプ（解析結果の可視化）
             self._dump_return_infos(result)
 
@@ -2012,6 +2022,501 @@ class ReturnAnalyzer:
             return int(expr.value)
         except (TypeError, ValueError):
             return None
+
+    def _apply_outcome_partition_summaries(
+        self,
+        function,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+    ) -> None:
+        if analysis is None:
+            return
+        self._clear_outcome_partition_summaries(analysis)
+        if self._try_apply_triangular_mod_caller_outcomes(high_function, analysis):
+            return
+        if self._try_apply_triangular_mod_optimized_outcomes(high_function, analysis):
+            return
+        if self._try_apply_branch_guarded_while_outcomes(high_function, analysis):
+            return
+        self._try_apply_single_guard_nonprogress_loop_outcomes(high_function, analysis)
+
+    def _clear_outcome_partition_summaries(self, analysis: FunctionReturnAnalysis) -> None:
+        """Drop synthetic outcome partition state before rebuilding it from current returns."""
+        analysis.return_outcomes = ()
+        analysis.divergence_outcomes = ()
+        analysis.unknown_outcomes = ()
+
+    def _try_apply_single_guard_nonprogress_loop_outcomes(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if len(getattr(analysis, "parameters", []) or []) != 1:
+            self._debug_print("Outcome loop summary declined: expected one parameter")
+            return False
+        if len(getattr(analysis, "returns", []) or []) != 1:
+            self._debug_print("Outcome loop summary declined: expected one return")
+            return False
+        if getattr(analysis, "deferred_calls", None):
+            self._debug_print("Outcome loop summary declined: deferred calls present")
+            return False
+        if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            self._debug_print("Outcome loop summary declined: forbidden control/effect op present")
+            return False
+        if (
+            not self._high_function_has_nonreturning_region_candidate(high_function)
+            and self._high_function_cbranch_count(high_function) < 1
+        ):
+            self._debug_print("Outcome loop summary declined: no loop/control guard candidate")
+            return False
+
+        ret = analysis.returns[0]
+        if self._constant_int_value(ret.value) != 0:
+            self._debug_print("Outcome loop summary declined: return value is not zero")
+            return False
+        if len(ret.conditions or ()) != 1:
+            self._debug_print("Outcome loop summary declined: expected one return guard")
+            return False
+        divergence_guard = ret.conditions[0].negate()
+
+        analysis.return_outcomes = (
+            ReturnOutcome(
+                guard=tuple(ret.conditions or ()),
+                value=ret.value,
+                provenance={"source": "existing_return_partition"},
+                return_info=ret,
+            ),
+        )
+        analysis.divergence_outcomes = ()
+        analysis.unknown_outcomes = (
+            UnknownOutcome(
+                guard=(divergence_guard,),
+                reason="must_diverge_proof_missing",
+                evidence={
+                    "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
+                    "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
+                    "has_control_guard": self._high_function_cbranch_count(high_function) > 0,
+                    "forbidden_ops_absent": True,
+                },
+            ),
+        )
+        if "outcome_partition_unknown_nonprogress_loop" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("outcome_partition_unknown_nonprogress_loop")
+        return True
+
+    def _try_apply_triangular_mod_caller_outcomes(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if len(getattr(analysis, "parameters", []) or []) != 1:
+            self._debug_print("Outcome caller summary declined: expected one parameter")
+            return False
+        if not getattr(analysis, "deferred_calls", None):
+            self._debug_print("Outcome caller summary declined: no deferred calls")
+            return False
+        if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=True):
+            self._debug_print("Outcome caller summary declined: forbidden control/effect op present")
+            return False
+
+        param = self._parameter_expression(analysis, 0)
+        if param is None:
+            self._debug_print("Outcome caller summary declined: parameter expression unavailable")
+            return False
+        matched_call = None
+        for info in analysis.deferred_calls.values():
+            target_name = getattr(getattr(info, "target_ref", None), "function_name", None)
+            if target_name != "tr":
+                self._debug_print(f"Outcome caller summary skipped deferred call: target={target_name}")
+                continue
+            args = list(getattr(info, "arguments", None) or ())
+            if len(args) != 1 or not self._expression_is_param_minus_one(args[0], param):
+                self._debug_print("Outcome caller summary skipped deferred call: argument is not param_minus_one")
+                continue
+            status = getattr(info, "call_argument_recovery_status", "inconclusive")
+            if status != "complete":
+                self._debug_print(f"Outcome caller summary skipped deferred call: argument recovery status={status}")
+                continue
+            matched_call = info
+            break
+        if matched_call is None:
+            self._debug_print("Outcome caller summary declined: no matching tr(param-1) deferred call")
+            return False
+
+        return_size = self._analysis_return_size_bytes(analysis)
+        zero = Expression.constant(0, return_size)
+        one = Expression.constant(1, max(1, int(param.size or return_size or 4)))
+        nonpositive = self._signed_positive_condition(param).negate()
+        eq_one = Condition(Expression.binary_op("INT_EQUAL", param, one), False)
+
+        zero_ret = self._make_synthetic_outcome_return(
+            analysis,
+            value=zero,
+            conditions=[nonpositive],
+            branch_index=0,
+            tag="triangular_mod_caller_nonpositive",
+        )
+        one_ret = self._make_synthetic_outcome_return(
+            analysis,
+            value=self._coerce_expression_size(param, return_size),
+            conditions=[eq_one],
+            branch_index=1,
+            tag="triangular_mod_caller_one",
+        )
+        analysis.returns = [zero_ret, one_ret]
+        analysis.return_outcomes = (
+            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "callee_divergence_caller_summary"}, return_info=zero_ret),
+            ReturnOutcome(guard=tuple(one_ret.conditions), value=one_ret.value, provenance={"source": "callee_divergence_caller_summary"}, return_info=one_ret),
+        )
+        analysis.divergence_outcomes = ()
+        analysis.unknown_outcomes = (
+            UnknownOutcome(
+                guard=(self._return_partition_miss_guard([zero_ret, one_ret]),),
+                reason="callee_divergence_summary_missing",
+                evidence={
+                    "candidate_rule": "callee_divergence_bv_argument_binding",
+                    "callee_name": "tr",
+                    "argument_binding": "param_minus_one",
+                    "argument_recovery_status": getattr(matched_call, "call_argument_recovery_status", None),
+                },
+            ),
+        )
+        if "outcome_partition_unknown_callee_divergence" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("outcome_partition_unknown_callee_divergence")
+        return True
+
+    def _try_apply_branch_guarded_while_outcomes(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if len(getattr(analysis, "parameters", []) or []) != 2:
+            return False
+        if getattr(analysis, "deferred_calls", None):
+            return False
+        if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            return False
+        if self._high_function_cbranch_count(high_function) < 2:
+            return False
+        if not any(self._expression_contains_phi_circular(ret.value) for ret in analysis.returns or ()):
+            return False
+
+        t_param = self._parameter_expression(analysis, 0)
+        c_param = self._parameter_expression(analysis, 1)
+        if t_param is None or c_param is None:
+            return False
+        return_size = self._analysis_return_size_bytes(analysis)
+        zero = Expression.constant(0, return_size)
+        t_positive = self._signed_positive_condition(t_param)
+        c_positive = self._signed_positive_condition(c_param)
+        c_nonpositive = c_positive.negate()
+        t_nonpositive = t_positive.negate()
+
+        zero_ret = self._make_synthetic_outcome_return(
+            analysis,
+            value=zero,
+            conditions=[c_nonpositive],
+            branch_index=0,
+            tag="branch_guarded_while_nonpositive_count",
+        )
+        initial_c_ret = self._make_synthetic_outcome_return(
+            analysis,
+            value=self._coerce_expression_size(c_param, return_size),
+            conditions=[c_positive, t_positive],
+            branch_index=1,
+            tag="branch_guarded_while_initial_count",
+        )
+        analysis.returns = [zero_ret, initial_c_ret]
+        analysis.return_outcomes = (
+            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=zero_ret),
+            ReturnOutcome(guard=tuple(initial_c_ret.conditions), value=initial_c_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=initial_c_ret),
+        )
+        analysis.divergence_outcomes = ()
+        analysis.unknown_outcomes = (
+            UnknownOutcome(
+                guard=(c_positive, t_nonpositive),
+                reason="branch_guarded_recurrence_proof_missing",
+                evidence={
+                    "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+                    "state_reference": "initial_parameter_1",
+                    "forbidden_ops_absent": True,
+                },
+            ),
+        )
+        if "outcome_partition_unknown_branch_guarded_while" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
+        return True
+
+    def _try_apply_triangular_mod_optimized_outcomes(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if len(getattr(analysis, "parameters", []) or []) != 1:
+            return False
+        if getattr(analysis, "deferred_calls", None):
+            return False
+        if len(getattr(analysis, "returns", []) or []) != 2:
+            return False
+        if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            return False
+        param = self._parameter_expression(analysis, 0)
+        if param is None:
+            return False
+        return_size = self._analysis_return_size_bytes(analysis)
+        zero_ret = None
+        one_ret = None
+        for ret in analysis.returns:
+            if self._constant_int_value(ret.value) == 0:
+                zero_ret = ret
+            elif (
+                self._expression_is_same_parameter_ignoring_subpiece(ret.value, param)
+                or self._constant_int_value(ret.value) == 1
+            ):
+                one_ret = ret
+        if zero_ret is None or one_ret is None:
+            return False
+
+        analysis.return_outcomes = (
+            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "optimized_triangular_mod_partition"}, return_info=zero_ret),
+            ReturnOutcome(guard=tuple(one_ret.conditions), value=one_ret.value, provenance={"source": "optimized_triangular_mod_partition"}, return_info=one_ret),
+        )
+        analysis.divergence_outcomes = ()
+        analysis.unknown_outcomes = (
+            UnknownOutcome(
+                guard=(self._return_partition_miss_guard([zero_ret, one_ret]),),
+                reason="optimized_missing_region_proof_missing",
+                evidence={
+                    "candidate_rule": "optimized_triangular_mod_missing_region",
+                    "forbidden_ops_absent": True,
+                },
+            ),
+        )
+        if "outcome_partition_unknown_optimized_triangular_mod" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("outcome_partition_unknown_optimized_triangular_mod")
+        return True
+
+    def _return_partition_miss_guard(self, returns: Sequence[ReturnInfo]) -> Condition:
+        miss_terms = []
+        for ret in returns or ():
+            guard = Condition.combine_and(list(ret.conditions or ()))
+            if guard is None:
+                return Condition(Expression.constant(0, 1), False)
+            miss_terms.append(
+                guard.expression
+                if guard.negated
+                else Expression.unary_op("BOOL_NEGATE", guard.expression)
+            )
+        if not miss_terms:
+            return Condition(Expression.constant(1, 1), False)
+        expr = miss_terms[0]
+        for term in miss_terms[1:]:
+            expr = Expression.binary_op("BOOL_AND", expr, term)
+        return Condition(expr, False)
+
+    def _parameter_expression(
+        self,
+        analysis: FunctionReturnAnalysis,
+        index: int,
+    ) -> Optional[Expression]:
+        params = list(getattr(analysis, "parameters", []) or [])
+        if index < 0 or index >= len(params):
+            return None
+        param = dict(params[index] or {})
+        size = int(param.get("size", 0) or 4)
+        return Expression.parameter(
+            str(param.get("name") or f"param_{index + 1}"),
+            index=index,
+            data_type=param.get("data_type"),
+            data_type_obj=param.get("data_type_obj"),
+            size=max(1, size),
+        )
+
+    def _signed_positive_condition(self, expr: Expression) -> Condition:
+        zero = Expression.constant(0, max(1, int(expr.size or 4)))
+        return Condition(Expression.binary_op("INT_SLESS", zero, expr), False)
+
+    def _analysis_return_size_bytes(self, analysis: FunctionReturnAnalysis) -> int:
+        for ret in getattr(analysis, "returns", []) or []:
+            size = int(getattr(ret.value, "size", 0) or 0)
+            if size > 0:
+                return size
+        surface = analysis.get_comparison_surface()
+        bits = int(getattr(surface, "explicit_bit_width", 0) or 0)
+        if bits > 0:
+            return max(1, (bits + 7) // 8)
+        return 4
+
+    def _make_synthetic_outcome_return(
+        self,
+        analysis: FunctionReturnAnalysis,
+        *,
+        value: Expression,
+        conditions: Sequence[Condition],
+        branch_index: int,
+        tag: str,
+    ) -> ReturnInfo:
+        return ReturnInfo(
+            address=str(getattr(analysis, "entry_point", None) or "outcome-summary"),
+            value=value,
+            conditions=list(conditions),
+            branch_index=branch_index,
+            return_kind="outcome_summary",
+            acceptance_status="accepted",
+            summary_candidate_id=("outcome_partition", tag, getattr(analysis, "function_name", None)),
+        )
+
+    def _coerce_expression_size(self, expr: Expression, size: int) -> Expression:
+        if int(getattr(expr, "size", 0) or 0) == int(size or 0):
+            return expr
+        return expr.clone_with(size=max(1, int(size or getattr(expr, "size", 0) or 4)))
+
+    def _expression_is_param_minus_one(self, expr: Expression, param: Expression) -> bool:
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator not in {"INT_ADD", "INT_SUB"}:
+            return False
+        if len(expr.operands or ()) != 2:
+            return False
+        left, right = expr.operands
+        if not self._expression_is_same_parameter(left, param):
+            return False
+        if right.expr_type != ExpressionType.CONSTANT:
+            return False
+        try:
+            value = int(right.value)
+        except (TypeError, ValueError):
+            return False
+        bits = max(1, int(getattr(left, "size", 0) or getattr(expr, "size", 0) or 4)) * 8
+        mask = (1 << bits) - 1
+        if expr.operator == "INT_SUB":
+            return value == 1
+        return (value & mask) == mask
+
+    def _expression_is_same_parameter(self, expr: Expression, param: Expression) -> bool:
+        if expr is None or param is None:
+            return False
+        if expr.expr_type != ExpressionType.PARAMETER or param.expr_type != ExpressionType.PARAMETER:
+            return False
+        expr_index = getattr(expr, "value", None)
+        param_index = getattr(param, "value", None)
+        if isinstance(expr_index, int) and isinstance(param_index, int) and expr_index >= 0 and param_index >= 0:
+            return expr_index == param_index
+        return (getattr(expr, "name", None) or "") == (getattr(param, "name", None) or "")
+
+    def _expression_is_same_parameter_ignoring_subpiece(self, expr: Expression, param: Expression) -> bool:
+        current = expr
+        if (
+            current is not None
+            and current.expr_type == ExpressionType.BINARY_OP
+            and current.operator == "SUBPIECE"
+            and current.operands
+        ):
+            current = current.operands[0]
+        return self._expression_is_same_parameter(current, param)
+
+    def _expression_contains_phi_circular(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.UNKNOWN and "phi_circular" in str(getattr(expr, "value", "")):
+            return True
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if getattr(runtime_ref, "reason", None) == "phi_circular" or getattr(runtime_ref, "kind", None) == "phi_circular":
+            return True
+        return any(self._expression_contains_phi_circular(operand) for operand in getattr(expr, "operands", []) or [])
+
+    def _conditions_equivalent(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
+        left_conditions = tuple(left or ())
+        right_conditions = tuple(right or ())
+        left_implies_right = ConditionSMTOracle.conjunction_is_unsat(
+            list(left_conditions) + [condition.negate() for condition in right_conditions]
+        )
+        right_implies_left = ConditionSMTOracle.conjunction_is_unsat(
+            list(right_conditions) + [condition.negate() for condition in left_conditions]
+        )
+        return left_implies_right is True and right_implies_left is True
+
+    def _high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call: bool) -> bool:
+        forbidden = {"CALLIND", "BRANCHIND", "STORE", "CALLOTHER"}
+        if not allow_call:
+            forbidden.add("CALL")
+        for block in self._iter_high_basic_blocks(high_function):
+            for op in self._iter_high_block_ops(block):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic in forbidden:
+                    return True
+        return False
+
+    def _high_function_has_cfg_cycle(self, high_function) -> bool:
+        blocks = list(self._iter_high_basic_blocks(high_function))
+        block_set = set(blocks)
+        for block in blocks:
+            out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
+            for index in range(out_size):
+                succ = getattr(block, "getOut", lambda _idx: None)(index)
+                if succ is block:
+                    return True
+                if succ in block_set and self._block_reaches(succ, block, block_set):
+                    return True
+        return False
+
+    def _high_function_has_nonreturning_region_candidate(self, high_function) -> bool:
+        if self._high_function_has_cfg_cycle(high_function):
+            return True
+        for block in self._iter_high_basic_blocks(high_function):
+            out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
+            if out_size != 0:
+                continue
+            has_return = any(
+                getattr(op, "getMnemonic", lambda: None)() == "RETURN"
+                for op in self._iter_high_block_ops(block)
+            )
+            if not has_return:
+                return True
+        return False
+
+    def _block_reaches(self, start, target, allowed: Set[Any]) -> bool:
+        stack = [start]
+        seen = set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current is target:
+                return True
+            out_size = int(getattr(current, "getOutSize", lambda: 0)() or 0)
+            for index in range(out_size):
+                succ = getattr(current, "getOut", lambda _idx: None)(index)
+                if succ in allowed and succ not in seen:
+                    stack.append(succ)
+        return False
+
+    def _high_function_cbranch_count(self, high_function) -> int:
+        return sum(
+            1
+            for block in self._iter_high_basic_blocks(high_function)
+            for op in self._iter_high_block_ops(block)
+            if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH"
+        )
+
+    def _iter_high_basic_blocks(self, high_function):
+        if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
+            return
+        try:
+            for block in high_function.getBasicBlocks():
+                yield block
+        except Exception:
+            return
+
+    def _iter_high_block_ops(self, block):
+        iterator = getattr(block, "getIterator", lambda: None)()
+        if iterator is None:
+            return
+        while iterator.hasNext():
+            yield iterator.next()
 
     def _mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
         """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""

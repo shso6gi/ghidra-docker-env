@@ -97,6 +97,62 @@ class ReturnInfo:
 
 
 @dataclass
+class ReturnOutcome:
+    """A returning member of a function outcome partition."""
+
+    guard: Tuple[Condition, ...]
+    value: Expression
+    storage: Optional[Tuple[Any, ...]] = None
+    provenance: Dict[str, Any] = field(default_factory=dict)
+    return_info: Optional[ReturnInfo] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "kind": "return",
+            "guard": [condition.to_dict() for condition in self.guard],
+            "value": self.value.to_dict(),
+            "provenance": _jsonable_nested_tuple(self.provenance),
+        }
+        if self.storage is not None:
+            result["storage"] = _jsonable_nested_tuple(self.storage)
+        if self.return_info is not None:
+            result["return_info"] = self.return_info.to_dict()
+        return result
+
+
+@dataclass
+class DivergenceOutcome:
+    """A must-diverge member of a function outcome partition."""
+
+    guard: Tuple[Condition, ...]
+    proof: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "divergence",
+            "guard": [condition.to_dict() for condition in self.guard],
+            "proof": _jsonable_nested_tuple(self.proof),
+        }
+
+
+@dataclass
+class UnknownOutcome:
+    """An unproved member of an outcome partition."""
+
+    guard: Tuple[Condition, ...]
+    reason: str
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "unknown",
+            "guard": [condition.to_dict() for condition in self.guard],
+            "reason": self.reason,
+            "evidence": _jsonable_nested_tuple(self.evidence),
+        }
+
+
+@dataclass
 class SummaryReturnCandidate:
     """Loop-summary-derived return candidate kept outside normal returns until accepted."""
 
@@ -711,6 +767,9 @@ class FunctionReturnAnalysis:
     completed_recovery_proof_evidence: Tuple[Dict[str, Any], ...] = ()
     binary_id: Optional[str] = None
     summary_return_candidates: Tuple[SummaryReturnCandidate, ...] = ()
+    return_outcomes: Tuple[ReturnOutcome, ...] = ()
+    divergence_outcomes: Tuple[DivergenceOutcome, ...] = ()
+    unknown_outcomes: Tuple[UnknownOutcome, ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -830,6 +889,12 @@ class FunctionReturnAnalysis:
             result["summary_return_candidates"] = [
                 candidate.to_dict()
                 for candidate in self.summary_return_candidates
+            ]
+        if self.return_outcomes or self.divergence_outcomes or self.unknown_outcomes:
+            result["outcomes"] = [
+                *(outcome.to_dict() for outcome in self.return_outcomes),
+                *(outcome.to_dict() for outcome in self.divergence_outcomes),
+                *(outcome.to_dict() for outcome in self.unknown_outcomes),
             ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key

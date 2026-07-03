@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
 from dataclasses import dataclass, field
 
@@ -12,6 +13,7 @@ from ...model import Condition, Expression, FunctionReturnAnalysis, expression_p
 from ...model import ExpressionType
 from ...model.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from ...smt import ParallelResult
+from ..formula.returns import coerce_value_to_bitvec_width
 from ..unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
@@ -294,16 +296,45 @@ class CheckStrategy(ABC):
         analysis2: Optional[FunctionReturnAnalysis] = None,
     ) -> List[str]:
         reasons: List[str] = []
+        outcome_covered_labels = self._outcome_partition_covered_labels(
+            base_ctx,
+            analysis1,
+            analysis2,
+            param_replace_fn1,
+            param_replace_fn2,
+        )
+        outcome_inconclusive_labels = self._outcome_partition_inconclusive_labels(
+            base_ctx,
+            analysis1,
+            analysis2,
+            param_replace_fn1,
+            param_replace_fn2,
+        )
         for label, cases, replace_fn, analysis in (
             ("function1", cases1, param_replace_fn1, analysis1),
             ("function2", cases2, param_replace_fn2, analysis2),
         ):
-            coverage_result = self._check_return_case_coverage_gap(
-                base_ctx,
-                cases,
-                replace_fn,
-                label,
-            )
+            if label in outcome_covered_labels:
+                coverage_result = ReturnCoverageCheckResult(
+                    status="covered",
+                    coverage_proof_method="outcome_partition_equivalence",
+                    solver_status="unsat",
+                )
+            elif label in outcome_inconclusive_labels:
+                coverage_result = ReturnCoverageCheckResult(
+                    status="inconclusive",
+                    reason_id=UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
+                    detail=f"Outcome partition unknown for {label}: UnknownOutcome covers missing control region",
+                    inconclusive_cause="unknown_outcome_partition",
+                    solver_status="unknown",
+                )
+            else:
+                coverage_result = self._check_return_case_coverage_gap(
+                    base_ctx,
+                    cases,
+                    replace_fn,
+                    label,
+                )
             if coverage_result.status == "gap":
                 if coverage_result.detail:
                     self._debug_print(coverage_result.detail)
@@ -2183,6 +2214,8 @@ class CheckStrategy(ABC):
             return UnknownReasonId.RETURN_COVERAGE_GAP
         if reason_kind == "return_coverage_inconclusive":
             return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+        if reason_kind == "outcome_partition_unknown":
+            return UnknownReasonId.OUTCOME_PARTITION_UNKNOWN
         summary_return_reason_ids = {
             UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID.value: UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
             UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN.value: UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN,
@@ -2307,6 +2340,42 @@ class CheckStrategy(ABC):
                 analysis1,
                 analysis2,
                 stage=stage,
+            )
+        if typed_reason_id == UnknownReasonId.OUTCOME_PARTITION_UNKNOWN:
+            object_target_key = self._outcome_partition_unknown_object_target_key(
+                blocking_reason,
+                analysis1,
+                analysis2,
+            )
+            object_evidence = self._outcome_partition_unknown_object_evidence(
+                blocking_reason,
+                analysis1,
+                analysis2,
+            )
+            return make_unknown_reason(
+                typed_reason_id,
+                stage=stage,
+                evidence_refs=(blocking_reason,),
+                detail=blocking_reason,
+                recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                recovery_proof_obligations=(
+                    UnknownRecoveryProofObligation.create(
+                        UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                        "outcome_partition_resolution",
+                        required_evidence=(
+                            "unknown_outcome_guard",
+                            "unknown_outcome_reason",
+                            "must_diverge_or_return_proof",
+                        ),
+                        description="Resolve UnknownOutcome members into proved return/divergence outcomes.",
+                    ),
+                ),
+                proof_stage="outcome_partition_unknown",
+                evidence_kind="outcome_partition",
+                object_target_key=object_target_key,
+                object_evidence=object_evidence,
+                recovery_action="outcome_partition_resolution_required",
+                action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
             )
         if typed_reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY:
             return make_unknown_reason(
@@ -7036,6 +7105,57 @@ class CheckStrategy(ABC):
             )
         )
 
+    def _outcome_partition_unknown_object_target_key(
+        self,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Tuple[Any, ...]]:
+        label, _reason_text = self._split_blocking_reason(blocking_reason)
+        reason_kind = self._blocking_reason_kind(blocking_reason)
+        if reason_kind != "outcome_partition_unknown":
+            return None
+        analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+        if analysis is None:
+            return None
+        target = (
+            "outcome_partition_unknown",
+            ("target_schema_version", 1),
+            label,
+            self._deterministic_function_identity(analysis),
+            self._return_storage_object_key(analysis),
+            self._outcome_partition_identity_key(analysis),
+            self._unknown_outcome_identity_key(analysis),
+        )
+        return self._identity_freeze(
+            self._artifact_stable_key_for_analysis(
+                self._identity_freeze(target),
+                analysis,
+            )
+        )
+
+    def _outcome_partition_unknown_object_evidence(
+        self,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Dict[str, Any]]:
+        label, _reason_text = self._split_blocking_reason(blocking_reason)
+        analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+        if analysis is None:
+            return None
+        return {
+            "object_derived": True,
+            "evidence_version": 1,
+            "evidence_kind": "outcome_partition",
+            "blocker_reason": blocking_reason,
+            "side": label,
+            "analysis_key": self._analysis_entry_key(analysis),
+            "return_storage": self._return_storage_object_key(analysis),
+            "outcome_partition": self._outcome_partition_identity_key(analysis),
+            "unknown_outcomes": self._unknown_outcome_identity_key(analysis),
+        }
+
     def _make_sat_unsafety_unknown_reason(
         self,
         sat_unsafety_reasons: Sequence[str],
@@ -7240,6 +7360,12 @@ class CheckStrategy(ABC):
                 "return_partition": self._return_partition_object_key(analysis),
                 "guard_disjunction": self._return_guard_disjunction_object_key(analysis),
             }
+        elif analysis is not None and reason_kind == "outcome_partition_unknown":
+            evidence["outcome_partition"] = self._outcome_partition_unknown_object_evidence(
+                canonical_reason,
+                analysis1,
+                analysis2,
+            )
         elif analysis is not None:
             evidence["analysis"] = {
                 "analysis_key": self._analysis_entry_key(analysis),
@@ -7328,6 +7454,14 @@ class CheckStrategy(ABC):
             target = self._return_coverage_object_target_key(canonical_reason, analysis1, analysis2)
             return (
                 "coverage_unsafety",
+                label,
+                reason_kind,
+                self._artifact_stable_key_for_analysis(target, analysis),
+            )
+        if reason_kind == "outcome_partition_unknown":
+            target = self._outcome_partition_unknown_object_target_key(canonical_reason, analysis1, analysis2)
+            return (
+                "outcome_partition_unsafety",
                 label,
                 reason_kind,
                 self._artifact_stable_key_for_analysis(target, analysis),
@@ -7778,6 +7912,70 @@ class CheckStrategy(ABC):
             "guard_disjunction_identity",
             ("normalization_schema_version", self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION),
             self._canonicalize_key_sequence(guard_sets),
+        )
+
+    def _outcome_partition_identity_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return_outcomes = tuple(getattr(analysis, "return_outcomes", ()) or ())
+        divergence_outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
+        unknown_outcomes = tuple(getattr(analysis, "unknown_outcomes", ()) or ())
+        return_keys = tuple(
+            (
+                "return",
+                index,
+                self._canonicalize_key_sequence(
+                    tuple(self._return_condition_object_key(condition) for condition in (getattr(outcome, "guard", ()) or ()))
+                ),
+                self._expression_runtime_object_key(getattr(outcome, "value", None)),
+                self._identity_freeze(getattr(outcome, "provenance", None)),
+            )
+            for index, outcome in enumerate(return_outcomes)
+        )
+        divergence_keys = tuple(
+            (
+                "divergence",
+                index,
+                self._canonicalize_key_sequence(
+                    tuple(self._return_condition_object_key(condition) for condition in (getattr(outcome, "guard", ()) or ()))
+                ),
+                self._identity_freeze(getattr(outcome, "proof", None)),
+            )
+            for index, outcome in enumerate(divergence_outcomes)
+        )
+        unknown_keys = tuple(
+            self._unknown_outcome_member_identity_key(index, outcome)
+            for index, outcome in enumerate(unknown_outcomes)
+        )
+        return (
+            "outcome_partition_identity",
+            ("normalization_schema_version", self._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION),
+            self._canonicalize_key_sequence(return_keys),
+            self._canonicalize_key_sequence(divergence_keys),
+            self._canonicalize_key_sequence(unknown_keys),
+        )
+
+    def _unknown_outcome_identity_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return (
+            "unknown_outcomes",
+            self._canonicalize_key_sequence(
+                tuple(
+                    self._unknown_outcome_member_identity_key(index, outcome)
+                    for index, outcome in enumerate(getattr(analysis, "unknown_outcomes", ()) or ())
+                )
+            ),
+        )
+
+    def _unknown_outcome_member_identity_key(self, index: int, outcome: Any) -> Tuple[Any, ...]:
+        return (
+            "unknown_outcome",
+            int(index),
+            ("reason", str(getattr(outcome, "reason", "") or "")),
+            (
+                "guard",
+                self._canonicalize_key_sequence(
+                    tuple(self._return_condition_object_key(condition) for condition in (getattr(outcome, "guard", ()) or ()))
+                ),
+            ),
+            ("evidence", self._identity_freeze(getattr(outcome, "evidence", None))),
         )
 
     def _return_case_object_key(self, index: int, return_info: Any) -> Tuple[Any, ...]:
@@ -8375,6 +8573,406 @@ class CheckStrategy(ABC):
     @classmethod
     def _expression_runtime_object_key(cls, expr: Any) -> Tuple[Any, ...]:
         return expression_provenance_key(expr)
+
+    def _outcome_partition_covered_labels(
+        self,
+        base_ctx: Mapping[str, Any],
+        analysis1: Optional[FunctionReturnAnalysis],
+        analysis2: Optional[FunctionReturnAnalysis],
+        param_replace_fn1,
+        param_replace_fn2,
+    ) -> Set[str]:
+        if analysis1 is None or analysis2 is None:
+            return set()
+        if not self._analysis_has_proved_outcome_partition(
+            base_ctx,
+            analysis1,
+            param_replace_fn1,
+            "function1",
+        ):
+            return set()
+        if not self._analysis_has_proved_outcome_partition(
+            base_ctx,
+            analysis2,
+            param_replace_fn2,
+            "function2",
+        ):
+            return set()
+        if not self._outcome_partitions_are_equivalent(
+            base_ctx,
+            analysis1,
+            analysis2,
+            param_replace_fn1,
+            param_replace_fn2,
+        ):
+            return set()
+        return {"function1", "function2"}
+
+    def _outcome_partition_inconclusive_labels(
+        self,
+        base_ctx: Mapping[str, Any],
+        analysis1: Optional[FunctionReturnAnalysis],
+        analysis2: Optional[FunctionReturnAnalysis],
+        param_replace_fn1,
+        param_replace_fn2,
+    ) -> Set[str]:
+        labels: Set[str] = set()
+        for label, analysis, replace_fn in (
+            ("function1", analysis1, param_replace_fn1),
+            ("function2", analysis2, param_replace_fn2),
+        ):
+            if analysis is None:
+                continue
+            if not getattr(analysis, "unknown_outcomes", ()) or ():
+                continue
+            if self._analysis_has_total_outcome_partition(
+                base_ctx,
+                analysis,
+                replace_fn,
+                label,
+            ):
+                labels.add(label)
+        return labels
+
+    def _analysis_has_total_outcome_partition(
+        self,
+        base_ctx: Mapping[str, Any],
+        analysis: FunctionReturnAnalysis,
+        replace_fn,
+        label: str,
+    ) -> bool:
+        return_outcomes = tuple(getattr(analysis, "return_outcomes", ()) or ())
+        divergence_outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
+        unknown_outcomes = tuple(getattr(analysis, "unknown_outcomes", ()) or ())
+        outcome_guards = [
+            tuple(getattr(outcome, "guard", ()) or ())
+            for outcome in (*return_outcomes, *divergence_outcomes, *unknown_outcomes)
+        ]
+        if not outcome_guards:
+            return False
+        return self._outcome_guard_union_is_total(
+            base_ctx,
+            outcome_guards,
+            replace_fn,
+            label,
+        )
+
+    def _analysis_has_proved_outcome_partition(
+        self,
+        base_ctx: Mapping[str, Any],
+        analysis: FunctionReturnAnalysis,
+        replace_fn,
+        label: str,
+    ) -> bool:
+        if getattr(analysis, "unknown_outcomes", ()) or ():
+            return False
+        return_outcomes = tuple(getattr(analysis, "return_outcomes", ()) or ())
+        divergence_outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
+        if not divergence_outcomes:
+            return False
+        return self._outcome_guard_union_is_total(
+            base_ctx,
+            [tuple(getattr(outcome, "guard", ()) or ()) for outcome in (*return_outcomes, *divergence_outcomes)],
+            replace_fn,
+            label,
+        )
+
+    def _outcome_partitions_are_equivalent(
+        self,
+        base_ctx: Mapping[str, Any],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        param_replace_fn1,
+        param_replace_fn2,
+    ) -> bool:
+        divergence1 = tuple(getattr(analysis1, "divergence_outcomes", ()) or ())
+        divergence2 = tuple(getattr(analysis2, "divergence_outcomes", ()) or ())
+        returns1 = tuple(getattr(analysis1, "return_outcomes", ()) or ())
+        returns2 = tuple(getattr(analysis2, "return_outcomes", ()) or ())
+        if not divergence1 or not divergence2:
+            return False
+        if not self._outcome_guard_unions_equivalent(
+            base_ctx,
+            [tuple(getattr(outcome, "guard", ()) or ()) for outcome in divergence1],
+            [tuple(getattr(outcome, "guard", ()) or ()) for outcome in divergence2],
+            param_replace_fn1,
+            param_replace_fn2,
+        ):
+            return False
+        if not self._outcome_cross_kind_disjoint(
+            base_ctx,
+            returns1,
+            divergence2,
+            param_replace_fn1,
+            param_replace_fn2,
+        ):
+            return False
+        if not self._outcome_cross_kind_disjoint(
+            base_ctx,
+            returns2,
+            divergence1,
+            param_replace_fn2,
+            param_replace_fn1,
+        ):
+            return False
+        if not self._return_outcome_values_are_equivalent(
+            base_ctx,
+            returns1,
+            returns2,
+            param_replace_fn1,
+            param_replace_fn2,
+        ):
+            return False
+        return True
+
+    def _return_outcome_values_are_equivalent(
+        self,
+        base_ctx: Mapping[str, Any],
+        returns1: Sequence[Any],
+        returns2: Sequence[Any],
+        param_replace_fn1,
+        param_replace_fn2,
+    ) -> bool:
+        for left in returns1 or ():
+            left_guard = tuple(getattr(left, "guard", ()) or ())
+            left_value = getattr(left, "value", None)
+            if left_value is None:
+                return False
+            for right in returns2 or ():
+                right_guard = tuple(getattr(right, "guard", ()) or ())
+                right_value = getattr(right, "value", None)
+                if right_value is None:
+                    return False
+                if self._outcome_condition_groups_are_unsat(
+                    base_ctx,
+                    ((left_guard, param_replace_fn1), (right_guard, param_replace_fn2)),
+                    title="Outcome return guard overlap",
+                ):
+                    continue
+                if not self._outcome_return_values_equal_under_guards(
+                    base_ctx,
+                    left_guard,
+                    right_guard,
+                    left_value,
+                    right_value,
+                    param_replace_fn1,
+                    param_replace_fn2,
+                ):
+                    return False
+        return True
+
+    def _outcome_cross_kind_disjoint(
+        self,
+        base_ctx: Mapping[str, Any],
+        return_outcomes: Sequence[Any],
+        divergence_outcomes: Sequence[Any],
+        return_replace_fn,
+        divergence_replace_fn,
+    ) -> bool:
+        for ret in return_outcomes or ():
+            ret_guard = tuple(getattr(ret, "guard", ()) or ())
+            for divergence in divergence_outcomes or ():
+                div_guard = tuple(getattr(divergence, "guard", ()) or ())
+                if not self._outcome_condition_groups_are_unsat(
+                    base_ctx,
+                    ((ret_guard, return_replace_fn), (div_guard, divergence_replace_fn)),
+                    title="Outcome return/divergence disjointness",
+                ):
+                    return False
+        return True
+
+    def _outcome_guard_unions_equivalent(
+        self,
+        base_ctx: Mapping[str, Any],
+        left_guards: Sequence[Sequence[Condition]],
+        right_guards: Sequence[Sequence[Condition]],
+        left_replace_fn,
+        right_replace_fn,
+    ) -> bool:
+        left_union = self._outcome_guard_union_smt(left_guards, left_replace_fn)
+        right_union = self._outcome_guard_union_smt(right_guards, right_replace_fn)
+        if left_union is None or right_union is None:
+            return False
+
+        left_implies_right = self._outcome_smt_assertions_are_unsat(
+            base_ctx,
+            [left_union, f"(not {right_union})"],
+            title="Outcome divergence guard implication left-to-right",
+        )
+        right_implies_left = self._outcome_smt_assertions_are_unsat(
+            base_ctx,
+            [right_union, f"(not {left_union})"],
+            title="Outcome divergence guard implication right-to-left",
+        )
+        return left_implies_right and right_implies_left
+
+    def _outcome_guard_union_is_total(
+        self,
+        base_ctx: Mapping[str, Any],
+        guard_sets: Sequence[Sequence[Condition]],
+        replace_fn,
+        label: str,
+    ) -> bool:
+        union = self._outcome_guard_union_smt(guard_sets, replace_fn)
+        if union is None:
+            return False
+        return self._outcome_smt_assertions_are_unsat(
+            base_ctx,
+            [f"(not {union})"],
+            title=f"Outcome partition total coverage: {label}",
+        )
+
+    def _outcome_condition_groups_are_unsat(
+        self,
+        base_ctx: Mapping[str, Any],
+        condition_groups: Sequence[Tuple[Sequence[Condition], Any]],
+        *,
+        title: str,
+    ) -> bool:
+        assertions: List[str] = []
+        for conditions, replace_fn in condition_groups:
+            rendered = self._outcome_conditions_smt(conditions, replace_fn)
+            if rendered is None:
+                return False
+            assertions.extend(rendered)
+        return self._outcome_smt_assertions_are_unsat(base_ctx, assertions, title=title)
+
+    def _outcome_return_values_equal_under_guards(
+        self,
+        base_ctx: Mapping[str, Any],
+        left_guard: Sequence[Condition],
+        right_guard: Sequence[Condition],
+        left_value: Expression,
+        right_value: Expression,
+        left_replace_fn,
+        right_replace_fn,
+    ) -> bool:
+        left_conditions = self._outcome_conditions_smt(left_guard, left_replace_fn)
+        right_conditions = self._outcome_conditions_smt(right_guard, right_replace_fn)
+        if left_conditions is None or right_conditions is None:
+            return False
+        left_smt = self._outcome_expression_smt(left_value, left_replace_fn)
+        right_smt = self._outcome_expression_smt(right_value, right_replace_fn)
+        if left_smt is None or right_smt is None:
+            return False
+        left_bits = int(expression_smt_bit_width(left_value) or 0)
+        right_bits = int(expression_smt_bit_width(right_value) or 0)
+        if left_bits <= 0 or right_bits <= 0:
+            return False
+        target_bits = max(left_bits, right_bits)
+        left_smt = coerce_value_to_bitvec_width(left_value, left_smt, target_bits)
+        right_smt = coerce_value_to_bitvec_width(right_value, right_smt, target_bits)
+        return self._outcome_smt_assertions_are_unsat(
+            base_ctx,
+            [*left_conditions, *right_conditions, f"(not (= {left_smt} {right_smt}))"],
+            title="Outcome return value equality",
+        )
+
+    def _outcome_guard_union_smt(
+        self,
+        guard_sets: Sequence[Sequence[Condition]],
+        replace_fn,
+    ) -> Optional[str]:
+        disjuncts: List[str] = []
+        for guards in guard_sets or ():
+            rendered = self._outcome_conditions_smt(guards, replace_fn)
+            if rendered is None:
+                return None
+            if not rendered:
+                return "true"
+            if len(rendered) == 1:
+                disjuncts.append(rendered[0])
+            else:
+                disjuncts.append(f"(and {' '.join(rendered)})")
+        if not disjuncts:
+            return None
+        if len(disjuncts) == 1:
+            return disjuncts[0]
+        return f"(or {' '.join(disjuncts)})"
+
+    def _outcome_conditions_smt(
+        self,
+        conditions: Sequence[Condition],
+        replace_fn,
+    ) -> Optional[List[str]]:
+        rendered: List[str] = []
+        for condition in conditions or ():
+            smt = self._outcome_condition_smt(condition, replace_fn)
+            if smt is None:
+                return None
+            rendered.append(smt)
+        return rendered
+
+    def _outcome_condition_smt(self, condition: Condition, replace_fn) -> Optional[str]:
+        try:
+            if replace_fn is None:
+                return condition.to_smt(float_mode="fp")
+            return replace_fn(condition)
+        except TypeError:
+            try:
+                return replace_fn(condition.to_smt(float_mode="fp"))
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _outcome_expression_smt(self, expression: Expression, replace_fn) -> Optional[str]:
+        try:
+            if replace_fn is None:
+                return expression.to_smt(float_mode="fp")
+            return replace_fn(expression)
+        except TypeError:
+            try:
+                return replace_fn(expression.to_smt(float_mode="fp"))
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _outcome_smt_assertions_are_unsat(
+        self,
+        base_ctx: Mapping[str, Any],
+        assertions: Sequence[str],
+        *,
+        title: str,
+    ) -> bool:
+        header_lines = list(base_ctx.get("header_lines", []) or []) if isinstance(base_ctx, Mapping) else []
+        if not header_lines:
+            return False
+        if not assertions:
+            return False
+        query = "\n".join(
+            [
+                f"; {title}",
+                *header_lines,
+                *(f"(assert {assertion})" for assertion in assertions),
+                "(check-sat)",
+                "(get-model)",
+            ]
+        )
+        result = self.solver_runner.run_sequential(query)
+        return result.is_equivalent is True
+
+    def _guard_union_miss_condition(
+        self,
+        guard_sets: Sequence[Sequence[Condition]],
+    ) -> Optional[Condition]:
+        guard_cases = [SimpleNamespace(conditions=tuple(guards or ())) for guards in guard_sets or ()]
+        miss_terms = []
+        for case in guard_cases:
+            conditions = tuple(getattr(case, "conditions", ()) or ())
+            if not conditions:
+                return Condition(Expression.constant(0, 1), False)
+            miss_expr = self._case_miss_expression(conditions)
+            if miss_expr is None:
+                return None
+            miss_terms.append(miss_expr)
+        if not miss_terms:
+            return None
+        expr = miss_terms[0]
+        for term in miss_terms[1:]:
+            expr = Expression.binary_op("BOOL_AND", expr, term)
+        return Condition(expr, False)
 
     def _check_return_case_coverage_gap(
         self,

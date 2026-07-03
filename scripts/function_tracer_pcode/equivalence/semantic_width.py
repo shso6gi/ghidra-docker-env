@@ -13,8 +13,11 @@ from ..model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    DivergenceOutcome,
     ReadonlyReductionRef,
     ReturnInfo,
+    ReturnOutcome,
+    UnknownOutcome,
     StorageInfo,
 )
 from ..model.render_smt import expression_smt_bit_width
@@ -1169,6 +1172,62 @@ def _rewrite_analysis_expressions(
             )
         )
 
+    rewritten_return_outcomes = []
+    for outcome in getattr(analysis, "return_outcomes", ()) or ():
+        new_value = rewrite_expr(outcome.value)
+        new_guard, guard_changed = _rewrite_conditions(
+            outcome.guard,
+            rewrite_expr,
+            simplify=simplify_conditions,
+        )
+        new_return_info = outcome.return_info
+        if new_return_info is not None:
+            info_value = rewrite_expr(new_return_info.value)
+            info_conditions, info_conditions_changed = _rewrite_conditions(
+                new_return_info.conditions,
+                rewrite_expr,
+                simplify=simplify_conditions,
+            )
+            if info_value is not new_return_info.value or info_conditions_changed:
+                new_return_info = replace(
+                    new_return_info,
+                    value=info_value,
+                    conditions=info_conditions,
+                )
+                changed = True
+        if new_value is not outcome.value or guard_changed:
+            changed = True
+        rewritten_return_outcomes.append(
+            replace(
+                outcome,
+                value=new_value,
+                guard=tuple(new_guard),
+                return_info=new_return_info,
+            )
+        )
+
+    rewritten_divergence_outcomes = []
+    for outcome in getattr(analysis, "divergence_outcomes", ()) or ():
+        new_guard, guard_changed = _rewrite_conditions(
+            outcome.guard,
+            rewrite_expr,
+            simplify=simplify_conditions,
+        )
+        if guard_changed:
+            changed = True
+        rewritten_divergence_outcomes.append(replace(outcome, guard=tuple(new_guard)))
+
+    rewritten_unknown_outcomes = []
+    for outcome in getattr(analysis, "unknown_outcomes", ()) or ():
+        new_guard, guard_changed = _rewrite_conditions(
+            outcome.guard,
+            rewrite_expr,
+            simplify=simplify_conditions,
+        )
+        if guard_changed:
+            changed = True
+        rewritten_unknown_outcomes.append(replace(outcome, guard=tuple(new_guard)))
+
     rewritten_effect_summary = _rewrite_effect_summary_expressions(
         getattr(analysis, "effect_summary", None),
         rewrite_expr,
@@ -1205,6 +1264,9 @@ def _rewrite_analysis_expressions(
     return replace(
         analysis,
         returns=rewritten_returns,
+        return_outcomes=tuple(rewritten_return_outcomes),
+        divergence_outcomes=tuple(rewritten_divergence_outcomes),
+        unknown_outcomes=tuple(rewritten_unknown_outcomes),
         effect_summary=rewritten_effect_summary,
         comparison_surface=rewritten_comparison_surface,
     )

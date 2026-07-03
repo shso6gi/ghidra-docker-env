@@ -26,6 +26,7 @@ class UnknownReasonId(str, Enum):
     LOOP_SUMMARY_PROOF_MISSING = "loop_summary_proof_missing"
     RETURN_COVERAGE_GAP = "return_coverage_gap"
     RETURN_COVERAGE_INCONCLUSIVE = "return_coverage_inconclusive"
+    OUTCOME_PARTITION_UNKNOWN = "outcome_partition_unknown"
     SUMMARY_RETURN_CANDIDATE_INVALID = "summary_return_candidate_invalid"
     SUMMARY_RETURN_OVERLAP_UNPROVEN = "summary_return_overlap_unproven"
     SUMMARY_EFFECT_UNMODELED = "summary_effect_unmodeled"
@@ -437,6 +438,15 @@ def _register_defaults() -> None:
             target_regression="return_coverage_inconclusive",
         ),
         UnknownReasonDefinition.create(
+            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
+            UnknownReasonClass.PROOF_OBLIGATION,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+            target_regression="outcome_partition_unknown",
+        ),
+        UnknownReasonDefinition.create(
             UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
             UnknownReasonClass.PROOF_OBLIGATION,
             UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
@@ -752,6 +762,23 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="return_coverage_inconclusive",
             description="Recover inconclusive coverage by proving or refuting the uncovered guard.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                    "outcome_partition_resolution",
+                    required_evidence=(
+                        "unknown_outcome_guard",
+                        "unknown_outcome_reason",
+                        "must_diverge_or_return_proof",
+                    ),
+                    description="Resolve UnknownOutcome members into proved return/divergence outcomes.",
+                ),
+            ),
+            target_regression="outcome_partition_unknown",
+            description="Recover unknown outcome partitions by proving the unknown member semantics.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
