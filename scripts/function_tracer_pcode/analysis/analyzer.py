@@ -2063,11 +2063,8 @@ class ReturnAnalyzer:
         if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
             self._debug_print("Outcome loop summary declined: forbidden control/effect op present")
             return False
-        if (
-            not self._high_function_has_nonreturning_region_candidate(high_function)
-            and self._high_function_cbranch_count(high_function) < 1
-        ):
-            self._debug_print("Outcome loop summary declined: no loop/control guard candidate")
+        if self._high_function_cbranch_count(high_function) < 1:
+            self._debug_print("Outcome loop summary declined: no control guard")
             return False
 
         ret = analysis.returns[0]
@@ -2076,6 +2073,20 @@ class ReturnAnalyzer:
             return False
         if len(ret.conditions or ()) != 1:
             self._debug_print("Outcome loop summary declined: expected one return guard")
+            return False
+        param = self._parameter_expression(analysis, 0)
+        if param is None:
+            self._debug_print("Outcome loop summary declined: parameter expression unavailable")
+            return False
+        nonpositive = self._signed_positive_condition(param).negate()
+        if not (
+            self._conditions_equivalent(ret.conditions, [nonpositive])
+            or (
+                len(ret.conditions or ()) == 1
+                and self._condition_is_signed_nonpositive_of_param(ret.conditions[0], param)
+            )
+        ):
+            self._debug_print("Outcome loop summary declined: return guard is not param nonpositive")
             return False
         divergence_guard = ret.conditions[0].negate()
 
@@ -2095,14 +2106,57 @@ class ReturnAnalyzer:
                 evidence={
                     "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
                     "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
+                    "nonreturning_region_candidate": self._high_function_has_nonreturning_region_candidate(high_function),
                     "has_control_guard": self._high_function_cbranch_count(high_function) > 0,
                     "forbidden_ops_absent": True,
+                    "return_guard_equivalent_to_param_nonpositive": True,
+                    "missing_proof": "scc_exit_impossibility_and_guard_preservation",
                 },
             ),
         )
         if "outcome_partition_unknown_nonprogress_loop" not in analysis.analysis_notes:
             analysis.analysis_notes.append("outcome_partition_unknown_nonprogress_loop")
         return True
+
+    def _iter_outcome_call_candidates(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> Iterable[Tuple[Optional[CallTargetRef], Tuple[Expression, ...], str, str]]:
+        seen: Set[Tuple[Any, ...]] = set()
+        for info in getattr(analysis, "deferred_calls", {}).values():
+            deferred_ref = getattr(info, "deferred_call_ref", None)
+            pcode_ref = getattr(deferred_ref, "pcode_op_ref", None)
+            stable_key_fn = getattr(pcode_ref, "stable_key", None)
+            key = stable_key_fn() if callable(stable_key_fn) else ("deferred", id(info))
+            if key in seen:
+                continue
+            seen.add(key)
+            yield (
+                getattr(info, "target_ref", None),
+                tuple(getattr(info, "arguments", None) or ()),
+                getattr(info, "call_argument_recovery_status", "inconclusive"),
+                "deferred_call",
+            )
+
+        effect_summary = getattr(analysis, "effect_summary", None)
+        evidence = getattr(effect_summary, "call_argument_evidence", None)
+        if not evidence:
+            return
+        for key, call_evidence in evidence.items():
+            stable_key = getattr(call_evidence, "stable_key", lambda: None)()
+            candidate_key = stable_key if stable_key is not None else ("effect", key)
+            if candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            is_usable = getattr(call_evidence, "is_usable", lambda: False)
+            if not callable(is_usable) or not is_usable():
+                continue
+            yield (
+                getattr(call_evidence, "target_ref", None),
+                tuple(getattr(call_evidence, "arguments", None) or ()),
+                getattr(call_evidence, "recovery_status", "inconclusive"),
+                "effect_call_argument_evidence",
+            )
 
     def _try_apply_triangular_mod_caller_outcomes(
         self,
@@ -2111,9 +2165,6 @@ class ReturnAnalyzer:
     ) -> bool:
         if len(getattr(analysis, "parameters", []) or []) != 1:
             self._debug_print("Outcome caller summary declined: expected one parameter")
-            return False
-        if not getattr(analysis, "deferred_calls", None):
-            self._debug_print("Outcome caller summary declined: no deferred calls")
             return False
         if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=True):
             self._debug_print("Outcome caller summary declined: forbidden control/effect op present")
@@ -2124,66 +2175,172 @@ class ReturnAnalyzer:
             self._debug_print("Outcome caller summary declined: parameter expression unavailable")
             return False
         matched_call = None
-        for info in analysis.deferred_calls.values():
-            target_name = getattr(getattr(info, "target_ref", None), "function_name", None)
-            if target_name != "tr":
-                self._debug_print(f"Outcome caller summary skipped deferred call: target={target_name}")
-                continue
-            args = list(getattr(info, "arguments", None) or ())
+        matched_source = None
+        for target_ref, args_tuple, status, source in self._iter_outcome_call_candidates(analysis):
+            args = list(args_tuple or ())
             if len(args) != 1 or not self._expression_is_param_minus_one(args[0], param):
                 self._debug_print("Outcome caller summary skipped deferred call: argument is not param_minus_one")
                 continue
-            status = getattr(info, "call_argument_recovery_status", "inconclusive")
             if status != "complete":
                 self._debug_print(f"Outcome caller summary skipped deferred call: argument recovery status={status}")
                 continue
-            matched_call = info
+            callee_analysis = self._cached_callee_analysis_for_outcome_summary(target_ref)
+            if not self._analysis_has_positive_region_outcome_obligation(callee_analysis):
+                self._debug_print("Outcome caller summary skipped deferred call: callee outcome contract unavailable")
+                continue
+            matched_call = (target_ref, args[0], status)
+            matched_source = source
             break
         if matched_call is None:
-            self._debug_print("Outcome caller summary declined: no matching tr(param-1) deferred call")
+            self._debug_print("Outcome caller summary declined: no matching callee outcome contract for param_minus_one call")
             return False
 
         return_size = self._analysis_return_size_bytes(analysis)
-        zero = Expression.constant(0, return_size)
         one = Expression.constant(1, max(1, int(param.size or return_size or 4)))
         nonpositive = self._signed_positive_condition(param).negate()
         eq_one = Condition(Expression.binary_op("INT_EQUAL", param, one), False)
 
-        zero_ret = self._make_synthetic_outcome_return(
+        zero_ret, one_ret = self._find_caller_return_partition_for_param_minus_one_obligation(
             analysis,
-            value=zero,
-            conditions=[nonpositive],
-            branch_index=0,
-            tag="triangular_mod_caller_nonpositive",
+            param=param,
+            nonpositive=nonpositive,
+            eq_one=eq_one,
         )
-        one_ret = self._make_synthetic_outcome_return(
-            analysis,
-            value=self._coerce_expression_size(param, return_size),
-            conditions=[eq_one],
-            branch_index=1,
-            tag="triangular_mod_caller_one",
-        )
+        if zero_ret is None or one_ret is None:
+            self._debug_print("Outcome caller summary declined: caller return partition/value proof unavailable")
+            return False
         analysis.returns = [zero_ret, one_ret]
         analysis.return_outcomes = (
-            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "callee_divergence_caller_summary"}, return_info=zero_ret),
-            ReturnOutcome(guard=tuple(one_ret.conditions), value=one_ret.value, provenance={"source": "callee_divergence_caller_summary"}, return_info=one_ret),
+            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "callee_positive_region_caller_summary"}, return_info=zero_ret),
+            ReturnOutcome(guard=tuple(one_ret.conditions), value=one_ret.value, provenance={"source": "callee_positive_region_caller_summary"}, return_info=one_ret),
         )
         analysis.divergence_outcomes = ()
         analysis.unknown_outcomes = (
             UnknownOutcome(
                 guard=(self._return_partition_miss_guard([zero_ret, one_ret]),),
-                reason="callee_divergence_summary_missing",
+                reason="callee_positive_region_outcome_proof_missing",
                 evidence={
-                    "candidate_rule": "callee_divergence_bv_argument_binding",
-                    "callee_name": "tr",
+                    "candidate_rule": "callee_positive_region_outcome_obligation_bv_argument_binding",
                     "argument_binding": "param_minus_one",
-                    "argument_recovery_status": getattr(matched_call, "call_argument_recovery_status", None),
+                    "argument_recovery_status": matched_call[2],
+                    "call_evidence_source": matched_source,
+                    "missing_proof": "callee_positive_region_outcome_resolution_and_bv_substitution",
                 },
             ),
         )
-        if "outcome_partition_unknown_callee_divergence" not in analysis.analysis_notes:
-            analysis.analysis_notes.append("outcome_partition_unknown_callee_divergence")
+        if "outcome_partition_unknown_callee_positive_region" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
         return True
+
+    def _find_caller_return_partition_for_param_minus_one_obligation(
+        self,
+        analysis: FunctionReturnAnalysis,
+        *,
+        param: Expression,
+        nonpositive: Condition,
+        eq_one: Condition,
+    ) -> Tuple[Optional[ReturnInfo], Optional[ReturnInfo]]:
+        zero_ret = None
+        one_ret = None
+        for ret in getattr(analysis, "returns", []) or ():
+            conditions = tuple(getattr(ret, "conditions", ()) or ())
+            if zero_ret is None and self._constant_int_value(getattr(ret, "value", None)) == 0:
+                if self._conditions_equivalent(conditions, [nonpositive]) or (
+                    len(conditions) == 1
+                    and self._condition_is_signed_nonpositive_of_param(conditions[0], param)
+                ):
+                    zero_ret = ret
+                    continue
+            if one_ret is None and self._caller_return_value_matches_param_on_eq_one(
+                getattr(ret, "value", None),
+                param,
+            ):
+                if self._conditions_equivalent(conditions, [eq_one]) or any(
+                    self._condition_is_param_equal_const(condition, param, 1)
+                    for condition in conditions
+                ):
+                    one_ret = ret
+        return zero_ret, one_ret
+
+    def _caller_return_value_matches_param_on_eq_one(
+        self,
+        value: Optional[Expression],
+        param: Expression,
+    ) -> bool:
+        if value is None:
+            return False
+        if self._expression_is_same_parameter_ignoring_subpiece(value, param):
+            return True
+        return self._constant_int_value(value) == 1
+
+    def _cached_callee_analysis_for_outcome_summary(
+        self,
+        target_ref: Optional[CallTargetRef],
+    ) -> Optional[FunctionReturnAnalysis]:
+        if target_ref is None:
+            return None
+        candidate_keys: List[Tuple[Any, ...]] = []
+        try:
+            candidate_keys.append(self._analysis_scope_key(target_ref))
+        except Exception:
+            pass
+        active_key = self._target_active_key(target_ref)
+        if active_key is not None:
+            candidate_keys.append(active_key)
+        try:
+            function_obj = getattr(target_ref, "function_obj", None) or self._resolve_target_function(target_ref)
+        except Exception:
+            function_obj = None
+        function_key = self._function_cache_key(function_obj)
+        if function_key is not None:
+            candidate_keys.append(function_key)
+        seen: Set[Tuple[Any, ...]] = set()
+        for key in candidate_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            cached = self._call_analysis_cache.get(key)
+            if cached is not None:
+                return cached
+        return None
+
+    def _analysis_has_positive_region_outcome_obligation(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> bool:
+        if analysis is None:
+            return False
+        if len(getattr(analysis, "parameters", []) or []) != 1:
+            return False
+        param = self._parameter_expression(analysis, 0)
+        if param is None:
+            return False
+        return_outcomes = tuple(getattr(analysis, "return_outcomes", ()) or ())
+        unknown_outcomes = tuple(getattr(analysis, "unknown_outcomes", ()) or ())
+        divergence_outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
+        if len(return_outcomes) != 1 or not (unknown_outcomes or divergence_outcomes):
+            return False
+        ret = return_outcomes[0]
+        if self._constant_int_value(getattr(ret, "value", None)) != 0:
+            return False
+        nonpositive = self._signed_positive_condition(param).negate()
+        if not (
+            self._conditions_equivalent(tuple(getattr(ret, "guard", ()) or ()), [nonpositive])
+            or (
+                len(tuple(getattr(ret, "guard", ()) or ())) == 1
+                and self._condition_is_signed_nonpositive_of_param(tuple(getattr(ret, "guard", ()) or ())[0], param)
+            )
+        ):
+            return False
+        positive = self._signed_positive_condition(param)
+        for outcome in (*unknown_outcomes, *divergence_outcomes):
+            guard = tuple(getattr(outcome, "guard", ()) or ())
+            if self._conditions_equivalent(guard, [positive]) or (
+                len(guard) == 1
+                and self._condition_is_signed_positive_of_param(guard[0], param)
+            ):
+                return True
+        return False
 
     def _try_apply_branch_guarded_while_outcomes(
         self,
@@ -2191,41 +2348,41 @@ class ReturnAnalyzer:
         analysis: FunctionReturnAnalysis,
     ) -> bool:
         if len(getattr(analysis, "parameters", []) or []) != 2:
+            self._debug_print("Outcome branch-guarded while summary declined: expected two parameters")
             return False
         if getattr(analysis, "deferred_calls", None):
+            self._debug_print("Outcome branch-guarded while summary declined: deferred calls present")
             return False
         if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            self._debug_print("Outcome branch-guarded while summary declined: forbidden control/effect op present")
             return False
         if self._high_function_cbranch_count(high_function) < 2:
+            self._debug_print("Outcome branch-guarded while summary declined: expected two control guards")
             return False
         if not any(self._expression_contains_phi_circular(ret.value) for ret in analysis.returns or ()):
+            self._debug_print("Outcome branch-guarded while summary declined: no phi_circular return")
             return False
 
         t_param = self._parameter_expression(analysis, 0)
         c_param = self._parameter_expression(analysis, 1)
         if t_param is None or c_param is None:
+            self._debug_print("Outcome branch-guarded while summary declined: parameter expression unavailable")
             return False
-        return_size = self._analysis_return_size_bytes(analysis)
-        zero = Expression.constant(0, return_size)
         t_positive = self._signed_positive_condition(t_param)
         c_positive = self._signed_positive_condition(c_param)
         c_nonpositive = c_positive.negate()
         t_nonpositive = t_positive.negate()
 
-        zero_ret = self._make_synthetic_outcome_return(
+        zero_ret, initial_c_ret = self._find_branch_guarded_while_return_partition(
             analysis,
-            value=zero,
-            conditions=[c_nonpositive],
-            branch_index=0,
-            tag="branch_guarded_while_nonpositive_count",
+            c_param=c_param,
+            c_nonpositive=c_nonpositive,
+            c_positive=c_positive,
+            t_positive=t_positive,
         )
-        initial_c_ret = self._make_synthetic_outcome_return(
-            analysis,
-            value=self._coerce_expression_size(c_param, return_size),
-            conditions=[c_positive, t_positive],
-            branch_index=1,
-            tag="branch_guarded_while_initial_count",
-        )
+        if zero_ret is None or initial_c_ret is None:
+            self._debug_print("Outcome branch-guarded while summary declined: return partition/value proof unavailable")
+            return False
         analysis.returns = [zero_ret, initial_c_ret]
         analysis.return_outcomes = (
             ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=zero_ret),
@@ -2240,6 +2397,9 @@ class ReturnAnalyzer:
                     "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
                     "state_reference": "initial_parameter_1",
                     "forbidden_ops_absent": True,
+                    "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
+                    "has_control_guards": True,
+                    "missing_proof": "scc_exit_impossibility_guard_preservation_and_affine_transition",
                 },
             ),
         )
@@ -2247,21 +2407,54 @@ class ReturnAnalyzer:
             analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
         return True
 
+    def _find_branch_guarded_while_return_partition(
+        self,
+        analysis: FunctionReturnAnalysis,
+        *,
+        c_param: Expression,
+        c_nonpositive: Condition,
+        c_positive: Condition,
+        t_positive: Condition,
+    ) -> Tuple[Optional[ReturnInfo], Optional[ReturnInfo]]:
+        zero_ret = None
+        initial_c_ret = None
+        for ret in getattr(analysis, "returns", []) or ():
+            conditions = tuple(getattr(ret, "conditions", ()) or ())
+            if zero_ret is None and self._constant_int_value(getattr(ret, "value", None)) == 0:
+                if self._conditions_equivalent(conditions, [c_nonpositive]) or (
+                    len(conditions) == 1
+                    and self._condition_is_signed_nonpositive_of_param(conditions[0], c_param)
+                ):
+                    zero_ret = ret
+                    continue
+            if initial_c_ret is None and self._expression_is_same_parameter_ignoring_subpiece(
+                getattr(ret, "value", None),
+                c_param,
+            ):
+                if self._conditions_equivalent(conditions, [c_positive, t_positive]):
+                    initial_c_ret = ret
+        return zero_ret, initial_c_ret
+
     def _try_apply_triangular_mod_optimized_outcomes(
         self,
         high_function,
         analysis: FunctionReturnAnalysis,
     ) -> bool:
         if len(getattr(analysis, "parameters", []) or []) != 1:
+            self._debug_print("Outcome optimized triangular summary declined: expected one parameter")
             return False
         if getattr(analysis, "deferred_calls", None):
+            self._debug_print("Outcome optimized triangular summary declined: deferred calls present")
             return False
         if len(getattr(analysis, "returns", []) or []) != 2:
+            self._debug_print("Outcome optimized triangular summary declined: expected two returns")
             return False
         if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            self._debug_print("Outcome optimized triangular summary declined: forbidden control/effect op present")
             return False
         param = self._parameter_expression(analysis, 0)
         if param is None:
+            self._debug_print("Outcome optimized triangular summary declined: parameter expression unavailable")
             return False
         return_size = self._analysis_return_size_bytes(analysis)
         zero_ret = None
@@ -2275,6 +2468,37 @@ class ReturnAnalyzer:
             ):
                 one_ret = ret
         if zero_ret is None or one_ret is None:
+            self._debug_print("Outcome optimized triangular summary declined: zero/one return partition not recognized")
+            return False
+        nonpositive = self._signed_positive_condition(param).negate()
+        eq_one = Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                param,
+                Expression.constant(1, max(1, int(param.size or return_size or 4))),
+            ),
+            False,
+        )
+        if not (
+            self._conditions_equivalent(zero_ret.conditions, [nonpositive])
+            or (
+                len(zero_ret.conditions or ()) == 1
+                and (
+                    self._condition_is_signed_nonpositive_of_param(zero_ret.conditions[0], param)
+                    or self._condition_is_signed_less_than_one_of_param(zero_ret.conditions[0], param)
+                )
+            )
+        ):
+            self._debug_print("Outcome optimized triangular summary declined: zero return guard is not param nonpositive")
+            return False
+        if not (
+            self._conditions_equivalent(one_ret.conditions, [eq_one])
+            or any(
+                self._condition_is_param_equal_const(condition, param, 1)
+                for condition in (one_ret.conditions or ())
+            )
+        ):
+            self._debug_print("Outcome optimized triangular summary declined: one return guard is not param eq one")
             return False
 
         analysis.return_outcomes = (
@@ -2289,6 +2513,9 @@ class ReturnAnalyzer:
                 evidence={
                     "candidate_rule": "optimized_triangular_mod_missing_region",
                     "forbidden_ops_absent": True,
+                    "nonreturning_region_candidate": self._high_function_has_nonreturning_region_candidate(high_function),
+                    "return_partition": "param_nonpositive_or_param_eq_one",
+                    "missing_proof": "object_level_nonreturning_region_or_positive_region_resolution",
                 },
             ),
         )
@@ -2335,6 +2562,70 @@ class ReturnAnalyzer:
     def _signed_positive_condition(self, expr: Expression) -> Condition:
         zero = Expression.constant(0, max(1, int(expr.size or 4)))
         return Condition(Expression.binary_op("INT_SLESS", zero, expr), False)
+
+    def _condition_is_signed_nonpositive_of_param(self, condition: Condition, param: Expression) -> bool:
+        if condition is None or not getattr(condition, "negated", False):
+            return False
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_SLESS":
+            return False
+        operands = list(getattr(expr, "operands", None) or ())
+        if len(operands) != 2:
+            return False
+        left, right = operands
+        return self._constant_int_value(left) == 0 and self._expression_is_same_parameter_ignoring_subpiece(right, param)
+
+    def _condition_is_signed_positive_of_param(self, condition: Condition, param: Expression) -> bool:
+        if condition is None or getattr(condition, "negated", False):
+            return False
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_SLESS":
+            return False
+        operands = list(getattr(expr, "operands", None) or ())
+        if len(operands) != 2:
+            return False
+        left, right = operands
+        return self._constant_int_value(left) == 0 and self._expression_is_same_parameter_ignoring_subpiece(right, param)
+
+    def _condition_is_signed_less_than_one_of_param(self, condition: Condition, param: Expression) -> bool:
+        if condition is None or getattr(condition, "negated", False):
+            return False
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_SLESS":
+            return False
+        operands = list(getattr(expr, "operands", None) or ())
+        if len(operands) != 2:
+            return False
+        left, right = operands
+        return self._expression_is_same_parameter_ignoring_subpiece(left, param) and self._constant_int_value(right) == 1
+
+    def _condition_is_param_equal_const(self, condition: Condition, param: Expression, value: int) -> bool:
+        if condition is None:
+            return False
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP:
+            return False
+        operator = getattr(expr, "operator", None)
+        negated = bool(getattr(condition, "negated", False))
+        if operator == "INT_NOTEQUAL" and negated:
+            pass
+        elif operator == "INT_EQUAL" and not negated:
+            pass
+        else:
+            return False
+        operands = list(getattr(expr, "operands", None) or ())
+        if len(operands) != 2:
+            return False
+        left, right = operands
+        if (
+            self._expression_is_same_parameter_ignoring_subpiece(left, param)
+        ) and self._constant_int_value(right) == value:
+            return True
+        if (
+            self._expression_is_same_parameter_ignoring_subpiece(right, param)
+        ) and self._constant_int_value(left) == value:
+            return True
+        return False
 
     def _analysis_return_size_bytes(self, analysis: FunctionReturnAnalysis) -> int:
         for ret in getattr(analysis, "returns", []) or []:

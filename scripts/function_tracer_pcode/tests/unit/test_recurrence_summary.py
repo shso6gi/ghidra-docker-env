@@ -2037,6 +2037,8 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert len(summarized_returns) == 2
     assert all(expression_has_unresolved_value(ret.value) is False for ret in summarized_returns)
     loop_case = next(ret for ret in summarized_returns if ret.conditions and ret.conditions[0].to_string() == "(0 < param_1)")
+    assert loop_case.summary_candidate_source_key is not None
+    assert loop_case.summary_transition_evidence_key is not None
     loop_smt = expression_to_smt(loop_case.value)
     assert "rtunk_" not in loop_smt
     assert "rt_counted_loop_sum_" not in loop_smt

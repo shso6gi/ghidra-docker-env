@@ -1134,6 +1134,8 @@ class FunctionReturnAnalysis:
 
     def should_skip_monolithic_fallback(self) -> bool:
         """解析が不完全で monolithic fallback を避けるべきか。"""
+        if self.has_unknown_outcome_partition():
+            return True
         if "return_case_coverage_gap" in self.analysis_notes:
             return True
         if "return_case_coverage_inconclusive" in self.analysis_notes:
@@ -1143,6 +1145,9 @@ class FunctionReturnAnalysis:
         if not self.incomplete_control_flow:
             return False
         return self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns()
+
+    def has_unknown_outcome_partition(self) -> bool:
+        return bool(self.unknown_outcomes and (self.return_outcomes or self.divergence_outcomes))
 
     def get_signature(self) -> "FunctionSignature":
         """現在の解析結果から有効シグネチャを取得する。"""

@@ -24,6 +24,10 @@ def _param() -> Expression:
     return Expression.parameter("param_1", index=0, data_type="int", size=4)
 
 
+def _param2() -> Expression:
+    return Expression.parameter("param_2", index=1, data_type="int", size=4)
+
+
 def _const(value: int) -> Expression:
     return Expression.constant(value, 4)
 
@@ -309,7 +313,32 @@ def test_outcome_partition_unknown_reason_maps_to_specific_reason_and_evidence()
     assert record.object_evidence["unknown_outcomes"][1][0][0] == "unknown_outcome"
 
 
-def test_analyzer_records_unknown_for_unproved_single_guard_nonprogress_loop():
+def test_unknown_outcomes_skip_monolithic_fallback():
+    analysis = _analysis(
+        return_guards=[[_nonpositive()]],
+        divergence_guards=[],
+        unknown_guards=[[_positive()]],
+    )
+
+    assert analysis.should_skip_monolithic_fallback() is True
+
+
+def test_unknown_outcomes_without_partition_do_not_skip_monolithic_fallback():
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        returns=[],
+        return_type="int",
+    )
+    analysis.unknown_outcomes = (
+        UnknownOutcome(guard=(_positive(),), reason="test_unknown"),
+    )
+
+    assert analysis.should_skip_monolithic_fallback() is False
+
+
+def test_analyzer_keeps_single_guard_nonprogress_loop_unknown_without_must_diverge_proof():
     ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
     analysis = _base_analysis(
         "tr",
@@ -329,7 +358,7 @@ def test_analyzer_records_unknown_for_unproved_single_guard_nonprogress_loop():
     assert analysis.return_outcomes[0].value.value == 0
 
 
-def test_analyzer_keeps_triangular_caller_divergence_unknown_without_callee_proof():
+def test_analyzer_does_not_create_triangular_caller_outcome_without_callee_contract():
     param = _param()
     call_arg = Expression.binary_op("INT_ADD", param, Expression.constant(0xFFFFFFFF, 4))
     deferred = DeferredCallInfo(
@@ -350,21 +379,159 @@ def test_analyzer_keeps_triangular_caller_divergence_unknown_without_callee_proo
         analysis,
     )
 
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_use_callee_contract_without_caller_return_proof():
+    analyzer = ReturnAnalyzer(None)
+    target_ref = CallTargetRef.from_name("callee_with_contract")
+    callee_ret = ReturnInfo(address="0x2000", value=_const(0), conditions=[_nonpositive()])
+    callee = _base_analysis(
+        "callee_with_contract",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [callee_ret],
+    )
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH"),
+        callee,
+    )
+    analyzer._call_analysis_cache[analyzer._analysis_scope_key(target_ref)] = callee
+
+    param = _param()
+    call_arg = Expression.binary_op("INT_ADD", param, Expression.constant(0xFFFFFFFF, 4))
+    deferred = DeferredCallInfo(
+        target_ref=target_ref,
+        arguments=[call_arg],
+        call_argument_recovery_status="complete",
+    )
+    analysis = _base_analysis(
+        "f",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo(address="0x1000", value=Expression.unknown("call@0x1000"), conditions=[])],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CALL", "CBRANCH"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_uses_callee_outcome_obligation_when_caller_returns_are_proved():
+    analyzer = ReturnAnalyzer(None)
+    target_ref = CallTargetRef.from_name("callee_with_contract")
+    callee_ret = ReturnInfo(address="0x2000", value=_const(0), conditions=[_nonpositive()])
+    callee = _base_analysis(
+        "callee_with_contract",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [callee_ret],
+    )
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH"),
+        callee,
+    )
+    analyzer._call_analysis_cache[analyzer._analysis_scope_key(target_ref)] = callee
+
+    param = _param()
+    call_arg = Expression.binary_op("INT_ADD", param, Expression.constant(0xFFFFFFFF, 4))
+    deferred = DeferredCallInfo(
+        target_ref=target_ref,
+        arguments=[call_arg],
+        call_argument_recovery_status="complete",
+    )
+    analysis = _base_analysis(
+        "f",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()]),
+            ReturnInfo(address="0x1004", value=param, conditions=[Condition(Expression.binary_op("INT_EQUAL", param, _const(1)), False)]),
+        ],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CALL", "CBRANCH"),
+        analysis,
+    )
+
     assert len(analysis.returns) == 2
     assert analysis.divergence_outcomes == ()
     assert len(analysis.unknown_outcomes) == 1
-    assert analysis.unknown_outcomes[0].reason == "callee_divergence_summary_missing"
+    assert analysis.unknown_outcomes[0].reason == "callee_positive_region_outcome_proof_missing"
+
+
+def test_analyzer_rejects_callee_contract_when_caller_return_value_is_not_param():
+    analyzer = ReturnAnalyzer(None)
+    target_ref = CallTargetRef.from_name("callee_with_contract")
+    callee_ret = ReturnInfo(address="0x2000", value=_const(0), conditions=[_nonpositive()])
+    callee = _base_analysis(
+        "callee_with_contract",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [callee_ret],
+    )
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH"),
+        callee,
+    )
+    analyzer._call_analysis_cache[analyzer._analysis_scope_key(target_ref)] = callee
+
+    param = _param()
+    call_arg = Expression.binary_op("INT_ADD", param, Expression.constant(0xFFFFFFFF, 4))
+    deferred = DeferredCallInfo(
+        target_ref=target_ref,
+        arguments=[call_arg],
+        call_argument_recovery_status="complete",
+    )
+    analysis = _base_analysis(
+        "f",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()]),
+            ReturnInfo(address="0x1004", value=Expression.constant(42, 4), conditions=[Condition(Expression.binary_op("INT_EQUAL", param, _const(1)), False)]),
+        ],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CALL", "CBRANCH"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
 
 
 def test_analyzer_keeps_whileif_divergence_unknown_without_recurrence_proof():
     phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
     analysis = _base_analysis(
         "f",
         [
             {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
             {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
         ],
-        [ReturnInfo(address="0x1000", value=phi, conditions=[])],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+        ],
     )
 
     ReturnAnalyzer(None)._apply_outcome_partition_summaries(
@@ -381,7 +548,7 @@ def test_analyzer_keeps_whileif_divergence_unknown_without_recurrence_proof():
     assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
 
 
-def test_analyzer_clears_stale_unknown_outcomes_after_return_partition_changes():
+def test_analyzer_does_not_synthesize_whileif_partition_from_phi_only():
     phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
     analysis = _base_analysis(
         "f",
@@ -390,6 +557,68 @@ def test_analyzer_clears_stale_unknown_outcomes_after_return_partition_changes()
             {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
         ],
         [ReturnInfo(address="0x1000", value=phi, conditions=[])],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH", "CBRANCH", "MULTIEQUAL"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_synthesize_whileif_partition_when_initial_count_value_missing():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=Expression.constant(42, 4), conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH", "CBRANCH", "MULTIEQUAL"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_clears_stale_unknown_outcomes_after_return_partition_changes():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+        ],
     )
     analyzer = ReturnAnalyzer(None)
     high_function = _cyclic_high_function("CBRANCH", "CBRANCH", "MULTIEQUAL")
@@ -401,6 +630,70 @@ def test_analyzer_clears_stale_unknown_outcomes_after_return_partition_changes()
         ReturnInfo(address="0x1004", value=_const(0), conditions=[]),
     ]
     analyzer._apply_outcome_partition_summaries(None, high_function, analysis)
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_propagate_caller_divergence_with_incomplete_argument_binding():
+    param = _param()
+    call_arg = Expression.binary_op("INT_ADD", param, Expression.constant(0xFFFFFFFF, 4))
+    deferred = DeferredCallInfo(
+        target_ref=CallTargetRef.from_name("tr"),
+        arguments=[call_arg],
+        call_argument_recovery_status="recoverable_partial",
+    )
+    analysis = _base_analysis(
+        "f",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo(address="0x1000", value=Expression.unknown("tr@0x1000"), conditions=[])],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CALL", "CBRANCH"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_classify_nonpositive_return_with_forbidden_store_as_divergence():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH", "STORE"),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_classify_guard_mismatch_loop_as_divergence():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_le_one()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH"),
+        analysis,
+    )
 
     assert analysis.return_outcomes == ()
     assert analysis.divergence_outcomes == ()
