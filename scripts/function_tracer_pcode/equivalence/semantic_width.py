@@ -1277,14 +1277,17 @@ def _rewrite_conditions(
     *,
     simplify: bool,
 ):
-    rewritten = [
-        Condition(rewrite_expr(cond.expression), cond.negated)
-        for cond in (conditions or [])
-    ]
+    rewritten = []
+    width_changed = False
+    for cond in conditions or []:
+        condition_expr = rewrite_expr(cond.expression)
+        condition_expr, condition_width_changed = _normalize_condition_comparison_constant_widths(condition_expr)
+        width_changed = width_changed or condition_width_changed
+        rewritten.append(Condition(condition_expr, cond.negated))
     if simplify:
         rewritten = ConditionSimplifier.simplify_conditions(rewritten)
 
-    changed = False
+    changed = width_changed
     original = list(conditions or [])
     if len(rewritten) != len(original):
         changed = True
@@ -1294,6 +1297,54 @@ def _rewrite_conditions(
             for new, old in zip(rewritten, original)
         )
     return rewritten, changed
+
+
+def _normalize_condition_comparison_constant_widths(expr: Optional[Expression]) -> Tuple[Optional[Expression], bool]:
+    if expr is None or not getattr(expr, "operands", None):
+        return expr, False
+
+    changed = False
+    new_operands = []
+    for operand in expr.operands:
+        new_operand, operand_changed = _normalize_condition_comparison_constant_widths(operand)
+        changed = changed or operand_changed
+        new_operands.append(new_operand)
+
+    current = expr.clone_with(operands=new_operands) if changed else expr
+    if (
+        current.expr_type != ExpressionType.BINARY_OP
+        or current.operator not in COMPARISON_OPS
+        or len(current.operands or ()) != 2
+    ):
+        return current, changed
+
+    left, right = current.operands
+    coerced_left, left_changed = _coerce_constant_operand_width(left, right)
+    coerced_right, right_changed = _coerce_constant_operand_width(right, left)
+    if not left_changed and not right_changed:
+        return current, changed
+    return current.clone_with(operands=[coerced_left, coerced_right]), True
+
+
+def _coerce_constant_operand_width(candidate: Expression, peer: Expression) -> Tuple[Expression, bool]:
+    if candidate is None or peer is None or candidate.expr_type != ExpressionType.CONSTANT:
+        return candidate, False
+    try:
+        if int(candidate.value) != 0:
+            return candidate, False
+    except (TypeError, ValueError):
+        return candidate, False
+    peer_size = int(getattr(peer, "size", 0) or 0)
+    if peer_size > 0:
+        desired_size = peer_size
+    else:
+        peer_bits = _expression_bit_width(peer)
+        if peer_bits <= 0 or peer_bits % 8 != 0:
+            return candidate, False
+        desired_size = max(1, peer_bits // 8)
+    if int(getattr(candidate, "size", 0) or 0) == desired_size:
+        return candidate, False
+    return candidate.clone_with(size=desired_size), True
 
 
 def _rewrite_effect_summary_expressions(

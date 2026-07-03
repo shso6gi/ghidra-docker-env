@@ -40,6 +40,14 @@ def _nonpositive() -> Condition:
     return _positive().negate()
 
 
+def _positive2() -> Condition:
+    return Condition(Expression.binary_op("INT_SLESS", _const(0), _param2()), False)
+
+
+def _nonpositive2() -> Condition:
+    return _positive2().negate()
+
+
 def _gt_one() -> Condition:
     return Condition(Expression.binary_op("INT_SLESS", _const(1), _param()), False)
 
@@ -87,11 +95,64 @@ def _analysis(
 
 
 class _FakeOp:
-    def __init__(self, mnemonic: str):
+    def __init__(self, mnemonic: str, *, condition_expr=None, writes_guard_state=False, inputs=(), output=None):
         self._mnemonic = mnemonic
+        self.condition_expr = condition_expr
+        self.writes_guard_state = writes_guard_state
+        self._inputs = tuple(inputs or ())
+        self._output = output
 
     def getMnemonic(self):
         return self._mnemonic
+
+    def getNumInputs(self):
+        return len(self._inputs)
+
+    def getInput(self, index):
+        return self._inputs[index]
+
+    def getOutput(self):
+        return self._output
+
+
+class _FakeAddressSpace:
+    def __init__(self, name):
+        self._name = name
+
+    def getName(self):
+        return self._name
+
+
+class _FakeAddress:
+    def __init__(self, space, offset):
+        self._space = _FakeAddressSpace(space)
+        self._offset = offset
+
+    def getAddressSpace(self):
+        return self._space
+
+    def getOffset(self):
+        return self._offset
+
+
+class _FakeVarnode:
+    def __init__(self, space, offset, size, *, is_constant=False, def_op=None):
+        self._address = _FakeAddress(space, offset)
+        self._size = size
+        self._is_constant = is_constant
+        self._def_op = def_op
+
+    def isConstant(self):
+        return self._is_constant
+
+    def getAddress(self):
+        return self._address
+
+    def getSize(self):
+        return self._size
+
+    def getDef(self):
+        return self._def_op
 
 
 class _FakeIterator:
@@ -109,12 +170,24 @@ class _FakeIterator:
 
 
 class _FakeBlock:
-    def __init__(self, ops):
+    def __init__(self, ops, *, index=None):
         self._ops = list(ops)
         self._outs = []
+        self._ins = []
+        self._edge_conditions = {}
+        self._true_out = None
+        self._false_out = None
+        self._index = index
 
-    def add_out(self, block):
+    def add_out(self, block, *, condition=None, is_true=None):
         self._outs.append(block)
+        block._ins.append(self)
+        if condition is not None:
+            self._edge_conditions[block] = condition
+        if is_true is True:
+            self._true_out = block
+        elif is_true is False:
+            self._false_out = block
 
     def getIterator(self):
         return _FakeIterator(self._ops)
@@ -124,6 +197,21 @@ class _FakeBlock:
 
     def getOut(self, index):
         return self._outs[index]
+
+    def getInSize(self):
+        return len(self._ins)
+
+    def getIn(self, index):
+        return self._ins[index]
+
+    def getTrueOut(self):
+        return self._true_out
+
+    def getFalseOut(self):
+        return self._false_out
+
+    def getIndex(self):
+        return self._index
 
 
 class _FakeHighFunction:
@@ -135,11 +223,90 @@ class _FakeHighFunction:
 
 
 def _cyclic_high_function(*mnemonics):
-    first = _FakeBlock([_FakeOp(mnemonic) for mnemonic in mnemonics])
-    second = _FakeBlock([])
+    first = _FakeBlock([_FakeOp(mnemonic) for mnemonic in mnemonics], index=0)
+    second = _FakeBlock([], index=1)
     first.add_out(second)
     second.add_out(first)
     return _FakeHighFunction([first, second])
+
+
+def _guard_cbranch_ops(condition: Condition | None = None, *, writes_guard_state=False):
+    zero = _FakeVarnode("const", 0, 4, is_constant=True)
+    state = _FakeVarnode("unique", 0x100, 4)
+    compare_out = _FakeVarnode("unique", 0x200, 1)
+    compare = _FakeOp("INT_SLESS", inputs=(zero, state), output=compare_out)
+    compare_out._def_op = compare
+    cbranch = _FakeOp(
+        "CBRANCH",
+        condition_expr=(condition.expression if condition is not None else None),
+        writes_guard_state=writes_guard_state,
+        inputs=(_FakeVarnode("const", 0x3000, 8, is_constant=True), compare_out),
+    )
+    return [compare, cbranch]
+
+
+def _proved_nonprogress_high_function(*, exit_condition=None, writes_guard_state=False):
+    entry = _FakeBlock([], index=0)
+    loop = _FakeBlock(
+        _guard_cbranch_ops(_positive(), writes_guard_state=writes_guard_state),
+        index=1,
+    )
+    ret = _FakeBlock([_FakeOp("RETURN")], index=2)
+    entry.add_out(loop)
+    loop.add_out(loop, condition=_positive(), is_true=True)
+    if exit_condition is None:
+        exit_condition = _nonpositive()
+    loop.add_out(ret, condition=exit_condition, is_true=False)
+    return _FakeHighFunction([entry, loop, ret])
+
+
+def _guarded_closed_self_loop_high_function():
+    entry = _FakeBlock([_FakeOp("CBRANCH", condition_expr=_positive().expression)], index=0)
+    ret = _FakeBlock([_FakeOp("RETURN")], index=1)
+    loop = _FakeBlock([], index=2)
+    entry.add_out(loop, condition=_positive(), is_true=True)
+    entry.add_out(ret, condition=_nonpositive(), is_true=False)
+    loop.add_out(loop)
+    return _FakeHighFunction([entry, ret, loop])
+
+
+def _unreachable_guarded_self_loop_high_function():
+    entry = _FakeBlock([], index=0)
+    ret = _FakeBlock([_FakeOp("RETURN")], index=1)
+    loop = _FakeBlock([_FakeOp("CBRANCH", condition_expr=_positive().expression)], index=2)
+    entry.add_out(ret)
+    loop.add_out(loop, condition=_positive(), is_true=True)
+    return _FakeHighFunction([entry, ret, loop])
+
+
+def _ambiguous_edge_polarity_high_function():
+    entry = _FakeBlock([], index=0)
+    loop = _FakeBlock([_FakeOp("CBRANCH", condition_expr=_positive().expression)], index=1)
+    ret = _FakeBlock([_FakeOp("RETURN")], index=2)
+    entry.add_out(loop)
+    loop.add_out(loop)
+    loop.add_out(ret)
+    return _FakeHighFunction([entry, loop, ret])
+
+
+def _guard_dependency_block(*, redefine_guard_varnode=False, redefine_parameter_varnode=False):
+    zero = _FakeVarnode("const", 0, 4, is_constant=True)
+    state = _FakeVarnode("unique", 0x100, 4)
+    param = _FakeVarnode("register", 0x4000, 4)
+    compare_out = _FakeVarnode("unique", 0x200, 1)
+    compare = _FakeOp("INT_SLESS", inputs=(zero, state), output=compare_out)
+    compare_out._def_op = compare
+    cbranch = _FakeOp("CBRANCH", inputs=(_FakeVarnode("const", 0x3000, 8, is_constant=True), compare_out))
+    ops = [compare, cbranch]
+    if redefine_guard_varnode:
+        ops.append(_FakeOp("COPY", inputs=(state,), output=state))
+    if redefine_parameter_varnode:
+        param_compare_out = _FakeVarnode("unique", 0x220, 1)
+        param_compare = _FakeOp("INT_SLESS", inputs=(zero, param), output=param_compare_out)
+        param_compare_out._def_op = param_compare
+        cbranch = _FakeOp("CBRANCH", inputs=(_FakeVarnode("const", 0x3000, 8, is_constant=True), param_compare_out))
+        ops = [param_compare, cbranch, _FakeOp("COPY", inputs=(param,), output=param)]
+    return _FakeBlock(ops, index=10)
 
 
 def _base_analysis(function_name: str, params, returns):
@@ -187,6 +354,49 @@ def _replace_param(symbol: str):
     return _replace
 
 
+def _replace_params(mapping):
+    def _replace(obj):
+        if isinstance(obj, Condition):
+            smt = obj.to_smt(float_mode="fp")
+        elif isinstance(obj, Expression):
+            smt = obj.to_smt(float_mode="fp")
+        else:
+            smt = str(obj)
+        for source, target in mapping.items():
+            smt = smt.replace(source, target)
+        return smt
+
+    return _replace
+
+
+def test_outcome_smt_zero_width_normalization_rewrites_left_zero_operand():
+    assert _strategy()._normalize_zero_constant_widths_for_declared_symbols(
+        ["(bvslt (_ bv0 64) p1)"],
+        ["(declare-fun p1 () (_ BitVec 32))"],
+    ) == ["(bvslt (_ bv0 32) p1)"]
+
+
+def test_outcome_smt_zero_width_normalization_rewrites_right_zero_operand():
+    assert _strategy()._normalize_zero_constant_widths_for_declared_symbols(
+        ["(bvslt p1 (_ bv0 64))"],
+        ["(declare-fun p1 () (_ BitVec 32))"],
+    ) == ["(bvslt p1 (_ bv0 32))"]
+
+
+def test_outcome_smt_zero_width_normalization_does_not_rewrite_nonzero_constant():
+    assert _strategy()._normalize_zero_constant_widths_for_declared_symbols(
+        ["(bvslt (_ bv1 64) p1)", "(= p1 (_ bv2 64))"],
+        ["(declare-fun p1 () (_ BitVec 32))"],
+    ) == ["(bvslt (_ bv1 64) p1)", "(= p1 (_ bv2 64))"]
+
+
+def test_outcome_smt_zero_width_normalization_does_not_rewrite_undeclared_symbol():
+    assert _strategy()._normalize_zero_constant_widths_for_declared_symbols(
+        ["(bvslt (_ bv0 64) p2)", "(= p2 (_ bv0 64))"],
+        ["(declare-fun p1 () (_ BitVec 32))"],
+    ) == ["(bvslt (_ bv0 64) p2)", "(= p2 (_ bv0 64))"]
+
+
 def test_outcome_partition_equivalence_accepts_matching_divergence_guard():
     strategy = _strategy()
     left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
@@ -220,6 +430,26 @@ def test_outcome_partition_equivalence_rejects_divergence_guard_mismatch():
         right,
         _replace_param("p1"),
         _replace_param("p2"),
+    ) == set()
+
+
+def test_outcome_partition_equivalence_rejects_unrelated_parameter_divergence_guard():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    right = _analysis(return_guards=[[_nonpositive2()]], divergence_guards=[[_positive2()]])
+    base_ctx = {
+        "header_lines": [
+            "(declare-fun p1 () (_ BitVec 32))",
+            "(declare-fun p2 () (_ BitVec 32))",
+        ],
+    }
+
+    assert strategy._outcome_partition_covered_labels(
+        base_ctx,
+        left,
+        right,
+        _replace_params({"param_1": "p1"}),
+        _replace_params({"param_2": "p2"}),
     ) == set()
 
 
@@ -356,6 +586,143 @@ def test_analyzer_keeps_single_guard_nonprogress_loop_unknown_without_must_diver
     assert len(analysis.unknown_outcomes) == 1
     assert analysis.unknown_outcomes[0].reason == "must_diverge_proof_missing"
     assert analysis.return_outcomes[0].value.value == 0
+
+
+def test_analyzer_promotes_single_guard_nonprogress_loop_to_divergence_when_scc_exit_is_infeasible():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _proved_nonprogress_high_function(),
+        analysis,
+    )
+
+    assert analysis.unknown_outcomes == ()
+    assert len(analysis.divergence_outcomes) == 1
+    assert analysis.divergence_outcomes[0].guard == (_positive(),)
+    assert analysis.divergence_outcomes[0].proof["proof_kind"] == "single_guard_nonprogress_must_diverge"
+    assert analysis.return_outcomes[0].value.value == 0
+
+
+def test_analyzer_promotes_guarded_closed_self_loop_to_divergence():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _guarded_closed_self_loop_high_function(),
+        analysis,
+    )
+
+    assert analysis.unknown_outcomes == ()
+    assert len(analysis.divergence_outcomes) == 1
+    assert analysis.divergence_outcomes[0].guard == (_positive(),)
+
+
+def test_analyzer_keeps_single_guard_loop_unknown_when_exit_is_feasible():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _proved_nonprogress_high_function(exit_condition=_positive()),
+        analysis,
+    )
+
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "must_diverge_proof_missing"
+
+
+def test_analyzer_keeps_single_guard_loop_unknown_when_guard_state_is_written():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _proved_nonprogress_high_function(writes_guard_state=True),
+        analysis,
+    )
+
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "must_diverge_proof_missing"
+
+
+def test_analyzer_keeps_single_guard_loop_unknown_for_unreachable_scc():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _unreachable_guarded_self_loop_high_function(),
+        analysis,
+    )
+
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "must_diverge_proof_missing"
+
+
+def test_analyzer_keeps_single_guard_loop_unknown_when_edge_polarity_is_ambiguous():
+    ret = ReturnInfo(address="0x1000", value=_const(0), conditions=[_nonpositive()])
+    analysis = _base_analysis(
+        "tr",
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ret],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _ambiguous_edge_polarity_high_function(),
+        analysis,
+    )
+
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "must_diverge_proof_missing"
+
+
+def test_analyzer_guard_dependency_preservation_rejects_guard_state_redefinition():
+    analyzer = ReturnAnalyzer(None)
+    block = _guard_dependency_block(redefine_guard_varnode=True)
+
+    assert analyzer._scc_preserves_guard_dependencies({block}) is False
+
+
+def test_analyzer_guard_dependency_preservation_rejects_parameter_redefinition():
+    analyzer = ReturnAnalyzer(None)
+    block = _guard_dependency_block(redefine_parameter_varnode=True)
+
+    assert analyzer._scc_preserves_guard_dependencies({block}) is False
+
+
+def test_analyzer_guard_dependency_preservation_accepts_read_only_guard_inputs():
+    analyzer = ReturnAnalyzer(None)
+    block = _guard_dependency_block()
+
+    assert analyzer._scc_preserves_guard_dependencies({block}) is True
 
 
 def test_analyzer_does_not_create_triangular_caller_outcome_without_callee_contract():

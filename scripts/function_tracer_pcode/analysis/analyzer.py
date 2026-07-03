@@ -14,6 +14,7 @@ from ..model.storage import StorageInfo
 from ..model.analysis import (
     ComparisonSurface,
     DeferredCallInfo,
+    DivergenceOutcome,
     ReturnInfo,
     ReturnOutcome,
     UnknownOutcome,
@@ -2088,7 +2089,7 @@ class ReturnAnalyzer:
         ):
             self._debug_print("Outcome loop summary declined: return guard is not param nonpositive")
             return False
-        divergence_guard = ret.conditions[0].negate()
+        divergence_guard = self._signed_positive_condition(param)
 
         analysis.return_outcomes = (
             ReturnOutcome(
@@ -2098,25 +2099,511 @@ class ReturnAnalyzer:
                 return_info=ret,
             ),
         )
-        analysis.divergence_outcomes = ()
-        analysis.unknown_outcomes = (
-            UnknownOutcome(
-                guard=(divergence_guard,),
-                reason="must_diverge_proof_missing",
-                evidence={
-                    "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
-                    "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
-                    "nonreturning_region_candidate": self._high_function_has_nonreturning_region_candidate(high_function),
-                    "has_control_guard": self._high_function_cbranch_count(high_function) > 0,
-                    "forbidden_ops_absent": True,
-                    "return_guard_equivalent_to_param_nonpositive": True,
-                    "missing_proof": "scc_exit_impossibility_and_guard_preservation",
-                },
-            ),
+        divergence_proof = self._prove_single_guard_nonprogress_region_must_diverge(
+            high_function,
+            analysis,
+            divergence_guard=divergence_guard,
+            param=param,
         )
-        if "outcome_partition_unknown_nonprogress_loop" not in analysis.analysis_notes:
-            analysis.analysis_notes.append("outcome_partition_unknown_nonprogress_loop")
+        if divergence_proof is not None:
+            analysis.divergence_outcomes = (
+                DivergenceOutcome(
+                    guard=(divergence_guard,),
+                    proof=divergence_proof,
+                ),
+            )
+            analysis.unknown_outcomes = ()
+            if "outcome_partition_proved_nonprogress_loop_divergence" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("outcome_partition_proved_nonprogress_loop_divergence")
+        else:
+            analysis.divergence_outcomes = ()
+            analysis.unknown_outcomes = (
+                UnknownOutcome(
+                    guard=(divergence_guard,),
+                    reason="must_diverge_proof_missing",
+                    evidence={
+                        "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
+                        "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
+                        "nonreturning_region_candidate": self._high_function_has_nonreturning_region_candidate(high_function),
+                        "has_control_guard": self._high_function_cbranch_count(high_function) > 0,
+                        "forbidden_ops_absent": True,
+                        "return_guard_equivalent_to_param_nonpositive": True,
+                        "missing_proof": "scc_exit_impossibility_and_guard_preservation",
+                    },
+                ),
+            )
+            if "outcome_partition_unknown_nonprogress_loop" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("outcome_partition_unknown_nonprogress_loop")
         return True
+
+    def _prove_single_guard_nonprogress_region_must_diverge(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+        *,
+        divergence_guard: Condition,
+        param: Expression,
+    ) -> Optional[Dict[str, Any]]:
+        if high_function is None or divergence_guard is None:
+            return None
+        if expression_contains_unsupported_smt_ops(getattr(divergence_guard, "expression", None)):
+            self._debug_print("Outcome loop divergence proof declined: unsupported divergence guard")
+            return None
+        if not (
+            self._conditions_equivalent([divergence_guard], [self._signed_positive_condition(param)])
+            or self._condition_is_signed_positive_of_param(divergence_guard, param)
+        ):
+            self._debug_print("Outcome loop divergence proof declined: divergence guard is not param positive")
+            return None
+
+        blocks = list(self._iter_high_basic_blocks(high_function))
+        if not blocks:
+            self._debug_print("Outcome loop divergence proof declined: no high-function blocks")
+            return None
+        if not self._high_function_has_cfg_cycle(high_function):
+            self._debug_print("Outcome loop divergence proof declined: no CFG cycle")
+            return None
+
+        tracer = None
+        if self.program is not None:
+            try:
+                tracer = self._make_tracer(high_function)
+            except Exception:
+                tracer = None
+        cyclic_sccs = self._high_function_cyclic_sccs(blocks)
+        if not cyclic_sccs:
+            self._debug_print("Outcome loop divergence proof declined: no cyclic SCC")
+            return None
+
+        for scc in cyclic_sccs:
+            proof = self._prove_scc_must_diverge_under_guard(
+                scc,
+                all_blocks=blocks,
+                divergence_guard=divergence_guard,
+                param=param,
+                tracer=tracer,
+            )
+            if proof is not None:
+                proof.update(
+                    {
+                        "proof_kind": "single_guard_nonprogress_must_diverge",
+                        "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
+                        "guard": "param_positive",
+                        "return_partition": "param_nonpositive_return_zero",
+                    }
+                )
+                return proof
+        return None
+
+    def _prove_scc_must_diverge_under_guard(
+        self,
+        scc: Sequence[Any],
+        *,
+        all_blocks: Sequence[Any],
+        divergence_guard: Condition,
+        param: Expression,
+        tracer: Optional[PcodeTracer],
+    ) -> Optional[Dict[str, Any]]:
+        scc_set = set(scc or ())
+        scc_keys = {self._block_debug_key(block) for block in scc_set}
+        if not scc_set:
+            return None
+        if any(self._block_has_return_op(block) for block in scc_set):
+            self._debug_print("Outcome loop divergence proof declined: RETURN in candidate SCC")
+            return None
+        if any(self._block_writes_outcome_guard_state(block) for block in scc_set):
+            self._debug_print("Outcome loop divergence proof declined: guard state write in SCC")
+            return None
+        if not self._scc_preserves_guard_dependencies(scc_set):
+            self._debug_print("Outcome loop divergence proof declined: guard dependency is redefined in SCC")
+            return None
+
+        internal_guarded_continue = False
+        internal_unconditional_continue = False
+        exit_proofs = []
+        for block in scc_set:
+            for successor in self._block_successors(block):
+                if self._block_debug_key(successor) in scc_keys:
+                    edge_condition = self._edge_condition_for_successor(block, successor, tracer)
+                    if edge_condition is None:
+                        internal_unconditional_continue = True
+                    elif self._single_guard_condition_matches(edge_condition, divergence_guard, param):
+                        internal_guarded_continue = True
+                    continue
+
+                edge_condition = self._edge_condition_for_successor(block, successor, tracer)
+                if edge_condition is None:
+                    self._debug_print("Outcome loop divergence proof declined: SCC exit without edge guard")
+                    return None
+                if not self._single_guard_conditions_are_contradictory(divergence_guard, edge_condition, param):
+                    self._debug_print(
+                        "Outcome loop divergence proof declined: SCC exit is feasible under divergence guard "
+                        f"(divergence={divergence_guard.to_string()}, exit={edge_condition.to_string()})"
+                    )
+                    return None
+                exit_proofs.append(
+                    {
+                        "source": self._block_debug_key(block),
+                        "target": self._block_debug_key(successor),
+                        "guard_relation": "divergence_guard_and_exit_guard_unsat",
+                    }
+                )
+
+        entry_proofs = []
+        has_guarded_entry = False
+        has_unconditional_entry = False
+        for block in all_blocks or ():
+            if self._block_debug_key(block) in scc_keys:
+                continue
+            for successor in self._block_successors(block):
+                if self._block_debug_key(successor) not in scc_keys:
+                    continue
+                edge_condition = self._edge_condition_for_successor(block, successor, tracer)
+                if edge_condition is None:
+                    if self._block_predecessor_count(block) != 0:
+                        self._debug_print("Outcome loop divergence proof declined: unconditional SCC entry is not from function entry")
+                        return None
+                    has_unconditional_entry = True
+                    entry_proofs.append(
+                        {
+                            "source": self._block_debug_key(block),
+                            "target": self._block_debug_key(successor),
+                            "guard_relation": "unconditional_entry_then_internal_guard",
+                        }
+                    )
+                elif self._single_guard_condition_matches(edge_condition, divergence_guard, param):
+                    has_guarded_entry = True
+                    entry_proofs.append(
+                        {
+                            "source": self._block_debug_key(block),
+                            "target": self._block_debug_key(successor),
+                            "guard_relation": "entry_guard_equivalent_to_divergence_guard",
+                        }
+                    )
+                else:
+                    self._debug_print(
+                        "Outcome loop divergence proof declined: SCC entry guard does not match divergence guard "
+                        f"(divergence={divergence_guard.to_string()}, entry={edge_condition.to_string()})"
+                    )
+                    return None
+
+        if not has_guarded_entry and not has_unconditional_entry:
+            self._debug_print("Outcome loop divergence proof declined: candidate SCC has no proved external entry")
+            return None
+        if has_guarded_entry:
+            preservation_ok = internal_unconditional_continue or internal_guarded_continue
+        elif has_unconditional_entry:
+            preservation_ok = internal_guarded_continue
+        else:
+            preservation_ok = False
+        if not preservation_ok:
+            self._debug_print("Outcome loop divergence proof declined: no guarded/invariant-preserving continue edge")
+            return None
+
+        return {
+            "scc_blocks": [self._block_debug_key(block) for block in scc_set],
+            "entry_edges": entry_proofs,
+            "exit_edges": exit_proofs,
+            "side_effect_control_safety": {
+                "forbidden_ops_absent": True,
+                "return_ops_absent_in_scc": True,
+                "guard_state_writes_absent": True,
+            },
+            "invariant_preservation": {
+                "internal_guarded_continue": internal_guarded_continue,
+                "internal_unconditional_continue": internal_unconditional_continue,
+            },
+        }
+
+    def _high_function_cyclic_sccs(self, blocks: Sequence[Any]) -> List[Tuple[Any, ...]]:
+        key_to_block = {self._block_debug_key(block): block for block in blocks or ()}
+        block_keys = set(key_to_block)
+        index_counter = 0
+        stack: List[Any] = []
+        on_stack: Set[Any] = set()
+        indices: Dict[Any, int] = {}
+        lowlinks: Dict[Any, int] = {}
+        components: List[Tuple[Any, ...]] = []
+
+        def strongconnect(block_key) -> None:
+            nonlocal index_counter
+            indices[block_key] = index_counter
+            lowlinks[block_key] = index_counter
+            index_counter += 1
+            stack.append(block_key)
+            on_stack.add(block_key)
+
+            for successor in self._block_successors(key_to_block[block_key]):
+                successor_key = self._block_debug_key(successor)
+                if successor_key not in block_keys:
+                    continue
+                if successor_key not in indices:
+                    strongconnect(successor_key)
+                    lowlinks[block_key] = min(lowlinks[block_key], lowlinks[successor_key])
+                elif successor_key in on_stack:
+                    lowlinks[block_key] = min(lowlinks[block_key], indices[successor_key])
+
+            if lowlinks[block_key] != indices[block_key]:
+                return
+            component = []
+            while stack:
+                current = stack.pop()
+                on_stack.remove(current)
+                component.append(current)
+                if current == block_key:
+                    break
+            component_set = set(component)
+            if len(component) > 1 or any(
+                self._block_debug_key(successor) in component_set
+                for item in component
+                for successor in self._block_successors(key_to_block[item])
+            ):
+                components.append(tuple(key_to_block[item] for item in component))
+
+        for block in blocks or ():
+            key = self._block_debug_key(block)
+            if key not in indices:
+                strongconnect(key)
+        return components
+
+    def _block_successors(self, block) -> Tuple[Any, ...]:
+        successors = []
+        out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
+        for index in range(out_size):
+            successor = getattr(block, "getOut", lambda _idx: None)(index)
+            if successor is not None:
+                successors.append(successor)
+        return tuple(successors)
+
+    def _block_predecessor_count(self, block) -> int:
+        return int(getattr(block, "getInSize", lambda: 0)() or 0)
+
+    def _block_has_return_op(self, block) -> bool:
+        return any(getattr(op, "getMnemonic", lambda: None)() == "RETURN" for op in self._iter_high_block_ops(block))
+
+    def _block_writes_outcome_guard_state(self, block) -> bool:
+        for op in self._iter_high_block_ops(block):
+            if bool(getattr(op, "writes_guard_state", False)):
+                return True
+        return False
+
+    def _scc_preserves_guard_dependencies(self, scc_set: Set[Any]) -> bool:
+        guard_dependency_keys: Set[Tuple[Any, ...]] = set()
+        for block in scc_set:
+            cbranch = self._first_high_block_cbranch(block)
+            if cbranch is None:
+                continue
+            if getattr(cbranch, "condition_expr", None) is not None and not callable(getattr(cbranch, "getInput", None)):
+                continue
+            try:
+                if int(getattr(cbranch, "getNumInputs", lambda: 0)() or 0) < 2:
+                    return False
+                condition_varnode = cbranch.getInput(1)
+            except Exception:
+                return False
+            if not self._collect_guard_dependency_varnodes(
+                condition_varnode,
+                guard_dependency_keys,
+                is_root=True,
+                seen=set(),
+            ):
+                return False
+
+        if not guard_dependency_keys:
+            return True
+
+        for block in scc_set:
+            for op in self._iter_high_block_ops(block):
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is None:
+                    continue
+                output_key = self._varnode_guard_dependency_key(output)
+                if output_key in guard_dependency_keys:
+                    return False
+        return True
+
+    def _collect_guard_dependency_varnodes(
+        self,
+        varnode,
+        guard_dependency_keys: Set[Tuple[Any, ...]],
+        *,
+        is_root: bool,
+        seen: Set[Tuple[Any, ...]],
+    ) -> bool:
+        if varnode is None:
+            return False
+        key = self._varnode_guard_dependency_key(varnode)
+        if key in seen:
+            return True
+        seen.add(key)
+
+        is_constant = getattr(varnode, "isConstant", lambda: False)
+        try:
+            if callable(is_constant) and is_constant():
+                return True
+        except Exception:
+            return False
+
+        if not is_root:
+            guard_dependency_keys.add(key)
+
+        try:
+            def_op = varnode.getDef()
+        except Exception:
+            return False
+        if def_op is None:
+            return True
+
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic not in {
+            "COPY",
+            "CAST",
+            "SUBPIECE",
+            "INT_ZEXT",
+            "INT_SEXT",
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+            "BOOL_NEGATE",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        }:
+            return True
+
+        try:
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+        except Exception:
+            return False
+        for index in range(input_count):
+            try:
+                child = def_op.getInput(index)
+            except Exception:
+                return False
+            if not self._collect_guard_dependency_varnodes(
+                child,
+                guard_dependency_keys,
+                is_root=False,
+                seen=seen,
+            ):
+                return False
+        return True
+
+    def _varnode_guard_dependency_key(self, varnode) -> Tuple[Any, ...]:
+        try:
+            address = varnode.getAddress()
+            offset = getattr(address, "getOffset", lambda: None)()
+            space = getattr(getattr(address, "getAddressSpace", lambda: None)(), "getName", lambda: None)()
+            size = getattr(varnode, "getSize", lambda: None)()
+            if offset is not None and size is not None:
+                return ("varnode", space, int(offset), int(size))
+        except Exception:
+            pass
+        return ("varnode_object", id(varnode))
+
+    def _edge_condition_for_successor(
+        self,
+        block,
+        successor,
+        tracer: Optional[PcodeTracer],
+    ) -> Optional[Condition]:
+        edge_conditions = getattr(block, "_edge_conditions", None)
+        if isinstance(edge_conditions, Mapping):
+            for key in (successor, id(successor), self._block_debug_key(successor)):
+                condition = edge_conditions.get(key)
+                if condition is not None:
+                    return condition
+
+        cbranch = self._first_high_block_cbranch(block)
+        if cbranch is None:
+            return None
+        expr = getattr(cbranch, "condition_expr", None)
+        if expr is None:
+            if tracer is None:
+                return None
+            try:
+                if int(getattr(cbranch, "getNumInputs", lambda: 0)() or 0) < 2:
+                    return None
+                expr = tracer.trace_varnode(cbranch.getInput(1), use_cache=False)
+            except Exception:
+                return None
+        if expr is None or expression_contains_unsupported_smt_ops(expr):
+            return None
+
+        true_out = getattr(block, "getTrueOut", lambda: None)()
+        false_out = getattr(block, "getFalseOut", lambda: None)()
+        if true_out is not None and self._same_high_block(true_out, successor):
+            return Condition(expr, False)
+        if false_out is not None and self._same_high_block(false_out, successor):
+            return Condition(expr, True)
+        return None
+
+    def _first_high_block_cbranch(self, block):
+        for op in self._iter_high_block_ops(block):
+            if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH":
+                return op
+        return None
+
+    def _conditions_are_unsat(self, conditions: Sequence[Condition]) -> bool:
+        return ConditionSMTOracle.conjunction_is_unsat(list(conditions or ())) is True
+
+    def _single_guard_condition_matches(
+        self,
+        condition: Condition,
+        divergence_guard: Condition,
+        param: Expression,
+    ) -> bool:
+        return (
+            condition.equals(divergence_guard)
+            or self._conditions_equivalent([condition], [divergence_guard])
+            or (
+                self._condition_is_signed_positive_of_param(condition, param)
+                and self._condition_is_signed_positive_of_param(divergence_guard, param)
+            )
+        )
+
+    def _single_guard_conditions_are_contradictory(
+        self,
+        divergence_guard: Condition,
+        edge_condition: Condition,
+        param: Expression,
+    ) -> bool:
+        return (
+            edge_condition.equals(divergence_guard.negate())
+            or self._conditions_are_unsat([divergence_guard, edge_condition])
+            or (
+                self._condition_is_signed_positive_of_param(divergence_guard, param)
+                and self._condition_is_signed_nonpositive_of_param(edge_condition, param)
+            )
+        )
+
+    def _same_high_block(self, left, right) -> bool:
+        if left is right:
+            return True
+        try:
+            if left == right:
+                return True
+        except Exception:
+            pass
+        return self._block_debug_key(left) == self._block_debug_key(right)
+
+    def _block_debug_key(self, block) -> Any:
+        try:
+            index = getattr(block, "getIndex", lambda: None)()
+            if index is not None:
+                return int(index)
+        except Exception:
+            pass
+        try:
+            start = getattr(block, "getStart", lambda: None)()
+            if start is not None:
+                return str(start)
+        except Exception:
+            pass
+        return f"block@{id(block):x}"
 
     def _iter_outcome_call_candidates(
         self,
@@ -2742,15 +3229,29 @@ class ReturnAnalyzer:
 
     def _high_function_has_cfg_cycle(self, high_function) -> bool:
         blocks = list(self._iter_high_basic_blocks(high_function))
-        block_set = set(blocks)
+        block_keys = {self._block_debug_key(block) for block in blocks}
+        visiting: Set[Any] = set()
+        visited: Set[Any] = set()
+
+        def visit(block) -> bool:
+            key = self._block_debug_key(block)
+            if key in visiting:
+                return True
+            if key in visited:
+                return False
+            visiting.add(key)
+            for succ in self._block_successors(block):
+                if self._block_debug_key(succ) not in block_keys:
+                    continue
+                if visit(succ):
+                    return True
+            visiting.remove(key)
+            visited.add(key)
+            return False
+
         for block in blocks:
-            out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
-            for index in range(out_size):
-                succ = getattr(block, "getOut", lambda _idx: None)(index)
-                if succ is block:
-                    return True
-                if succ in block_set and self._block_reaches(succ, block, block_set):
-                    return True
+            if visit(block):
+                return True
         return False
 
     def _high_function_has_nonreturning_region_candidate(self, high_function) -> bool:

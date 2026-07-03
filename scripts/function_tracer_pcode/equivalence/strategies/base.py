@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
 from dataclasses import dataclass, field
@@ -8590,6 +8591,7 @@ class CheckStrategy(ABC):
             param_replace_fn1,
             "function1",
         ):
+            self._debug_print("Outcome partition coverage declined: function1 partition is not proved total")
             return set()
         if not self._analysis_has_proved_outcome_partition(
             base_ctx,
@@ -8597,6 +8599,7 @@ class CheckStrategy(ABC):
             param_replace_fn2,
             "function2",
         ):
+            self._debug_print("Outcome partition coverage declined: function2 partition is not proved total")
             return set()
         if not self._outcome_partitions_are_equivalent(
             base_ctx,
@@ -8605,6 +8608,7 @@ class CheckStrategy(ABC):
             param_replace_fn1,
             param_replace_fn2,
         ):
+            self._debug_print("Outcome partition coverage declined: partitions are not equivalent")
             return set()
         return {"function1", "function2"}
 
@@ -8690,6 +8694,7 @@ class CheckStrategy(ABC):
         returns1 = tuple(getattr(analysis1, "return_outcomes", ()) or ())
         returns2 = tuple(getattr(analysis2, "return_outcomes", ()) or ())
         if not divergence1 or not divergence2:
+            self._debug_print("Outcome partition equivalence declined: missing divergence outcomes")
             return False
         if not self._outcome_guard_unions_equivalent(
             base_ctx,
@@ -8698,6 +8703,7 @@ class CheckStrategy(ABC):
             param_replace_fn1,
             param_replace_fn2,
         ):
+            self._debug_print("Outcome partition equivalence declined: divergence guard unions differ")
             return False
         if not self._outcome_cross_kind_disjoint(
             base_ctx,
@@ -8706,6 +8712,7 @@ class CheckStrategy(ABC):
             param_replace_fn1,
             param_replace_fn2,
         ):
+            self._debug_print("Outcome partition equivalence declined: function1 returns overlap function2 divergence")
             return False
         if not self._outcome_cross_kind_disjoint(
             base_ctx,
@@ -8714,6 +8721,7 @@ class CheckStrategy(ABC):
             param_replace_fn2,
             param_replace_fn1,
         ):
+            self._debug_print("Outcome partition equivalence declined: function2 returns overlap function1 divergence")
             return False
         if not self._return_outcome_values_are_equivalent(
             base_ctx,
@@ -8722,6 +8730,7 @@ class CheckStrategy(ABC):
             param_replace_fn1,
             param_replace_fn2,
         ):
+            self._debug_print("Outcome partition equivalence declined: return outcome values differ")
             return False
         return True
 
@@ -8941,17 +8950,60 @@ class CheckStrategy(ABC):
             return False
         if not assertions:
             return False
+        normalized_assertions = self._normalize_zero_constant_widths_for_declared_symbols(
+            assertions,
+            header_lines,
+        )
         query = "\n".join(
             [
                 f"; {title}",
                 *header_lines,
-                *(f"(assert {assertion})" for assertion in assertions),
+                *(f"(assert {assertion})" for assertion in normalized_assertions),
                 "(check-sat)",
                 "(get-model)",
             ]
         )
         result = self.solver_runner.run_sequential(query)
         return result.is_equivalent is True
+
+    @classmethod
+    def _normalize_zero_constant_widths_for_declared_symbols(
+        cls,
+        assertions: Sequence[str],
+        header_lines: Sequence[str],
+    ) -> List[str]:
+        widths: Dict[str, int] = {}
+        for line in header_lines or ():
+            match = re.search(
+                r"\(declare-(?:fun|const)\s+([^\s()]+)\s+(?:\(\)\s+)?\(_\s+BitVec\s+(\d+)\)\)",
+                str(line),
+            )
+            if match is None:
+                continue
+            try:
+                widths[match.group(1)] = int(match.group(2))
+            except ValueError:
+                continue
+        if not widths:
+            return list(assertions or ())
+
+        normalized = []
+        for assertion in assertions or ():
+            text = str(assertion)
+            for symbol, width in widths.items():
+                escaped = re.escape(symbol)
+                text = re.sub(
+                    rf"(\((?:bvslt|bvult|bvsle|bvule|=|distinct)\s+)\(_ bv0 \d+\)(\s+{escaped}(?=[\s)]))",
+                    rf"\1(_ bv0 {width})\2",
+                    text,
+                )
+                text = re.sub(
+                    rf"(\((?:bvslt|bvult|bvsle|bvule|=|distinct)\s+{escaped}\s+)\(_ bv0 \d+\)(?=\))",
+                    rf"\1(_ bv0 {width})",
+                    text,
+                )
+            normalized.append(text)
+        return normalized
 
     def _guard_union_miss_condition(
         self,
