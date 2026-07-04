@@ -877,10 +877,6 @@ class CheckStrategy(ABC):
                 analysis1,
                 analysis2,
             )
-            or self._call_argument_evidence_call_effect_proof_content(
-                object_target_key,
-                analysis,
-            )
         )
         if proof_content is None:
             return
@@ -901,6 +897,8 @@ class CheckStrategy(ABC):
         proof_source = (
             "self_recursive_no_store_call_effect_summary"
             if proof_rule == "self_recursive_no_store_effect_summary"
+            else "call_argument_evidence_phase15_complete"
+            if proof_rule == "call_argument_evidence_phase15_complete"
             else "call_argument_evidence_complete"
             if proof_rule == "call_argument_evidence_complete"
             else "matched_deferred_call_argument_evidence"
@@ -978,10 +976,11 @@ class CheckStrategy(ABC):
 
             candidate_content: Optional[Dict[str, Any]] = None
             if candidate_kind == "call_argument_evidence":
-                candidate_content = self._call_argument_evidence_call_effect_proof_content(
-                    candidate,
-                    analysis,
-                )
+                # Complete call-site argument recovery is necessary evidence, but not a
+                # complete call/effect proof by itself. Phase 1.5 requires an explicit
+                # proof that also covers callee summary completion, callee
+                # preconditions, ABI coercion, and value provenance.
+                candidate_content = None
             elif candidate_kind == "unsupported_call_effect":
                 candidate_content = (
                     self._self_recursive_no_store_call_effect_proof_content(
@@ -3436,7 +3435,157 @@ class CheckStrategy(ABC):
             )
         ):
             return False
+        if (
+            str(object_target_key[0]) == "call_argument_evidence"
+            and not cls._call_argument_evidence_phase15_proof_content_is_complete(
+                proof_content,
+                object_target_key,
+            )
+        ):
+            return False
         return True
+
+    @classmethod
+    def _call_argument_evidence_phase15_proof_content_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        """Validate Phase 1.5 obligations for call argument evidence.
+
+        A recovered call argument is not enough to discharge a call/effect
+        blocker. The proof must also pin the callee summary, preconditions/ABI
+        coercion, and argument provenance to the same object target.
+        """
+
+        if cls._evidence_text(proof_content, "proof_rule") not in {
+            "call_argument_evidence_phase15_complete",
+            "call_effect_object_evidence_complete",
+        }:
+            return False
+
+        callee_summary = proof_content.get("callee_summary_completion")
+        if not cls._call_argument_callee_summary_section_is_complete(
+            callee_summary,
+            object_target_key,
+        ):
+            return False
+
+        precondition = proof_content.get("callee_precondition")
+        if not cls._call_argument_precondition_section_is_complete(
+            precondition,
+            object_target_key,
+        ):
+            return False
+
+        provenance = proof_content.get("argument_value_provenance")
+        if not cls._call_argument_value_provenance_section_is_complete(
+            provenance,
+            object_target_key,
+        ):
+            return False
+
+        dependency_graph = proof_content.get("proof_dependency_graph")
+        if not cls._call_argument_dependency_graph_section_is_complete(
+            dependency_graph,
+            object_target_key,
+        ):
+            return False
+
+        return True
+
+    @classmethod
+    def _call_argument_callee_summary_section_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(section.get("object_target_key")) != object_target_key:
+            return False
+        if cls._normalize_nested_tuple(section.get("callee_identity")) != object_target_key[4]:
+            return False
+        required_statuses = (
+            "return_coverage_status",
+            "effect_summary_status",
+            "memory_policy_status",
+            "unsupported_call_policy_status",
+        )
+        return all(cls._evidence_text(section, field) == "complete" for field in required_statuses)
+
+    @classmethod
+    def _call_argument_precondition_section_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(section.get("object_target_key")) != object_target_key:
+            return False
+        if section.get("caller_guard_implies_callee_precondition") is not True:
+            return False
+        abi = section.get("abi_coercion")
+        if not isinstance(abi, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(abi):
+            return False
+        if cls._evidence_text(abi, "status") not in {"complete", "completed", "proven"}:
+            return False
+        required_keys = (
+            "argument_widths",
+            "sign_zero_extension",
+            "abi_narrow_wide_coercion",
+            "callee_parameter_interpretation",
+        )
+        return all(key in abi for key in required_keys)
+
+    @classmethod
+    def _call_argument_value_provenance_section_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(section.get("object_target_key")) != object_target_key:
+            return False
+        if cls._normalize_nested_tuple(section.get("argument_keys")) != object_target_key[5]:
+            return False
+        return bool(section.get("value_provenance_equivalent"))
+
+    @classmethod
+    def _call_argument_dependency_graph_section_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(section.get("object_target_key")) != object_target_key:
+            return False
+        return cls._evidence_text(section, "cycle_policy") in {
+            "acyclic",
+            "fixed_point_proven",
+            "induction_proven",
+        }
 
     @classmethod
     def _validated_call_effect_blocker_selected_candidate(

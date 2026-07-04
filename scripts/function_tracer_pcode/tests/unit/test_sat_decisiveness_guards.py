@@ -750,12 +750,14 @@ def _call_effect_summary_proof_content(object_target_key):
             "function2" if object_target_key[1] == "function1" else "function1",
             *object_target_key[2:],
         )
-    return {
+    content = {
         "object_derived": True,
         "status": "complete",
         "proof_rule": (
             "matched_unknown_indirect_no_store_call_effect"
             if kind == "unsupported_call_effect"
+            else "call_argument_evidence_phase15_complete"
+            if kind == "call_argument_evidence"
             else "call_effect_object_evidence_complete"
         ),
         "object_target_key": object_target_key,
@@ -810,6 +812,44 @@ def _call_effect_summary_proof_content(object_target_key):
             else None
         ),
     }
+    if kind == "call_argument_evidence":
+        content.update(
+            {
+                "callee_summary_completion": {
+                    "status": "complete",
+                    "object_target_key": object_target_key,
+                    "callee_identity": object_target_key[4],
+                    "return_coverage_status": "complete",
+                    "effect_summary_status": "complete",
+                    "memory_policy_status": "complete",
+                    "unsupported_call_policy_status": "complete",
+                },
+                "callee_precondition": {
+                    "status": "complete",
+                    "object_target_key": object_target_key,
+                    "caller_guard_implies_callee_precondition": True,
+                    "abi_coercion": {
+                        "status": "complete",
+                        "argument_widths": ("same_width",),
+                        "sign_zero_extension": "identity",
+                        "abi_narrow_wide_coercion": "none",
+                        "callee_parameter_interpretation": "same_integer_value",
+                    },
+                },
+                "argument_value_provenance": {
+                    "status": "complete",
+                    "object_target_key": object_target_key,
+                    "argument_keys": object_target_key[5],
+                    "value_provenance_equivalent": True,
+                },
+                "proof_dependency_graph": {
+                    "status": "complete",
+                    "object_target_key": object_target_key,
+                    "cycle_policy": "acyclic",
+                },
+            }
+        )
+    return content
 
 
 def _complete_call_effect_summary_proof_evidence(object_target_key, **overrides):
@@ -4062,7 +4102,7 @@ def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_p
     )
 
 
-def test_pairwise_complete_call_argument_evidence_auto_proof_recovers_by_default(monkeypatch):
+def test_pairwise_complete_call_argument_evidence_requires_explicit_phase15_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -4080,17 +4120,43 @@ def test_pairwise_complete_call_argument_evidence_auto_proof_recovers_by_default
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
     evidence = [
         item
         for item in analysis1.completed_recovery_proof_evidence
         if item.get("proof_source") == "call_argument_evidence_complete"
     ]
-    assert len(evidence) == 1
-    assert evidence[0]["proof_content"]["proof_rule"] == "call_argument_evidence_complete"
-    assert evidence[0]["proof_content"]["runtime_ref"]["runtime_ref"][1] == "call_argument"
-    assert evidence[0]["proof_content"]["callsite_storage"]["callsite_storage"][1] == "call_argument"
+    assert evidence == []
+
+
+def test_pairwise_preserves_call_effect_reason_alongside_return_coverage_gap(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.effect_summary = _analysis_with_effect_call_argument_evidence().effect_summary
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    reason_ids = [reason.reason_id for reason in result.unknown_reasons]
+    assert UnknownReasonId.RETURN_COVERAGE_GAP.value in reason_ids
+    assert UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value in reason_ids
+    effect_reasons = [
+        reason
+        for reason in result.unknown_reasons
+        if reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    ]
+    assert effect_reasons
+    assert effect_reasons[0].detail == "function1:effect_call_argument_evidence"
+    assert effect_reasons[0].recovery_proof_kind == (
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
+    )
 
 
 def test_pairwise_matched_unknown_indirect_no_store_call_effect_recovers(monkeypatch):
@@ -5416,6 +5482,30 @@ def test_call_argument_proof_rejects_summary_without_target_kind_and_evidence_ki
         "different_target",
     )
     evidence["proof_content"]["call_effect_summary"].pop("evidence_kind")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_missing_phase15_sections():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"].pop("callee_summary_completion")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_abi_coercion_mismatch():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["callee_precondition"]["abi_coercion"].pop(
+        "callee_parameter_interpretation"
+    )
 
     assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 
@@ -7017,15 +7107,7 @@ def test_pairwise_strategy_records_recoverable_candidate_for_call_effect_blocker
         for item in getattr(analysis1, "completed_recovery_proof_evidence", ())
         if item.get("proof_obligation_id") == reason.proof_obligation_id
     ]
-    assert len(proofs) == 1
-    proof_content = proofs[0].get("proof_content") if proofs else None
-    assert proof_content is not None
-    assert proof_content.get("selected_candidate_key") is not None
-    assert proof_content.get("selected_candidate_kind") == "call_argument_evidence"
-    assert isinstance(proof_content.get("selected_candidate_proof_content"), dict)
-    runtime_ref = proof_content.get("runtime_ref", {})
-    assert _nested_contains(runtime_ref, complete_pcode_ref.stable_key())
-    assert not _nested_contains(runtime_ref, incomplete_pcode_ref.stable_key())
+    assert proofs == []
 
 
 def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_proof():
