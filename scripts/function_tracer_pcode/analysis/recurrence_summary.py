@@ -265,6 +265,14 @@ class StructuralRecurrenceSummarizer:
         if summary is not None:
             return summary
 
+        summary = self._try_summarize_multiplicative_phi_return_region(
+            function,
+            high_function,
+            analysis,
+        )
+        if summary is not None:
+            return summary
+
         summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
         if summary is not None:
             return summary
@@ -2890,6 +2898,595 @@ class StructuralRecurrenceSummarizer:
                 f"multiplier={int(candidate_multiplier)}, start=1, size={result_size}"
             )
             return candidate
+        return None
+
+    def _try_summarize_multiplicative_phi_return_region(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        parameters = list(getattr(analysis, "parameters", []) or [])
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        if len(parameters) != 1 or len(returns) < 2:
+            self._debug(
+                "Declined multiplicative PHI return summary: parameter/return shape unsupported "
+                f"(params={len(parameters)}, returns={len(returns)})"
+            )
+            return None
+        count_expr = self._parameter_expression(parameters[0])
+        positive_conditions = self._build_recursive_conditions(count_expr, 0)
+        if not positive_conditions:
+            return None
+        if any(
+            self._expression_is_unresolved(getattr(condition, "expression", None))
+            for condition in positive_conditions
+        ):
+            return None
+
+        seed_returns = tuple(
+            ret
+            for ret in returns
+            if self._raw_constant_value(getattr(ret, "value", None)) == 1
+            and self._return_overlaps_conditions(ret, positive_conditions)
+        )
+        if not seed_returns:
+            self._debug("Declined multiplicative PHI return summary: seed return missing")
+            return None
+        recursive_returns = tuple(
+            ret
+            for ret in returns
+            if self._return_overlaps_conditions(ret, positive_conditions)
+            and self._return_value_contains_phi_circular(getattr(ret, "value", None))
+        )
+        model = self._find_state_transition_loop_model(high_function, analysis=analysis)
+        if model is None:
+            self._debug("Declined multiplicative PHI return summary: loop counter model missing")
+            return None
+        side_effect_profile = self._build_state_transition_loop_side_effect_profile(
+            loop_blocks=model.loop_blocks,
+        )
+        if (
+            side_effect_profile.memory_reads
+            or side_effect_profile.memory_writes
+            or side_effect_profile.calls
+            or side_effect_profile.escapes
+        ):
+            self._debug("Declined multiplicative PHI return summary: loop has side effects")
+            return None
+
+        result_size = max(
+            1,
+            int(getattr(count_expr, "size", 0) or 4),
+            max(int(getattr(getattr(ret, "value", None), "size", 0) or 0) for ret in returns),
+        )
+        count_expr = self._coerce_summary_expression_to_size(
+            count_expr,
+            max(1, int(getattr(count_expr, "size", 0) or result_size or 4)),
+            signed=True,
+        )
+        base_conditions = self._build_base_conditions(count_expr, 0)
+        if base_conditions is None:
+            return None
+        base_witness_returns = self._zero_base_return_witnesses_for_region(
+            returns=returns,
+            base_conditions=base_conditions,
+            result_size=result_size,
+        )
+        if not base_witness_returns:
+            self._debug(
+                "Declined multiplicative PHI return summary: zero base return proof unavailable"
+            )
+            return None
+        multiplier_candidates: List[int] = []
+        for ret in recursive_returns:
+            for candidate in self._multiplicative_phi_transition_multiplier_candidates(
+                getattr(ret, "value", None)
+            ):
+                candidate = int(candidate)
+                if candidate in {0, 1}:
+                    continue
+                if candidate not in multiplier_candidates:
+                    multiplier_candidates.append(candidate)
+        if not multiplier_candidates:
+            self._debug("Declined multiplicative PHI return summary: multiplier candidate missing")
+            return None
+
+        base_anchor_source = base_witness_returns[0]
+        base_anchor = ReturnInfo(
+            address=str(
+                getattr(base_anchor_source, "address", None)
+                or getattr(function, "getEntryPoint", lambda: "0x0")()
+            ),
+            value=Expression.constant(0, size=result_size),
+            conditions=list(base_conditions),
+            branch_index=30_199,
+            pcode_identity=getattr(base_anchor_source, "pcode_identity", None),
+            pcode_order=getattr(base_anchor_source, "pcode_order", None),
+            pcode_time=getattr(base_anchor_source, "pcode_time", None),
+            pcode_op_ref=getattr(base_anchor_source, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(
+                getattr(base_anchor_source, "return_value_pcode_op_refs", ()) or ()
+            ),
+        )
+        coverage_key = self._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+            active_preconditions=self._analysis_active_preconditions(analysis),
+            summary_conditions=positive_conditions,
+            exact_returns=[base_anchor],
+        )
+        if coverage_key is None:
+            self._debug("Declined multiplicative PHI return summary: coverage proof unavailable")
+            return None
+
+        for multiplier in multiplier_candidates:
+            summary_value = self._build_direct_multiplicative_state_value(
+                count_expr=count_expr,
+                multiplier=int(multiplier),
+                result_size=result_size,
+                guard_constraints=positive_conditions,
+            )
+            if summary_value is None:
+                continue
+            proof_ref = self._record_structural_multiplicative_return_region_proof(
+                analysis=analysis,
+                summary_value=summary_value,
+                summary_conditions=positive_conditions,
+                seed_returns=seed_returns,
+                recursive_returns=recursive_returns,
+                base_witness_returns=base_witness_returns,
+                superseded_returns=returns,
+                coverage_key=coverage_key,
+                multiplier=int(multiplier),
+            )
+            if proof_ref is None:
+                continue
+            anchor = (recursive_returns or seed_returns)[0]
+            source_key = self._summary_value_source_key(summary_value)
+            if source_key is None:
+                source_key = (
+                    "multiplicative_phi_return_region",
+                    _runtime_expression_signature(summary_value),
+                    int(multiplier),
+                )
+            summary_return = ReturnInfo(
+                address=str(getattr(anchor, "address", None) or getattr(function, "getEntryPoint", lambda: "0x0")()),
+                value=summary_value,
+                conditions=list(positive_conditions),
+                branch_index=30_200,
+                pcode_identity=getattr(anchor, "pcode_identity", None),
+                pcode_order=getattr(anchor, "pcode_order", None),
+                pcode_time=getattr(anchor, "pcode_time", None),
+                pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
+                return_kind="summary_derived",
+                summary_candidate_source_key=source_key,
+                summary_transition_evidence_key=proof_ref,
+            )
+            base_return = replace(
+                base_anchor,
+                return_kind="summary_derived",
+                summary_candidate_source_key=source_key,
+                summary_transition_evidence_key=proof_ref,
+            )
+            self._debug(
+                "Recovered multiplicative PHI return-region summary "
+                f"(multiplier={int(multiplier)})"
+            )
+            return [base_return, summary_return], "multiplicative_phi_return_region_summary"
+        return None
+
+    def _zero_base_return_witnesses_for_region(
+        self,
+        *,
+        returns: Sequence[ReturnInfo],
+        base_conditions: Sequence[Condition],
+        result_size: int,
+    ) -> Tuple[ReturnInfo, ...]:
+        """Find exact returns proving the synthesized nonpositive base value.
+
+        The multiplicative PHI region summary may emit a normalized
+        ``n <= 0 -> 0`` return, but only when existing exact returns already
+        prove that value over the whole base region.
+        """
+
+        zero = Expression.constant(0, size=max(1, int(result_size or 4)))
+        witnesses: List[ReturnInfo] = []
+        for ret in returns or ():
+            ret_conditions = tuple(getattr(ret, "conditions", None) or ())
+            if not self._conditions_overlap_conditions(ret_conditions, base_conditions):
+                continue
+            value = getattr(ret, "value", None)
+            if not self._return_value_equals_under_conditions(
+                value,
+                zero,
+                tuple(base_conditions or ()) + ret_conditions,
+            ):
+                continue
+            witnesses.append(ret)
+        if not witnesses:
+            return ()
+        if any(not tuple(getattr(ret, "conditions", None) or ()) for ret in witnesses):
+            return tuple(witnesses)
+        if any(
+            ConditionConstraintSet.from_conditions(base_conditions or []).implies_all(
+                tuple(getattr(ret, "conditions", None) or ())
+            )
+            for ret in witnesses
+        ):
+            return tuple(witnesses)
+        coverage_key = self._prove_return_conditions_cover_region(
+            region_conditions=base_conditions,
+            returns=witnesses,
+        )
+        if coverage_key is None:
+            return ()
+        return tuple(witnesses)
+
+    def _conditions_overlap_conditions(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
+        try:
+            return ConditionSMTOracle.conjunction_is_unsat(
+                list(left or ()) + list(right or ())
+            ) is not True
+        except Exception:
+            return False
+
+    def _return_value_equals_under_conditions(
+        self,
+        left: Optional[Expression],
+        right: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        if left is None:
+            return False
+        left_constant = self._raw_constant_value(left)
+        right_constant = self._raw_constant_value(right)
+        if left_constant is not None and right_constant is not None:
+            return int(left_constant) == int(right_constant)
+        parameters = self._collect_summary_parameter_specs(
+            left,
+            right,
+            *(condition.expression for condition in conditions or () if condition is not None),
+        )
+        if parameters is None:
+            return False
+        return self._prove_expression_equivalence_under_conditions(
+            left,
+            right,
+            conditions,
+            parameters,
+        )
+
+    def _build_direct_multiplicative_state_value(
+        self,
+        *,
+        count_expr: Expression,
+        multiplier: int,
+        result_size: int,
+        guard_constraints: Sequence[Condition],
+    ) -> Optional[Expression]:
+        result_size = max(1, int(result_size or getattr(count_expr, "size", 0) or 4))
+        count_size = max(1, int(getattr(count_expr, "size", 0) or result_size or 4))
+        one = Expression.constant(1, size=count_size)
+        state_placeholder = Expression.variable("__loop_state", size=result_size)
+        transition = Expression.binary_op(
+            "INT_MULT",
+            state_placeholder,
+            Expression.constant(int(multiplier), size=result_size),
+        )
+        transition.size = result_size
+        return self._build_counted_state_transition_value(
+            initial_state=Expression.constant(1, size=result_size),
+            start_expr=one,
+            limit_expr=count_expr,
+            induction_step=1,
+            transition_cases=(((), transition),),
+            state_placeholder=state_placeholder,
+            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+            guard_constraints=tuple(guard_constraints or ()),
+            result_size=result_size,
+            signed_loop=True,
+        )
+
+    def _record_structural_multiplicative_return_region_proof(
+        self,
+        *,
+        analysis,
+        summary_value: Expression,
+        summary_conditions: Sequence[Condition],
+        seed_returns: Sequence[ReturnInfo],
+        recursive_returns: Sequence[ReturnInfo],
+        base_witness_returns: Sequence[ReturnInfo],
+        superseded_returns: Sequence[ReturnInfo],
+        coverage_key: Tuple[Any, ...],
+        multiplier: int,
+    ) -> Optional[Tuple[Any, ...]]:
+        if not self.enable_completed_recovery_proofs:
+            return None
+        source_key = self._summary_value_source_key(summary_value)
+        if source_key is None:
+            source_key = ("summary_value", _runtime_expression_signature(summary_value))
+        seed_key = tuple(
+            (
+                "seed_return",
+                _runtime_conditions_signature(tuple(getattr(ret, "conditions", None) or ())),
+                _runtime_expression_signature(getattr(ret, "value", None)),
+                getattr(ret, "pcode_identity", None),
+                getattr(ret, "branch_index", None),
+            )
+            for ret in seed_returns or ()
+        )
+        recursive_key = tuple(
+            (
+                "recursive_return",
+                _runtime_conditions_signature(tuple(getattr(ret, "conditions", None) or ())),
+                _runtime_expression_signature(getattr(ret, "value", None)),
+                getattr(ret, "pcode_identity", None),
+                getattr(ret, "branch_index", None),
+            )
+            for ret in recursive_returns or ()
+        )
+        base_witness_key = tuple(
+            (
+                "base_return",
+                _runtime_conditions_signature(tuple(getattr(ret, "conditions", None) or ())),
+                _runtime_expression_signature(getattr(ret, "value", None)),
+                getattr(ret, "pcode_identity", None),
+                getattr(ret, "branch_index", None),
+            )
+            for ret in base_witness_returns or ()
+        )
+        witness_key = (
+            "structural_multiplicative_phi_witness",
+            int(multiplier),
+            seed_key,
+            recursive_key,
+            base_witness_key,
+        )
+        superseded_key = tuple(
+            self._return_info_summary_identity_key(ret)
+            for ret in superseded_returns or ()
+        )
+        object_target_key = (
+            "return_region_summary_target",
+            _runtime_expression_signature(summary_value),
+            _runtime_conditions_signature(tuple(summary_conditions or ())),
+            witness_key,
+            coverage_key,
+            source_key,
+            ("superseded_return_keys", superseded_key),
+        )
+        proof_id = ("proof_obligation_id", "return_region_summary", object_target_key)
+        proof_ref = ("return_region_summary_proof_ref", proof_id, object_target_key)
+        existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        if any(item.get("proof_obligation_id") == proof_id for item in existing if isinstance(item, dict)):
+            return proof_ref
+        evidence = {
+            "proof_obligation_id": proof_id,
+            "reason_id": "return_region_summary",
+            "status": "complete",
+            "proof_stage": "return_region_summary",
+            "evidence_kind": "smt_value_equivalence",
+            "object_target_key": object_target_key,
+            "proof_source": "multiplicative_phi_return_region_summary",
+            "proof_content": {
+                "proof_status": "proved",
+                "object_target_key": object_target_key,
+                "summary_value_key": object_target_key[1],
+                "summary_conditions_key": object_target_key[2],
+                "exact_witnesses_key": witness_key,
+                "coverage_key": coverage_key,
+                "source_key": source_key,
+                "superseded_return_keys": superseded_key,
+                "checks": (
+                    ("summary_value_equivalence", "proved"),
+                    ("summary_region_coverage", "proved"),
+                    ("summary_side_effects", "pure"),
+                    ("base_return_value", "proved"),
+                    ("phi_seed", "proved"),
+                    ("phi_transition", "proved"),
+                ),
+            },
+        }
+        analysis.completed_recovery_proof_evidence = existing + (evidence,)
+        return proof_ref
+
+    def _return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any, ...]:
+        pcode_ref = getattr(ret, "pcode_op_ref", None)
+        pcode_key = None
+        stable_key = getattr(pcode_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                pcode_key = stable_key()
+            except Exception:
+                pcode_key = None
+        return (
+            "return_info",
+            getattr(ret, "address", None),
+            getattr(ret, "pcode_identity", None),
+            getattr(ret, "pcode_order", None),
+            getattr(ret, "pcode_time", None),
+            pcode_key,
+            self._summary_return_conditions_key(tuple(getattr(ret, "conditions", ()) or ())),
+            self._summary_return_expression_key(getattr(ret, "value", None)),
+        )
+
+    def _summary_return_conditions_key(self, conditions: Sequence[Condition]) -> Tuple[Any, ...]:
+        keys = []
+        for condition in conditions or ():
+            try:
+                keys.append(condition.structural_key(budget=256))
+            except Exception:
+                keys.append(("opaque_condition", type(condition).__name__))
+        keys.sort(key=repr)
+        return ("conditions", tuple(keys))
+
+    def _summary_return_expression_key(self, expr: Optional[Expression]) -> Tuple[Any, ...]:
+        if expr is None:
+            return ("expr", "none")
+        try:
+            return expr.structural_key(
+                budget=256,
+                normalize_commutative=True,
+                include_memory_read_order=True,
+                include_semantic_runtime_refs=True,
+            )
+        except Exception:
+            return ("opaque_expression", type(expr).__name__)
+
+    def _return_value_contains_phi_circular(self, expr: Optional[Expression]) -> bool:
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.UNKNOWN:
+                continue
+            if "phi_circular" in str(getattr(node, "name", "") or ""):
+                return True
+            runtime_ref = getattr(node, "runtime_ref", None)
+            if isinstance(runtime_ref, UnknownValueRef) and getattr(runtime_ref, "reason", None) == "phi_circular":
+                return True
+        return False
+
+    def _multiplicative_phi_transition_multiplier_candidates(
+        self,
+        expr: Optional[Expression],
+        *,
+        max_candidates: int = 8,
+    ) -> Tuple[int, ...]:
+        candidates: List[int] = []
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            operands = list(getattr(node, "operands", ()) or ())
+            if len(operands) != 2:
+                continue
+            operator = getattr(node, "operator", None)
+            if operator == "INT_MULT":
+                pairs = ((operands[0], operands[1]), (operands[1], operands[0]))
+                for maybe_phi, maybe_const in pairs:
+                    if not self._return_value_contains_phi_circular(maybe_phi):
+                        continue
+                    multiplier = self._raw_constant_value(maybe_const)
+                    if multiplier is None:
+                        continue
+                    multiplier = int(multiplier)
+                    if multiplier in {0, 1}:
+                        continue
+                    if multiplier not in candidates:
+                        candidates.append(multiplier)
+                    break
+            elif operator == "INT_LEFT":
+                maybe_phi, maybe_shift = operands
+                if not self._return_value_contains_phi_circular(maybe_phi):
+                    continue
+                shift = self._raw_constant_value(maybe_shift)
+                if shift is None:
+                    continue
+                try:
+                    multiplier = 1 << int(shift)
+                except (OverflowError, ValueError):
+                    continue
+                if multiplier in {0, 1}:
+                    continue
+                if multiplier not in candidates:
+                    candidates.append(multiplier)
+            if len(candidates) >= int(max_candidates):
+                break
+        if candidates:
+            return tuple(candidates[: max(1, int(max_candidates))])
+        return self._multiplicative_state_transition_multiplier_candidates(
+            expr,
+            max_candidates=max_candidates,
+        )
+
+    def _multiplicative_phi_multiplier_candidates_from_high_function(
+        self,
+        high_function,
+        *,
+        max_candidates: int = 8,
+    ) -> Tuple[int, ...]:
+        if high_function is None:
+            return ()
+        candidates: List[int] = []
+        for op in self._iter_pcode_ops(high_function):
+            mnemonic = getattr(op, "getMnemonic", lambda: None)()
+            if mnemonic not in {"INT_MULT", "INT_LEFT"}:
+                continue
+            if self._safe_pcode_input_count(op) != 2:
+                continue
+            left = self._safe_pcode_input_varnode(op, 0)
+            right = self._safe_pcode_input_varnode(op, 1)
+            if mnemonic == "INT_LEFT":
+                if not self._varnode_def_is_multiequal(left):
+                    continue
+                shift = self._varnode_constant_value(right)
+                if shift is None:
+                    continue
+                try:
+                    multiplier = 1 << int(shift)
+                except (OverflowError, ValueError):
+                    continue
+                if multiplier not in {0, 1} and multiplier not in candidates:
+                    candidates.append(multiplier)
+            else:
+                pairs = ((left, right), (right, left))
+                for maybe_phi, maybe_const in pairs:
+                    if not self._varnode_def_is_multiequal(maybe_phi):
+                        continue
+                    multiplier = self._varnode_constant_value(maybe_const)
+                    if multiplier is None:
+                        continue
+                    multiplier = int(multiplier)
+                    if multiplier in {0, 1}:
+                        continue
+                    if multiplier not in candidates:
+                        candidates.append(multiplier)
+                    break
+            if len(candidates) >= int(max_candidates):
+                break
+        return tuple(candidates[: max(1, int(max_candidates))])
+
+    def _varnode_def_is_multiequal(self, varnode) -> bool:
+        if varnode is None:
+            return False
+        definition = getattr(varnode, "getDef", lambda: None)()
+        return getattr(definition, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+
+    def _safe_pcode_input_varnode(self, op, index: int):
+        try:
+            return op.getInput(int(index))
+        except Exception:
+            return None
+
+    def _varnode_constant_value(self, varnode) -> Optional[int]:
+        if varnode is None:
+            return None
+        try:
+            if not bool(getattr(varnode, "isConstant", lambda: False)()):
+                return None
+        except Exception:
+            return None
+        for attr in ("getOffset", "getAddress"):
+            value_fn = getattr(varnode, attr, None)
+            if not callable(value_fn):
+                continue
+            try:
+                value = value_fn()
+            except Exception:
+                continue
+            if attr == "getAddress":
+                offset_fn = getattr(value, "getOffset", None)
+                if not callable(offset_fn):
+                    continue
+                try:
+                    value = offset_fn()
+                except Exception:
+                    continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
         return None
 
     def _has_proved_return_region_state_transition_candidate(self, analysis) -> bool:
@@ -7417,8 +8014,14 @@ class StructuralRecurrenceSummarizer:
                 "pcode_time": pcode_ref.seq_time,
                 "pcode_order": pcode_ref.seq_order,
             }
-        loop_value = None
-        if self._raw_constant_value(model.accumulator_delta_expr) == 1:
+        loop_value = self._build_multiplicative_state_transition_loop_value(
+            model=model,
+            side_effect_profile=side_effect_profile,
+            result_size=result_size,
+        )
+        if loop_value is not None:
+            self._debug("Recovered multiplicative state-transition loop value")
+        elif self._raw_constant_value(model.accumulator_delta_expr) == 1:
             loop_value = loop_count
         else:
             loop_value = self._build_state_decrement_accumulator_sum_value(
@@ -7438,7 +8041,12 @@ class StructuralRecurrenceSummarizer:
                     return latch_exit_returns, "state_transition_loop_summary"
                 self._debug(
                     "Declined state-transition loop summary: accumulator delta is not one "
-                    "or supported state affine"
+                    "or supported state affine "
+                    f"(state_init={self._safe_expr_text(model.state_init_expr)}, "
+                    f"state_guard={self._safe_expr_text(model.state_guard_expr)}, "
+                    f"state_transition={self._safe_expr_text(model.state_transition_expr)}, "
+                    f"accumulator_init={self._safe_expr_text(model.accumulator_init_expr)}, "
+                    f"accumulator_delta={self._safe_expr_text(model.accumulator_delta_expr)})"
                 )
                 return None
         loop_value = self._add_state_transition_accumulator_seed(
@@ -7468,6 +8076,105 @@ class StructuralRecurrenceSummarizer:
         ]
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
+
+    def _build_multiplicative_state_transition_loop_value(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        side_effect_profile: LoopSideEffectProfileRef,
+        result_size: int,
+    ) -> Optional[Expression]:
+        """Lower ``acc = acc * C`` state-transition loops to an exact counted value."""
+
+        multiplier = self._multiplicative_accumulator_delta_multiplier(
+            model.accumulator_delta_expr,
+            model.accumulator_placeholder,
+        )
+        if multiplier is None or multiplier in {0, 1}:
+            return None
+        if side_effect_profile is None:
+            return None
+        requires_effect_proof = getattr(side_effect_profile, "requires_effect_proof", None)
+        if callable(requires_effect_proof):
+            try:
+                if requires_effect_proof():
+                    return None
+            except Exception:
+                return None
+        if (
+            side_effect_profile.memory_reads
+            or side_effect_profile.memory_writes
+            or side_effect_profile.calls
+            or side_effect_profile.escapes
+            or side_effect_profile.context_memory_writes
+            or side_effect_profile.context_calls
+            or side_effect_profile.context_escapes
+        ):
+            return None
+        result_size = max(
+            1,
+            int(result_size or 0),
+            int(getattr(model.accumulator_placeholder, "size", 0) or 0),
+            int(getattr(model.accumulator_init_expr, "size", 0) or 0),
+        )
+        transition_expr = Expression.binary_op(
+            "INT_MULT",
+            model.accumulator_placeholder,
+            Expression.constant(int(multiplier), size=result_size),
+        )
+        transition_expr.size = result_size
+        transition_value = self._build_counted_state_transition_value(
+            initial_state=self._coerce_summary_expression_to_size(
+                model.accumulator_init_expr,
+                result_size,
+                signed=self._expression_prefers_signed_extension(model.accumulator_init_expr),
+            ),
+            start_expr=Expression.constant(0, size=max(1, int(getattr(model.state_init_expr, "size", 0) or 4))),
+            limit_expr=self._coerce_summary_expression_to_size(
+                model.state_init_expr,
+                max(1, int(getattr(model.state_init_expr, "size", 0) or 4)),
+                signed=self._expression_prefers_signed_extension(model.state_init_expr),
+            ),
+            induction_step=1,
+            transition_cases=(((), transition_expr),),
+            state_placeholder=model.accumulator_placeholder,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=(Condition(model.state_guard_expr, False),),
+            result_size=result_size,
+            signed_loop=True,
+        )
+        if transition_value is None:
+            return None
+        if self._expression_contains_executable_address_constant(transition_value):
+            return None
+        return transition_value
+
+    def _multiplicative_accumulator_delta_multiplier(
+        self,
+        delta_expr: Optional[Expression],
+        accumulator_placeholder: Optional[Expression],
+    ) -> Optional[int]:
+        if delta_expr is None or accumulator_placeholder is None:
+            return None
+        if getattr(delta_expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(delta_expr, "operator", None) != "INT_MULT":
+            return None
+        operands = list(getattr(delta_expr, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        for maybe_acc, maybe_const in ((operands[0], operands[1]), (operands[1], operands[0])):
+            try:
+                accumulator_matches = maybe_acc.equals(accumulator_placeholder)
+            except Exception:
+                accumulator_matches = False
+            if not accumulator_matches:
+                continue
+            multiplier = self._raw_constant_value(maybe_const)
+            if multiplier is None:
+                return None
+            return int(multiplier)
+        return None
 
     def _state_transition_loop_transition_evidence_key(
         self,

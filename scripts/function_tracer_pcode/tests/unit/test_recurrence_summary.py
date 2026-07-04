@@ -1676,6 +1676,18 @@ class _FakeVarnode:
         return self._storage_offset
 
 
+class _FakeConstantVarnode(_FakeVarnode):
+    def __init__(self, value: int, size: int = 4):
+        super().__init__(f"const_{value}", size=size, storage_offset=int(value), storage_space="const")
+        self._value = int(value)
+
+    def isConstant(self):
+        return True
+
+    def getOffset(self):
+        return self._value
+
+
 class _FakeStoreSpaceVarnode:
     def __init__(
         self,
@@ -2961,6 +2973,177 @@ def test_state_transition_loop_summary_recovers_latch_exit_decrement_sum_without
     assert "rt_state_transition_loop_count_" not in positive_smt
     assert "(bvmul (bvsub param_1 (_ bv1 32)) (bvsub param_1 (_ bv1 32)))" in positive_smt
     assert "bvlshr" in positive_smt
+
+
+def test_multiplicative_phi_return_region_recovers_direct_state_value():
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value.size = 4
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "multiplicative_phi_return_region_summary"
+    assert len(summarized_returns) == 2
+    positive_case = next(
+        ret
+        for ret in summarized_returns
+        if ret.value.opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE
+    )
+    assert positive_case.conditions[0].to_string() == "(0 < param_1)"
+    assert positive_case.value.opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE
+    assert isinstance(positive_case.value.runtime_ref, CountedStateTransitionLoopSummaryRef)
+    assert expression_has_unresolved_value(positive_case.value) is False
+    positive_smt = expression_to_smt(positive_case.value)
+    assert "rt_counted_state_transition_value_" not in positive_smt
+    assert "pow_acc" in positive_smt
+    assert positive_case.summary_transition_evidence_key is not None
+
+
+def test_multiplicative_phi_return_region_requires_zero_base_return_proof():
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value.size = 4
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    ) is None
+
+
+def test_multiplicative_phi_return_region_accepts_unconditional_zero_base_witness():
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value.size = 4
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[]),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, _note = summary
+    assert any(ret.conditions and ret.conditions[0].to_string() == "(param_1 <= 0)" for ret in summarized_returns)
+
+
+def test_multiplicative_phi_return_region_ignores_unrelated_high_function_multiplier():
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+    high_function = _build_decrement_accumulator_sum_cfg()
+    unrelated_phi = _FakeVarnode("unrelated_phi")
+    unrelated_next = _FakeVarnode("unrelated_next")
+    _FakePcodeOp("MULTIEQUAL", [_FakeVarnode("seed", expr=_const(1)), unrelated_next], unrelated_phi)
+    unrelated_mult = _FakePcodeOp(
+        "INT_MULT",
+        [unrelated_phi, _FakeConstantVarnode(2)],
+        unrelated_next,
+    )
+    block = high_function.getBasicBlocks()[1]
+    block._ops.append(unrelated_mult)
+    unrelated_mult.setParent(block)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        high_function,
+        analysis,
+    ) is None
 
 
 def test_peeled_decrement_accumulator_sum_keeps_state_width_until_return_truncation():

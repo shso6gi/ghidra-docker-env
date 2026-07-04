@@ -47,7 +47,10 @@ from .condition.bitvector import eval_constant_raw
 from .condition.smt_oracle import ConditionSMTOracle
 from .debug import summarize_expression
 from .signedness import SignednessDetector
-from .summary_returns import accept_summary_return_candidates
+from .summary_returns import (
+    accept_summary_return_candidates,
+    attach_summary_return_acceptance_proof,
+)
 from .effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -1112,6 +1115,7 @@ class ReturnAnalyzer:
             finally:
                 if current_active_key is not None:
                     self._analysis_in_progress.pop(current_active_key, None)
+            self._clear_resolved_call_effect_blockers(result)
 
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             self._repair_mixed_scalar_signedness(result)
@@ -1140,6 +1144,7 @@ class ReturnAnalyzer:
                     finally:
                         if current_active_key is not None:
                             self._analysis_in_progress.pop(current_active_key, None)
+                    self._clear_resolved_call_effect_blockers(result)
                     self._normalize_return_partition(result)
                     self._mark_incomplete_control_flow(result)
             if (
@@ -1243,6 +1248,12 @@ class ReturnAnalyzer:
             summary_return_candidates=accepted.candidates,
             reason=summary_note,
         )
+        attach_summary_return_acceptance_proof(
+            accepted_view,
+            candidates=accepted.candidates,
+            accepted_returns=accepted.accepted_returns,
+            summary_note=summary_note,
+        )
         if summary_note not in accepted_view.analysis_notes:
             accepted_view.analysis_notes.append(summary_note)
         return accepted_view
@@ -1314,6 +1325,12 @@ class ReturnAnalyzer:
             list(accepted.accepted_returns),
             summary_return_candidates=accepted.candidates,
             reason=summary_note,
+        )
+        attach_summary_return_acceptance_proof(
+            result,
+            candidates=accepted.candidates,
+            accepted_returns=accepted.accepted_returns,
+            summary_note=summary_note,
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -7599,6 +7616,22 @@ class ReturnAnalyzer:
                     return_value_pcode_op_refs=tuple(
                         getattr(ret, "return_value_pcode_op_refs", ()) or ()
                     ),
+                    return_kind=getattr(ret, "return_kind", "exact") or "exact",
+                    acceptance_status=getattr(ret, "acceptance_status", None),
+                    summary_candidate_id=getattr(ret, "summary_candidate_id", None),
+                    summary_candidate_source_key=getattr(
+                        ret,
+                        "summary_candidate_source_key",
+                        None,
+                    ),
+                    summary_transition_evidence_key=getattr(
+                        ret,
+                        "summary_transition_evidence_key",
+                        None,
+                    ),
+                    validation_blockers=tuple(
+                        getattr(ret, "validation_blockers", ()) or ()
+                    ),
                 )
             )
 
@@ -7619,10 +7652,25 @@ class ReturnAnalyzer:
             deferred_calls=specialized_deferred_calls,
             effect_summary=analysis.effect_summary,
             signature_hypotheses=list(getattr(analysis, "signature_hypotheses", []) or []),
+            return_type_provenance=dict(getattr(analysis, "return_type_provenance", {}) or {}),
             comparison_surface=analysis.comparison_surface,
             analysis_scope_key=analysis.analysis_scope_key,
             program_is_big_endian=analysis.program_is_big_endian,
+            completed_recovery_proof_ids=tuple(
+                getattr(analysis, "completed_recovery_proof_ids", ()) or ()
+            ),
+            completed_recovery_proof_evidence=tuple(
+                getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            ),
             binary_id=analysis.binary_id,
+            summary_return_candidates=tuple(
+                getattr(analysis, "summary_return_candidates", ()) or ()
+            ),
+            return_outcomes=tuple(getattr(analysis, "return_outcomes", ()) or ()),
+            divergence_outcomes=tuple(getattr(analysis, "divergence_outcomes", ()) or ()),
+            unknown_outcomes=tuple(getattr(analysis, "unknown_outcomes", ()) or ()),
+            analysis_view_identity=getattr(analysis, "analysis_view_identity", None),
+            partition_revision=int(getattr(analysis, "partition_revision", 0) or 0),
         )
 
     def _merge_deferred_calls_into_current_analysis(
@@ -9062,6 +9110,7 @@ class ReturnAnalyzer:
             expanded_values,
             return_index,
             site_metadata=value_site_metadata,
+            return_kind="phi_expansion" if has_multiequal else None,
         )
         if has_multiequal and results:
             results = self._append_smt_lowerable_phi_return_fallback_infos(
@@ -9372,6 +9421,7 @@ class ReturnAnalyzer:
         expanded_values,
         return_index: int,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
+        return_kind: Optional[str] = None,
     ) -> List[ReturnInfo]:
         results = []
         for i, ev in enumerate(expanded_values):
@@ -9461,19 +9511,20 @@ class ReturnAnalyzer:
                         )
                     continue
 
-                results.append(
-                    self._make_return_info(
-                        address=address,
-                        value=resolved_value,
-                        conditions=split_conditions,
-                        branch_index=(
-                            branch_base
-                            if len(split_cases) == 1
-                            else branch_base * 10 + split_index
-                        ),
-                        site_metadata=site_metadata,
-                    )
+                info = self._make_return_info(
+                    address=address,
+                    value=resolved_value,
+                    conditions=split_conditions,
+                    branch_index=(
+                        branch_base
+                        if len(split_cases) == 1
+                        else branch_base * 10 + split_index
+                    ),
+                    site_metadata=site_metadata,
                 )
+                if return_kind:
+                    info = replace(info, return_kind=return_kind)
+                results.append(info)
         pruned = self._prune_less_precise_return_infos(results)
         return self._merge_equivalent_return_infos(pruned)
 
@@ -10959,6 +11010,36 @@ class ReturnAnalyzer:
             if self._expression_contains_deferred_call_value(operand):
                 return True
         return False
+
+    def _clear_resolved_call_effect_blockers(self, analysis: Optional[FunctionReturnAnalysis]) -> None:
+        if analysis is None:
+            return
+        if getattr(analysis, "deferred_calls", None):
+            return
+        if any(
+            self._expression_contains_deferred_call_value(getattr(ret, "value", None))
+            or any(
+                self._expression_contains_deferred_call_value(getattr(cond, "expression", None))
+                for cond in (getattr(ret, "conditions", None) or [])
+            )
+            for ret in (getattr(analysis, "returns", None) or [])
+        ):
+            return
+        blocking_notes = {
+            "effect_call_argument_evidence",
+            "effect_call_argument_evidence_incomplete",
+        }
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is not None and getattr(effect_summary, "call_argument_evidence", None):
+            return
+        if any(note in blocking_notes for note in getattr(analysis, "analysis_notes", []) or []):
+            analysis.analysis_notes = [
+                note
+                for note in (analysis.analysis_notes or [])
+                if note not in blocking_notes
+            ]
+            if "bounded_call_effect_resolved" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("bounded_call_effect_resolved")
 
     def _return_region_conditions_imply(
         self,

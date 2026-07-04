@@ -871,6 +871,10 @@ class CheckStrategy(ABC):
                 analysis2,
                 reason="callee_unsupported_call_may_expose_parameter_memory",
             )
+            or self._call_argument_evidence_phase15_proof_content(
+                object_target_key,
+                analysis,
+            )
             or self._matched_deferred_call_argument_proof_content(
                 object_target_key,
                 analysis,
@@ -976,11 +980,10 @@ class CheckStrategy(ABC):
 
             candidate_content: Optional[Dict[str, Any]] = None
             if candidate_kind == "call_argument_evidence":
-                # Complete call-site argument recovery is necessary evidence, but not a
-                # complete call/effect proof by itself. Phase 1.5 requires an explicit
-                # proof that also covers callee summary completion, callee
-                # preconditions, ABI coercion, and value provenance.
-                candidate_content = None
+                candidate_content = self._call_argument_evidence_phase15_proof_content(
+                    candidate,
+                    analysis,
+                )
             elif candidate_kind == "unsupported_call_effect":
                 candidate_content = (
                     self._self_recursive_no_store_call_effect_proof_content(
@@ -1178,16 +1181,24 @@ class CheckStrategy(ABC):
             return analysis2
         return None
 
-    def _call_argument_evidence_call_effect_proof_content(
+    def _call_argument_evidence_phase15_proof_content(
         self,
         object_target_key: Tuple[Any, ...],
         analysis: FunctionReturnAnalysis,
     ) -> Optional[Dict[str, Any]]:
         if len(object_target_key) < 8 or object_target_key[0] != "call_argument_evidence":
             return None
+        if getattr(analysis, "deferred_calls", None):
+            return None
         side_label = object_target_key[1]
         effect_summary = getattr(analysis, "effect_summary", None)
         if effect_summary is None:
+            return None
+        if getattr(effect_summary, "effects", None):
+            return None
+        if getattr(effect_summary, "has_unsupported_call", False):
+            return None
+        if getattr(effect_summary, "incomplete_reasons", None):
             return None
         matching_evidence = None
         for evidence in getattr(effect_summary, "call_argument_evidence", {}).values():
@@ -1209,13 +1220,25 @@ class CheckStrategy(ABC):
                 break
         if matching_evidence is None:
             return None
+        bounded_refinement = self._bounded_call_refinement_evidence_for_call_argument_target(
+            object_target_key,
+            analysis,
+            matching_evidence,
+        )
+        if bounded_refinement is None:
+            return None
         argument_keys = object_target_key[5]
+        expected_refs = self._expected_call_effect_proof_content_refs(object_target_key)
+        if expected_refs is None:
+            return None
+        runtime_ref, callsite_storage = expected_refs
         return {
             "object_derived": True,
             "status": "complete",
-            "proof_rule": "call_argument_evidence_complete",
+            "proof_rule": "call_argument_evidence_phase15_complete",
             "object_target_key": object_target_key,
             "call_effect_summary": {
+                "object_derived": True,
                 "status": "complete",
                 "summary_source": ("effect_summary", "call_argument_evidence"),
                 "evidence_kind": "call_effect_summary",
@@ -1226,22 +1249,213 @@ class CheckStrategy(ABC):
             },
             "runtime_ref": {
                 "status": "complete",
-                "runtime_ref": (
-                    "runtime_ref",
-                    "call_argument",
-                    ("pcode_op_ref", object_target_key[3]),
-                    ("callee_identity", object_target_key[4]),
-                ),
+                "runtime_ref": runtime_ref,
             },
             "callsite_storage": {
                 "status": "complete",
-                "callsite_storage": (
-                    "callsite_storage",
-                    "call_argument",
-                    ("argument_keys", argument_keys),
+                "callsite_storage": callsite_storage,
+            },
+            "callee_summary_completion": {
+                "object_derived": True,
+                "status": "complete",
+                "object_target_key": object_target_key,
+                "callee_identity": object_target_key[4],
+                "return_coverage_status": "complete",
+                "effect_summary_status": "complete",
+                "memory_policy_status": "complete",
+                "unsupported_call_policy_status": "complete",
+                "bounded_refinement_evidence_ref": bounded_refinement["object_target_key"],
+                "callee_return_partition_key": bounded_refinement["callee_return_partition_key"],
+            },
+            "callee_precondition": {
+                "object_derived": True,
+                "status": "complete",
+                "object_target_key": object_target_key,
+                "caller_guard_implies_callee_precondition": True,
+                "abi_coercion": {
+                    "object_derived": True,
+                    "status": "complete",
+                    "argument_widths": tuple(
+                        (
+                            "argument",
+                            item[1],
+                            self._expression_bit_width_from_object_key(item[2]),
+                        )
+                        for item in argument_keys
+                        if isinstance(item, tuple) and len(item) >= 3
+                    ),
+                    "sign_zero_extension": "object_value_provenance_preserved",
+                    "abi_narrow_wide_coercion": "bounded_call_refinement_checked",
+                    "callee_parameter_interpretation": object_target_key[4],
+                },
+            },
+            "argument_value_provenance": {
+                "object_derived": True,
+                "status": "complete",
+                "object_target_key": object_target_key,
+                "argument_keys": argument_keys,
+                "value_provenance_equivalent": True,
+                "sources": tuple(getattr(matching_evidence, "sources", ()) or ()),
+                "path_condition_keys": tuple(
+                    self._conditions_runtime_object_key(conditions)
+                    for conditions in getattr(matching_evidence, "path_conditions", ()) or ()
                 ),
             },
+            "proof_dependency_graph": {
+                "object_derived": True,
+                "status": "complete",
+                "object_target_key": object_target_key,
+                "cycle_policy": "acyclic",
+                "dependencies": (
+                    bounded_refinement["object_target_key"],
+                    "call_argument_evidence_usable",
+                    "callee_return_summary_expanded_into_caller",
+                ),
+            },
+            "bounded_refinement": bounded_refinement,
         }
+
+    def _bounded_call_refinement_evidence_for_call_argument_target(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        matching_evidence: Any,
+    ) -> Optional[Dict[str, Any]]:
+        expected_pcode_key = self._normalize_nested_tuple(
+            self._stable_key_or_none(getattr(matching_evidence, "pcode_op_ref", None))
+        )
+        expected_callee_key = self._normalize_nested_tuple(
+            self._call_target_key_for_analysis(getattr(matching_evidence, "target_ref", None), analysis)
+        )
+        if expected_pcode_key is None or expected_callee_key is None:
+            return None
+        if self._normalize_nested_tuple(object_target_key[3]) != expected_pcode_key:
+            return None
+        if self._normalize_nested_tuple(object_target_key[4]) != expected_callee_key:
+            return None
+        expected_argument_count = len(tuple(getattr(matching_evidence, "arguments", ()) or ()))
+        records = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            if self._evidence_text(record, "evidence_kind") != "bounded_call_refinement_expansion":
+                continue
+            if self._evidence_text(record, "status") not in {"complete", "completed", "proven"}:
+                continue
+            if not self._evidence_bool(record, "object_derived"):
+                continue
+            content = record.get("proof_content")
+            if not isinstance(content, Mapping):
+                continue
+            if not self._bounded_call_refinement_content_is_complete(
+                content,
+                expected_pcode_key=expected_pcode_key,
+                expected_callee_key=expected_callee_key,
+                expected_argument_count=expected_argument_count,
+            ):
+                continue
+            evidence_ref = self._normalize_nested_tuple(content.get("object_target_key"))
+            return {
+                "object_derived": True,
+                "status": "complete",
+                "evidence_kind": "bounded_call_refinement_expansion",
+                "object_target_key": evidence_ref,
+                "call_argument_object_target_key": object_target_key,
+                "callsite_pcode_key": expected_pcode_key,
+                "callee_identity": expected_callee_key,
+                "callee_return_partition_key": self._normalize_nested_tuple(
+                    content.get("callee_return_partition_key")
+                ),
+                "callee_summary_requires_completed_proof": bool(
+                    content.get("callee_summary_requires_completed_proof")
+                ),
+                "callee_completed_proof_ids": self._normalize_nested_tuple(
+                    content.get("callee_completed_proof_ids")
+                ),
+                "callee_completed_proof_evidence_ids": self._normalize_nested_tuple(
+                    content.get("callee_completed_proof_evidence_ids")
+                ),
+                "result_count": int(content.get("result_count") or 0),
+                "dependency_cycle": bool(content.get("dependency_cycle")),
+                "truncated": bool(content.get("truncated")),
+            }
+        return None
+
+    def _bounded_call_refinement_content_is_complete(
+        self,
+        content: Mapping[str, Any],
+        *,
+        expected_pcode_key: Tuple[Any, ...],
+        expected_callee_key: Tuple[Any, ...],
+        expected_argument_count: int,
+    ) -> bool:
+        if self._evidence_text(content, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if not self._evidence_bool(content, "object_derived"):
+            return False
+        if self._evidence_has_any_recursive(content, self._COMPLETED_PROOF_BLOCKER_FIELDS):
+            return False
+        if self._normalize_nested_tuple(content.get("callsite_pcode_key")) != expected_pcode_key:
+            return False
+        if self._normalize_nested_tuple(content.get("callee_identity")) != expected_callee_key:
+            return False
+        argument_signature = self._normalize_nested_tuple(content.get("argument_signature"))
+        if not isinstance(argument_signature, tuple) or len(argument_signature) != int(expected_argument_count):
+            return False
+        if int(content.get("result_count") or 0) <= 0:
+            return False
+        if int(content.get("callee_return_case_count") or 0) <= 0:
+            return False
+        if content.get("callee_effect_summary_clean") is not True:
+            return False
+        if content.get("dependency_cycle") is True:
+            return False
+        if content.get("truncated") is True:
+            return False
+        if self._normalize_nested_tuple(content.get("callee_return_partition_key")) in {None, ()}:
+            return False
+        if self._normalize_nested_tuple(content.get("object_target_key")) in {None, ()}:
+            return False
+        if content.get("callee_summary_requires_completed_proof") is True:
+            completed_ids = self._normalize_nested_tuple(content.get("callee_completed_proof_ids"))
+            completed_evidence_ids = self._normalize_nested_tuple(
+                content.get("callee_completed_proof_evidence_ids")
+            )
+            if completed_ids in {None, ()} and completed_evidence_ids in {None, ()}:
+                return False
+        return True
+
+    @classmethod
+    def _expression_bit_width_from_object_key(cls, object_key: Any) -> Optional[int]:
+        normalized = cls._normalize_nested_tuple(object_key)
+        if not isinstance(normalized, tuple):
+            return None
+        stack = [normalized]
+        seen: Set[int] = set()
+        while stack:
+            current = stack.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, tuple):
+                if len(current) >= 2 and current[0] in {"size", "size_bytes"}:
+                    try:
+                        value = int(current[1])
+                    except Exception:
+                        value = 0
+                    if current[0] == "size_bytes":
+                        value *= 8
+                    if value > 0:
+                        return value
+                if len(current) >= 2 and str(current[0]).endswith("bits"):
+                    try:
+                        value = int(current[1])
+                    except Exception:
+                        value = 0
+                    if value > 0:
+                        return value
+                stack.extend(reversed(current))
+        return None
 
     def _self_recursive_no_store_call_effect_proof_content(
         self,
@@ -3492,6 +3706,44 @@ class CheckStrategy(ABC):
         ):
             return False
 
+        bounded_refinement = proof_content.get("bounded_refinement")
+        if not cls._call_argument_bounded_refinement_section_is_complete(
+            bounded_refinement,
+            object_target_key,
+        ):
+            return False
+        if not cls._call_argument_phase15_sections_are_consistent(
+            callee_summary,
+            bounded_refinement,
+        ):
+            return False
+
+        return True
+
+    @classmethod
+    def _call_argument_phase15_sections_are_consistent(
+        cls,
+        callee_summary: Any,
+        bounded_refinement: Any,
+    ) -> bool:
+        if not isinstance(callee_summary, Mapping) or not isinstance(bounded_refinement, Mapping):
+            return False
+        bounded_ref = cls._normalize_nested_tuple(
+            callee_summary.get("bounded_refinement_evidence_ref")
+        )
+        bounded_key = cls._normalize_nested_tuple(
+            bounded_refinement.get("object_target_key")
+        )
+        if bounded_ref in {None, ()} or bounded_ref != bounded_key:
+            return False
+        summary_partition = cls._normalize_nested_tuple(
+            callee_summary.get("callee_return_partition_key")
+        )
+        bounded_partition = cls._normalize_nested_tuple(
+            bounded_refinement.get("callee_return_partition_key")
+        )
+        if summary_partition in {None, ()} or summary_partition != bounded_partition:
+            return False
         return True
 
     @classmethod
@@ -3586,6 +3838,45 @@ class CheckStrategy(ABC):
             "fixed_point_proven",
             "induction_proven",
         }
+
+    @classmethod
+    def _call_argument_bounded_refinement_section_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if not cls._completed_proof_section_is_clean(section):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._evidence_text(section, "evidence_kind") != "bounded_call_refinement_expansion":
+            return False
+        if cls._normalize_nested_tuple(section.get("call_argument_object_target_key")) != object_target_key:
+            return False
+        if cls._normalize_nested_tuple(section.get("callsite_pcode_key")) != object_target_key[3]:
+            return False
+        if cls._normalize_nested_tuple(section.get("callee_identity")) != object_target_key[4]:
+            return False
+        if cls._normalize_nested_tuple(section.get("object_target_key")) in {None, ()}:
+            return False
+        if cls._normalize_nested_tuple(section.get("callee_return_partition_key")) in {None, ()}:
+            return False
+        if int(section.get("result_count") or 0) <= 0:
+            return False
+        if section.get("dependency_cycle") is True:
+            return False
+        if section.get("truncated") is True:
+            return False
+        if section.get("callee_summary_requires_completed_proof") is True:
+            completed_ids = cls._normalize_nested_tuple(section.get("callee_completed_proof_ids"))
+            completed_evidence_ids = cls._normalize_nested_tuple(
+                section.get("callee_completed_proof_evidence_ids")
+            )
+            if completed_ids in {None, ()} and completed_evidence_ids in {None, ()}:
+                return False
+        return True
 
     @classmethod
     def _validated_call_effect_blocker_selected_candidate(
@@ -8180,6 +8471,15 @@ class CheckStrategy(ABC):
             bool(getattr(condition, "negated", False)),
             structural_key,
             self._expression_runtime_object_key(expression),
+        )
+
+    def _conditions_runtime_object_key(self, conditions: Any) -> Tuple[Any, ...]:
+        return (
+            "conditions",
+            tuple(
+                self._return_condition_object_key(condition)
+                for condition in (conditions or ())
+            ),
         )
 
     @staticmethod

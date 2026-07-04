@@ -3814,6 +3814,60 @@ def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_b
     assert "effect_call_argument_evidence" not in analysis.analysis_notes
 
 
+def test_clear_resolved_call_effect_blockers_preserves_call_argument_evidence_note():
+    pcode_ref = PcodeOpRef(address_offset=0x1010, seq_time=1, seq_order=0, mnemonic="CALL")
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[ReturnInfo(address="0x1000", value=Expression.constant(0, size=4), conditions=[])],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+        analysis_notes=["effect_call_argument_evidence"],
+        effect_summary=EffectSummary(
+            parameter_names=["param_1"],
+            effects=[],
+            call_argument_evidence={
+                pcode_ref.stable_key(): CallArgumentEvidence(
+                    pcode_op_ref=pcode_ref,
+                    target_ref=CallTargetRef.from_name("callee", entry_offset=0x2000),
+                    callee_param_identities=(("parameter", 0),),
+                    arguments=(Expression.parameter("param_1", 0, size=4),),
+                    sources=("explicit_input",),
+                    path_conditions=((),),
+                    coverage_complete=True,
+                    recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+                )
+            },
+        ),
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._clear_resolved_call_effect_blockers(analysis)
+
+    assert "effect_call_argument_evidence" in analysis.analysis_notes
+    assert "bounded_call_effect_resolved" not in analysis.analysis_notes
+    assert analysis.effect_summary.call_argument_evidence
+
+
+def test_clear_resolved_call_effect_blockers_clears_empty_bounded_call_notes():
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[ReturnInfo(address="0x1000", value=Expression.constant(0, size=4), conditions=[])],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+        analysis_notes=[
+            "effect_call_argument_evidence",
+            "effect_call_argument_evidence_incomplete",
+            "bounded_call_refinement",
+        ],
+        effect_summary=EffectSummary(parameter_names=["param_1"], effects=[]),
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._clear_resolved_call_effect_blockers(analysis)
+
+    assert "effect_call_argument_evidence" not in analysis.analysis_notes
+    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
+    assert "bounded_call_effect_resolved" in analysis.analysis_notes
+
+
 def test_inconclusive_call_argument_evidence_marks_existing_recovered_args_inconclusive():
     pcode_ref = PcodeOpRef(address_offset=0x1011, seq_time=1, seq_order=1, mnemonic="CALL")
     deferred = DeferredCallInfo(
@@ -4002,6 +4056,54 @@ def test_call_argument_recovery_state_survives_specialize_and_merge_deferred_cal
     merged = next(iter(analyzer._current_deferred_calls.values()))
     assert merged.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
     assert merged.call_argument_recovery_reason == "argument_recovery_recoverable_partial"
+
+
+def test_specialize_call_analysis_preserves_summary_proof_metadata():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    proof_target = ("return_region_summary_target", ("value", "x"), ("guards",), ("witness",), ("coverage",))
+    proof_id = ("proof_obligation_id", "return_region_summary", proof_target)
+    proof_ref = ("return_region_summary_proof_ref", proof_id, proof_target)
+    analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x2000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=Expression.parameter("param_1", 0, size=4),
+                conditions=[],
+                return_kind="summary_derived",
+                acceptance_status="accepted",
+                summary_candidate_id=("candidate", 1),
+                summary_candidate_source_key=("source", "recurrence"),
+                summary_transition_evidence_key=proof_ref,
+            )
+        ],
+        completed_recovery_proof_evidence=(
+            {
+                "proof_obligation_id": proof_id,
+                "proof_stage": "return_region_summary",
+                "object_target_key": proof_target,
+                "proof_content": {"object_target_key": proof_target},
+            },
+        ),
+        analysis_view_identity=("accepted_return_partition_view", ("partition", 1)),
+        partition_revision=1,
+    )
+
+    specialized = analyzer._specialize_call_analysis(
+        analysis,
+        [Expression.parameter("caller_arg", 0, size=4)],
+    )
+
+    specialized_return = specialized.returns[0]
+    assert specialized_return.return_kind == "summary_derived"
+    assert specialized_return.summary_candidate_id == ("candidate", 1)
+    assert specialized_return.summary_candidate_source_key == ("source", "recurrence")
+    assert specialized_return.summary_transition_evidence_key == proof_ref
+    assert specialized.completed_recovery_proof_evidence == analysis.completed_recovery_proof_evidence
+    assert specialized.analysis_view_identity == analysis.analysis_view_identity
+    assert specialized.partition_revision == 1
 
 
 def test_merge_deferred_calls_into_current_analysis_preserves_most_conservative_state():

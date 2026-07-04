@@ -813,6 +813,7 @@ def _call_effect_summary_proof_content(object_target_key):
         ),
     }
     if kind == "call_argument_evidence":
+        bounded_refinement = _bounded_call_refinement_section(object_target_key)
         content.update(
             {
                 "callee_summary_completion": {
@@ -823,6 +824,8 @@ def _call_effect_summary_proof_content(object_target_key):
                     "effect_summary_status": "complete",
                     "memory_policy_status": "complete",
                     "unsupported_call_policy_status": "complete",
+                    "bounded_refinement_evidence_ref": bounded_refinement["object_target_key"],
+                    "callee_return_partition_key": bounded_refinement["callee_return_partition_key"],
                 },
                 "callee_precondition": {
                     "status": "complete",
@@ -847,9 +850,43 @@ def _call_effect_summary_proof_content(object_target_key):
                     "object_target_key": object_target_key,
                     "cycle_policy": "acyclic",
                 },
+                "bounded_refinement": bounded_refinement,
             }
         )
     return content
+
+
+def _bounded_call_refinement_section(object_target_key, **overrides):
+    bounded_key = (
+        "bounded_call_refinement_expansion",
+        ("analysis", "caller"),
+        object_target_key[3],
+        object_target_key[4],
+        tuple(("argument_signature", index) for index, _arg in enumerate(object_target_key[5])),
+        ("analysis", "callee"),
+        (("return", 0, ("const", 1)),),
+        (),
+        1,
+        2,
+    )
+    section = {
+        "object_derived": True,
+        "status": "complete",
+        "evidence_kind": "bounded_call_refinement_expansion",
+        "object_target_key": bounded_key,
+        "call_argument_object_target_key": object_target_key,
+        "callsite_pcode_key": object_target_key[3],
+        "callee_identity": object_target_key[4],
+        "callee_return_partition_key": bounded_key[6],
+        "callee_summary_requires_completed_proof": False,
+        "callee_completed_proof_ids": (),
+        "callee_completed_proof_evidence_ids": (),
+        "result_count": 1,
+        "dependency_cycle": False,
+        "truncated": False,
+    }
+    section.update(overrides)
+    return section
 
 
 def _complete_call_effect_summary_proof_evidence(object_target_key, **overrides):
@@ -857,6 +894,50 @@ def _complete_call_effect_summary_proof_evidence(object_target_key, **overrides)
     evidence["proof_content"] = _call_effect_summary_proof_content(object_target_key)
     evidence.update(overrides)
     return evidence
+
+
+def _attach_bounded_call_refinement_expansion_evidence(
+    analysis,
+    object_target_key,
+    *,
+    content_overrides=None,
+):
+    section = _bounded_call_refinement_section(object_target_key, **(content_overrides or {}))
+    record = {
+        "object_derived": True,
+        "status": "complete",
+        "evidence_kind": "bounded_call_refinement_expansion",
+        "proof_stage": "bounded_call_refinement",
+        "object_target_key": section["object_target_key"],
+        "proof_source": "bounded_call_refinement_deferred_expanded",
+        "proof_content": {
+            "object_derived": True,
+            "status": section["status"],
+            "object_target_key": section["object_target_key"],
+            "callsite_pcode_key": section["callsite_pcode_key"],
+            "callee_identity": section["callee_identity"],
+            "argument_signature": section["object_target_key"][4],
+            "callee_analysis_entry": section["object_target_key"][5],
+            "callee_return_partition_key": section["callee_return_partition_key"],
+            "callee_return_case_count": 1,
+            "callee_summary_requires_completed_proof": section[
+                "callee_summary_requires_completed_proof"
+            ],
+            "callee_completed_proof_ids": section["callee_completed_proof_ids"],
+            "callee_completed_proof_evidence_ids": section["callee_completed_proof_evidence_ids"],
+            "callee_effect_summary_clean": True,
+            "target_conditions_key": (),
+            "result_count": section["result_count"],
+            "max_unroll": 2,
+            "dependency_cycle": section["dependency_cycle"],
+            "truncated": section["truncated"],
+        },
+    }
+    if content_overrides:
+        record["proof_content"].update(content_overrides)
+    analysis.completed_recovery_proof_evidence = tuple(
+        getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+    ) + (record,)
 
 
 def _completed_proof_ids_for_call_effect_evidence(evidence):
@@ -5431,6 +5512,74 @@ def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypa
     ]
 
 
+def test_pairwise_bounded_call_argument_evidence_auto_records_phase15_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis1.analysis_notes.append("bounded_call_refinement_deferred_expanded")
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        analysis1,
+    )
+    _attach_bounded_call_refinement_expansion_evidence(analysis1, object_target_key)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    evidence = [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("proof_source") == "call_argument_evidence_phase15_complete"
+    ]
+    assert len(evidence) == 1
+    content = evidence[0]["proof_content"]
+    assert content["proof_rule"] == "call_argument_evidence_phase15_complete"
+    assert content["callee_summary_completion"]["return_coverage_status"] == "complete"
+    assert content["callee_precondition"]["abi_coercion"]["callee_parameter_interpretation"]
+    assert content["argument_value_provenance"]["value_provenance_equivalent"] is True
+    assert content["bounded_refinement"]["evidence_kind"] == "bounded_call_refinement_expansion"
+
+
+def test_pairwise_bounded_call_argument_note_without_evidence_does_not_auto_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_effect_call_argument_evidence()
+    analysis1.analysis_notes.append("bounded_call_refinement_deferred_expanded")
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert not [
+        item
+        for item in analysis1.completed_recovery_proof_evidence
+        if item.get("proof_source") == "call_argument_evidence_phase15_complete"
+    ]
+
+
 def test_call_argument_evidence_ignores_metadata_only_completed_proof():
     object_target_key = _blocking_unsafety_object_target_key(
         "function1:effect_call_argument_evidence",
@@ -5506,6 +5655,71 @@ def test_call_argument_proof_rejects_abi_coercion_mismatch():
     evidence["proof_content"]["callee_precondition"]["abi_coercion"].pop(
         "callee_parameter_interpretation"
     )
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_bounded_refinement_dependency_cycle():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["bounded_refinement"]["dependency_cycle"] = True
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_truncated_bounded_refinement():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["bounded_refinement"]["truncated"] = True
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_bounded_refinement_ref_mismatch():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["callee_summary_completion"][
+        "bounded_refinement_evidence_ref"
+    ] = ("bounded_call_refinement_expansion", "different")
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_bounded_refinement_partition_mismatch():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["callee_summary_completion"][
+        "callee_return_partition_key"
+    ] = (("return", "different"),)
+
+    assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
+
+
+def test_call_argument_proof_rejects_summary_callee_without_completed_proof_ids():
+    object_target_key = _blocking_unsafety_object_target_key(
+        "function1:effect_call_argument_evidence",
+        _analysis_with_effect_call_argument_evidence(),
+    )
+    evidence = _complete_call_effect_summary_proof_evidence(object_target_key)
+    evidence["proof_content"]["bounded_refinement"][
+        "callee_summary_requires_completed_proof"
+    ] = True
+    evidence["proof_content"]["bounded_refinement"]["callee_completed_proof_ids"] = ()
+    evidence["proof_content"]["bounded_refinement"][
+        "callee_completed_proof_evidence_ids"
+    ] = ()
 
     assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 

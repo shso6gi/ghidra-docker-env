@@ -49,14 +49,23 @@ def accept_summary_return_candidates(
     overlap checks against exact returns, and a proposed-partition coverage proof.
     """
 
+    proposed_returns = tuple(proposed_returns or ())
+    if not proposed_returns:
+        return SummaryReturnAcceptanceResult((), (), ("summary_return_candidate_invalid:no_proposed_returns",), False)
+    proposed_summary_returns = tuple(
+        ret for ret in proposed_returns if _return_has_summary_provenance(ret)
+    )
+    active_preconditions = _active_preconditions(analysis)
     exact_returns = tuple(
         ret
         for ret in (getattr(analysis, "returns", ()) or ())
         if _return_is_exact_seed(ret)
+        or _return_is_disjoint_resolved_phi_expansion_seed(
+            ret,
+            proposed_summary_returns,
+            active_preconditions,
+        )
     )
-    proposed_returns = tuple(proposed_returns or ())
-    if not proposed_returns:
-        return SummaryReturnAcceptanceResult((), (), ("summary_return_candidate_invalid:no_proposed_returns",), False)
 
     exact_keys = {_return_info_identity_key(ret) for ret in exact_returns}
     candidates: List[SummaryReturnCandidate] = []
@@ -103,7 +112,18 @@ def accept_summary_return_candidates(
             blockers.append("summary_return_candidate_invalid:no_valid_candidates")
         return SummaryReturnAcceptanceResult((), tuple(candidates), tuple(dict.fromkeys(blockers)), False)
 
-    proposed_partition = tuple(exact_returns) + tuple(
+    superseded_exact_keys = _superseded_exact_return_keys_from_candidates(
+        valid_candidates.values(),
+        analysis,
+        enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+    )
+    effective_exact_returns = tuple(
+        ret
+        for ret in exact_returns
+        if _return_info_identity_key(ret) not in superseded_exact_keys
+    )
+
+    proposed_partition = tuple(effective_exact_returns) + tuple(
         _candidate_return_for_partition(valid_candidates[index])
         for index in sorted(valid_candidates)
     )
@@ -111,7 +131,7 @@ def accept_summary_return_candidates(
     overlap_blockers = _check_candidate_overlaps(
         analysis,
         valid_candidates.values(),
-        exact_returns,
+        effective_exact_returns,
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     )
     blockers.extend(overlap_blockers)
@@ -135,7 +155,7 @@ def accept_summary_return_candidates(
         return SummaryReturnAcceptanceResult((), tuple(candidates), unique_blockers, coverage_complete)
 
     accepted: List[ReturnInfo] = []
-    accepted.extend(exact_returns)
+    accepted.extend(effective_exact_returns)
     for index in sorted(valid_candidates):
         candidate = valid_candidates[index]
         candidate.acceptance_status = "accepted"
@@ -145,6 +165,161 @@ def accept_summary_return_candidates(
         accepted.append(accepted_return)
 
     return SummaryReturnAcceptanceResult(tuple(accepted), tuple(candidates), (), True)
+
+
+def attach_summary_return_acceptance_proof(
+    analysis: FunctionReturnAnalysis,
+    *,
+    candidates: Sequence[SummaryReturnCandidate],
+    accepted_returns: Sequence[ReturnInfo],
+    summary_note: str,
+) -> None:
+    """Record a completed local gate proof for accepted summary-derived returns.
+
+    This proof is intentionally scoped to summary-return exposure.  It does not
+    replace pairwise final return coverage proof, but it gives callers a stable
+    ref showing that summary-derived callee returns passed candidate validation,
+    overlap checks, and candidate partition coverage before being exposed.
+    """
+
+    accepted_candidates = tuple(
+        candidate
+        for candidate in (candidates or ())
+        if str(getattr(candidate, "acceptance_status", "") or "") == "accepted"
+    )
+    if not accepted_candidates:
+        return
+    accepted_partition_key = tuple(
+        _return_info_identity_key(ret)
+        for ret in (accepted_returns or ())
+    )
+    candidate_ids = tuple(candidate.candidate_id for candidate in accepted_candidates)
+    transition_keys = tuple(
+        candidate.transition_evidence_key
+        for candidate in accepted_candidates
+    )
+    object_target_key = (
+        "summary_return_acceptance_target",
+        _analysis_key(analysis),
+        str(summary_note or "structural_summary"),
+        accepted_partition_key,
+        candidate_ids,
+        transition_keys,
+        _active_precondition_key(analysis),
+    )
+    proof_id = ("proof_obligation_id", "summary_return_acceptance", object_target_key)
+    existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+    if any(
+        isinstance(item, Mapping) and item.get("proof_obligation_id") == proof_id
+        for item in existing
+    ):
+        return
+    evidence = {
+        "proof_obligation_id": proof_id,
+        "reason_id": "summary_return_acceptance",
+        "status": "complete",
+        "proof_stage": "summary_return_acceptance",
+        "evidence_kind": "summary_return_candidate_acceptance",
+        "object_target_key": object_target_key,
+        "proof_source": str(summary_note or "structural_summary"),
+        "proof_content": {
+            "object_derived": True,
+            "status": "complete",
+            "object_target_key": object_target_key,
+            "accepted_partition_key": accepted_partition_key,
+            "candidate_ids": candidate_ids,
+            "transition_evidence_keys": transition_keys,
+            "candidate_validation": "proved",
+            "overlap_proof": "proved",
+            "candidate_partition_coverage": "proved",
+            "final_pairwise_coverage": "not_claimed",
+        },
+    }
+    analysis.completed_recovery_proof_evidence = existing + (evidence,)
+    existing_ids = tuple(getattr(analysis, "completed_recovery_proof_ids", ()) or ())
+    if proof_id not in existing_ids:
+        analysis.completed_recovery_proof_ids = existing_ids + (proof_id,)
+
+
+def summary_return_acceptance_proof_id_from_evidence(
+    evidence: Any,
+) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(evidence, Mapping):
+        return None
+    if str(evidence.get("status") or "") != "complete":
+        return None
+    if str(evidence.get("proof_stage") or "") != "summary_return_acceptance":
+        return None
+    if str(evidence.get("evidence_kind") or "") != "summary_return_candidate_acceptance":
+        return None
+    object_target_key = evidence.get("object_target_key")
+    proof_id = evidence.get("proof_obligation_id")
+    if not _summary_return_acceptance_target_key_is_strong(object_target_key):
+        return None
+    if not _summary_return_acceptance_proof_id_matches_target(proof_id, object_target_key):
+        return None
+    proof_content = evidence.get("proof_content")
+    if not _summary_return_acceptance_proof_content_matches_target(
+        proof_content,
+        object_target_key,
+    ):
+        return None
+    return proof_id
+
+
+def _summary_return_acceptance_target_key_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 7:
+        return False
+    if value[0] != "summary_return_acceptance_target":
+        return False
+    if _key_contains_forbidden_identity(value):
+        return False
+    accepted_partition_key = value[3]
+    candidate_ids = value[4]
+    transition_keys = value[5]
+    if not isinstance(accepted_partition_key, tuple) or not accepted_partition_key:
+        return False
+    if not isinstance(candidate_ids, tuple) or not candidate_ids:
+        return False
+    if not isinstance(transition_keys, tuple) or not transition_keys:
+        return False
+    return True
+
+
+def _summary_return_acceptance_proof_id_matches_target(
+    proof_id: Any,
+    object_target_key: Tuple[Any, ...],
+) -> bool:
+    return (
+        isinstance(proof_id, tuple)
+        and len(proof_id) == 3
+        and proof_id[0] == "proof_obligation_id"
+        and proof_id[1] == "summary_return_acceptance"
+        and proof_id[2] == object_target_key
+    )
+
+
+def _summary_return_acceptance_proof_content_matches_target(
+    proof_content: Any,
+    object_target_key: Tuple[Any, ...],
+) -> bool:
+    if not isinstance(proof_content, Mapping):
+        return False
+    if proof_content.get("object_target_key") != object_target_key:
+        return False
+    expected = {
+        "accepted_partition_key": object_target_key[3],
+        "candidate_ids": object_target_key[4],
+        "transition_evidence_keys": object_target_key[5],
+        "candidate_validation": "proved",
+        "overlap_proof": "proved",
+        "candidate_partition_coverage": "proved",
+        "final_pairwise_coverage": "not_claimed",
+    }
+    for key, expected_value in expected.items():
+        if proof_content.get(key) != expected_value:
+            return False
+    return str(proof_content.get("status") or "") in {"complete", "completed", "proven"}
 
 
 def build_summary_return_candidate(
@@ -198,13 +373,43 @@ def _return_has_summary_provenance(ret: ReturnInfo) -> bool:
         return True
     if getattr(ret, "summary_candidate_source_key", None):
         return True
-    return _loop_summary_structural_key(ret) is not None
+    try:
+        return _loop_summary_structural_key(ret) is not None
+    except RecursionError:
+        return False
 
 
 def _return_is_exact_seed(ret: ReturnInfo) -> bool:
-    if str(getattr(ret, "return_kind", "exact") or "exact") != "exact":
+    return_kind = str(getattr(ret, "return_kind", "exact") or "exact")
+    if return_kind != "exact":
         return False
-    return not _expression_contains_unresolved_value(getattr(ret, "value", None))
+    if _expression_contains_unresolved_value(getattr(ret, "value", None)):
+        return False
+    if _return_has_summary_provenance(ret):
+        return False
+    return True
+
+
+def _return_is_disjoint_resolved_phi_expansion_seed(
+    ret: ReturnInfo,
+    proposed_summary_returns: Sequence[ReturnInfo],
+    active_preconditions: Sequence[Condition],
+) -> bool:
+    if str(getattr(ret, "return_kind", "exact") or "exact") == "summary_derived":
+        return False
+    if _expression_contains_unresolved_value(getattr(ret, "value", None)):
+        return False
+    if _return_has_summary_provenance(ret):
+        return False
+    for summary_return in proposed_summary_returns or ():
+        overlap_conditions = (
+            list(getattr(ret, "conditions", None) or [])
+            + list(getattr(summary_return, "conditions", None) or [])
+            + list(active_preconditions or ())
+        )
+        if _conditions_unsat(overlap_conditions) is not True:
+            return False
+    return True
 
 
 def _expression_contains_unresolved_value(
@@ -501,6 +706,28 @@ def _return_region_summary_proof_witnesses_include_return(
     return False
 
 
+def _superseded_exact_return_keys_from_candidates(
+    candidates: Iterable[SummaryReturnCandidate],
+    analysis: FunctionReturnAnalysis,
+    *,
+    enable_completed_recovery_proofs: bool,
+) -> set[Tuple[Any, ...]]:
+    superseded: set[Tuple[Any, ...]] = set()
+    for candidate in candidates:
+        proof_ref = getattr(candidate.return_info, "summary_transition_evidence_key", None)
+        if not _return_region_summary_proof_ref_is_strong(
+            proof_ref,
+            analysis,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        ):
+            continue
+        if not isinstance(proof_ref, tuple) or len(proof_ref) != 3:
+            continue
+        for key in _return_region_summary_superseded_return_keys_from_target(proof_ref[2]):
+            superseded.add(key)
+    return superseded
+
+
 def _exact_witnesses_key_contains_return(
     witnesses_key: Any,
     exact_ret: ReturnInfo,
@@ -550,9 +777,13 @@ def _return_partition_covers_active_precondition(
         return True
     if not region_exprs:
         return False
-    disjunction = _combine_or(region_exprs)
-    miss_condition = Condition(disjunction, True)
-    miss_unsat = _conditions_unsat(list(active_preconditions or ()) + [miss_condition])
+    miss_conditions = list(active_preconditions or [])
+    for conditions in conditions_by_return:
+        combined = Condition.combine_and(conditions)
+        if combined is None:
+            return False
+        miss_conditions.append(Condition(_condition_as_expression(combined), True))
+    miss_unsat = _conditions_unsat(miss_conditions)
     return miss_unsat is True
 
 
@@ -923,13 +1154,37 @@ def _return_region_summary_proof_ref_is_strong(
 
 
 def _return_region_summary_target_key_is_strong(value: Any) -> bool:
-    if not isinstance(value, tuple) or len(value) != 6:
+    if not isinstance(value, tuple) or len(value) not in {6, 7}:
         return False
     if value[0] != "return_region_summary_target":
+        return False
+    if len(value) == 7 and not _return_region_summary_superseded_target_part_is_strong(value[6]):
         return False
     if _key_contains_forbidden_identity(value):
         return False
     return True
+
+
+def _return_region_summary_superseded_target_part_is_strong(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 2:
+        return False
+    if value[0] != "superseded_return_keys":
+        return False
+    keys = value[1]
+    if not isinstance(keys, tuple):
+        return False
+    return all(isinstance(key, tuple) for key in keys)
+
+
+def _return_region_summary_superseded_return_keys_from_target(
+    object_target_key: Any,
+) -> Tuple[Tuple[Any, ...], ...]:
+    if not isinstance(object_target_key, tuple) or len(object_target_key) != 7:
+        return ()
+    superseded_part = object_target_key[6]
+    if not _return_region_summary_superseded_target_part_is_strong(superseded_part):
+        return ()
+    return tuple(key for key in superseded_part[1] if isinstance(key, tuple))
 
 
 def _completed_return_region_summary_proof_ids(
@@ -987,14 +1242,29 @@ def _return_region_summary_proof_content_matches_target(
         return False
     if str(proof_content.get("proof_status") or "") != "proved":
         return False
-    (
-        _tag,
-        summary_value_key,
-        summary_conditions_key,
-        exact_witnesses_key,
-        coverage_key,
-        source_key,
-    ) = object_target_key
+    if len(object_target_key) == 6:
+        (
+            _tag,
+            summary_value_key,
+            summary_conditions_key,
+            exact_witnesses_key,
+            coverage_key,
+            source_key,
+        ) = object_target_key
+        superseded_keys = ()
+    else:
+        (
+            _tag,
+            summary_value_key,
+            summary_conditions_key,
+            exact_witnesses_key,
+            coverage_key,
+            source_key,
+            superseded_part,
+        ) = object_target_key
+        if not _return_region_summary_superseded_target_part_is_strong(superseded_part):
+            return False
+        superseded_keys = tuple(superseded_part[1])
     expected = {
         "summary_value_key": summary_value_key,
         "summary_conditions_key": summary_conditions_key,
@@ -1005,6 +1275,8 @@ def _return_region_summary_proof_content_matches_target(
     for key, expected_value in expected.items():
         if proof_content.get(key) != expected_value:
             return False
+    if len(object_target_key) == 7 and tuple(proof_content.get("superseded_return_keys") or ()) != superseded_keys:
+        return False
     checks = tuple(proof_content.get("checks") or ())
     required = {
         ("summary_value_equivalence", "proved"),

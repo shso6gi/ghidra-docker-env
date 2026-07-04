@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from ..model import (
     CallTargetRef,
@@ -28,6 +28,10 @@ from .effect_summary import (
     lower_post_state_expression_for_smt_if_needed,
     substitute_condition,
     substitute_expression,
+)
+from .summary_returns import (
+    _return_region_summary_proof_id_from_evidence,
+    summary_return_acceptance_proof_id_from_evidence,
 )
 
 
@@ -481,6 +485,7 @@ class BoundedCallRefiner:
                 callee_analysis,
                 replacements,
             )
+            candidate_result_count = 0
 
             for ret in callee_analysis.returns:
                 substituted_value = substitute_expression(ret.value, replacements, callee_analysis.parameters)
@@ -525,6 +530,7 @@ class BoundedCallRefiner:
                         if ConditionSimplifier.is_contradiction(merged_conditions):
                             continue
                         had_return_expansion = True
+                        candidate_result_count += 1
                         results.append((value_expr, merged_conditions))
                         if len(results) >= self.max_cases:
                             self._record_note(
@@ -532,6 +538,16 @@ class BoundedCallRefiner:
                                 "bounded_call_refinement_deferred_expanded",
                             )
                             return results[: self.max_cases]
+            if candidate_result_count:
+                self._record_bounded_call_refinement_expansion_evidence(
+                    caller_analysis=caller_analysis,
+                    deferred=deferred,
+                    target_ref=_target_ref,
+                    target_conditions=target_conditions,
+                    callee_analysis=callee_analysis,
+                    aligned_arguments=aligned_arguments,
+                    result_count=candidate_result_count,
+                )
 
         if results:
             self._record_note(caller_analysis, "bounded_call_refinement_deferred_expanded")
@@ -906,3 +922,207 @@ class BoundedCallRefiner:
             ):
                 filtered[info_key] = info
         return filtered
+
+    def _record_bounded_call_refinement_expansion_evidence(
+        self,
+        *,
+        caller_analysis: FunctionReturnAnalysis,
+        deferred: DeferredCallInfo,
+        target_ref: CallTargetRef,
+        target_conditions: Sequence[Condition],
+        callee_analysis: FunctionReturnAnalysis,
+        aligned_arguments: Sequence[Expression],
+        result_count: int,
+    ) -> None:
+        if caller_analysis is None or deferred is None or callee_analysis is None:
+            return
+        if int(result_count or 0) <= 0:
+            return
+        callee_effect_summary = getattr(callee_analysis, "effect_summary", None)
+        if callee_effect_summary is None:
+            self._debug("Skipped bounded refinement evidence: callee effect summary missing")
+            return
+        callee_effect_clean = (
+            not getattr(callee_effect_summary, "effects", None)
+            and not getattr(callee_effect_summary, "has_unsupported_call", False)
+            and not getattr(callee_effect_summary, "incomplete_reasons", None)
+        )
+        if not callee_effect_clean:
+            self._debug("Skipped bounded refinement evidence: callee effect summary not clean")
+            return
+        callee_requires_completed_summary_proof = self._callee_requires_completed_summary_proof(
+            callee_analysis
+        )
+        callee_completed_proof_ids = self._callee_summary_completion_proof_ids(
+            callee_analysis
+        )
+        callee_completed_proof_evidence_ids = self._callee_summary_completion_evidence_ids(
+            callee_analysis
+        )
+        if callee_requires_completed_summary_proof and not (
+            callee_completed_proof_ids or callee_completed_proof_evidence_ids
+        ):
+            self._debug(
+                "Skipped bounded refinement evidence: summary-derived callee lacks completed proof refs"
+            )
+            return
+        pcode_key = self._deferred_call_pcode_key(deferred)
+        callee_key = self._call_target_key_for_analysis(target_ref, caller_analysis)
+        argument_exprs = tuple(aligned_arguments or getattr(deferred, "arguments", ()) or ())
+        argument_signature = tuple(_runtime_expression_signature(arg) for arg in argument_exprs)
+        callee_partition_key = self._analysis_signature(getattr(callee_analysis, "returns", ()) or ())
+        object_target_key = (
+            "bounded_call_refinement_expansion",
+            self._analysis_entry_key(caller_analysis),
+            self._normalize_nested_tuple(pcode_key),
+            self._normalize_nested_tuple(callee_key),
+            argument_signature,
+            self._analysis_entry_key(callee_analysis),
+            callee_partition_key,
+            _runtime_conditions_signature(target_conditions),
+            int(result_count),
+            int(self.max_unroll),
+        )
+        existing = tuple(getattr(caller_analysis, "completed_recovery_proof_evidence", ()) or ())
+        if any(
+            isinstance(item, dict)
+            and self._normalize_nested_tuple(item.get("object_target_key")) == object_target_key
+            and item.get("evidence_kind") == "bounded_call_refinement_expansion"
+            for item in existing
+        ):
+            return
+        content = {
+            "object_derived": True,
+            "status": "complete",
+            "object_target_key": object_target_key,
+            "callsite_pcode_key": self._normalize_nested_tuple(pcode_key),
+            "callee_identity": self._normalize_nested_tuple(callee_key),
+            "argument_signature": argument_signature,
+            "callee_analysis_entry": self._analysis_entry_key(callee_analysis),
+            "callee_return_partition_key": callee_partition_key,
+            "callee_return_case_count": len(getattr(callee_analysis, "returns", ()) or ()),
+            "callee_summary_requires_completed_proof": callee_requires_completed_summary_proof,
+            "callee_completed_proof_ids": callee_completed_proof_ids,
+            "callee_completed_proof_evidence_ids": callee_completed_proof_evidence_ids,
+            "callee_effect_summary_clean": True,
+            "target_conditions_key": _runtime_conditions_signature(target_conditions),
+            "result_count": int(result_count),
+            "max_unroll": int(self.max_unroll),
+            "dependency_cycle": False,
+            "truncated": False,
+        }
+        record = {
+            "object_derived": True,
+            "status": "complete",
+            "evidence_kind": "bounded_call_refinement_expansion",
+            "proof_stage": "bounded_call_refinement",
+            "object_target_key": object_target_key,
+            "proof_source": "bounded_call_refinement_deferred_expanded",
+            "proof_content": content,
+        }
+        caller_analysis.completed_recovery_proof_evidence = existing + (record,)
+        self._debug("Recorded bounded refinement expansion evidence")
+
+    @staticmethod
+    def _callee_requires_completed_summary_proof(
+        callee_analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        for ret in getattr(callee_analysis, "returns", ()) or ():
+            if str(getattr(ret, "return_kind", "exact") or "exact") == "summary_derived":
+                return True
+            if getattr(ret, "summary_transition_evidence_key", None) is not None:
+                return True
+            if getattr(ret, "summary_candidate_source_key", None) is not None:
+                return True
+        return False
+
+    @classmethod
+    def _callee_summary_completion_proof_ids(
+        cls,
+        callee_analysis: FunctionReturnAnalysis,
+    ) -> Tuple[Any, ...]:
+        return cls._callee_summary_completion_evidence_ids(callee_analysis)
+
+    @classmethod
+    def _callee_summary_completion_evidence_ids(
+        cls,
+        callee_analysis: FunctionReturnAnalysis,
+    ) -> Tuple[Any, ...]:
+        accepted = []
+        for item in getattr(callee_analysis, "completed_recovery_proof_evidence", ()) or ():
+            if not isinstance(item, Mapping):
+                continue
+            proof_id = cls._validated_summary_completion_proof_id(item)
+            if proof_id is not None:
+                accepted.append(proof_id)
+        return tuple(accepted)
+
+    @classmethod
+    def _validated_summary_completion_proof_id(
+        cls,
+        evidence: Mapping[str, Any],
+    ) -> Optional[Tuple[Any, ...]]:
+        proof_id = _return_region_summary_proof_id_from_evidence(evidence)
+        if proof_id is not None:
+            return cls._normalize_nested_tuple(proof_id)
+        proof_id = summary_return_acceptance_proof_id_from_evidence(evidence)
+        if proof_id is not None:
+            return cls._normalize_nested_tuple(proof_id)
+        return None
+
+    @staticmethod
+    def _normalize_nested_tuple(value: Any) -> Any:
+        if isinstance(value, list):
+            return tuple(BoundedCallRefiner._normalize_nested_tuple(item) for item in value)
+        if isinstance(value, tuple):
+            return tuple(BoundedCallRefiner._normalize_nested_tuple(item) for item in value)
+        return value
+
+    @staticmethod
+    def _stable_key_or_none(value: Any) -> Optional[Tuple[Any, ...]]:
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                return None
+            return key if isinstance(key, tuple) else None
+        return None
+
+    def _deferred_call_pcode_key(self, deferred: DeferredCallInfo) -> Optional[Tuple[Any, ...]]:
+        deferred_ref = getattr(deferred, "deferred_call_ref", None)
+        return self._stable_key_or_none(getattr(deferred_ref, "pcode_op_ref", None))
+
+    def _call_target_key_for_analysis(
+        self,
+        target_ref: Any,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> Any:
+        key = self._stable_key_or_none(target_ref)
+        binary_id = getattr(analysis, "binary_id", None) if analysis is not None else None
+        if not binary_id or not isinstance(key, tuple) or not key:
+            return key
+        kind = key[0]
+        if kind == "function" and len(key) >= 3 and key[2] is not None:
+            return ("function", str(binary_id), key[2])
+        if kind == "code_address" and len(key) >= 3 and key[2] is not None:
+            return ("code_address", str(binary_id), key[2])
+        if kind == "unknown":
+            return ("unknown", str(binary_id))
+        return key
+
+    def _analysis_entry_key(self, analysis: Optional[FunctionReturnAnalysis]) -> Tuple[Any, ...]:
+        if analysis is None:
+            return ("analysis", None, None, None)
+        function_ref_key = self._stable_key_or_none(getattr(analysis, "function_ref", None))
+        if function_ref_key is not None:
+            binary_id = getattr(analysis, "binary_id", None)
+            if binary_id and function_ref_key[0] == "function" and len(function_ref_key) >= 3:
+                return ("function", str(binary_id), function_ref_key[2])
+            return function_ref_key
+        return (
+            "analysis",
+            getattr(analysis, "binary_id", None),
+            getattr(analysis, "function_name", None),
+            getattr(analysis, "entry_point", None),
+        )

@@ -109,6 +109,7 @@ def test_bounded_call_refiner_prefers_argument_specialized_callee_lookup():
         parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
         returns=[ReturnInfo(address="0x2000", value=_param("x", 0), conditions=[])],
     )
+    callee.effect_summary = EffectSummary(parameter_names=["x"], effects=[])
     captured = []
 
     def _provider(target_ref, args=None):
@@ -125,6 +126,228 @@ def test_bounded_call_refiner_prefers_argument_specialized_callee_lookup():
     assert captured
     assert captured[0][1] == deferred.arguments
     assert caller.returns[0].value.to_string() == "(n + 4)"
+    evidence = [
+        item
+        for item in caller.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "bounded_call_refinement_expansion"
+    ]
+    assert len(evidence) == 1
+    content = evidence[0]["proof_content"]
+    assert content["status"] == "complete"
+    assert content["result_count"] == 1
+    assert content["callee_return_case_count"] == 1
+    assert content["dependency_cycle"] is False
+    assert content["truncated"] is False
+
+
+def test_bounded_call_refiner_does_not_record_expansion_evidence_without_callee_effect_summary():
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param()],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(deferred), conditions=[])],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x2000", value=_param("x", 0), conditions=[])],
+    )
+
+    refiner = BoundedCallRefiner(lambda _target_ref, _args=None: callee, max_unroll=1, max_cases=8)
+
+    assert refiner.refine_analysis(caller) is True
+    assert not [
+        item
+        for item in caller.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "bounded_call_refinement_expansion"
+    ]
+
+
+def test_bounded_call_refiner_requires_completed_proof_for_summary_derived_callee():
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param()],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(deferred), conditions=[])],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_param("x", 0),
+                conditions=[],
+                return_kind="summary_derived",
+            )
+        ],
+    )
+    callee.effect_summary = EffectSummary(parameter_names=["x"], effects=[])
+
+    refiner = BoundedCallRefiner(lambda _target_ref, _args=None: callee, max_unroll=1, max_cases=8)
+
+    assert refiner.refine_analysis(caller) is True
+    assert not [
+        item
+        for item in caller.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "bounded_call_refinement_expansion"
+    ]
+
+
+def test_bounded_call_refiner_accepts_summary_derived_callee_with_summary_completion_proof():
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param()],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(deferred), conditions=[])],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    accepted_partition_key = (("return", "summary"),)
+    candidate_ids = (("summary_candidate", 1),)
+    transition_keys = (("transition", "state"),)
+    proof_target = (
+        "summary_return_acceptance_target",
+        ("analysis", "callee"),
+        "counted_scalar_loop_summary",
+        accepted_partition_key,
+        candidate_ids,
+        transition_keys,
+        ("active_precondition", ()),
+    )
+    proof_id = ("proof_obligation_id", "summary_return_acceptance", proof_target)
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_param("x", 0),
+                conditions=[],
+                return_kind="summary_derived",
+            )
+        ],
+    )
+    callee.effect_summary = EffectSummary(parameter_names=["x"], effects=[])
+    callee.completed_recovery_proof_evidence = (
+        {
+            "proof_obligation_id": proof_id,
+            "proof_stage": "summary_return_acceptance",
+            "evidence_kind": "summary_return_candidate_acceptance",
+            "status": "complete",
+            "object_target_key": proof_target,
+            "proof_content": {
+                "status": "complete",
+                "object_target_key": proof_target,
+                "accepted_partition_key": accepted_partition_key,
+                "candidate_ids": candidate_ids,
+                "transition_evidence_keys": transition_keys,
+                "candidate_validation": "proved",
+                "overlap_proof": "proved",
+                "candidate_partition_coverage": "proved",
+                "final_pairwise_coverage": "not_claimed",
+            },
+        },
+    )
+
+    refiner = BoundedCallRefiner(lambda _target_ref, _args=None: callee, max_unroll=1, max_cases=8)
+
+    assert refiner.refine_analysis(caller) is True
+    evidence = [
+        item
+        for item in caller.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "bounded_call_refinement_expansion"
+    ]
+    assert len(evidence) == 1
+    content = evidence[0]["proof_content"]
+    assert content["callee_summary_requires_completed_proof"] is True
+    assert content["callee_completed_proof_evidence_ids"] == (proof_id,)
+
+
+def test_bounded_call_refiner_rejects_incomplete_summary_completion_proof():
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param()],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(deferred), conditions=[])],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    accepted_partition_key = (("return", "summary"),)
+    candidate_ids = (("summary_candidate", 1),)
+    transition_keys = (("transition", "state"),)
+    proof_target = (
+        "summary_return_acceptance_target",
+        ("analysis", "callee"),
+        "counted_scalar_loop_summary",
+        accepted_partition_key,
+        candidate_ids,
+        transition_keys,
+        ("active_precondition", ()),
+    )
+    proof_id = ("proof_obligation_id", "summary_return_acceptance", proof_target)
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_param("x", 0),
+                conditions=[],
+                return_kind="summary_derived",
+            )
+        ],
+    )
+    callee.effect_summary = EffectSummary(parameter_names=["x"], effects=[])
+    callee.completed_recovery_proof_evidence = (
+        {
+            "proof_obligation_id": proof_id,
+            "proof_stage": "summary_return_acceptance",
+            "evidence_kind": "summary_return_candidate_acceptance",
+            "status": "pending",
+            "object_target_key": proof_target,
+            "proof_content": {
+                "status": "complete",
+                "object_target_key": ("summary_return_acceptance_target", ("other",), ("partition",)),
+                "accepted_partition_key": accepted_partition_key,
+                "candidate_ids": candidate_ids,
+                "transition_evidence_keys": transition_keys,
+                "candidate_validation": "proved",
+                "overlap_proof": "proved",
+                "candidate_partition_coverage": "proved",
+                "final_pairwise_coverage": "not_claimed",
+            },
+        },
+    )
+
+    refiner = BoundedCallRefiner(lambda _target_ref, _args=None: callee, max_unroll=1, max_cases=8)
+
+    assert refiner.refine_analysis(caller) is True
+    assert not [
+        item
+        for item in caller.completed_recovery_proof_evidence
+        if item.get("evidence_kind") == "bounded_call_refinement_expansion"
+    ]
 
 
 def test_bounded_call_refiner_does_not_rebind_fully_specialized_callee_analysis():

@@ -3,6 +3,7 @@
 from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.summary_returns import (
+    _return_info_identity_key,
     _return_is_exact_seed,
     accept_summary_return_candidates,
 )
@@ -226,7 +227,10 @@ def _with_return_region_summary_proof(
     *,
     coverage_status: str = "proved",
     exact_witnesses_key=("exact_return_witnesses", ()),
+    superseded_return_keys=(),
+    content_superseded_return_keys=None,
 ):
+    superseded_return_keys = tuple(superseded_return_keys or ())
     object_target_key = (
         "return_region_summary_target",
         ("summary_value", "unit_test"),
@@ -235,8 +239,17 @@ def _with_return_region_summary_proof(
         ("coverage", "unit_test", coverage_status),
         ("source", "unit_test"),
     )
+    if superseded_return_keys:
+        object_target_key = object_target_key + (
+            ("superseded_return_keys", superseded_return_keys),
+        )
     proof_id = ("proof_obligation_id", "return_region_summary", object_target_key)
     proof_ref = ("return_region_summary_proof_ref", proof_id, object_target_key)
+    content_superseded_return_keys = (
+        superseded_return_keys
+        if content_superseded_return_keys is None
+        else tuple(content_superseded_return_keys or ())
+    )
     evidence = {
         "proof_obligation_id": proof_id,
         "status": "complete",
@@ -251,6 +264,7 @@ def _with_return_region_summary_proof(
             "exact_witnesses_key": exact_witnesses_key,
             "coverage_key": object_target_key[4],
             "source_key": object_target_key[5],
+            "superseded_return_keys": content_superseded_return_keys,
             "checks": (
                 ("summary_value_equivalence", "proved"),
                 ("summary_region_coverage", coverage_status),
@@ -662,6 +676,59 @@ def test_summary_candidate_overlap_requires_value_equality_proof():
     assert len(analysis.returns) == 2
 
 
+def test_return_region_summary_proof_can_supersede_imprecise_exact_return():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    positive_summary, evidence = _with_return_region_summary_proof(
+        ReturnInfo(
+            address="0x1008",
+            value=_summary_const(2),
+            conditions=[_cond("INT_SLESS", _const(0), n)],
+            pcode_identity="summary:n_positive",
+        ),
+        superseded_return_keys=(_return_info_identity_key(analysis.returns[1]),),
+    )
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], positive_summary],
+        summary_note="multiplicative_phi_return_region_summary",
+    )
+
+    assert result.blockers == ()
+    assert result.coverage_complete is True
+    assert tuple(ret.pcode_identity for ret in result.accepted_returns) == (
+        "return:non_positive",
+        "summary:n_positive",
+    )
+
+
+def test_return_region_summary_supersede_requires_target_content_match():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    positive_summary, evidence = _with_return_region_summary_proof(
+        ReturnInfo(
+            address="0x1008",
+            value=_summary_const(2),
+            conditions=[_cond("INT_SLESS", _const(0), n)],
+            pcode_identity="summary:n_positive",
+        ),
+        superseded_return_keys=(_return_info_identity_key(analysis.returns[1]),),
+        content_superseded_return_keys=(_return_info_identity_key(analysis.returns[0]),),
+    )
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], positive_summary],
+        summary_note="multiplicative_phi_return_region_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert result.blockers
+
+
 def test_return_region_production_object_proved_is_not_completed_coverage_proof():
     analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
     n = _n()
@@ -730,6 +797,80 @@ def test_summary_candidate_non_total_partition_keeps_coverage_gap():
     assert result.accepted_returns == ()
     assert "summary_partition_not_total:active_precondition_not_covered" in result.blockers
     assert len(analysis.returns) == 2
+
+
+def test_resolved_phi_expansion_counts_as_exact_seed_for_partition_coverage():
+    n = _n()
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[_param()],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", n, _const(0))],
+                pcode_identity="return:non_positive",
+                return_kind="phi_expansion",
+            ),
+        ],
+        return_type="int",
+        effect_summary=_empty_effect_summary(),
+    )
+    positive_summary = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(0), n)],
+        pcode_identity="summary:n_positive",
+    ))
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], positive_summary],
+        summary_note="state_transition_loop_summary",
+    )
+
+    assert result.blockers == ()
+    assert result.coverage_complete is True
+    assert tuple(ret.pcode_identity for ret in result.accepted_returns) == (
+        "return:non_positive",
+        "summary:n_positive",
+    )
+
+
+def test_unresolved_phi_expansion_is_not_exact_seed_for_partition_coverage():
+    n = _n()
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[_param()],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("phi_circular"),
+                conditions=[_cond("INT_SLESSEQUAL", n, _const(0))],
+                pcode_identity="return:non_positive",
+                return_kind="phi_expansion",
+            ),
+        ],
+        return_type="int",
+        effect_summary=_empty_effect_summary(),
+    )
+    positive_summary = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(0), n)],
+        pcode_identity="summary:n_positive",
+    ))
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], positive_summary],
+        summary_note="state_transition_loop_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert "summary_partition_not_total:active_precondition_not_covered" in result.blockers
 
 
 def test_multiple_summary_candidates_overlap_requires_value_equality_proof():
