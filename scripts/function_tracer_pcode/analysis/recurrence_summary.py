@@ -7388,6 +7388,9 @@ class StructuralRecurrenceSummarizer:
             state_size=state_size,
             result_size=result_size,
         )
+        transition_evidence_key = self._state_transition_loop_transition_evidence_key(summary_ref)
+        if transition_evidence_key is None:
+            self._debug("Declined state-transition evidence: stable evidence key unavailable")
         loop_count = Expression.intrinsic(
             "STATE_TRANSITION_LOOP_COUNT",
             [model.state_init_expr],
@@ -7459,11 +7462,127 @@ class StructuralRecurrenceSummarizer:
                 value=loop_value,
                 conditions=[Condition(entry_guard_expr, False)],
                 branch_index=10_200,
+                summary_transition_evidence_key=transition_evidence_key,
                 **site_metadata,
             ),
         ]
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
+
+    def _state_transition_loop_transition_evidence_key(
+        self,
+        summary_ref: StateTransitionLoopSummaryRef,
+    ) -> Optional[Tuple[Any, ...]]:
+        if summary_ref is None:
+            return None
+        side_effect_profile = getattr(summary_ref, "side_effect_profile", None)
+        if side_effect_profile is None:
+            self._debug("State-transition evidence unavailable: side-effect profile missing")
+            return None
+        if getattr(side_effect_profile, "requires_effect_proof", lambda: True)():
+            self._debug("State-transition evidence unavailable: side-effect profile requires proof")
+            return None
+        side_effect_key = side_effect_profile.stable_key()
+        guard_key = self._summary_expression_evidence_key(getattr(summary_ref, "state_guard", None))
+        transition_key = self._summary_expression_evidence_key(getattr(summary_ref, "transition_expr", None))
+        accumulator_init_key = self._summary_expression_evidence_key(
+            getattr(summary_ref, "accumulator_init", None)
+        )
+        accumulator_delta_key = self._summary_expression_evidence_key(
+            getattr(summary_ref, "accumulator_delta", None)
+        )
+        transition_cases_key = self._state_transition_cases_evidence_key(
+            getattr(summary_ref, "transition_cases", None)
+        )
+        if transition_cases_key is None and transition_key is not None:
+            transition_cases_key = ("transition_cases", "uniform_transition_expr", transition_key)
+        if any(
+            key is None
+            for key in (
+                side_effect_key,
+                guard_key,
+                transition_key,
+                accumulator_init_key,
+                accumulator_delta_key,
+                transition_cases_key,
+            )
+        ):
+            missing = [
+                name
+                for name, key in (
+                    ("side_effect_key", side_effect_key),
+                    ("guard_key", guard_key),
+                    ("transition_key", transition_key),
+                    ("accumulator_init_key", accumulator_init_key),
+                    ("accumulator_delta_key", accumulator_delta_key),
+                    ("transition_cases_key", transition_cases_key),
+                )
+                if key is None
+            ]
+            self._debug(
+                "State-transition evidence unavailable: missing " + ",".join(missing)
+            )
+            return None
+        summary_key = (
+            "state_transition_loop_summary",
+            guard_key,
+            transition_cases_key,
+            accumulator_init_key,
+            accumulator_delta_key,
+            side_effect_key,
+            int(getattr(summary_ref, "state_size", 0) or 0),
+            int(getattr(summary_ref, "result_size", 0) or 0),
+            str(getattr(summary_ref, "source", "") or "state_transition_loop_summary"),
+        )
+        return (
+            "state_transition_loop_evidence",
+            ("summary_key", summary_key),
+            ("guard_key", guard_key),
+            ("transition_key", transition_key),
+            ("accumulator_init_key", accumulator_init_key),
+            ("accumulator_delta_key", accumulator_delta_key),
+            ("transition_cases_key", transition_cases_key),
+            ("side_effect_profile_key", side_effect_key),
+            ("replacement_obligation", "not_required_without_phi_circular"),
+        )
+
+    @staticmethod
+    def _summary_expression_evidence_key(expr: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
+        if expr is None:
+            return None
+        try:
+            return ("expression", ConditionNormalizer.expression_signature(expr))
+        except Exception:
+            return None
+
+    def _state_transition_cases_evidence_key(self, cases: Any) -> Optional[Tuple[Any, ...]]:
+        if not isinstance(cases, (tuple, list)) or not cases:
+            return None
+        entries: List[Tuple[Any, ...]] = []
+        for case in cases:
+            if not isinstance(case, (tuple, list)) or len(case) != 2:
+                return None
+            conditions, expr = case
+            try:
+                condition_key = _runtime_conditions_signature(tuple(conditions or ()))
+                expr_key = _runtime_expression_signature(expr)
+            except Exception as exc:
+                self._debug(
+                    "State-transition evidence unavailable: transition case signature failed "
+                    f"({type(exc).__name__}: {exc})"
+                )
+                return None
+            if condition_key is None or expr_key is None:
+                self._debug(
+                    "State-transition evidence unavailable: transition case key missing "
+                    f"(conditions={condition_key is not None}, expr={expr_key is not None}, "
+                    f"expr_type={getattr(expr, 'expr_type', None)}, operator={getattr(expr, 'operator', None)}, "
+                    f"name={getattr(expr, 'name', None)})"
+                )
+                return None
+            entries.append(("transition_case", condition_key, expr_key))
+        entries.sort(key=repr)
+        return ("transition_cases", tuple(entries))
 
     def _add_state_transition_accumulator_seed(
         self,

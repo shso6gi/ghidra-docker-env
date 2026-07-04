@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
+import hashlib
+import json
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple, Mapping
 
 if TYPE_CHECKING:
@@ -33,6 +35,19 @@ def _jsonable_nested_tuple(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable_nested_tuple(item) for item in value]
     return value
+
+
+def _stable_json_digest(value: Any) -> str:
+    try:
+        payload = json.dumps(
+            _jsonable_nested_tuple(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    except (TypeError, ValueError):
+        payload = repr(_jsonable_nested_tuple(value))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -770,6 +785,8 @@ class FunctionReturnAnalysis:
     return_outcomes: Tuple[ReturnOutcome, ...] = ()
     divergence_outcomes: Tuple[DivergenceOutcome, ...] = ()
     unknown_outcomes: Tuple[UnknownOutcome, ...] = ()
+    analysis_view_identity: Optional[Tuple[Any, ...]] = None
+    partition_revision: int = 0
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -787,6 +804,89 @@ class FunctionReturnAnalysis:
         if not self.return_type_provenance:
             self.return_type_provenance = self._build_return_type_provenance()
         self.normalize_deferred_calls()
+
+    def with_accepted_return_partition(
+        self,
+        returns: List[ReturnInfo],
+        *,
+        summary_return_candidates: Tuple[SummaryReturnCandidate, ...] = (),
+        reason: str = "summary_return_acceptance",
+    ) -> "FunctionReturnAnalysis":
+        """Build a view for an accepted return partition without mutating the seed analysis."""
+
+        next_revision = int(self.partition_revision or 0) + 1
+        partition_digest = _stable_json_digest(
+            tuple(ret.to_dict() for ret in (returns or ()))
+        )
+        candidate_digest = _stable_json_digest(
+            tuple(candidate.to_dict() for candidate in (summary_return_candidates or ()))
+        )
+        view_identity = (
+            "accepted_return_partition_view",
+            ("reason", str(reason or "summary_return_acceptance")),
+            ("analysis_scope_key", self.analysis_scope_key),
+            ("function_ref", self.function_ref.stable_key() if self.function_ref is not None else None),
+            ("base_revision", int(self.partition_revision or 0)),
+            ("partition_revision", next_revision),
+            ("accepted_return_partition_sha256", partition_digest),
+            ("summary_return_candidates_sha256", candidate_digest),
+        )
+        return replace(
+            self,
+            parameters=[dict(param) for param in (self.parameters or [])],
+            returns=list(returns or ()),
+            unknown_event_reasons=list(self.unknown_event_reasons or []),
+            analysis_notes=list(self.analysis_notes or []),
+            deferred_calls=dict(self.deferred_calls or {}),
+            signature_hypotheses=list(self.signature_hypotheses or []),
+            return_type_provenance=dict(self.return_type_provenance or {}),
+            summary_return_candidates=tuple(summary_return_candidates or ()),
+            analysis_view_identity=view_identity,
+            partition_revision=next_revision,
+        )
+
+    def with_summary_return_diagnostics(
+        self,
+        *,
+        summary_return_candidates: Tuple[SummaryReturnCandidate, ...] = (),
+        blockers: Tuple[str, ...] = (),
+        reason: str = "summary_return_diagnostics",
+    ) -> "FunctionReturnAnalysis":
+        """Build a diagnostics view retaining rejected summary candidates without changing returns."""
+
+        next_revision = int(self.partition_revision or 0) + 1
+        candidate_digest = _stable_json_digest(
+            tuple(candidate.to_dict() for candidate in (summary_return_candidates or ()))
+        )
+        blocker_digest = _stable_json_digest(tuple(str(blocker) for blocker in (blockers or ())))
+        view_identity = (
+            "summary_return_diagnostics_view",
+            ("reason", str(reason or "summary_return_diagnostics")),
+            ("analysis_scope_key", self.analysis_scope_key),
+            ("function_ref", self.function_ref.stable_key() if self.function_ref is not None else None),
+            ("base_revision", int(self.partition_revision or 0)),
+            ("partition_revision", next_revision),
+            ("summary_return_candidates_sha256", candidate_digest),
+            ("summary_return_blockers_sha256", blocker_digest),
+        )
+        view = replace(
+            self,
+            parameters=[dict(param) for param in (self.parameters or [])],
+            returns=list(self.returns or []),
+            unknown_event_reasons=list(self.unknown_event_reasons or []),
+            analysis_notes=list(self.analysis_notes or []),
+            deferred_calls=dict(self.deferred_calls or {}),
+            signature_hypotheses=list(self.signature_hypotheses or []),
+            return_type_provenance=dict(self.return_type_provenance or {}),
+            summary_return_candidates=tuple(summary_return_candidates or ()),
+            analysis_view_identity=view_identity,
+            partition_revision=next_revision,
+        )
+        for blocker in blockers or ():
+            note = f"summary_return_blocker:{blocker}"
+            if note not in view.analysis_notes:
+                view.analysis_notes.append(note)
+        return view
 
     def _build_return_type_provenance(self) -> Dict[str, Any]:
         return_type = get_data_type_display_name(self.return_type_obj, self.return_type)
@@ -898,6 +998,9 @@ class FunctionReturnAnalysis:
             ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key
+        if self.analysis_view_identity is not None:
+            result["analysis_view_identity"] = _jsonable_nested_tuple(self.analysis_view_identity)
+            result["partition_revision"] = int(self.partition_revision or 0)
         if self.program_is_big_endian is not None:
             result["program_is_big_endian"] = bool(self.program_is_big_endian)
         

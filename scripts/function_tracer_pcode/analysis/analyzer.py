@@ -1118,16 +1118,14 @@ class ReturnAnalyzer:
             self._normalize_return_partition(result)
             self._mark_incomplete_control_flow(result)
 
-            summary = self._apply_structural_recurrence_summary(
+            summary_view = self._apply_structural_recurrence_summary(
                 function,
                 high_function,
                 result,
                 tracer,
             )
-            if summary is not None:
-                result.returns = summary[0]
-                if summary[1] not in result.analysis_notes:
-                    result.analysis_notes.append(summary[1])
+            if summary_view is not None:
+                result = summary_view
                 self._normalize_return_partition(result)
                 self._mark_incomplete_control_flow(result)
                 if result.deferred_calls:
@@ -1188,7 +1186,7 @@ class ReturnAnalyzer:
         high_function,
         analysis: FunctionReturnAnalysis,
         tracer: PcodeTracer,
-    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+    ) -> Optional[FunctionReturnAnalysis]:
         if analysis is None or not analysis.returns:
             return None
 
@@ -1218,7 +1216,6 @@ class ReturnAnalyzer:
             summary_note=summary_note,
             enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
         )
-        analysis.summary_return_candidates = accepted.candidates
         if accepted.blockers:
             if self.debug:
                 for candidate in accepted.candidates:
@@ -1234,14 +1231,21 @@ class ReturnAnalyzer:
                         f"blockers={list(getattr(candidate, 'validation_blockers', ()) or ())} "
                         f"conditions={conditions} value={value}"
                     )
-            for blocker in accepted.blockers:
-                note = f"summary_return_blocker:{blocker}"
-                if note not in analysis.analysis_notes:
-                    analysis.analysis_notes.append(note)
-            return None
+            return analysis.with_summary_return_diagnostics(
+                summary_return_candidates=accepted.candidates,
+                blockers=tuple(accepted.blockers),
+                reason=summary_note,
+            )
         if not accepted.accepted_returns:
             return None
-        return list(accepted.accepted_returns), summary_note
+        accepted_view = analysis.with_accepted_return_partition(
+            list(accepted.accepted_returns),
+            summary_return_candidates=accepted.candidates,
+            reason=summary_note,
+        )
+        if summary_note not in accepted_view.analysis_notes:
+            accepted_view.analysis_notes.append(summary_note)
+        return accepted_view
 
     def _try_pre_return_counted_loop_summary(
         self,
@@ -1258,7 +1262,13 @@ class ReturnAnalyzer:
         signedness_result: Optional[SignednessResult],
         effect_summary: EffectSummary,
     ) -> Optional[FunctionReturnAnalysis]:
-        if not self._effect_summary_allows_pre_return_structural_summary(effect_summary):
+        if not self._effect_summary_allows_pre_return_structural_summary(
+            effect_summary,
+            function=function,
+            high_function=high_function,
+            return_type=return_type,
+            return_type_obj=return_type_obj,
+        ):
             return None
 
         anchor = self._make_pre_return_summary_anchor(function, return_ops)
@@ -1300,21 +1310,10 @@ class ReturnAnalyzer:
         )
         if accepted.blockers or not accepted.accepted_returns:
             return None
-        result = FunctionReturnAnalysis(
-            function_name=function.getName(),
-            entry_point=str(function.getEntryPoint()),
-            parameters=list(parameters or []),
-            returns=list(accepted.accepted_returns),
-            function_ref=current_function_ref,
-            analysis_scope_key=analysis_scope_key,
-            return_type=return_type,
-            return_type_obj=return_type_obj,
-            signedness_result=signedness_result,
-            deferred_calls=dict(self._current_deferred_calls),
-            effect_summary=effect_summary,
-            program_is_big_endian=self._program_is_big_endian(),
-            binary_id=self._binary_id,
+        result = skeleton.with_accepted_return_partition(
+            list(accepted.accepted_returns),
             summary_return_candidates=accepted.candidates,
+            reason=summary_note,
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -1372,8 +1371,26 @@ class ReturnAnalyzer:
     def _effect_summary_allows_pre_return_structural_summary(
         self,
         effect_summary: Optional[EffectSummary],
+        *,
+        function=None,
+        high_function=None,
+        return_type: Optional[str] = None,
+        return_type_obj=None,
     ) -> bool:
         if effect_summary is None:
+            return False
+        if self._phase1_return_type_is_float(return_type, return_type_obj):
+            self._debug_print("Declined pre-return counted loop summary: Phase 1 excludes FP return types")
+            return False
+        if self._function_body_has_phase1_pure_return_forbidden_ops(function):
+            self._debug_print(
+                "Declined pre-return counted loop summary: function body is not Phase 1 pure/no-memory"
+            )
+            return False
+        if self._high_function_has_phase1_pure_return_forbidden_ops(high_function):
+            self._debug_print(
+                "Declined pre-return counted loop summary: HighFunction-visible body is not Phase 1 pure/no-memory"
+            )
             return False
         if getattr(effect_summary, "effects", None):
             self._debug_print("Declined pre-return counted loop summary: effect summary contains memory writes")
@@ -1382,6 +1399,163 @@ class ReturnAnalyzer:
             self._debug_print("Declined pre-return counted loop summary: effect summary contains unsupported call")
             return False
         return True
+
+    def _function_body_has_phase1_pure_return_forbidden_ops(self, function) -> bool:
+        if function is None:
+            return False
+        program = getattr(self, "program", None)
+        listing_getter = getattr(program, "getListing", None)
+        body_getter = getattr(function, "getBody", None)
+        if not callable(listing_getter) or not callable(body_getter):
+            return True
+        try:
+            listing = listing_getter()
+            body = body_getter()
+        except Exception:
+            return True
+        if listing is None or body is None:
+            return True
+        get_instructions = getattr(listing, "getInstructions", None)
+        if not callable(get_instructions):
+            return True
+        try:
+            instructions = get_instructions(body, True)
+        except TypeError:
+            try:
+                instructions = get_instructions(body)
+            except Exception:
+                return True
+        except Exception:
+            return True
+        saw_op = False
+        instruction_items, complete = self._collect_java_or_python_iterable(instructions)
+        if not complete:
+            return True
+        for instruction in instruction_items:
+            if instruction is None:
+                return True
+            try:
+                pcode_ops = instruction.getPcode()
+            except Exception:
+                return True
+            op_items, complete = self._collect_java_or_python_iterable(pcode_ops)
+            if not complete:
+                return True
+            for op in op_items:
+                saw_op = True
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if str(mnemonic or "").strip().upper() == "BRANCH":
+                    if self._phase1_direct_branch_escapes_function_body(instruction, body):
+                        return True
+                    continue
+                if self._phase1_pure_return_forbids_mnemonic(mnemonic):
+                    return True
+        return not saw_op
+
+    def _phase1_direct_branch_escapes_function_body(self, instruction, body) -> bool:
+        target = self._resolve_local_branch_target(instruction)
+        if target is None:
+            return True
+        return not self._phase1_body_contains_address(body, target)
+
+    @staticmethod
+    def _phase1_body_contains_address(body, target) -> bool:
+        if body is None or target is None:
+            return False
+        contains = getattr(body, "contains", None)
+        if callable(contains):
+            try:
+                return bool(contains(target))
+            except Exception:
+                pass
+        try:
+            min_addr = body.getMinAddress()
+            max_addr = body.getMaxAddress()
+            get_offset = getattr(target, "getOffset", None)
+            min_offset = getattr(min_addr, "getOffset", None)
+            max_offset = getattr(max_addr, "getOffset", None)
+            if callable(get_offset) and callable(min_offset) and callable(max_offset):
+                offset = int(get_offset())
+                return int(min_offset()) <= offset <= int(max_offset())
+        except Exception:
+            return False
+        return False
+
+    def _high_function_has_phase1_pure_return_forbidden_ops(self, high_function) -> bool:
+        if high_function is None:
+            return True
+        saw_op = False
+        blocks, complete = self._collect_java_or_python_iterable(
+            getattr(high_function, "getBasicBlocks", lambda: None)()
+            if callable(getattr(high_function, "getBasicBlocks", None))
+            else None
+        )
+        if not complete:
+            return True
+        for block in blocks:
+            ops, complete = self._collect_java_or_python_iterable(
+                getattr(block, "getIterator", lambda: None)()
+            )
+            if not complete:
+                return True
+            for op in ops:
+                saw_op = True
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if self._phase1_pure_return_forbids_mnemonic(mnemonic):
+                    return True
+        return not saw_op
+
+    @staticmethod
+    def _phase1_pure_return_forbids_mnemonic(mnemonic: Optional[str]) -> bool:
+        name = str(mnemonic or "").strip().upper()
+        if not name:
+            return True
+        if name in {"CALL", "CALLIND", "STORE", "LOAD", "BRANCHIND", "CALLOTHER"}:
+            return True
+        if "FLOAT" in name or name in {"INT2FLOAT", "FLOAT2INT"}:
+            return True
+        return False
+
+    @staticmethod
+    def _collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
+        if value is None:
+            return (), False
+        has_next = getattr(value, "hasNext", None)
+        next_item = getattr(value, "next", None)
+        items: List[Any] = []
+        if callable(has_next) and callable(next_item):
+            while True:
+                try:
+                    has_item = has_next()
+                    if not isinstance(has_item, bool):
+                        return tuple(items), False
+                    if not has_item:
+                        break
+                    items.append(next_item())
+                except Exception:
+                    return tuple(items), False
+            return tuple(items), True
+        try:
+            iterator = iter(value)
+        except TypeError:
+            return (), False
+        try:
+            for item in iterator:
+                items.append(item)
+        except Exception:
+            return tuple(items), False
+        return tuple(items), True
+
+    @staticmethod
+    def _phase1_return_type_is_float(return_type: Optional[str], return_type_obj=None) -> bool:
+        texts = [return_type, str(return_type_obj) if return_type_obj is not None else None]
+        for text in texts:
+            normalized = str(text or "").strip().lower()
+            if not normalized:
+                continue
+            if any(token in normalized for token in ("float", "double", "longdouble", "long double")):
+                return True
+        return False
 
     def _normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
         if analysis is None:

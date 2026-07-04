@@ -29,6 +29,7 @@ class ConditionSMTOracle:
     _available = False
     _z3: Any = None
     _unsat_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
+    _CACHE_KEY_SCHEMA_VERSION = "condition-smt-cache-v2"
     _RECOVERABLE_KEY_ERRORS = (
         AttributeError,
         IndexError,
@@ -63,9 +64,10 @@ class ConditionSMTOracle:
             return None
 
         query_key = cache_key or cls._build_cache_key(conditions)
-        cached = cls._unsat_cache.get(query_key)
-        if cached is not None:
-            return cached
+        if query_key is not None:
+            cached = cls._unsat_cache.get(query_key)
+            if cached is not None:
+                return cached
 
         z3 = cls._z3
         if z3 is None and not cls.is_available():
@@ -79,12 +81,15 @@ class ConditionSMTOracle:
             solver.add(assertions)
             result = solver.check()
             if result == z3.unsat:
-                cls._remember(query_key, True)
+                if query_key is not None:
+                    cls._remember(query_key, True)
                 return True
             if result == z3.sat:
-                cls._remember(query_key, False)
+                if query_key is not None:
+                    cls._remember(query_key, False)
                 return False
-            cls._remember(query_key, None)
+            if query_key is not None:
+                cls._remember(query_key, None)
             return None
         except Exception:
             return None
@@ -96,22 +101,22 @@ class ConditionSMTOracle:
         cls._unsat_cache[key] = value
 
     @classmethod
-    def _safe_condition_cache_component(cls, condition) -> Tuple[object, ...]:
+    def _safe_condition_cache_component(cls, condition) -> Optional[Tuple[object, ...]]:
         try:
             key = condition_key(condition, budget=96)
             if key_contains_placeholder(key):
-                return ("placeholder", id(condition))
+                return None
             return key
         except cls._RECOVERABLE_KEY_ERRORS:
-            expr = getattr(condition, "expression", None)
-            negated = bool(getattr(condition, "negated", False))
-            return ("unsafe", negated, id(expr) if expr is not None else id(condition))
+            return None
 
     @classmethod
-    def _build_cache_key(cls, conditions: Sequence) -> Tuple[object, ...]:
+    def _build_cache_key(cls, conditions: Sequence) -> Optional[Tuple[object, ...]]:
         keys = [cls._safe_condition_cache_component(condition) for condition in (conditions or ())]
+        if any(key is None for key in keys):
+            return None
         keys.sort(key=repr)
-        return ("unsat", tuple(keys))
+        return ("unsat", cls._CACHE_KEY_SCHEMA_VERSION, tuple(keys))
 
     @classmethod
     def _build_script(

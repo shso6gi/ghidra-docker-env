@@ -546,9 +546,73 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
             tracer,
         )
 
-    assert result == (summary_returns, "counted_scalar_loop_summary")
+    assert result is not None
+    assert result is not analysis
+    assert result.returns == summary_returns
+    assert "counted_scalar_loop_summary" in result.analysis_notes
+    assert result.summary_return_candidates == ()
+    assert result.analysis_view_identity[0] == "accepted_return_partition_view"
     summary_mock.assert_called_once()
     accept_mock.assert_called_once()
+
+
+def test_apply_structural_recurrence_summary_keeps_rejected_candidate_diagnostics():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    function = Mock()
+    function.getName.return_value = "branch_for_accumulate"
+    high_function = Mock()
+    tracer = Mock()
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        returns=[
+            analyzer._make_return_info(
+                address="0x1004",
+                value=Expression.unknown("phi_circular"),
+                conditions=[],
+                branch_index=1,
+            ),
+        ],
+    )
+    summary_returns = [
+        analyzer._make_return_info(
+            address="0x2004",
+            value=Expression.constant(1, 4),
+            conditions=[],
+            branch_index=11,
+        ),
+    ]
+    candidate = Mock()
+    candidate.to_dict.return_value = {
+        "candidate_id": ["summary-return-candidate-v1", "test"],
+        "acceptance_status": "rejected",
+        "validation_blockers": ["summary_return_candidate_invalid:value_missing"],
+    }
+
+    with patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        return_value=(summary_returns, "counted_scalar_loop_summary"),
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.accept_summary_return_candidates",
+    ) as accept_mock:
+        accept_mock.return_value = Mock(
+            accepted_returns=(),
+            candidates=(candidate,),
+            blockers=("summary_return_candidate_invalid:value_missing",),
+        )
+        result = analyzer._apply_structural_recurrence_summary(
+            function,
+            high_function,
+            analysis,
+            tracer,
+        )
+
+    assert result is not None
+    assert result is not analysis
+    assert result.returns == analysis.returns
+    assert result.summary_return_candidates == (candidate,)
+    assert result.analysis_view_identity[0] == "summary_return_diagnostics_view"
+    assert "summary_return_blocker:summary_return_candidate_invalid:value_missing" in result.analysis_notes
+    assert analysis.summary_return_candidates == ()
 
 
 def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
@@ -634,14 +698,16 @@ def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
             high_function,
             analysis,
             tracer,
-        )
+    )
 
     assert result is not None
-    accepted_returns, note = result
-    assert note == "counted_scalar_loop_summary"
-    assert len(accepted_returns) == 2
-    assert all(ret.acceptance_status == "accepted" for ret in accepted_returns)
-    assert len(analysis.summary_return_candidates) == 2
+    assert result is not analysis
+    assert "counted_scalar_loop_summary" in result.analysis_notes
+    assert len(result.returns) == 2
+    assert all(ret.acceptance_status == "accepted" for ret in result.returns)
+    assert len(result.summary_return_candidates) == 2
+    assert len(analysis.summary_return_candidates) == 0
+    assert result.analysis_view_identity[0] == "accepted_return_partition_view"
     summary_mock.assert_called_once()
 
 

@@ -734,6 +734,9 @@ def _transition_evidence_has_required_parts(
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     ):
         return True
+    state_transition_evidence = _unwrap_state_transition_loop_evidence(value)
+    if state_transition_evidence is not None:
+        return _state_transition_loop_evidence_has_required_parts(state_transition_evidence)
     evidence = _unwrap_counted_loop_transition_evidence(value)
     if evidence is None:
         return False
@@ -805,6 +808,43 @@ def _transition_evidence_has_required_parts(
     if not isinstance(replacement, tuple) or len(replacement) != 2:
         return False
     return not _key_contains_incomplete_summary_metadata(replacement[1])
+
+
+def _state_transition_loop_evidence_has_required_parts(value: Any) -> bool:
+    if not isinstance(value, tuple) or not value or value[0] != "state_transition_loop_evidence":
+        return False
+    fields = _tagged_tuple_fields(value[1:])
+    required_markers = {
+        "summary_key",
+        "guard_key",
+        "transition_key",
+        "accumulator_init_key",
+        "accumulator_delta_key",
+        "transition_cases_key",
+        "side_effect_profile_key",
+        "replacement_obligation",
+    }
+    if not required_markers.issubset(fields):
+        return False
+    for marker in required_markers:
+        item = fields[marker]
+        if not isinstance(item, tuple) or len(item) != 2:
+            return False
+        if _key_contains_incomplete_summary_metadata(item[1]):
+            return False
+    return True
+
+
+def _unwrap_state_transition_loop_evidence(value: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(value, tuple) or not value:
+        return None
+    if value[0] == "state_transition_loop_evidence":
+        return value
+    for item in value:
+        nested = _unwrap_state_transition_loop_evidence(item)
+        if nested is not None:
+            return nested
+    return None
 
 
 def _unwrap_counted_loop_transition_evidence(value: Any) -> Optional[Tuple[Any, ...]]:
@@ -1504,7 +1544,81 @@ def _summary_transition_evidence_key(ret: ReturnInfo) -> Optional[Tuple[Any, ...
     explicit = getattr(ret, "summary_transition_evidence_key", None)
     if explicit is not None:
         return explicit if isinstance(explicit, tuple) else ("transition_evidence", explicit)
+    expr_evidence = _state_transition_loop_evidence_from_expression(getattr(ret, "value", None))
+    if expr_evidence is not None:
+        return expr_evidence
     return None
+
+
+def _state_transition_loop_evidence_from_expression(expr: Any) -> Optional[Tuple[Any, ...]]:
+    if expr is None:
+        return None
+    evidence = _state_transition_loop_evidence_from_runtime_ref(getattr(expr, "runtime_ref", None))
+    if evidence is not None:
+        return evidence
+    for operand in getattr(expr, "operands", ()) or ():
+        evidence = _state_transition_loop_evidence_from_expression(operand)
+        if evidence is not None:
+            return evidence
+    return None
+
+
+def _state_transition_loop_evidence_from_runtime_ref(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+    if runtime_ref is None or type(runtime_ref).__name__ != "StateTransitionLoopSummaryRef":
+        return None
+    side_effect_profile = getattr(runtime_ref, "side_effect_profile", None)
+    if side_effect_profile is None:
+        return None
+    if getattr(side_effect_profile, "requires_effect_proof", lambda: True)():
+        return None
+    summary_key = _stable_key_or_none(runtime_ref)
+    guard_key = _expression_key(getattr(runtime_ref, "state_guard", None))
+    transition_key = _expression_key(getattr(runtime_ref, "transition_expr", None))
+    transition_cases_key = _state_transition_cases_key(getattr(runtime_ref, "transition_cases", None))
+    accumulator_init_key = _expression_key(getattr(runtime_ref, "accumulator_init", None))
+    accumulator_delta_key = _expression_key(getattr(runtime_ref, "accumulator_delta", None))
+    side_effect_key = _stable_key_or_none(side_effect_profile)
+    if any(
+        key is None
+        for key in (
+            summary_key,
+            guard_key,
+            transition_key,
+            transition_cases_key,
+            accumulator_init_key,
+            accumulator_delta_key,
+            side_effect_key,
+        )
+    ):
+        return None
+    return (
+        "state_transition_loop_evidence",
+        ("summary_key", summary_key),
+        ("guard_key", guard_key),
+        ("transition_key", transition_key),
+        ("accumulator_init_key", accumulator_init_key),
+        ("accumulator_delta_key", accumulator_delta_key),
+        ("transition_cases_key", transition_cases_key),
+        ("side_effect_profile_key", side_effect_key),
+        ("replacement_obligation", "not_required_without_phi_circular"),
+    )
+
+
+def _state_transition_cases_key(cases: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(cases, (tuple, list)) or not cases:
+        return None
+    entries = []
+    for case in cases:
+        if not isinstance(case, (tuple, list)) or len(case) != 2:
+            return None
+        conditions, expr = case
+        condition_key = _conditions_key(tuple(conditions or ()))
+        expr_key = _expression_key(expr)
+        if not condition_key or not expr_key:
+            return None
+        entries.append(("transition_case", condition_key, expr_key))
+    entries.sort(key=repr)
+    return ("transition_cases", tuple(entries))
 
 
 def _counted_loop_transition_evidence_from_runtime_ref(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:

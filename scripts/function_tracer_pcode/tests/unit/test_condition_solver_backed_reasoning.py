@@ -490,3 +490,40 @@ def test_smt_oracle_cache_key_is_structural_and_order_independent():
 
     assert key_one == key_two
     assert key_single != key_single_negated
+    assert key_one[0] == "unsat"
+    assert key_one[1] == ConditionSMTOracle._CACHE_KEY_SCHEMA_VERSION
+
+
+def test_smt_oracle_cache_key_declines_placeholder_components(monkeypatch):
+    import scripts.function_tracer_pcode.analysis.condition.smt_oracle as smt_oracle
+
+    cond = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
+            Expression(ExpressionType.CONSTANT, value=0, size=4),
+        )
+    )
+    monkeypatch.setattr(smt_oracle, "condition_key", lambda _condition, budget=96: ("placeholder",))
+    monkeypatch.setattr(smt_oracle, "key_contains_placeholder", lambda _key: True)
+
+    assert ConditionSMTOracle._build_cache_key((cond,)) is None
+
+
+def test_smt_oracle_cache_key_declines_unsafe_components(monkeypatch):
+    import scripts.function_tracer_pcode.analysis.condition.smt_oracle as smt_oracle
+
+    cond = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
+            Expression(ExpressionType.CONSTANT, value=0, size=4),
+        )
+    )
+
+    def raise_attribute_error(_condition, budget=96):
+        raise AttributeError("synthetic structural key failure")
+
+    monkeypatch.setattr(smt_oracle, "condition_key", raise_attribute_error)
+
+    assert ConditionSMTOracle._build_cache_key((cond,)) is None

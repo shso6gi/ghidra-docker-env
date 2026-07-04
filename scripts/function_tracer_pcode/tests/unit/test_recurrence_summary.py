@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from typing import Optional
+from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     CountedLoopAccumulator,
@@ -14,6 +15,10 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
 )
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
+from scripts.function_tracer_pcode.analysis.summary_returns import (
+    _summary_transition_evidence_key,
+    _transition_evidence_has_required_parts,
+)
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
@@ -183,6 +188,398 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _cond(operator: str, left: Expression, right: Expression, negated: bool = False) -> Condition:
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
+
+
+class _Phase1FakeHighIterator:
+    def __init__(self, ops):
+        self._ops = list(ops)
+        self._index = 0
+
+    def hasNext(self):
+        return self._index < len(self._ops)
+
+    def next(self):
+        op = self._ops[self._index]
+        self._index += 1
+        return op
+
+
+class _Phase1FakePcodeOp:
+    def __init__(self, mnemonic):
+        self._mnemonic = mnemonic
+
+    def getMnemonic(self):
+        return self._mnemonic
+
+
+class _Phase1FakeHighBlock:
+    def __init__(self, mnemonics):
+        self._ops = [_Phase1FakePcodeOp(mnemonic) for mnemonic in mnemonics]
+
+    def getIterator(self):
+        return _Phase1FakeHighIterator(self._ops)
+
+
+class _Phase1FakeHighFunction:
+    def __init__(self, blocks):
+        self._blocks = [_Phase1FakeHighBlock(block) for block in blocks]
+
+    def getBasicBlocks(self):
+        return list(self._blocks)
+
+
+class _Phase1BrokenIteratorAfterSafeOp:
+    def __init__(self):
+        self._index = 0
+
+    def hasNext(self):
+        if self._index == 0:
+            return True
+        raise RuntimeError("iterator failed after safe op")
+
+    def next(self):
+        self._index += 1
+        return _Phase1FakePcodeOp("COPY")
+
+
+class _Phase1BrokenInstruction:
+    def getPcode(self):
+        return _Phase1BrokenIteratorAfterSafeOp()
+
+
+class _Phase1FakeInstruction:
+    def __init__(self, mnemonics, flows=None, fallthrough=None):
+        self._ops = [_Phase1FakePcodeOp(mnemonic) for mnemonic in mnemonics]
+        self._flows = tuple(flows or ())
+        self._fallthrough = fallthrough
+
+    def getPcode(self):
+        return list(self._ops)
+
+    def getFlows(self):
+        return self._flows
+
+    def getFallThrough(self):
+        return self._fallthrough
+
+
+class _Phase1FakeAddress:
+    def __init__(self, offset):
+        self._offset = int(offset)
+
+    def getOffset(self):
+        return self._offset
+
+
+class _Phase1FakeBody:
+    def __init__(self, start=0x1000, end=0x10FF):
+        self._start = _Phase1FakeAddress(start)
+        self._end = _Phase1FakeAddress(end)
+
+    def contains(self, target):
+        return self._start.getOffset() <= target.getOffset() <= self._end.getOffset()
+
+    def getMinAddress(self):
+        return self._start
+
+    def getMaxAddress(self):
+        return self._end
+
+
+class _Phase1FakeListing:
+    def __init__(self, instructions):
+        self._instructions = list(instructions)
+
+    def getInstructions(self, _body, _forward=True):
+        return list(self._instructions)
+
+
+class _Phase1FakeProgram:
+    def __init__(self, instructions):
+        self._listing = _Phase1FakeListing(instructions)
+
+    def getListing(self):
+        return self._listing
+
+
+class _Phase1FakeFunction:
+    def __init__(self, body=None):
+        if body is None:
+            body = _Phase1FakeBody()
+        self._body = body
+
+    def getBody(self):
+        return self._body
+
+
+def test_accepted_return_partition_view_does_not_mutate_seed_analysis():
+    seed_return = ReturnInfo(address="0x1000", value=_const(0), conditions=[])
+    accepted_return = ReturnInfo(
+        address="0x1010",
+        value=_const(1),
+        conditions=[_cond("INT_SLESS", _const(0), _param())],
+        return_kind="summary_derived",
+    )
+    seed = FunctionReturnAnalysis(
+        function_name="pure_loop",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "type": "int", "size": 4}],
+        returns=[seed_return],
+        analysis_scope_key=("function", "pure_loop"),
+        return_type="int",
+    )
+    seed.analysis_notes.append("seed_note")
+
+    view = seed.with_accepted_return_partition(
+        [seed_return, accepted_return],
+        reason="pure_return_coverage_completion",
+    )
+    other_view = seed.with_accepted_return_partition(
+        [
+            seed_return,
+            ReturnInfo(
+                address="0x1010",
+                value=_const(2),
+                conditions=[_cond("INT_SLESS", _const(0), _param())],
+                return_kind="summary_derived",
+            ),
+        ],
+        reason="pure_return_coverage_completion",
+    )
+    view.analysis_notes.append("view_note")
+
+    assert seed.returns == [seed_return]
+    assert "view_note" not in seed.analysis_notes
+    assert view.returns == [seed_return, accepted_return]
+    assert view.partition_revision == seed.partition_revision + 1
+    assert view.analysis_view_identity is not None
+    assert view.analysis_view_identity[0] == "accepted_return_partition_view"
+    assert other_view.analysis_view_identity != view.analysis_view_identity
+    assert view.to_dict()["analysis_view_identity"][0] == "accepted_return_partition_view"
+    assert view.to_dict()["partition_revision"] == view.partition_revision
+
+
+def test_phase1_high_function_visible_scan_allows_integer_no_effect_body():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    high_function = _Phase1FakeHighFunction([
+        ["COPY", "INT_ADD", "INT_SLESS", "CBRANCH"],
+        ["MULTIEQUAL", "INT_MULT", "RETURN"],
+    ])
+
+    assert analyzer._high_function_has_phase1_pure_return_forbidden_ops(high_function) is False
+
+
+def test_phase1_high_function_visible_scan_rejects_memory_call_control_and_fp_ops():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+
+    for mnemonic in (
+        "LOAD",
+        "STORE",
+        "CALL",
+        "CALLIND",
+        "BRANCHIND",
+        "CALLOTHER",
+        "FLOAT_ADD",
+        "FLOAT_LESSEQUAL",
+        "INT2FLOAT",
+        "FLOAT2INT",
+    ):
+        high_function = _Phase1FakeHighFunction([["COPY", mnemonic, "RETURN"]])
+        assert analyzer._high_function_has_phase1_pure_return_forbidden_ops(high_function) is True
+
+
+def test_phase1_function_body_scan_rejects_forbidden_ops_not_seen_in_high_function():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([
+        _Phase1FakeInstruction(["COPY", "INT_ADD"]),
+        _Phase1FakeInstruction(["LOAD", "RETURN"]),
+    ])
+    function = _Phase1FakeFunction()
+    high_function = _Phase1FakeHighFunction([["COPY", "INT_ADD", "RETURN"]])
+    effect_summary = EffectSummary(parameter_names=[], effects=[])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(function) is True
+    assert analyzer._effect_summary_allows_pre_return_structural_summary(
+        effect_summary,
+        function=function,
+        high_function=high_function,
+    ) is False
+
+
+def test_phase1_function_body_scan_still_rejects_forbidden_high_function_ops():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([
+        _Phase1FakeInstruction(["COPY", "INT_ADD", "CBRANCH"]),
+        _Phase1FakeInstruction(["MULTIEQUAL", "INT_MULT", "RETURN"]),
+    ])
+    function = _Phase1FakeFunction()
+    high_function = _Phase1FakeHighFunction([["LOAD"]])
+    effect_summary = EffectSummary(parameter_names=[], effects=[])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(function) is False
+    assert analyzer._effect_summary_allows_pre_return_structural_summary(
+        effect_summary,
+        function=function,
+        high_function=high_function,
+    ) is False
+
+
+def test_phase1_function_body_and_high_function_scan_allow_integer_no_effect_body():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([
+        _Phase1FakeInstruction(["COPY", "INT_ADD", "CBRANCH"]),
+        _Phase1FakeInstruction(["MULTIEQUAL", "INT_MULT", "RETURN"]),
+    ])
+    function = _Phase1FakeFunction()
+    high_function = _Phase1FakeHighFunction([["COPY", "INT_ADD", "RETURN"]])
+    effect_summary = EffectSummary(parameter_names=[], effects=[])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(function) is False
+    assert analyzer._high_function_has_phase1_pure_return_forbidden_ops(high_function) is False
+    assert analyzer._effect_summary_allows_pre_return_structural_summary(
+        effect_summary,
+        function=function,
+        high_function=high_function,
+    ) is True
+
+
+def test_phase1_function_body_scan_failure_is_conservative():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = Mock()
+    analyzer.program.getListing.side_effect = RuntimeError("listing unavailable")
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
+
+
+def test_phase1_function_body_pcode_iterator_failure_after_safe_op_is_conservative():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([_Phase1BrokenInstruction()])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
+
+
+def test_phase1_function_body_scan_rejects_direct_branch_outside_body():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([
+        _Phase1FakeInstruction(["COPY", "BRANCH"], flows=[_Phase1FakeAddress(0x2000)]),
+    ])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
+
+
+def test_phase1_function_body_scan_allows_direct_branch_inside_body():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    analyzer.program = _Phase1FakeProgram([
+        _Phase1FakeInstruction(["COPY", "BRANCH"], flows=[_Phase1FakeAddress(0x1010)]),
+        _Phase1FakeInstruction(["RETURN"]),
+    ])
+
+    assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is False
+
+
+def test_phase1_pre_return_effect_gate_rejects_impure_high_function():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    high_function = _Phase1FakeHighFunction([["COPY", "LOAD", "RETURN"]])
+    effect_summary = EffectSummary(parameter_names=[], effects=[])
+
+    assert analyzer._effect_summary_allows_pre_return_structural_summary(
+        effect_summary,
+        high_function=high_function,
+    ) is False
+
+
+def test_phase1_pre_return_effect_gate_rejects_float_return_type():
+    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
+    analyzer.debug = False
+    high_function = _Phase1FakeHighFunction([["COPY", "INT_ADD", "RETURN"]])
+    effect_summary = EffectSummary(parameter_names=[], effects=[])
+
+    assert analyzer._effect_summary_allows_pre_return_structural_summary(
+        effect_summary,
+        high_function=high_function,
+        return_type="double",
+    ) is False
+
+
+def test_state_transition_runtime_ref_supplies_summary_transition_evidence():
+    state = Expression.variable("__loop_state", size=4)
+    transition = Expression.binary_op("INT_SUB", state, _const(1))
+    transition.size = 4
+    accumulator_init = _const(0)
+    accumulator_delta = _const(1)
+    runtime_ref = StateTransitionLoopSummaryRef(
+        state_guard=Expression.binary_op("INT_SLESS", _const(0), state),
+        transition_expr=transition,
+        accumulator_init=accumulator_init,
+        accumulator_delta=accumulator_delta,
+        transition_cases=(((), transition),),
+        side_effect_profile=LoopSideEffectProfileRef(),
+        state_size=4,
+        result_size=4,
+    )
+    value = Expression.intrinsic(
+        "STATE_TRANSITION_LOOP_COUNT",
+        [state],
+        size=4,
+        runtime_ref=runtime_ref,
+        opcode=STATE_TRANSITION_LOOP_COUNT_OPCODE,
+    )
+    ret = ReturnInfo(
+        address="0x2000",
+        value=value,
+        conditions=[_cond("INT_SLESS", _const(0), _param())],
+        return_kind="summary_derived",
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="state_loop",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_const(0), conditions=[])],
+        return_type="int",
+    )
+
+    evidence = _summary_transition_evidence_key(ret)
+
+    assert evidence is not None
+    assert evidence[0] == "state_transition_loop_evidence"
+    assert _transition_evidence_has_required_parts(
+        evidence,
+        analysis,
+        enable_completed_recovery_proofs=True,
+    )
+
+
+def test_state_transition_evidence_allows_uniform_transition_cases():
+    state = Expression.variable("__loop_state", size=4)
+    transition = Expression.binary_op("INT_SUB", state, _const(1))
+    transition.size = 4
+    runtime_ref = StateTransitionLoopSummaryRef(
+        state_guard=Expression.binary_op("INT_SLESS", _const(0), state),
+        transition_expr=transition,
+        accumulator_init=_const(0),
+        accumulator_delta=_const(1),
+        transition_cases=(),
+        side_effect_profile=LoopSideEffectProfileRef(),
+        state_size=4,
+        result_size=4,
+    )
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+
+    evidence = summarizer._state_transition_loop_transition_evidence_key(runtime_ref)
+
+    assert evidence is not None
+    assert (
+        "transition_cases_key",
+        ("transition_cases", "uniform_transition_expr", ("expression", transition.structural_key())),
+    ) in evidence
 
 
 def test_counted_loop_affine_case_preserves_parameter_bias_expression():
