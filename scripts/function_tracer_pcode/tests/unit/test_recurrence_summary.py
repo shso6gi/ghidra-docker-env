@@ -2959,6 +2959,117 @@ def test_state_transition_loop_summary_recovers_state_affine_accumulator_sum():
     assert "extract 31 0" in positive_smt
 
 
+def test_multiplicative_accumulator_delta_accepts_left_shift_multiplier():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    accumulator = Expression.variable("__state", size=4)
+    shifted = Expression.binary_op("INT_LEFT", accumulator, _const(1))
+    shifted.size = 4
+    reversed_shift = Expression.binary_op("INT_LEFT", _const(1), accumulator)
+    reversed_shift.size = 4
+    huge_shift = Expression.binary_op("INT_LEFT", accumulator, _const(31))
+    huge_shift.size = 4
+
+    assert summarizer._multiplicative_accumulator_delta_multiplier(shifted, accumulator) == 2
+    assert summarizer._multiplicative_accumulator_delta_multiplier(reversed_shift, accumulator) is None
+    assert summarizer._multiplicative_accumulator_delta_multiplier(huge_shift, accumulator) is None
+
+
+def test_state_loop_accumulator_delta_accepts_left_shift_transition():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    accumulator = Expression.variable("__state", size=4)
+    shifted = Expression.binary_op("INT_LEFT", accumulator, _const(1))
+    shifted.size = 4
+
+    deltas = summarizer._extract_delta_from_possible_phi(
+        shifted,
+        accumulator,
+        parameters=[],
+    )
+
+    assert len(deltas) == 1
+    assert deltas[0].structural_key() == shifted.structural_key()
+
+
+def test_multiplicative_state_transition_start_requires_proved_zero_stop():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    zero_stop_guard = Expression.binary_op("INT_NOTEQUAL", state, _const(0))
+    zero_stop_guard.size = 1
+    nonzero_stop_guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    nonzero_stop_guard.size = 1
+    greater_than_one_guard = Expression.binary_op("INT_SLESS", _const(1), state)
+    greater_than_one_guard.size = 1
+    compound_stricter_guard = Expression.binary_op(
+        "BOOL_AND",
+        zero_stop_guard,
+        greater_than_one_guard,
+    )
+    compound_stricter_guard.size = 1
+    state_not_one_guard = Expression.binary_op("INT_NOTEQUAL", state, _const(1))
+    state_not_one_guard.size = 1
+    compound_nonzero_stop_guard = Expression.binary_op(
+        "BOOL_AND",
+        zero_stop_guard,
+        state_not_one_guard,
+    )
+    compound_nonzero_stop_guard.size = 1
+
+    start = summarizer._state_transition_iteration_start_expr(
+        zero_stop_guard,
+        state,
+        size=4,
+    )
+
+    assert start is not None
+    assert start.structural_key() == _const(0).structural_key()
+    assert summarizer._state_transition_iteration_start_expr(
+        nonzero_stop_guard,
+        state,
+        size=4,
+    ) is None
+    assert summarizer._state_transition_iteration_start_expr(
+        greater_than_one_guard,
+        state,
+        size=4,
+    ) is None
+    assert summarizer._state_transition_iteration_start_expr(
+        compound_stricter_guard,
+        state,
+        size=4,
+    ) is None
+    assert summarizer._state_transition_iteration_start_expr(
+        compound_nonzero_stop_guard,
+        state,
+        size=4,
+    ) is None
+
+
+def test_generated_loop_alias_substitution_requires_exact_name():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    replacement = _param("param_1")
+    placeholder = Expression.variable("__loop_state_1", size=4)
+    same_kind_different_alias = Expression.variable("__loop_state_2", size=4)
+    exact_alias = Expression.variable("__loop_state_1", size=4)
+
+    unchanged = summarizer._substitute_generated_loop_variable_aliases(
+        same_kind_different_alias,
+        placeholder,
+        replacement,
+    )
+    replaced = summarizer._substitute_generated_loop_variable_aliases(
+        exact_alias,
+        placeholder,
+        replacement,
+    )
+
+    assert unchanged.structural_key() == same_kind_different_alias.structural_key()
+    assert replaced.structural_key() == replacement.structural_key()
+
+
 def test_state_transition_loop_summary_recovers_latch_exit_decrement_sum_without_triangular_proof():
     state_equals_one = Expression.binary_op(
         "INT_NOTEQUAL",
@@ -3165,6 +3276,92 @@ def test_multiplicative_phi_return_region_ignores_unrelated_high_function_multip
     block = high_function.getBasicBlocks()[1]
     block._ops.append(unrelated_mult)
     unrelated_mult.setParent(block)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        high_function,
+        analysis,
+    ) is None
+
+
+def test_multiplicative_phi_return_region_rejects_high_function_multiplier_without_recursive_witness():
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+    high_function = _build_decrement_accumulator_sum_cfg()
+    phi = _FakeVarnode("return_reaching_phi")
+    next_value = _FakeVarnode("return_reaching_next")
+    _FakePcodeOp("MULTIEQUAL", [_FakeVarnode("seed", expr=_const(1)), next_value], phi)
+    mult = _FakePcodeOp("INT_MULT", [phi, _FakeConstantVarnode(2)], next_value)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), next_value], None)
+    block = high_function.getBasicBlocks()[1]
+    block._ops.extend([mult, return_op])
+    mult.setParent(block)
+    return_op.setParent(block)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        high_function,
+        analysis,
+    ) is None
+
+
+def test_multiplicative_phi_return_region_rejects_high_function_multiplier_without_recursive_value_proof():
+    recursive_value = Expression.unknown("phi_circular")
+    recursive_value.size = 4
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+    high_function = _build_decrement_accumulator_sum_cfg()
+    phi = _FakeVarnode("return_reaching_phi")
+    next_value = _FakeVarnode("return_reaching_next")
+    _FakePcodeOp("MULTIEQUAL", [_FakeVarnode("seed", expr=_const(1)), next_value], phi)
+    mult = _FakePcodeOp("INT_MULT", [phi, _FakeConstantVarnode(2)], next_value)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), next_value], None)
+    block = high_function.getBasicBlocks()[1]
+    block._ops.extend([mult, return_op])
+    mult.setParent(block)
+    return_op.setParent(block)
 
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
 

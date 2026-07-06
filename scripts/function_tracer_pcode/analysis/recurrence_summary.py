@@ -3402,53 +3402,6 @@ class StructuralRecurrenceSummarizer:
             max_candidates=max_candidates,
         )
 
-    def _multiplicative_phi_multiplier_candidates_from_high_function(
-        self,
-        high_function,
-        *,
-        max_candidates: int = 8,
-    ) -> Tuple[int, ...]:
-        if high_function is None:
-            return ()
-        candidates: List[int] = []
-        for op in self._iter_pcode_ops(high_function):
-            mnemonic = getattr(op, "getMnemonic", lambda: None)()
-            if mnemonic not in {"INT_MULT", "INT_LEFT"}:
-                continue
-            if self._safe_pcode_input_count(op) != 2:
-                continue
-            left = self._safe_pcode_input_varnode(op, 0)
-            right = self._safe_pcode_input_varnode(op, 1)
-            if mnemonic == "INT_LEFT":
-                if not self._varnode_def_is_multiequal(left):
-                    continue
-                shift = self._varnode_constant_value(right)
-                if shift is None:
-                    continue
-                try:
-                    multiplier = 1 << int(shift)
-                except (OverflowError, ValueError):
-                    continue
-                if multiplier not in {0, 1} and multiplier not in candidates:
-                    candidates.append(multiplier)
-            else:
-                pairs = ((left, right), (right, left))
-                for maybe_phi, maybe_const in pairs:
-                    if not self._varnode_def_is_multiequal(maybe_phi):
-                        continue
-                    multiplier = self._varnode_constant_value(maybe_const)
-                    if multiplier is None:
-                        continue
-                    multiplier = int(multiplier)
-                    if multiplier in {0, 1}:
-                        continue
-                    if multiplier not in candidates:
-                        candidates.append(multiplier)
-                    break
-            if len(candidates) >= int(max_candidates):
-                break
-        return tuple(candidates[: max(1, int(max_candidates))])
-
     def _varnode_def_is_multiequal(self, varnode) -> bool:
         if varnode is None:
             return False
@@ -8043,6 +7996,108 @@ class StructuralRecurrenceSummarizer:
 
         return expr
 
+    def _substitute_generated_loop_variable_aliases(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        replacement: Expression,
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+        placeholder_name = str(getattr(placeholder, "name", "") or "")
+        if not placeholder_name.startswith("__loop_"):
+            return expr
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.VARIABLE
+            and str(getattr(expr, "name", "") or "") == placeholder_name
+        ):
+            return self._coerce_summary_expression_to_size(
+                replacement,
+                max(1, int(getattr(expr, "size", 0) or getattr(replacement, "size", 0) or 4)),
+                signed=self._expression_prefers_signed_extension(replacement),
+            )
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left = self._substitute_generated_loop_variable_aliases(
+                expr.operands[0],
+                placeholder,
+                replacement,
+            )
+            right = self._substitute_generated_loop_variable_aliases(
+                expr.operands[1],
+                placeholder,
+                replacement,
+            )
+            if left is expr.operands[0] and right is expr.operands[1]:
+                return expr
+            rebuilt = Expression.binary_op(expr.operator, left, right)
+            rebuilt.size = expr.size
+            return rebuilt
+        if expr.expr_type == ExpressionType.UNARY_OP and len(expr.operands) == 1:
+            operand = self._substitute_generated_loop_variable_aliases(
+                expr.operands[0],
+                placeholder,
+                replacement,
+            )
+            if operand is expr.operands[0]:
+                return expr
+            rebuilt = Expression.unary_op(expr.operator, operand)
+            rebuilt.size = expr.size
+            return rebuilt
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branches = []
+            changed = False
+            for condition, value in expr.value:
+                new_condition = condition
+                if condition is not None:
+                    condition_expr = self._substitute_generated_loop_variable_aliases(
+                        condition.expression,
+                        placeholder,
+                        replacement,
+                    )
+                    if condition_expr is not condition.expression:
+                        new_condition = Condition(condition_expr, condition.negated)
+                        changed = True
+                new_value = self._substitute_generated_loop_variable_aliases(
+                    value,
+                    placeholder,
+                    replacement,
+                )
+                if new_value is not value:
+                    changed = True
+                branches.append((new_condition, new_value))
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return rebuilt
+        if expr.expr_type in {ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY} and expr.operands:
+            new_operands = [
+                self._substitute_generated_loop_variable_aliases(operand, placeholder, replacement)
+                for operand in expr.operands
+            ]
+            if all(new is old for new, old in zip(new_operands, expr.operands)):
+                return expr
+            if expr.expr_type == ExpressionType.CALL:
+                rebuilt = Expression.call(expr.name or "call", new_operands)
+            elif expr.expr_type == ExpressionType.INTRINSIC:
+                rebuilt = Expression.intrinsic(
+                    expr.name or "intrinsic",
+                    new_operands,
+                    size=expr.size,
+                    runtime_ref=expr.runtime_ref,
+                    opcode=expr.opcode,
+                )
+            else:
+                rebuilt = Expression.memory(
+                    new_operands[0],
+                    size=expr.size,
+                    read_order_key=expr.read_order_key,
+                    runtime_ref=expr.runtime_ref,
+                )
+            rebuilt.size = expr.size
+            return rebuilt
+        return expr
+
     def _has_branch_accumulator_candidate(
         self,
         analysis,
@@ -8127,6 +8182,19 @@ class StructuralRecurrenceSummarizer:
             model.state_placeholder,
             model.state_init_expr,
         )
+        entry_guard_expr = self._substitute_generated_loop_variable_aliases(
+            entry_guard_expr,
+            model.state_placeholder,
+            model.state_init_expr,
+        )
+        entry_guard_expr = self._substitute_generated_loop_variable_aliases(
+            entry_guard_expr,
+            Expression.variable(
+                "__loop_state",
+                size=max(1, int(getattr(model.state_init_expr, "size", 0) or 4)),
+            ),
+            model.state_init_expr,
+        )
         if entry_guard_expr is None or self._expression_is_unresolved(entry_guard_expr):
             self._debug("Declined state-transition loop summary: entry guard is unresolved")
             return None
@@ -8146,6 +8214,7 @@ class StructuralRecurrenceSummarizer:
             side_effect_profile=side_effect_profile,
             result_size=result_size,
         )
+        multiplicative_loop_value = loop_value is not None
         if loop_value is not None:
             self._debug("Recovered multiplicative state-transition loop value")
         elif self._raw_constant_value(model.accumulator_delta_expr) == 1:
@@ -8176,33 +8245,96 @@ class StructuralRecurrenceSummarizer:
                     f"accumulator_delta={self._safe_expr_text(model.accumulator_delta_expr)})"
                 )
                 return None
-        loop_value = self._add_state_transition_accumulator_seed(
-            accumulator_init,
-            loop_value,
-            result_size,
+        if not multiplicative_loop_value:
+            loop_value = self._add_state_transition_accumulator_seed(
+                accumulator_init,
+                loop_value,
+                result_size,
+            )
+            if loop_value is None:
+                self._debug("Declined state-transition loop summary: accumulator seed could not be combined")
+                return None
+        loop_conditions = [Condition(entry_guard_expr, False)]
+        exact_exclusion_conditions = self._state_transition_exact_return_exclusion_conditions(
+            analysis,
+            loop_conditions,
         )
-        if loop_value is None:
-            self._debug("Declined state-transition loop summary: accumulator seed could not be combined")
-            return None
-        returns = [
-            ReturnInfo(
-                address=address,
-                value=accumulator_init,
-                conditions=[Condition(entry_guard_expr, True)],
-                branch_index=0,
-                **site_metadata,
-            ),
+        if exact_exclusion_conditions:
+            loop_conditions.extend(exact_exclusion_conditions)
+            returns = []
+        else:
+            returns = [
+                ReturnInfo(
+                    address=address,
+                    value=accumulator_init,
+                    conditions=[Condition(entry_guard_expr, True)],
+                    branch_index=0,
+                    **site_metadata,
+                )
+            ]
+        returns.append(
             ReturnInfo(
                 address=address,
                 value=loop_value,
-                conditions=[Condition(entry_guard_expr, False)],
+                conditions=loop_conditions,
                 branch_index=10_200,
                 summary_transition_evidence_key=transition_evidence_key,
                 **site_metadata,
-            ),
-        ]
+            )
+        )
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
+
+    def _state_transition_exact_return_exclusion_conditions(
+        self,
+        analysis,
+        loop_conditions: Sequence[Condition],
+    ) -> Tuple[Condition, ...]:
+        exclusions: List[Condition] = []
+        for ret in tuple(getattr(analysis, "returns", ()) or ()):
+            if str(getattr(ret, "return_kind", "exact") or "exact") == "summary_derived":
+                continue
+            if not tuple(getattr(ret, "conditions", None) or ()):
+                continue
+            if self._expression_is_unresolved(getattr(ret, "value", None)):
+                continue
+            if not self._conditions_overlap_conditions(
+                tuple(getattr(ret, "conditions", None) or ()),
+                tuple(loop_conditions or ()),
+            ):
+                continue
+            exclusion = self._negated_return_region_condition(ret.conditions)
+            if exclusion is not None:
+                try:
+                    loop_implies_exact_region = ConditionSMTOracle.conjunction_is_unsat(
+                        list(loop_conditions or ()) + [exclusion]
+                    ) is True
+                except Exception:
+                    loop_implies_exact_region = False
+                if loop_implies_exact_region:
+                    continue
+                exclusions.append(exclusion)
+        return tuple(exclusions)
+
+    def _negated_return_region_condition(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Condition]:
+        region_expr = None
+        for condition in conditions or ():
+            expr = getattr(condition, "expression", None)
+            if expr is None:
+                return None
+            if getattr(condition, "negated", False):
+                expr = Expression.unary_op("BOOL_NEGATE", expr)
+                expr.size = 1
+            region_expr = expr if region_expr is None else Expression.binary_op("BOOL_AND", region_expr, expr)
+            region_expr.size = 1
+        if region_expr is None:
+            return None
+        negated = Expression.unary_op("BOOL_NEGATE", self._canonicalize_expression(region_expr))
+        negated.size = 1
+        return Condition(self._canonicalize_expression(negated), False)
 
     def _build_multiplicative_state_transition_loop_value(
         self,
@@ -8250,13 +8382,20 @@ class StructuralRecurrenceSummarizer:
             Expression.constant(int(multiplier), size=result_size),
         )
         transition_expr.size = result_size
+        start_expr = self._state_transition_iteration_start_expr(
+            model.state_guard_expr,
+            model.state_placeholder,
+            size=max(1, int(getattr(model.state_init_expr, "size", 0) or 4)),
+        )
+        if start_expr is None:
+            return None
         transition_value = self._build_counted_state_transition_value(
             initial_state=self._coerce_summary_expression_to_size(
                 model.accumulator_init_expr,
                 result_size,
                 signed=self._expression_prefers_signed_extension(model.accumulator_init_expr),
             ),
-            start_expr=Expression.constant(0, size=max(1, int(getattr(model.state_init_expr, "size", 0) or 4))),
+            start_expr=start_expr,
             limit_expr=self._coerce_summary_expression_to_size(
                 model.state_init_expr,
                 max(1, int(getattr(model.state_init_expr, "size", 0) or 4)),
@@ -8266,7 +8405,7 @@ class StructuralRecurrenceSummarizer:
             transition_cases=(((), transition_expr),),
             state_placeholder=model.accumulator_placeholder,
             side_effect_profile=side_effect_profile,
-            guard_constraints=(Condition(model.state_guard_expr, False),),
+            guard_constraints=(),
             result_size=result_size,
             signed_loop=True,
         )
@@ -8275,6 +8414,81 @@ class StructuralRecurrenceSummarizer:
         if self._expression_contains_executable_address_constant(transition_value):
             return None
         return transition_value
+
+    def _state_transition_iteration_start_expr(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+        *,
+        size: int,
+    ) -> Optional[Expression]:
+        stop_value = self._state_transition_guard_stop_constant(
+            state_guard,
+            state_placeholder,
+        )
+        if stop_value is None:
+            return None
+        return Expression.constant(int(stop_value), size=max(1, int(size or 4)))
+
+    def _state_transition_guard_stop_constant(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+    ) -> Optional[int]:
+        guard = self._canonicalize_expression(state_guard)
+        if guard is None:
+            return None
+        if (
+            guard.expr_type == ExpressionType.BINARY_OP
+            and guard.operator == "BOOL_AND"
+            and len(guard.operands) == 2
+        ):
+            state_dependent_stops: List[int] = []
+            for operand in self._flatten_bool_and_expression(guard):
+                if not self._expression_mentions_placeholder(operand, state_placeholder):
+                    continue
+                stop = self._state_transition_guard_stop_constant(operand, state_placeholder)
+                if stop is None:
+                    return None
+                state_dependent_stops.append(int(stop))
+            if not state_dependent_stops:
+                return None
+            unique_stops = set(state_dependent_stops)
+            if len(unique_stops) == 1:
+                return state_dependent_stops[0]
+            return None
+        if (
+            guard.expr_type == ExpressionType.BINARY_OP
+            and guard.operator == "INT_NOTEQUAL"
+            and len(guard.operands) == 2
+        ):
+            left, right = guard.operands
+            right_const = self._raw_constant_value(right)
+            if right_const == 0:
+                affine = self._extract_affine_placeholder_term(left, state_placeholder)
+                if affine is not None:
+                    coeff, bias = affine
+                    if int(coeff) == 1 and int(bias) == 0:
+                        return 0
+            left_const = self._raw_constant_value(left)
+            if left_const == 0:
+                affine = self._extract_affine_placeholder_term(right, state_placeholder)
+                if affine is not None:
+                    coeff, bias = affine
+                    if int(coeff) == 1 and int(bias) == 0:
+                        return 0
+        if (
+            guard.expr_type == ExpressionType.BINARY_OP
+            and guard.operator == "INT_SLESS"
+            and len(guard.operands) == 2
+        ):
+            left, right = guard.operands
+            if (
+                self._raw_constant_value(left) == 0
+                and self._expr_matches_placeholder(right, state_placeholder)
+            ):
+                return 0
+        return None
 
     def _multiplicative_accumulator_delta_multiplier(
         self,
@@ -8285,11 +8499,30 @@ class StructuralRecurrenceSummarizer:
             return None
         if getattr(delta_expr, "expr_type", None) != ExpressionType.BINARY_OP:
             return None
-        if getattr(delta_expr, "operator", None) != "INT_MULT":
+        operator = getattr(delta_expr, "operator", None)
+        if operator not in {"INT_MULT", "INT_LEFT"}:
             return None
         operands = list(getattr(delta_expr, "operands", ()) or ())
         if len(operands) != 2:
             return None
+        if operator == "INT_LEFT":
+            maybe_acc, maybe_shift = operands
+            try:
+                accumulator_matches = maybe_acc.equals(accumulator_placeholder)
+            except Exception:
+                accumulator_matches = False
+            if not accumulator_matches:
+                return None
+            shift = self._raw_constant_value(maybe_shift)
+            if shift is None:
+                return None
+            try:
+                shift_int = int(shift)
+            except (TypeError, ValueError):
+                return None
+            if shift_int < 0 or shift_int > 30:
+                return None
+            return 1 << shift_int
         for maybe_acc, maybe_const in ((operands[0], operands[1]), (operands[1], operands[0])):
             try:
                 accumulator_matches = maybe_acc.equals(accumulator_placeholder)
@@ -9849,9 +10082,31 @@ class StructuralRecurrenceSummarizer:
                 deltas.extend(branch_deltas)
             return tuple(deltas)
         delta = self._extract_additive_delta(expr, accumulator_placeholder, parameters)
-        if delta is None:
-            return ()
-        return (delta,)
+        if delta is not None:
+            return (delta,)
+        multiplicative = self._extract_multiplicative_accumulator_transition(
+            expr,
+            accumulator_placeholder,
+        )
+        if multiplicative is not None:
+            return (multiplicative,)
+        return ()
+
+    def _extract_multiplicative_accumulator_transition(
+        self,
+        expr: Expression,
+        accumulator_placeholder: Expression,
+    ) -> Optional[Expression]:
+        expr = self._canonicalize_expression(expr)
+        if expr is None:
+            return None
+        multiplier = self._multiplicative_accumulator_delta_multiplier(
+            expr,
+            accumulator_placeholder,
+        )
+        if multiplier is None or int(multiplier) in {0, 1}:
+            return None
+        return expr
 
     def _state_loop_accumulator_priority(
         self,
