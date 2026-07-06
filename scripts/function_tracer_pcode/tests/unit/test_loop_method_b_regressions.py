@@ -2129,6 +2129,338 @@ def test_exact_load_sum_proof_uses_readonly_reduction_ref_not_intrinsic_name():
     assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
 
 
+def test_exact_fp_count_one_return_matches_wide_readonly_reduction_contract():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=16,
+        stride=4,
+        element_size=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=16,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", _count_param())
+    denominator.size = 8
+    quotient = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    quotient.size = 8
+    exact_value = Expression.binary_op("FLOAT_ADD", Expression.constant(0, size=8), quotient)
+    exact_value.size = 8
+    exact_info = ReturnInfo(address="0x12B0", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(
+        address="0x12C0",
+        value=Expression.intrinsic(
+            "READONLY_SUM",
+            [_base_param(), _count_param()],
+            size=16,
+            runtime_ref=reduction_ref,
+            opcode=READONLY_SUM_OPCODE,
+        ),
+        conditions=[_count_gt(0)],
+    )
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("exact_fp_count_one", [exact_info], comparison_bits=64).parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=_analysis("summary_fp_wide", [summary_info], comparison_bits=128).parameters,
+    )
+
+    assert _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
+def _fp_count_one_exact_summary_cases_with_name_only_denominator(parameters):
+    count_expr = _count_param()
+    name_only_count = Expression.parameter("count", index=-1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=16,
+        stride=4,
+        element_size=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=16,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", name_only_count)
+    denominator.size = 8
+    exact_value = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    exact_value.size = 8
+    exact_info = ReturnInfo(address="0x12C8", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(
+        address="0x12CC",
+        value=Expression.intrinsic(
+            "READONLY_SUM",
+            [_base_param(), count_expr],
+            size=16,
+            runtime_ref=reduction_ref,
+            opcode=READONLY_SUM_OPCODE,
+        ),
+        conditions=[_count_gt(0)],
+    )
+    return (
+        ReturnCase(
+            0,
+            list(exact_info.conditions),
+            exact_info.value,
+            exact_info,
+            parameters=parameters,
+        ),
+        ReturnCase(
+            0,
+            list(summary_info.conditions),
+            summary_info.value,
+            summary_info,
+            parameters=parameters,
+        ),
+    )
+
+
+def test_exact_fp_count_one_return_rejects_name_only_count_without_parameter_descriptors():
+    exact_case, summary_case = _fp_count_one_exact_summary_cases_with_name_only_denominator(())
+
+    assert not _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
+def test_exact_fp_count_one_return_rejects_name_only_count_without_count_descriptor():
+    exact_case, summary_case = _fp_count_one_exact_summary_cases_with_name_only_denominator(
+        (
+            {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "other", "index": 2, "data_type": "int", "size": 4, "is_signed": True},
+        )
+    )
+
+    assert not _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
+def test_exact_fp_count_one_return_rejects_name_only_count_descriptor_identity_mismatch():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    other_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a2",
+        base_register_name="a2",
+        size=4,
+        size_bits=32,
+    )
+    count_expr = Expression.parameter(
+        "count",
+        index=1,
+        data_type="int",
+        size=4,
+        storage_info=count_storage,
+    )
+    name_only_count = Expression.parameter("count", index=-1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+        limit_expr=count_expr,
+        result_size=16,
+        stride=4,
+        element_size=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=16,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", name_only_count)
+    denominator.size = 8
+    exact_value = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    exact_value.size = 8
+    exact_info = ReturnInfo(address="0x12D4", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(
+        address="0x12D8",
+        value=Expression.intrinsic(
+            "READONLY_SUM",
+            [_base_param(), count_expr],
+            size=16,
+            runtime_ref=reduction_ref,
+            opcode=READONLY_SUM_OPCODE,
+        ),
+        conditions=[_count_gt(0)],
+    )
+    parameters = (
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+        {
+            "name": "count",
+            "index": 2,
+            "data_type": "int",
+            "size": 4,
+            "is_signed": True,
+            "storage_info": other_count_storage,
+        },
+    )
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=parameters,
+    )
+
+    assert not _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
+def test_exact_fp_count_one_return_rejects_same_named_different_count_parameter():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    other_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a2",
+        base_register_name="a2",
+        size=4,
+        size_bits=32,
+    )
+    count_expr = Expression.parameter(
+        "count",
+        index=1,
+        data_type="int",
+        size=4,
+        storage_info=count_storage,
+    )
+    wrong_denominator = Expression.parameter(
+        "count",
+        index=2,
+        data_type="int",
+        size=4,
+        storage_info=other_count_storage,
+    )
+    proof = ReductionAccumulatorProof(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+        limit_expr=count_expr,
+        result_size=16,
+        stride=4,
+        element_size=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=16,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", wrong_denominator)
+    denominator.size = 8
+    exact_value = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    exact_value.size = 8
+    exact_info = ReturnInfo(address="0x12D0", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(
+        address="0x12E0",
+        value=Expression.intrinsic(
+            "READONLY_SUM",
+            [_base_param(), count_expr],
+            size=16,
+            runtime_ref=reduction_ref,
+            opcode=READONLY_SUM_OPCODE,
+        ),
+        conditions=[_count_gt(0)],
+    )
+    parameters = [
+        {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+        {
+            "name": "count",
+            "index": 1,
+            "data_type": "int",
+            "size": 4,
+            "is_signed": True,
+            "storage_info": count_storage,
+        },
+        {
+            "name": "count",
+            "index": 2,
+            "data_type": "int",
+            "size": 4,
+            "is_signed": True,
+            "storage_info": other_count_storage,
+        },
+    ]
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=parameters,
+    )
+
+    assert not _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
 def test_exact_load_sum_count_proof_distinguishes_same_named_parameter_indices():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(

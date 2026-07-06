@@ -140,6 +140,35 @@ def test_return_region_summary_coverage_uses_active_preconditions():
     assert coverage_key is not None
 
 
+def test_return_region_summary_coverage_rejects_duplicate_name_only_guard_canonicalization():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    indexed_n = Expression.parameter("n", index=1, data_type="int", size=4)
+    name_only_n = Expression.parameter("n", index=-1, data_type="int", size=4)
+    parameters = [
+        {"name": "n", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+        {"name": "n", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+    ]
+    exact_nonpositive = ReturnInfo(
+        address="0x1000",
+        value=_const(1),
+        conditions=[_cond("INT_SLESS", indexed_n, _const(1))],
+    )
+    summary_conditions = [_cond("INT_SLESSEQUAL", _const(1), name_only_n)]
+
+    normalized_summary = summarizer._canonicalize_condition_parameters_for_analysis(
+        summary_conditions,
+        parameters,
+    )
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=summary_conditions,
+        exact_returns=[exact_nonpositive],
+        parameters=parameters,
+    )
+
+    assert normalized_summary[0].expression.operands[1].value == -1
+    assert coverage_key is None
+
+
 def _readonly_accumulator_proof(
     *,
     base_ref: LocationBaseRef,
@@ -13551,4 +13580,37 @@ def test_bounded_counter_region_coverage_accepts_exact_count_partition():
         region,
         exact_returns[:2],
         count_param,
+    )
+
+
+def test_exact_count_region_accepts_masked_negated_notequal_singleton_guard():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    count_param = {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_1", index=0, data_type="int", size=4)
+    positive = _cond("INT_SLESS", _const(0), count_expr)
+    masked_count = Expression.binary_op(
+        "INT_AND",
+        count_expr,
+        Expression.constant(0xFFFFFFFF, size=4),
+    )
+    masked_count.size = 4
+    selector_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked_count, _const(1)),
+        _const(0),
+    )
+    selector_expr.size = 1
+    singleton_selector = Condition(selector_expr, negated=True)
+    ret = ReturnInfo(
+        address="0x1000",
+        value=_const(0, size=8),
+        conditions=[positive, singleton_selector],
+    )
+
+    assert summarizer._exact_counter_value_from_conditions(ret.conditions, "param_1") == 1
+    assert summarizer._readonly_exact_count_region_is_fully_covered_by_return(
+        ret,
+        [positive],
+        count_param,
+        1,
     )

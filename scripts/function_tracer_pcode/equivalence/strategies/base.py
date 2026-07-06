@@ -10,7 +10,13 @@ from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
 from dataclasses import dataclass, field
 
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
-from ...model import Condition, Expression, FunctionReturnAnalysis, expression_provenance_key
+from ...model import (
+    Condition,
+    Expression,
+    FunctionReturnAnalysis,
+    ReadonlyReductionRef,
+    expression_provenance_key,
+)
 from ...model import ExpressionType
 from ...model.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from ...smt import ParallelResult
@@ -5870,10 +5876,18 @@ class CheckStrategy(ABC):
             and expr_profile["wide_producer_is_materially_narrow_constant"]
         ):
             effective_producer_width = int(narrow_width)
+        if (
+            effective_producer_width > int(narrow_width)
+            and expr_profile.get("wide_producer_is_semantically_narrow_runtime_ref") is True
+            and expr_profile.get("semantic_narrow_runtime_ref_key") is not None
+        ):
+            effective_producer_width = int(narrow_width)
         rejection_reasons = list(expr_profile["rejection_reasons"])
-        if int(producer_width) > int(narrow_width) and not expr_profile[
-            "wide_producer_is_materially_narrow_constant"
-        ]:
+        if (
+            int(producer_width) > int(narrow_width)
+            and not expr_profile["wide_producer_is_materially_narrow_constant"]
+            and expr_profile.get("wide_producer_is_semantically_narrow_runtime_ref") is not True
+        ):
             rejection_reasons.append("producer_width_exceeds_narrow_width")
         if expr_profile["unsupported_or_unresolved"]:
             rejection_reasons.append("unsupported_or_unresolved_producer")
@@ -5900,6 +5914,10 @@ class CheckStrategy(ABC):
             ("constant_widths", tuple(sorted(set(expr_profile["constant_widths"])))),
             ("unresolved_widths", tuple(sorted(set(expr_profile["unresolved_widths"])))),
             ("unsupported_or_unresolved", bool(expr_profile["unsupported_or_unresolved"])),
+            (
+                "semantic_narrow_runtime_ref_key",
+                self._normalize_nested_tuple(expr_profile.get("semantic_narrow_runtime_ref_key")),
+            ),
             ("expression_profile", expr_profile["profile_key"]),
         )
         return {
@@ -5927,6 +5945,9 @@ class CheckStrategy(ABC):
                 "call_result_widths": tuple(sorted(set(expr_profile["call_result_widths"]))),
                 "constant_widths": tuple(sorted(set(expr_profile["constant_widths"]))),
                 "unresolved_widths": tuple(sorted(set(expr_profile["unresolved_widths"]))),
+                "semantic_narrow_runtime_ref_key": self._normalize_nested_tuple(
+                    expr_profile.get("semantic_narrow_runtime_ref_key")
+                ),
                 "unsupported_or_unresolved": False,
                 "wide_return_bits": int(wide_return_bits),
                 "narrow_width": int(narrow_width),
@@ -6039,14 +6060,22 @@ class CheckStrategy(ABC):
                 and expr_profile["wide_producer_is_materially_narrow_constant"]
             ):
                 effective_producer_width = int(narrow_width)
+            if (
+                effective_producer_width > int(narrow_width)
+                and expr_profile.get("wide_producer_is_semantically_narrow_runtime_ref") is True
+                and expr_profile.get("semantic_narrow_runtime_ref_key") is not None
+            ):
+                effective_producer_width = int(narrow_width)
             max_producer_width = max(max_producer_width, effective_producer_width)
             load_widths.extend(expr_profile["load_widths"])
             call_result_widths.extend(expr_profile["call_result_widths"])
             constant_widths.extend(expr_profile["constant_widths"])
             unresolved_widths.extend(expr_profile["unresolved_widths"])
-            if int(producer_width) > int(narrow_width) and not expr_profile[
-                "wide_producer_is_materially_narrow_constant"
-            ]:
+            if (
+                int(producer_width) > int(narrow_width)
+                and not expr_profile["wide_producer_is_materially_narrow_constant"]
+                and expr_profile.get("wide_producer_is_semantically_narrow_runtime_ref") is not True
+            ):
                 rejection_reasons.append("producer_width_exceeds_narrow_width")
             rejection_reasons.extend(expr_profile["rejection_reasons"])
             required_wide_members.append(member)
@@ -6065,6 +6094,10 @@ class CheckStrategy(ABC):
                     ("constant_widths", tuple(sorted(set(expr_profile["constant_widths"])))),
                     ("unresolved_widths", tuple(sorted(set(expr_profile["unresolved_widths"])))),
                     ("unsupported_or_unresolved", bool(expr_profile["unsupported_or_unresolved"])),
+                    (
+                        "semantic_narrow_runtime_ref_key",
+                        self._normalize_nested_tuple(expr_profile.get("semantic_narrow_runtime_ref_key")),
+                    ),
                     ("expression_profile", expr_profile["profile_key"]),
                 )
             )
@@ -6307,6 +6340,8 @@ class CheckStrategy(ABC):
         rejection_reasons: List[str] = []
         max_value_width = 0
         unsupported_or_unresolved = False
+        semantically_narrow_runtime_ref = False
+        semantic_narrow_runtime_ref_key = None
         profile_nodes: List[Tuple[Any, ...]] = []
         try:
             expression_bits = int(expression_smt_bit_width(expr) or 0)
@@ -6339,6 +6374,22 @@ class CheckStrategy(ABC):
                 node_bits = 0
             max_value_width = max(max_value_width, node_bits)
             operator = getattr(node, "operator", None)
+            runtime_ref = getattr(node, "runtime_ref", None)
+            runtime_ref_contract_key = None
+            if (
+                isinstance(runtime_ref, ReadonlyReductionRef)
+                and int(narrow_width) > 0
+                and int(narrow_width) % 8 == 0
+            ):
+                try:
+                    runtime_ref_contract_key = runtime_ref.readonly_term_sequence_contract_key(
+                        result_size=int(narrow_width) // 8
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    runtime_ref_contract_key = None
+                if runtime_ref_contract_key is not None:
+                    semantically_narrow_runtime_ref = True
+                    semantic_narrow_runtime_ref_key = runtime_ref_contract_key
             profile_nodes.append(
                 (
                     "node",
@@ -6346,6 +6397,7 @@ class CheckStrategy(ABC):
                     ("operator", operator),
                     ("bits", node_bits),
                     ("provenance", expression_provenance_key(node)),
+                    ("semantic_narrow_runtime_ref", runtime_ref_contract_key),
                 )
             )
             if expr_type == ExpressionType.UNKNOWN:
@@ -6372,7 +6424,11 @@ class CheckStrategy(ABC):
                     rejection_reasons.append("wide_constant")
             if expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.INTRINSIC}:
                 width_adapter = operator in {"INT_ZEXT", "INT_SEXT", "SUBPIECE", "CAST", "COPY"}
-                if node_bits > int(narrow_width) and not width_adapter:
+                if (
+                    node_bits > int(narrow_width)
+                    and not width_adapter
+                    and runtime_ref_contract_key is None
+                ):
                     rejection_reasons.append("wide_arithmetic")
             try:
                 if expression_contains_unsupported_smt_ops(node):
@@ -6394,6 +6450,8 @@ class CheckStrategy(ABC):
             "constant_widths": constant_widths,
             "unresolved_widths": unresolved_widths,
             "wide_producer_is_materially_narrow_constant": wide_producer_is_materially_narrow_constant,
+            "wide_producer_is_semantically_narrow_runtime_ref": semantically_narrow_runtime_ref,
+            "semantic_narrow_runtime_ref_key": semantic_narrow_runtime_ref_key,
             "unsupported_or_unresolved": unsupported_or_unresolved,
             "rejection_reasons": tuple(sorted(set(rejection_reasons))),
             "profile_key": tuple(profile_nodes),

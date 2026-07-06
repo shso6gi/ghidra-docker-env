@@ -546,6 +546,7 @@ def build_return_width_bridge_narrow_query(
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
     lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
     lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
+    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
     lines.extend(
         _build_value_inequality_section(
             case1.get_value_smt(

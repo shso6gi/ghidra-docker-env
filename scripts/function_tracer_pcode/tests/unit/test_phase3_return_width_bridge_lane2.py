@@ -17,6 +17,11 @@ from scripts.function_tracer_pcode.model import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.model.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.model.runtime_refs import (
+    LocationBaseRef,
+    ReductionAccumulatorProof,
+    ReadonlyReductionRef,
+)
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -1311,6 +1316,52 @@ def test_return_width_bridge_semantic_narrowing_rejects_wide_arithmetic():
         narrow_width=32,
     )
     assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+
+def test_return_width_bridge_semantic_narrowing_accepts_readonly_runtime_contract():
+    proof = ReductionAccumulatorProof(
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        stride=4,
+        element_size=4,
+        result_size=16,
+        start_index=0,
+        start_offset=0,
+        reduction_kind="fp_int2float_div_count_sum",
+    )
+    runtime_ref = ReadonlyReductionRef(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        stride=4,
+        element_size=4,
+        result_size=16,
+        accumulator_proof=proof,
+    )
+    wide_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("base", index=0, data_type="float *", size=8),
+            Expression.parameter("count", index=1, data_type="int", size=4),
+        ],
+        size=16,
+        runtime_ref=runtime_ref,
+    )
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=wide_expr,
+        wide_return_type="undefined1[16]",
+    )
+
+    assert strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
 
 
 def test_return_width_bridge_semantic_narrowing_rejects_wide_call_result():

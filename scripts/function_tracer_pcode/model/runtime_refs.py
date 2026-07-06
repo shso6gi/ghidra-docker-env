@@ -2882,7 +2882,11 @@ class ReductionAccumulatorProof:
             return None
         if target_result_size > proof_result_size:
             return None
-        if target_result_size < proof_result_size and self.reduction_kind not in {"sum", "memory_sum"}:
+        if (
+            target_result_size < proof_result_size
+            and self.reduction_kind not in {"sum", "memory_sum"}
+            and not self._readonly_reduction_uses_distinct_term_width()
+        ):
             return None
         return target_result_size
 
@@ -2903,6 +2907,7 @@ class ReductionAccumulatorProof:
         target_result_size: int,
     ) -> Optional[Tuple[int, int]]:
         target_result_size = max(1, int(target_result_size))
+        term_access_size = self._readonly_term_access_size()
         start_index = int(self.start_index)
         if start_index < 0:
             return None
@@ -2918,10 +2923,18 @@ class ReductionAccumulatorProof:
             scalar_stride = target_result_size
             term_start_offset = int(self.start_offset) + first_lane_offset - start_index * scalar_stride
             return term_start_offset, scalar_stride
-        if max(1, int(self.element_size or 0)) != target_result_size:
+        if term_access_size != target_result_size and not self._readonly_reduction_uses_distinct_term_width():
             return None
         term_start_offset = int(self.start_offset) - start_index * index_scale
         return term_start_offset, index_scale
+
+    def _readonly_reduction_uses_distinct_term_width(self) -> bool:
+        return str(self.reduction_kind or "").startswith("fp_")
+
+    def _readonly_term_access_size(self) -> int:
+        if self._readonly_reduction_uses_distinct_term_width():
+            return max(1, int(self.element_size or 0))
+        return max(1, int(self.result_size or 0))
 
     def _readonly_contract_scalar_lane_terms(
         self,
@@ -2953,16 +2966,17 @@ class ReductionAccumulatorProof:
         scalar_stride: int,
     ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         target_result_size = max(1, int(target_result_size))
+        term_access_size = self._readonly_term_access_size()
         explicit_seed_terms = tuple(self.seed_terms or ())
         if explicit_seed_terms:
             normalized_terms = []
             for term in explicit_seed_terms:
-                if max(1, int(getattr(term, "access_size", 0) or 0)) != target_result_size:
+                if max(1, int(getattr(term, "access_size", 0) or 0)) != term_access_size:
                     return None
                 normalized_terms.append(
                     ReadonlyReductionTermRef(
                         byte_offset=int(getattr(term, "byte_offset")),
-                        access_size=target_result_size,
+                        access_size=term_access_size,
                     )
                 )
             return tuple(normalized_terms)
@@ -2978,7 +2992,7 @@ class ReductionAccumulatorProof:
         return tuple(
             ReadonlyReductionTermRef(
                 byte_offset=int(term_start_offset) + index * int(scalar_stride),
-                access_size=target_result_size,
+                access_size=term_access_size,
             )
             for index in range(seed_count)
         )
@@ -2991,6 +3005,7 @@ class ReductionAccumulatorProof:
         term_start_offset: int,
         scalar_stride: int,
     ) -> Tuple[int, Tuple[ReadonlyReductionTermRef, ...]]:
+        term_access_size = self._readonly_term_access_size()
         canonical_start = int(self.start_index)
         index_step = int(self.index_step)
         remaining_seed_terms = sorted(
@@ -3003,7 +3018,7 @@ class ReductionAccumulatorProof:
                 break
             expected_term = ReadonlyReductionTermRef(
                 byte_offset=int(term_start_offset) + previous_index * int(scalar_stride),
-                access_size=max(1, int(target_result_size)),
+                access_size=term_access_size,
             )
             expected_key = expected_term.stable_key()
             matching_index = None
@@ -3033,7 +3048,7 @@ class ReductionAccumulatorProof:
         trip_count = self.trip_count_for_count_value(count_value)
         if trip_count is None:
             return None
-        access_size = max(1, int(self.result_size))
+        access_size = self._readonly_term_access_size()
         lane_terms = self._scalar_lane_terms(require_witness_prefix=False)
         if lane_terms:
             lane_count = len(lane_terms)
@@ -3097,7 +3112,7 @@ class ReductionAccumulatorProof:
             return None
         if count_value <= 0:
             return None
-        access_size = max(1, int(self.result_size))
+        access_size = self._readonly_term_access_size()
         expected_prefix = tuple(
             ReadonlyReductionTermRef(
                 byte_offset=index * access_size,
@@ -3154,7 +3169,7 @@ class ReductionAccumulatorProof:
                 return tuple(
                     ReadonlyReductionTermRef(
                         byte_offset=int(term_start_offset) + index * index_scale,
-                        access_size=max(1, int(self.result_size)),
+                        access_size=self._readonly_term_access_size(),
                     )
                     for index in range(selected_count)
                 )
@@ -3200,7 +3215,7 @@ class ReductionAccumulatorProof:
         return tuple(
             ReadonlyReductionTermRef(
                 byte_offset=int(term_start_offset) + index * index_scale,
-                access_size=max(1, int(self.result_size)),
+                access_size=self._readonly_term_access_size(),
             )
             for index in range(seed_term_count_value)
         )

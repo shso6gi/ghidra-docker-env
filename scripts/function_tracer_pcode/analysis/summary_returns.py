@@ -141,6 +141,7 @@ def accept_summary_return_candidates(
         coverage_complete = _return_partition_covers_active_precondition(
             proposed_partition,
             _active_preconditions(analysis),
+            parameters=getattr(analysis, "parameters", None),
         )
         if not coverage_complete:
             blockers.append("summary_partition_not_total:active_precondition_not_covered")
@@ -757,8 +758,13 @@ def _exact_witnesses_key_contains_return(
 def _return_partition_covers_active_precondition(
     returns: Sequence[ReturnInfo],
     active_preconditions: Sequence[Condition] = (),
+    *,
+    parameters: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> bool:
-    conditions_by_return = [list(ret.conditions or []) for ret in returns or ()]
+    conditions_by_return = [
+        list(_canonicalize_conditions_for_analysis_parameters(ret.conditions or [], parameters))
+        for ret in returns or ()
+    ]
     if not conditions_by_return:
         return False
     region_exprs = []
@@ -777,7 +783,7 @@ def _return_partition_covers_active_precondition(
         return True
     if not region_exprs:
         return False
-    miss_conditions = list(active_preconditions or [])
+    miss_conditions = list(_canonicalize_conditions_for_analysis_parameters(active_preconditions or [], parameters))
     for conditions in conditions_by_return:
         combined = Condition.combine_and(conditions)
         if combined is None:
@@ -785,6 +791,105 @@ def _return_partition_covers_active_precondition(
         miss_conditions.append(Condition(_condition_as_expression(combined), True))
     miss_unsat = _conditions_unsat(miss_conditions)
     return miss_unsat is True
+
+
+def _canonicalize_conditions_for_analysis_parameters(
+    conditions: Sequence[Condition],
+    parameters: Optional[Sequence[Dict[str, Any]]],
+) -> Tuple[Condition, ...]:
+    if not parameters:
+        return tuple(conditions or ())
+    by_index: Dict[int, Dict[str, Any]] = {}
+    by_name = _unique_parameters_by_name(parameters)
+    for param in parameters or ():
+        if not isinstance(param, dict):
+            continue
+        try:
+            by_index[int(param.get("index"))] = param
+        except (TypeError, ValueError):
+            pass
+    if not by_index and not by_name:
+        return tuple(conditions or ())
+    return tuple(
+        Condition(
+            _canonicalize_expression_parameters_for_analysis(
+                condition.expression,
+                by_index=by_index,
+                by_name=by_name,
+            ),
+            bool(getattr(condition, "negated", False)),
+        )
+        for condition in conditions or ()
+        if condition is not None
+    )
+
+
+def _unique_parameters_by_name(
+    parameters: Optional[Sequence[Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    by_name: Dict[str, Dict[str, Any]] = {}
+    name_counts: Dict[str, int] = {}
+    for param in parameters or ():
+        if not isinstance(param, dict):
+            continue
+        name = str(param.get("name") or "")
+        if not name:
+            continue
+        name_counts[name] = name_counts.get(name, 0) + 1
+        by_name.setdefault(name, param)
+    return {
+        name: param
+        for name, param in by_name.items()
+        if name_counts.get(name, 0) == 1
+    }
+
+
+def _canonicalize_expression_parameters_for_analysis(
+    expr: Expression,
+    *,
+    by_index: Dict[int, Dict[str, Any]],
+    by_name: Dict[str, Dict[str, Any]],
+) -> Expression:
+    if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+        descriptor = None
+        try:
+            descriptor = by_index.get(int(getattr(expr, "value", -1)))
+        except (TypeError, ValueError):
+            descriptor = None
+        if descriptor is None:
+            descriptor = by_name.get(str(getattr(expr, "name", "") or ""))
+        if descriptor is not None:
+            return Expression.parameter(
+                str(descriptor.get("name") or getattr(expr, "name", "") or "param"),
+                index=int(descriptor.get("index", getattr(expr, "value", -1)) or 0),
+                data_type=descriptor.get("data_type"),
+                data_type_obj=descriptor.get("data_type_obj"),
+                size=int(descriptor.get("size", getattr(expr, "size", 4)) or 4),
+                storage_info=descriptor.get("storage_info", descriptor.get("storage")),
+            )
+    operands = [
+        _canonicalize_expression_parameters_for_analysis(
+            operand,
+            by_index=by_index,
+            by_name=by_name,
+        )
+        for operand in (getattr(expr, "operands", None) or ())
+    ]
+    return Expression(
+        getattr(expr, "expr_type", None),
+        value=getattr(expr, "value", None),
+        operator=getattr(expr, "operator", None),
+        operands=operands,
+        size=int(getattr(expr, "size", 0) or 0),
+        name=getattr(expr, "name", None),
+        data_type=getattr(expr, "data_type", None),
+        data_type_obj=getattr(expr, "data_type_obj", None),
+        storage_info=getattr(expr, "storage_info", None),
+        read_order_key=getattr(expr, "read_order_key", None),
+        runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
+        call_argument_width_evidence=getattr(expr, "call_argument_width_evidence", None),
+    )
 
 
 def _candidate_return_for_partition(candidate: SummaryReturnCandidate) -> ReturnInfo:

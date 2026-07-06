@@ -420,6 +420,20 @@ class PairwiseStrategy(CheckStrategy):
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                         )
                     continue
+                readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
+                    case1,
+                    case2,
+                    symbol_replace_fn1,
+                    symbol_replace_fn2,
+                )
+                if readonly_contract_assertions:
+                    self._register_pairwise_extra_assertions(
+                        base_ctx,
+                        pair_id,
+                        readonly_contract_assertions,
+                    )
+                else:
+                    self._clear_pairwise_extra_assertions(base_ctx, pair_id)
                 if self._cases_have_equivalent_runtime_reductions(
                     case1,
                     case2,
@@ -664,7 +678,8 @@ class PairwiseStrategy(CheckStrategy):
                         )
                         continue
                 else:
-                    self._clear_pairwise_extra_assertions(base_ctx, pair_id)
+                    if not readonly_contract_assertions:
+                        self._clear_pairwise_extra_assertions(base_ctx, pair_id)
 
                 result = self._solve_query_twostage(
                     base_ctx,
@@ -1190,18 +1205,31 @@ class PairwiseStrategy(CheckStrategy):
                 summary_case,
                 summary_ref,
             )
-        if getattr(summary_ref, "loop_summary", None) is None:
-            return None
-        result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
-        if max(1, int(getattr(summary_ref, "result_size", 0) or 0)) != result_size:
+        proof_result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+        if max(1, int(getattr(summary_ref, "result_size", 0) or 0)) != proof_result_size:
             return None
         if self._normalize_constant_bias(
             int(getattr(summary_ref, "constant_bias", 0) or 0),
-            result_size,
+            proof_result_size,
         ) != self._normalize_constant_bias(
             int(getattr(accumulator_proof, "constant_bias", 0) or 0),
-            result_size,
+            proof_result_size,
         ):
+            return None
+        exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
+        if exact_bits <= 0 or exact_bits % 8 != 0:
+            return None
+        result_size = exact_bits // 8
+        if result_size > proof_result_size:
+            return None
+        contract_key_fn = getattr(accumulator_proof, "readonly_term_sequence_contract_key", None)
+        if not callable(contract_key_fn):
+            return None
+        try:
+            contract_key = contract_key_fn(result_size=result_size)
+        except (AttributeError, TypeError, ValueError):
+            contract_key = None
+        if contract_key is None:
             return None
         extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
             exact_case.value_expr,
@@ -1209,12 +1237,17 @@ class PairwiseStrategy(CheckStrategy):
             getattr(accumulator_proof, "pointer_base_ref", None),
             program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
         )
+        if extracted is None and str(getattr(accumulator_proof, "reduction_kind", "") or "") == "fp_int2float_div_count_sum":
+            extracted = self._extract_fp_count_one_readonly_terms_and_bias_from_expression(
+                exact_case.value_expr,
+                exact_case.parameters,
+                getattr(accumulator_proof, "pointer_base_ref", None),
+                accumulator_proof=accumulator_proof,
+                program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
+            )
         if extracted is None:
             return None
         extracted_terms, extracted_bias = extracted
-        exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
-        if exact_bits != result_size * 8:
-            return None
         if self._normalize_constant_bias(extracted_bias, result_size) != self._normalize_constant_bias(
             int(getattr(accumulator_proof, "constant_bias", 0) or 0),
             result_size,
@@ -1250,6 +1283,188 @@ class PairwiseStrategy(CheckStrategy):
             constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
             result_size=result_size,
         )
+
+    def _extract_fp_count_one_readonly_terms_and_bias_from_expression(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        pointer_base_ref,
+        *,
+        accumulator_proof,
+        program_is_big_endian: Optional[bool] = None,
+    ) -> Optional[tuple[tuple[ReadonlyReductionTermRef, ...], int]]:
+        if expr is None or pointer_base_ref is None or accumulator_proof is None:
+            return None
+        terms = self._extract_fp_count_one_readonly_terms_from_expression(
+            expr,
+            parameters,
+            pointer_base_ref,
+            accumulator_proof=accumulator_proof,
+            program_is_big_endian=program_is_big_endian,
+        )
+        if terms is None:
+            return None
+        normalized_terms = tuple(sorted(terms, key=lambda item: (int(item.byte_offset), int(item.access_size))))
+        if not normalized_terms:
+            return None
+        return normalized_terms, 0
+
+    def _extract_fp_count_one_readonly_terms_from_expression(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        pointer_base_ref,
+        *,
+        accumulator_proof,
+        program_is_big_endian: Optional[bool] = None,
+    ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        if expr is None:
+            return None
+        if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+            return () if self._raw_constant_value(expr) == 0 else None
+        if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operands", None):
+            if getattr(expr, "operator", None) in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT", "CAST", "COPY"}:
+                return self._extract_fp_count_one_readonly_terms_from_expression(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    accumulator_proof=accumulator_proof,
+                    program_is_big_endian=program_is_big_endian,
+                )
+        if getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP and len(getattr(expr, "operands", ()) or ()) == 2:
+            if getattr(expr, "operator", None) == "FLOAT_ADD":
+                left = self._extract_fp_count_one_readonly_terms_from_expression(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    accumulator_proof=accumulator_proof,
+                    program_is_big_endian=program_is_big_endian,
+                )
+                right = self._extract_fp_count_one_readonly_terms_from_expression(
+                    expr.operands[1],
+                    parameters,
+                    pointer_base_ref,
+                    accumulator_proof=accumulator_proof,
+                    program_is_big_endian=program_is_big_endian,
+                )
+                if left is None or right is None:
+                    return None
+                return tuple(left) + tuple(right)
+            if getattr(expr, "operator", None) == "FLOAT_DIV":
+                if not self._fp_denominator_matches_reduction_count(
+                    expr.operands[1],
+                    parameters,
+                    accumulator_proof,
+                ):
+                    return None
+                return self._extract_fp_count_one_readonly_terms_from_expression(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    accumulator_proof=accumulator_proof,
+                    program_is_big_endian=program_is_big_endian,
+                )
+        descriptor = self._extract_readonly_reduction_term_descriptor(
+            expr,
+            parameters,
+            pointer_base_ref,
+            program_is_big_endian=program_is_big_endian,
+        )
+        if descriptor is None:
+            return None
+        return (descriptor,)
+
+    def _fp_denominator_matches_reduction_count(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        accumulator_proof,
+    ) -> bool:
+        if expr is None or accumulator_proof is None:
+            return False
+        if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operands", None):
+            if getattr(expr, "operator", None) in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT", "CAST", "COPY"}:
+                return self._fp_denominator_matches_reduction_count(
+                    expr.operands[0],
+                    parameters,
+                    accumulator_proof,
+                )
+        if getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP and len(getattr(expr, "operands", ()) or ()) == 2:
+            if getattr(expr, "operator", None) == "SUBPIECE":
+                return self._fp_denominator_matches_reduction_count(
+                    expr.operands[0],
+                    parameters,
+                    accumulator_proof,
+                )
+        if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        expr_storage = self._parameter_expression_storage_identity_key(expr)
+        expr_index = self._parameter_expression_index_identity_key(expr)
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
+        expr_identity = parameter_identity_key_from_expression(expr)
+        proof_identities = self._reduction_count_identity_keys(accumulator_proof)
+        if self._fp_denominator_count_identity_matches(
+            expr_storage,
+            expr_index,
+            proof_storage,
+            proof_index,
+        ):
+            return True
+        if expr_identity is not None and proof_identities:
+            return expr_identity is not None and tuple(expr_identity) in proof_identities
+        expr_has_identity = expr_storage is not None or expr_index is not None or expr_identity is not None
+        if expr_has_identity:
+            return False
+        return self._fp_denominator_name_fallback_matches_unique_count(
+            expr,
+            parameters,
+            accumulator_proof,
+        )
+
+    @staticmethod
+    def _fp_denominator_count_identity_matches(
+        expr_storage: Optional[tuple],
+        expr_index: Optional[tuple],
+        proof_storage: Optional[tuple],
+        proof_index: Optional[tuple],
+    ) -> bool:
+        if expr_storage is not None and proof_storage is not None:
+            if expr_storage == proof_storage:
+                return True
+            if expr_index is None or proof_index is None:
+                return False
+        if expr_index is not None and proof_index is not None:
+            return expr_index == proof_index
+        return False
+
+    def _fp_denominator_name_fallback_matches_unique_count(
+        self,
+        expr: Expression,
+        parameters: Sequence[Dict[str, Any]],
+        accumulator_proof,
+    ) -> bool:
+        count_parameter_name = str(getattr(accumulator_proof, "count_parameter_name", "") or "")
+        expr_name = str(getattr(expr, "name", "") or "")
+        if not count_parameter_name or expr_name != count_parameter_name:
+            return False
+        matching_parameters = tuple(
+            parameter
+            for parameter in parameters or ()
+            if isinstance(parameter, dict) and str(parameter.get("name") or "") == count_parameter_name
+        )
+        if len(matching_parameters) != 1:
+            return False
+        descriptor = matching_parameters[0]
+        descriptor_storage = self._parameter_descriptor_storage_identity_key(descriptor)
+        descriptor_index = self._parameter_descriptor_index_identity_key(descriptor)
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
+        if proof_storage is not None and descriptor_storage != proof_storage:
+            return False
+        if proof_index is not None and descriptor_index != proof_index:
+            return False
+        return proof_storage is not None or proof_index is not None
 
     def _prove_exact_load_sum_matches_readonly_loop_summary(
         self,
@@ -2321,6 +2536,83 @@ class PairwiseStrategy(CheckStrategy):
             return left_bits // 8
         return None
 
+    def _case_pair_readonly_contract_result_size(
+        self,
+        left_case: Optional[ReturnCase],
+        right_case: Optional[ReturnCase],
+    ) -> Optional[int]:
+        common_size = self._case_pair_comparison_result_size(left_case, right_case)
+        if common_size is not None:
+            return common_size
+        left_bits = self._case_comparison_bit_width(left_case)
+        right_bits = self._case_comparison_bit_width(right_case)
+        if (
+            left_bits is None
+            or right_bits is None
+            or left_bits <= 0
+            or right_bits <= 0
+            or left_bits % 8 != 0
+            or right_bits % 8 != 0
+        ):
+            return None
+        left_ref = getattr(getattr(left_case, "value_expr", None), "runtime_ref", None)
+        right_ref = getattr(getattr(right_case, "value_expr", None), "runtime_ref", None)
+        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
+            return None
+        narrow_size = min(int(left_bits), int(right_bits)) // 8
+        if narrow_size <= 0:
+            return None
+        if (
+            self._readonly_reduction_term_sequence_contract_key(left_ref, result_size=narrow_size) is None
+            or self._readonly_reduction_term_sequence_contract_key(right_ref, result_size=narrow_size) is None
+        ):
+            return None
+        return narrow_size
+
+    def _readonly_contract_pairwise_extra_assertions(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        left_param_replace_fn,
+        right_param_replace_fn,
+    ) -> Tuple[str, ...]:
+        result_size = self._case_pair_readonly_contract_result_size(left_case, right_case)
+        if result_size is None:
+            return ()
+        left_ref = getattr(getattr(left_case, "value_expr", None), "runtime_ref", None)
+        right_ref = getattr(getattr(right_case, "value_expr", None), "runtime_ref", None)
+        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
+            return ()
+        decision = self._runtime_loop_contract_shortcut_decision(
+            left_ref,
+            right_ref,
+            result_size=result_size,
+        )
+        if not decision.equivalent:
+            return ()
+        if decision.requires_guard_equivalence and not self._case_pair_has_runtime_guard_coverage_or_equivalence(
+            left_case,
+            right_case,
+        ):
+            return ()
+        target_bits = int(result_size) * 8
+        left_value = left_case.get_value_smt(
+            left_param_replace_fn,
+            target_bits=target_bits,
+            use_sign_extension=left_case.should_sign_extend_value(),
+        )
+        right_value = right_case.get_value_smt(
+            right_param_replace_fn,
+            target_bits=target_bits,
+            use_sign_extension=right_case.should_sign_extend_value(),
+        )
+        if not left_value or not right_value:
+            return ()
+        return (
+            "; readonly reduction contract equality at proven narrow return surface",
+            f"(assert (= {left_value} {right_value}))",
+        )
+
     def _case_comparison_bit_width(self, case: Optional[ReturnCase]) -> Optional[int]:
         if case is None:
             return None
@@ -2550,6 +2842,7 @@ class PairwiseStrategy(CheckStrategy):
         try:
             if index is not None and int(index) >= 0:
                 identities.add(("parameter", int(index)))
+                identities.add(("parameter_index", int(index)))
         except (TypeError, ValueError):
             pass
         return identities
@@ -2574,11 +2867,26 @@ class PairwiseStrategy(CheckStrategy):
         left_ref: ReadonlyReductionRef,
         right_ref: ReadonlyReductionRef,
     ) -> bool:
+        left_storage = self._readonly_count_storage_identity_key(left_ref)
+        right_storage = self._readonly_count_storage_identity_key(right_ref)
+        left_index = self._readonly_count_index_identity_key(left_ref)
+        right_index = self._readonly_count_index_identity_key(right_ref)
+        if left_storage is not None and right_storage is not None:
+            if left_storage == right_storage:
+                return True
+            if (
+                str(getattr(left_ref, "reduction_kind", "") or "").startswith("fp_")
+                and str(getattr(right_ref, "reduction_kind", "") or "").startswith("fp_")
+                and left_index is not None
+                and right_index is not None
+            ):
+                return left_index == right_index
+            return False
         return self._count_identity_components_compatible(
-            self._readonly_count_storage_identity_key(left_ref),
-            self._readonly_count_index_identity_key(left_ref),
-            self._readonly_count_storage_identity_key(right_ref),
-            self._readonly_count_index_identity_key(right_ref),
+            left_storage,
+            left_index,
+            right_storage,
+            right_index,
         )
 
     def _record_completed_readonly_identity_projection_proof_if_safe(
@@ -5235,7 +5543,7 @@ class PairwiseStrategy(CheckStrategy):
             loop_contract_decision = self._runtime_loop_contract_shortcut_decision(
                 getattr(left, "runtime_ref", None),
                 getattr(right, "runtime_ref", None),
-                result_size=self._case_pair_comparison_result_size(left_case, right_case),
+                result_size=self._case_pair_readonly_contract_result_size(left_case, right_case),
             )
             if loop_contract_decision.equivalent:
                 if loop_contract_decision.requires_guard_equivalence and (
@@ -5268,7 +5576,7 @@ class PairwiseStrategy(CheckStrategy):
                 decision = self._runtime_refs_shortcut_decision(
                     left_ref,
                     right_ref,
-                    result_size=self._case_pair_comparison_result_size(left_case, right_case),
+                    result_size=self._case_pair_readonly_contract_result_size(left_case, right_case),
                 )
                 if not decision.equivalent:
                     return decision.reason
@@ -8225,6 +8533,7 @@ class PairwiseStrategy(CheckStrategy):
         try:
             if index is not None and int(index) >= 0:
                 identities.add(("parameter", int(index)))
+                identities.add(("parameter_index", int(index)))
         except (TypeError, ValueError):
             pass
         return identities
@@ -9898,6 +10207,50 @@ class PairwiseStrategy(CheckStrategy):
             use_hard_timeout=True,
         )
         if high_bit_result.is_equivalent is not True:
+            widths = self._return_width_bridge_target_widths(target)
+            wide_param_replace_fn = (
+                param_replace_fn1
+                if widths is not None and widths[0] > widths[1]
+                else param_replace_fn2
+            )
+            if self._record_completed_return_width_bridge_semantic_narrowing_proofs(
+                reason_record,
+                analysis1,
+                analysis2,
+                narrow_width=narrow_width,
+                base_ctx=base_ctx,
+                wide_param_replace_fn=wide_param_replace_fn,
+            ) and self._return_width_bridge_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+                base_ctx=base_ctx,
+                wide_param_replace_fn=wide_param_replace_fn,
+            ):
+                proof_result.last_query = narrow_query
+                proof_result.pair_stage = "return-width-bridge-narrow-ineq"
+                self._debug_print(
+                    "  Pair "
+                    f"{pair_id}: return-width bridge completed by semantic return-width narrowing proof"
+                )
+                return proof_result
+            if self._record_completed_return_width_bridge_member_narrow_producer_proofs(
+                reason_record,
+                analysis1,
+                analysis2,
+                narrow_width=narrow_width,
+            ) and self._return_width_bridge_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+            ):
+                proof_result.last_query = narrow_query
+                proof_result.pair_stage = "return-width-bridge-narrow-ineq"
+                self._debug_print(
+                    "  Pair "
+                    f"{pair_id}: return-width bridge completed by target member narrow producer proof"
+                )
+                return proof_result
             self._debug_print(
                 "  Pair "
                 f"{pair_id} return-width bridge proof skipped: high-bit query was not UNSAT"

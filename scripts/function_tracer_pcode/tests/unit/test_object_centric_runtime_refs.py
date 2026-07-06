@@ -3938,3 +3938,49 @@ def test_post_state_symbolic_locations_bind_parameter_indices():
     assert isinstance(runtime_ref, PostStateReadRef)
     assert runtime_ref.location.base_ref == LocationBaseRef.parameter("trace", index=0)
     assert runtime_ref.snapshot_ref == PostStateSnapshotRef.function_return()
+
+
+def test_fp_readonly_reduction_contract_allows_narrow_result_surface():
+    proof = ReductionAccumulatorProof(
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        stride=4,
+        element_size=4,
+        result_size=16,
+        start_index=0,
+        start_offset=0,
+        reduction_kind="fp_int2float_div_count_sum",
+    )
+
+    key = proof.readonly_term_sequence_contract_key(result_size=8)
+
+    assert key is not None
+    assert key[5] == 8
+
+
+def test_readonly_count_identity_prefers_matching_parameter_index_over_storage_mismatch():
+    strategy = PairwiseStrategy(None, None, debug=False)
+    left = ReadonlyReductionRef(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=("register", "w0", 4),
+        stride=4,
+        element_size=4,
+        result_size=16,
+    )
+    right = ReadonlyReductionRef(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=("register", "a0", 4),
+        stride=4,
+        element_size=4,
+        result_size=8,
+    )
+
+    assert strategy._readonly_count_identities_compatible(left, right)

@@ -12399,12 +12399,9 @@ class ReturnAnalyzer:
         if summary is None:
             return analysis
 
-        analysis.returns = summary[0]
-        if summary[1] not in analysis.analysis_notes:
-            analysis.analysis_notes.append(summary[1])
-        self._normalize_return_partition(analysis)
-        self._mark_incomplete_control_flow(analysis)
-        return analysis
+        self._normalize_return_partition(summary)
+        self._mark_incomplete_control_flow(summary)
+        return summary
 
     def get_last_function_lookup_error(self) -> Optional[str]:
         return self._last_function_lookup_error

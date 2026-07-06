@@ -3,8 +3,10 @@
 from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.summary_returns import (
+    _canonicalize_conditions_for_analysis_parameters,
     _return_info_identity_key,
     _return_is_exact_seed,
+    _return_partition_covers_active_precondition,
     accept_summary_return_candidates,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
@@ -797,6 +799,40 @@ def test_summary_candidate_non_total_partition_keeps_coverage_gap():
     assert result.accepted_returns == ()
     assert "summary_partition_not_total:active_precondition_not_covered" in result.blockers
     assert len(analysis.returns) == 2
+
+
+def test_summary_partition_coverage_rejects_duplicate_name_only_guard_canonicalization():
+    indexed_n = Expression.parameter("n", index=1, size=4)
+    name_only_n = Expression.parameter("n", index=-1, size=4)
+    exact_nonpositive = ReturnInfo(
+        address="0x1000",
+        value=_const(0),
+        conditions=[_cond("INT_SLESS", indexed_n, _const(1))],
+        pcode_identity="return:n1_nonpositive",
+    )
+    summary_positive = ReturnInfo(
+        address="0x1004",
+        value=_summary_const(1),
+        conditions=[_cond("INT_SLESSEQUAL", _const(1), name_only_n)],
+        pcode_identity="summary:name_only_positive",
+        return_kind="summary_derived",
+    )
+    parameters = [
+        _param("n", index=0),
+        _param("n", index=1),
+    ]
+
+    normalized_summary = _canonicalize_conditions_for_analysis_parameters(
+        summary_positive.conditions,
+        parameters,
+    )
+
+    assert normalized_summary[0].expression.operands[1].value == -1
+    assert _return_partition_covers_active_precondition(
+        (exact_nonpositive, summary_positive),
+        (),
+        parameters=parameters,
+    ) is False
 
 
 def test_resolved_phi_expansion_counts_as_exact_seed_for_partition_coverage():
