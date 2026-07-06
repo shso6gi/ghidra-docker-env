@@ -8211,6 +8211,7 @@ class StructuralRecurrenceSummarizer:
             }
         loop_value = self._build_multiplicative_state_transition_loop_value(
             model=model,
+            analysis=analysis,
             side_effect_profile=side_effect_profile,
             result_size=result_size,
         )
@@ -8340,6 +8341,7 @@ class StructuralRecurrenceSummarizer:
         self,
         *,
         model: StateTransitionLoopModel,
+        analysis,
         side_effect_profile: LoopSideEffectProfileRef,
         result_size: int,
     ) -> Optional[Expression]:
@@ -8382,9 +8384,10 @@ class StructuralRecurrenceSummarizer:
             Expression.constant(int(multiplier), size=result_size),
         )
         transition_expr.size = result_size
-        start_expr = self._state_transition_iteration_start_expr(
-            model.state_guard_expr,
-            model.state_placeholder,
+        start_expr = self._multiplicative_state_transition_iteration_start_expr(
+            model=model,
+            analysis=analysis,
+            result_size=result_size,
             size=max(1, int(getattr(model.state_init_expr, "size", 0) or 4)),
         )
         if start_expr is None:
@@ -8430,10 +8433,148 @@ class StructuralRecurrenceSummarizer:
             return None
         return Expression.constant(int(stop_value), size=max(1, int(size or 4)))
 
+    def _multiplicative_state_transition_iteration_start_expr(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        analysis,
+        result_size: int,
+        size: int,
+    ) -> Optional[Expression]:
+        stop_value = self._state_transition_guard_stop_constant(
+            model.state_guard_expr,
+            model.state_placeholder,
+            allow_nonzero=True,
+        )
+        if stop_value is None:
+            return None
+        stop_value = int(stop_value)
+        if stop_value == 0:
+            return Expression.constant(0, size=max(1, int(size or 4)))
+        if stop_value == 1 and self._has_exact_accumulator_init_return_at_state_one(
+            analysis=analysis,
+            state_expr=model.state_init_expr,
+            accumulator_init=model.accumulator_init_expr,
+            result_size=result_size,
+        ):
+            return Expression.constant(1, size=max(1, int(size or 4)))
+        return None
+
+    def _has_exact_accumulator_init_return_at_state_one(
+        self,
+        *,
+        analysis,
+        state_expr: Expression,
+        accumulator_init: Expression,
+        result_size: int,
+    ) -> bool:
+        expected_value = self._coerce_summary_expression_to_size(
+            accumulator_init,
+            max(1, int(result_size or getattr(accumulator_init, "size", 0) or 4)),
+            signed=self._expression_prefers_signed_extension(accumulator_init),
+        )
+        expected_value = self._canonicalize_expression(expected_value)
+        if expected_value is None or self._expression_is_unresolved(expected_value):
+            return False
+        state_one_expr = Expression.binary_op(
+            "INT_EQUAL",
+            self._canonicalize_expression(state_expr),
+            Expression.constant(
+                1,
+                size=max(1, int(getattr(state_expr, "size", 0) or result_size or 4)),
+            ),
+        )
+        state_one_expr.size = 1
+        state_one_condition = Condition(self._canonicalize_expression(state_one_expr), False)
+        active_preconditions = self._analysis_active_preconditions(analysis)
+        region_conditions = tuple(active_preconditions or ()) + (state_one_condition,)
+        exact_anchor_returns: List[ReturnInfo] = []
+        for ret in tuple(getattr(analysis, "returns", ()) or ()):
+            if not self._return_is_exact_anchor_seed(ret):
+                continue
+            conditions = tuple(getattr(ret, "conditions", ()) or ())
+            if not self._conditions_overlap_conditions(conditions, region_conditions):
+                continue
+            value = self._coerce_summary_expression_to_size(
+                getattr(ret, "value", None),
+                max(1, int(result_size or getattr(expected_value, "size", 0) or 4)),
+                signed=self._expression_prefers_signed_extension(expected_value),
+            )
+            value = self._canonicalize_expression(value)
+            if value is None or self._expression_is_unresolved(value):
+                continue
+            if not self._return_value_equals_under_conditions(
+                value,
+                expected_value,
+                region_conditions + conditions,
+            ):
+                return False
+            exact_anchor_returns.append(ret)
+        if not exact_anchor_returns:
+            return False
+        if any(not tuple(getattr(ret, "conditions", None) or ()) for ret in exact_anchor_returns):
+            return True
+        coverage_key = self._prove_return_conditions_cover_region(
+            region_conditions=region_conditions,
+            returns=exact_anchor_returns,
+        )
+        return coverage_key is not None
+
+    def _return_is_exact_anchor_seed(self, ret: ReturnInfo) -> bool:
+        if str(getattr(ret, "return_kind", "exact") or "exact") != "exact":
+            return False
+        if self._expression_is_unresolved(getattr(ret, "value", None)):
+            return False
+        if getattr(ret, "summary_candidate_id", None) is not None:
+            return False
+        if getattr(ret, "summary_candidate_source_key", None) is not None:
+            return False
+        if getattr(ret, "summary_transition_evidence_key", None) is not None:
+            return False
+        for node in self._iter_expression_nodes(getattr(ret, "value", None)):
+            runtime_ref = getattr(node, "runtime_ref", None)
+            for owner in (
+                runtime_ref,
+                getattr(runtime_ref, "loop_summary", None),
+                getattr(runtime_ref, "accumulator_proof", None),
+                getattr(runtime_ref, "proof", None),
+            ):
+                stable_key = self._stable_key_or_none(owner)
+                if stable_key is not None and self._stable_key_looks_like_loop_summary(stable_key):
+                    return False
+        return True
+
+    def _stable_key_or_none(self, value) -> Optional[Tuple[Any, ...]]:
+        if value is None:
+            return None
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+            except Exception:
+                return None
+            if key is None:
+                return None
+            return key if isinstance(key, tuple) else ("stable", key)
+        if isinstance(value, tuple):
+            return value
+        return None
+
+    def _stable_key_looks_like_loop_summary(self, stable_key: Tuple[Any, ...]) -> bool:
+        text = repr(stable_key)
+        return (
+            "loop_summary" in text
+            or "COUNTED_LOOP" in text
+            or "STATE_TRANSITION_LOOP" in text
+            or "READONLY_SUM" in text
+        )
+
     def _state_transition_guard_stop_constant(
         self,
         state_guard: Optional[Expression],
         state_placeholder: Expression,
+        *,
+        allow_nonzero: bool = False,
     ) -> Optional[int]:
         guard = self._canonicalize_expression(state_guard)
         if guard is None:
@@ -8447,7 +8588,11 @@ class StructuralRecurrenceSummarizer:
             for operand in self._flatten_bool_and_expression(guard):
                 if not self._expression_mentions_placeholder(operand, state_placeholder):
                     continue
-                stop = self._state_transition_guard_stop_constant(operand, state_placeholder)
+                stop = self._state_transition_guard_stop_constant(
+                    operand,
+                    state_placeholder,
+                    allow_nonzero=allow_nonzero,
+                )
                 if stop is None:
                     return None
                 state_dependent_stops.append(int(stop))
@@ -8468,15 +8613,19 @@ class StructuralRecurrenceSummarizer:
                 affine = self._extract_affine_placeholder_term(left, state_placeholder)
                 if affine is not None:
                     coeff, bias = affine
-                    if int(coeff) == 1 and int(bias) == 0:
-                        return 0
+                    if int(coeff) == 1:
+                        stop = -int(bias)
+                        if stop == 0 or allow_nonzero:
+                            return stop
             left_const = self._raw_constant_value(left)
             if left_const == 0:
                 affine = self._extract_affine_placeholder_term(right, state_placeholder)
                 if affine is not None:
                     coeff, bias = affine
-                    if int(coeff) == 1 and int(bias) == 0:
-                        return 0
+                    if int(coeff) == 1:
+                        stop = -int(bias)
+                        if stop == 0 or allow_nonzero:
+                            return stop
         if (
             guard.expr_type == ExpressionType.BINARY_OP
             and guard.operator == "INT_SLESS"

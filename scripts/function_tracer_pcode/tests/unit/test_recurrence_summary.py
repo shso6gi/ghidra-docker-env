@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     CountedLoopUpdateCase,
     ReadonlyRoundedCountCandidate,
     ResidueLoopCase,
+    StateTransitionLoopModel,
     StructuralRecurrenceSummarizer,
 )
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
@@ -3044,6 +3045,344 @@ def test_multiplicative_state_transition_start_requires_proved_zero_stop():
     assert summarizer._state_transition_iteration_start_expr(
         compound_nonzero_stop_guard,
         state,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_accepts_one_stop_with_exact_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    analysis = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[_cond("INT_EQUAL", Expression.binary_op("INT_ADD", n, Expression.constant(0xFFFFFFFF, size=4)), _const(0))],
+            ),
+        ],
+    )
+
+    start = summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=analysis,
+        result_size=4,
+        size=4,
+    )
+
+    assert start is not None
+    assert start.structural_key() == _const(1).structural_key()
+
+
+def test_multiplicative_state_transition_start_rejects_one_stop_without_exact_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    missing_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[],
+    )
+    wrong_value_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(2),
+                conditions=[_cond("INT_EQUAL", Expression.binary_op("INT_ADD", n, Expression.constant(0xFFFFFFFF, size=4)), _const(0))],
+            ),
+        ],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=missing_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=wrong_value_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_partial_one_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    flag = _param("param_2")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    partial_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[
+                    _cond("INT_EQUAL", n, _const(1)),
+                    _cond("INT_SLESS", _const(0), flag),
+                ],
+            ),
+        ],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=partial_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_contradictory_one_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    flag = _param("param_2")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    contradictory_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[
+                    _cond("INT_EQUAL", n, _const(1)),
+                    _cond("INT_SLESS", _const(0), flag),
+                    _cond("INT_SLESSEQUAL", flag, _const(0)),
+                ],
+            ),
+        ],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=contradictory_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_phi_expansion_one_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    phi_expansion_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[_cond("INT_EQUAL", n, _const(1))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=phi_expansion_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_model_only_zero_iteration_anchor(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    monkeypatch.setattr(summarizer, "_varnode_reaches_return", lambda _varnode: True)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    accumulator_output = object()
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=accumulator_output,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    no_exact_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=no_exact_anchor,
+        result_size=4,
         size=4,
     ) is None
 
