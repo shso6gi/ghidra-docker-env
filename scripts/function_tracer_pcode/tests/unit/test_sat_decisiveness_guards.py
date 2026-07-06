@@ -1096,6 +1096,69 @@ def _return_coverage_completion_evidence_without_proof_id(action):
     return evidence
 
 
+def _normalization_aware_return_coverage_evidence(action):
+    evidence = _return_coverage_completion_evidence(action)
+    policy = PairwiseStrategy._return_coverage_normalization_policy(
+        rules=(
+            {
+                "rule_id": "subpiece_low32_guard",
+                "expression_kind": "guard",
+                "width": 32,
+                "signedness": "signed",
+            },
+        )
+    )
+    policy_digest = PairwiseStrategy._return_coverage_normalization_policy_digest(policy)
+    query = evidence["proof_content"]["normalized_guard_formula"]["query"]
+    raw_identity = ("raw_guard_identity", ("guard", "raw"))
+    normalized_identity = ("normalized_guard_identity", ("guard", "normalized"))
+    evidence["proof_schema_version"] = PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION
+    evidence["normalization_required"] = True
+    evidence["proof_content"] = deepcopy(evidence["proof_content"])
+    evidence["proof_content"].update(
+        {
+            "proof_schema_version": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION,
+            "normalization_required": True,
+            "normalization_policy": policy,
+            "normalization_policy_digest": policy_digest,
+            "raw_normalized_correspondence": {
+                "status": "complete",
+                "normalization_policy_digest": policy_digest,
+                "raw_guard_identity": raw_identity,
+                "normalized_guard_identity": normalized_identity,
+                "rule_id": "subpiece_low32_guard",
+                "before_structural_key": ("before", raw_identity),
+                "after_structural_key": ("after", normalized_identity),
+                "equivalence_proof": {
+                    "status": "unsat",
+                    "proof_method": "smt_equivalence_under_active_guard",
+                },
+            },
+            "normalized_guard_payload": {
+                "normalization_policy_digest": policy_digest,
+                "raw_identity": raw_identity,
+                "normalized_identity": normalized_identity,
+                "final_query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            },
+        }
+    )
+    return evidence
+
+
+def _retarget_return_coverage_evidence(evidence, object_target_key):
+    retargeted = deepcopy(evidence)
+    retargeted["object_target_key"] = object_target_key
+    retargeted["proof_content"]["proof_target_identity"] = object_target_key
+    retargeted["proof_obligation_id"] = build_proof_obligation_id(
+        retargeted["reason_id"],
+        retargeted["proof_stage"],
+        retargeted["recovery_proof_kind"],
+        retargeted["evidence_kind"],
+        object_target_key,
+    )
+    return retargeted
+
+
 def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrides):
     if counterexample_raw is None:
         counterexample_raw = {"x_1": 0, "x_2": 0}
@@ -8535,6 +8598,192 @@ def test_return_coverage_completed_evidence_rejects_structural_content_mismatch(
     miss_keys[0] = ("case_miss_formula", 0, ("expression", "wrong_miss_formula"))
     miss_mismatch["proof_content"]["structural_miss_formula_keys"]["keys"] = tuple(miss_keys)
     assert strategy._return_coverage_proof_id_from_evidence(miss_mismatch) is None
+
+
+def test_return_coverage_normalization_required_uses_normalization_aware_schema():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    strict_evidence = _return_coverage_completion_evidence(action)
+    strict_evidence["normalization_required"] = True
+    strict_evidence["proof_content"] = deepcopy(strict_evidence["proof_content"])
+    strict_evidence["proof_content"]["normalization_required"] = True
+    assert strategy._return_coverage_proof_id_from_evidence(strict_evidence) is None
+
+    normalization_aware = _normalization_aware_return_coverage_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(normalization_aware) == action.proof_obligation_id
+
+
+def test_return_coverage_normalization_required_by_target_digest_rejects_strict_schema():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    normalization_aware = _normalization_aware_return_coverage_evidence(action)
+    digest = normalization_aware["proof_content"]["normalization_policy_digest"]
+    target_with_digest = action.object_target_key + (("normalization_policy_digest", digest),)
+
+    strict_evidence = _retarget_return_coverage_evidence(
+        _return_coverage_completion_evidence(action),
+        target_with_digest,
+    )
+    assert strategy._return_coverage_proof_id_from_evidence(strict_evidence) is None
+
+    retargeted_normalized = _retarget_return_coverage_evidence(
+        normalization_aware,
+        target_with_digest,
+    )
+    assert strategy._return_coverage_proof_id_from_evidence(
+        retargeted_normalized
+    ) == retargeted_normalized["proof_obligation_id"]
+
+    digest_mismatch = deepcopy(retargeted_normalized)
+    digest_mismatch["proof_content"]["normalization_policy_digest"] = "0" * 64
+    assert strategy._return_coverage_proof_id_from_evidence(digest_mismatch) is None
+
+
+def test_return_coverage_normalization_policy_digest_is_canonical():
+    policy_a = PairwiseStrategy._return_coverage_normalization_policy(
+        rules=(
+            {"rule_id": "z_rule", "width": 64},
+            {"width": 32, "rule_id": "a_rule"},
+        )
+    )
+    policy_b = {
+        "rules": (
+            {"rule_id": "a_rule", "width": 32},
+            {"width": 64, "rule_id": "z_rule"},
+        ),
+        "canonical_encoding_version": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_CANONICAL_ENCODING_VERSION,
+        "rule_set_version": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_RULESET_VERSION,
+        "normalization_schema_version": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION,
+        "normalization_policy_id": PairwiseStrategy._RETURN_COVERAGE_NORMALIZATION_POLICY_ID,
+    }
+
+    assert PairwiseStrategy._return_coverage_normalization_policy_digest(policy_a) == (
+        PairwiseStrategy._return_coverage_normalization_policy_digest(policy_b)
+    )
+
+
+def test_return_coverage_normalization_policy_rejects_unsupported_ruleset_version():
+    policy = PairwiseStrategy._return_coverage_normalization_policy(
+        rules=({"rule_id": "a_rule", "width": 32},)
+    )
+    unsupported = dict(policy)
+    unsupported["rule_set_version"] = 999
+
+    assert PairwiseStrategy._return_coverage_normalization_policy_digest(unsupported) is None
+
+
+def test_return_coverage_normalization_aware_rejects_payload_mismatch():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    valid = _normalization_aware_return_coverage_evidence(action)
+    assert strategy._return_coverage_proof_id_from_evidence(valid) == action.proof_obligation_id
+
+    digest_mismatch = deepcopy(valid)
+    digest_mismatch["proof_content"]["normalization_policy_digest"] = "0" * 64
+    assert strategy._return_coverage_proof_id_from_evidence(digest_mismatch) is None
+
+    correspondence_mismatch = deepcopy(valid)
+    correspondence_mismatch["proof_content"]["raw_normalized_correspondence"][
+        "normalized_guard_identity"
+    ] = ("normalized_guard_identity", ("guard", "different"))
+    assert strategy._return_coverage_proof_id_from_evidence(correspondence_mismatch) is None
+
+    hash_mismatch = deepcopy(valid)
+    hash_mismatch["proof_content"]["normalized_guard_payload"]["final_query_sha256"] = "1" * 64
+    assert strategy._return_coverage_proof_id_from_evidence(hash_mismatch) is None
+
+    missing_hash = deepcopy(valid)
+    missing_hash["proof_content"]["normalized_guard_payload"].pop("final_query_sha256")
+    assert strategy._return_coverage_proof_id_from_evidence(missing_hash) is None
+
+    broken_value_payload = deepcopy(valid)
+    query = broken_value_payload["proof_content"]["normalized_guard_formula"]["query"]
+    digest = broken_value_payload["proof_content"]["normalization_policy_digest"]
+    broken_value_payload["proof_content"]["raw_normalized_correspondence"][
+        "raw_value_identity"
+    ] = ("raw_value_identity", ("value", "raw"))
+    broken_value_payload["proof_content"]["raw_normalized_correspondence"][
+        "normalized_value_identity"
+    ] = ("normalized_value_identity", ("value", "normalized"))
+    broken_value_payload["proof_content"]["normalized_value_payload"] = {
+        "normalization_policy_digest": digest,
+        "raw_identity": ("raw_value_identity", ("value", "raw")),
+        "normalized_identity": ("normalized_value_identity", ("value", "different")),
+        "final_query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+    }
+    assert strategy._return_coverage_proof_id_from_evidence(broken_value_payload) is None
+
+    value_without_correspondence = deepcopy(valid)
+    value_without_correspondence["proof_content"]["normalized_value_payload"] = {
+        "normalization_policy_digest": value_without_correspondence["proof_content"][
+            "normalization_policy_digest"
+        ],
+        "raw_identity": ("raw_value_identity", ("value", "raw")),
+        "normalized_identity": ("normalized_value_identity", ("value", "normalized")),
+        "final_query_sha256": hashlib.sha256(
+            value_without_correspondence["proof_content"]["normalized_guard_formula"]["query"].encode(
+                "utf-8"
+            )
+        ).hexdigest(),
+    }
+    assert strategy._return_coverage_proof_id_from_evidence(value_without_correspondence) is None
+
+    address_without_correspondence = deepcopy(valid)
+    address_without_correspondence["proof_content"]["normalized_address_payload"] = {
+        "normalization_policy_digest": address_without_correspondence["proof_content"][
+            "normalization_policy_digest"
+        ],
+        "raw_identity": ("raw_address_identity", ("address", "raw")),
+        "normalized_identity": ("normalized_address_identity", ("address", "normalized")),
+        "final_query_sha256": hashlib.sha256(
+            address_without_correspondence["proof_content"]["normalized_guard_formula"][
+                "query"
+            ].encode("utf-8")
+        ).hexdigest(),
+    }
+    assert strategy._return_coverage_proof_id_from_evidence(address_without_correspondence) is None
+
+
+def test_return_coverage_common_proof_reason_scope_is_enforced():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _coverage_identity_analysis(binary_id="B1")
+    analysis2 = _coverage_identity_analysis(binary_id="B2")
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    evidence = _return_coverage_completion_evidence(action)
+    evidence["proof_content"] = deepcopy(evidence["proof_content"])
+    evidence["proof_content"]["applicable_reason_ids"] = (UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,)
+
+    assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
 
 
 def test_return_coverage_target_identity_validator_rejects_raw_object_leaf():

@@ -76,7 +76,11 @@ class CheckStrategy(ABC):
 
     _RETURN_COVERAGE_TARGET_SCHEMA_VERSION = 3
     _RETURN_COVERAGE_PROOF_SCHEMA_VERSION = 2
+    _RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION = 3
     _RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION = 1
+    _RETURN_COVERAGE_NORMALIZATION_POLICY_ID = "return-coverage-proof-scoped-normalization"
+    _RETURN_COVERAGE_NORMALIZATION_RULESET_VERSION = 1
+    _RETURN_COVERAGE_NORMALIZATION_CANONICAL_ENCODING_VERSION = 1
     _RETURN_COVERAGE_DISCHARGEABLE_INCONCLUSIVE_CAUSES = {
         "solver_timeout",
         "smt_disambiguation_inconclusive",
@@ -784,6 +788,96 @@ class CheckStrategy(ABC):
     @staticmethod
     def _canonicalize_key_sequence(values: Sequence[Any]) -> Tuple[Any, ...]:
         return tuple(sorted(tuple(values or ()), key=repr))
+
+    @classmethod
+    def _return_coverage_normalization_policy(cls, *, rules: Sequence[Any] = ()) -> Dict[str, Any]:
+        return {
+            "normalization_policy_id": cls._RETURN_COVERAGE_NORMALIZATION_POLICY_ID,
+            "normalization_schema_version": cls._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION,
+            "rule_set_version": cls._RETURN_COVERAGE_NORMALIZATION_RULESET_VERSION,
+            "canonical_encoding_version": cls._RETURN_COVERAGE_NORMALIZATION_CANONICAL_ENCODING_VERSION,
+            "rules": tuple(sorted(tuple(rules or ()), key=repr)),
+        }
+
+    @classmethod
+    def _canonical_jsonable_for_digest(cls, value: Any) -> Optional[Any]:
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        if isinstance(value, Mapping):
+            result = {}
+            for key in sorted(value.keys(), key=lambda item: str(item)):
+                if not isinstance(key, str):
+                    return None
+                normalized = cls._canonical_jsonable_for_digest(value[key])
+                if normalized is None and value[key] is not None:
+                    return None
+                result[key] = normalized
+            return result
+        if isinstance(value, (tuple, list)):
+            result = []
+            for item in value:
+                normalized = cls._canonical_jsonable_for_digest(item)
+                if normalized is None and item is not None:
+                    return None
+                result.append(normalized)
+            return result
+        return None
+
+    @classmethod
+    def _canonical_json_digest(cls, value: Any) -> Optional[str]:
+        canonical = cls._canonical_jsonable_for_digest(value)
+        if canonical is None and value is not None:
+            return None
+        try:
+            payload = json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _return_coverage_normalization_policy_digest(cls, policy: Mapping[str, Any]) -> Optional[str]:
+        if not isinstance(policy, Mapping):
+            return None
+        required = {
+            "normalization_policy_id",
+            "normalization_schema_version",
+            "rule_set_version",
+            "canonical_encoding_version",
+            "rules",
+        }
+        if not required.issubset(set(policy.keys())):
+            return None
+        if policy.get("normalization_policy_id") != cls._RETURN_COVERAGE_NORMALIZATION_POLICY_ID:
+            return None
+        if policy.get("normalization_schema_version") != cls._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION:
+            return None
+        if policy.get("rule_set_version") != cls._RETURN_COVERAGE_NORMALIZATION_RULESET_VERSION:
+            return None
+        if policy.get("canonical_encoding_version") != cls._RETURN_COVERAGE_NORMALIZATION_CANONICAL_ENCODING_VERSION:
+            return None
+        rules = policy.get("rules")
+        if not isinstance(rules, (tuple, list)):
+            return None
+        normalized_rules = []
+        for rule in rules:
+            if not isinstance(rule, Mapping) or not isinstance(rule.get("rule_id"), str):
+                return None
+            normalized_rules.append({key: rule[key] for key in sorted(rule.keys())})
+        normalized_rules.sort(key=lambda item: str(item.get("rule_id")))
+        return cls._canonical_json_digest(
+            {
+                "canonical_encoding_version": policy.get("canonical_encoding_version"),
+                "normalization_policy_id": policy.get("normalization_policy_id"),
+                "normalization_schema_version": policy.get("normalization_schema_version"),
+                "rule_set_version": policy.get("rule_set_version"),
+                "rules": tuple(normalized_rules),
+            }
+        )
 
     @classmethod
     def _collect_condition_width_sign_metadata(
@@ -7105,7 +7199,11 @@ class CheckStrategy(ABC):
     ) -> bool:
         if cls._evidence_get(evidence, "target_schema_version") != cls._RETURN_COVERAGE_TARGET_SCHEMA_VERSION:
             return False
-        if cls._evidence_get(evidence, "proof_schema_version") != cls._RETURN_COVERAGE_PROOF_SCHEMA_VERSION:
+        evidence_schema = cls._evidence_get(evidence, "proof_schema_version")
+        if evidence_schema not in {
+            cls._RETURN_COVERAGE_PROOF_SCHEMA_VERSION,
+            cls._RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION,
+        }:
             return False
         if reason_id is not None:
             evidence_reason_id = cls._evidence_text(evidence, "reason_id")
@@ -7114,14 +7212,39 @@ class CheckStrategy(ABC):
         proof_content = cls._evidence_get(evidence, "proof_content")
         if not isinstance(proof_content, Mapping):
             return False
+        if reason_id is not None:
+            applicable_reason_ids = cls._normalize_nested_tuple(
+                cls._evidence_get(evidence, "applicable_reason_ids")
+            )
+            if applicable_reason_ids is None:
+                applicable_reason_ids = cls._normalize_nested_tuple(
+                    proof_content.get("applicable_reason_ids")
+                )
+            if applicable_reason_ids is not None and reason_id.value not in set(applicable_reason_ids):
+                return False
         evidence_target = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
         proof_target = cls._normalize_nested_tuple(proof_content.get("proof_target_identity"))
         if proof_target != evidence_target:
             return False
-        if proof_content.get("proof_schema_version") != cls._RETURN_COVERAGE_PROOF_SCHEMA_VERSION:
+        content_schema = proof_content.get("proof_schema_version")
+        if content_schema != evidence_schema:
             return False
         if proof_content.get("normalization_schema_version") != cls._RETURN_COVERAGE_NORMALIZATION_SCHEMA_VERSION:
             return False
+        normalization_required = cls._return_coverage_normalization_required(
+            evidence,
+            proof_content,
+            evidence_target,
+        )
+        if normalization_required and evidence_schema != cls._RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION:
+            return False
+        if evidence_schema == cls._RETURN_COVERAGE_NORMALIZATION_AWARE_PROOF_SCHEMA_VERSION:
+            if not cls._return_coverage_normalization_proof_content_is_complete(
+                proof_content,
+                evidence_target,
+                required=normalization_required,
+            ):
+                return False
         if not cls._return_coverage_structural_proof_content_is_complete(proof_content):
             return False
         if not cls._return_coverage_structural_proof_content_matches_target(
@@ -7156,6 +7279,167 @@ class CheckStrategy(ABC):
                 if solver_status in {"unknown", "timeout", "error", "inconclusive"}:
                     return False
         return True
+
+    @classmethod
+    def _return_coverage_normalization_required(
+        cls,
+        evidence: Mapping[str, Any],
+        proof_content: Mapping[str, Any],
+        object_target_key: Any,
+    ) -> bool:
+        if cls._evidence_bool(evidence, "normalization_required") or bool(
+            proof_content.get("normalization_required")
+        ):
+            return True
+        if cls._nested_contains_tag(object_target_key, "normalization_policy_digest"):
+            return True
+        for key in (
+            "normalized_guard_payload",
+            "normalized_value_payload",
+            "normalized_address_payload",
+            "raw_normalized_correspondence",
+        ):
+            if key in proof_content:
+                return True
+        return False
+
+    @classmethod
+    def _nested_contains_tag(cls, value: Any, tag: str) -> bool:
+        if isinstance(value, Mapping):
+            return any(cls._nested_contains_tag(item, tag) for item in value.values())
+        if isinstance(value, tuple):
+            if value and value[0] == tag:
+                return True
+            return any(cls._nested_contains_tag(item, tag) for item in value)
+        if isinstance(value, list):
+            return any(cls._nested_contains_tag(item, tag) for item in value)
+        return False
+
+    @classmethod
+    def _return_coverage_normalization_proof_content_is_complete(
+        cls,
+        proof_content: Mapping[str, Any],
+        object_target_key: Any,
+        *,
+        required: bool,
+    ) -> bool:
+        policy = proof_content.get("normalization_policy")
+        policy_digest = proof_content.get("normalization_policy_digest")
+        if not isinstance(policy, Mapping) or not isinstance(policy_digest, str) or not policy_digest:
+            return not required
+        if cls._return_coverage_normalization_policy_digest(policy) != policy_digest:
+            return False
+        target_digest = cls._normalization_policy_digest_from_target(object_target_key)
+        if target_digest is not None and target_digest != policy_digest:
+            return False
+        correspondence = proof_content.get("raw_normalized_correspondence")
+        if not isinstance(correspondence, Mapping):
+            return not required
+        if cls._evidence_text(correspondence, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if correspondence.get("normalization_policy_digest") != policy_digest:
+            return False
+        raw_identity = cls._normalize_nested_tuple(correspondence.get("raw_guard_identity"))
+        normalized_identity = cls._normalize_nested_tuple(correspondence.get("normalized_guard_identity"))
+        before_key = cls._normalize_nested_tuple(correspondence.get("before_structural_key"))
+        after_key = cls._normalize_nested_tuple(correspondence.get("after_structural_key"))
+        if raw_identity is None or normalized_identity is None or before_key is None or after_key is None:
+            return False
+        if not correspondence.get("rule_id"):
+            return False
+        equivalence_proof = correspondence.get("equivalence_proof")
+        if not isinstance(equivalence_proof, Mapping):
+            return False
+        if cls._evidence_text(equivalence_proof, "status") not in {"complete", "completed", "proven", "unsat"}:
+            return False
+        normalized_guard_formula = proof_content.get("normalized_guard_formula")
+        if not isinstance(normalized_guard_formula, Mapping):
+            return False
+        query = normalized_guard_formula.get("query")
+        if not isinstance(query, str) or not query:
+            return False
+        expected_query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        payloads: List[Tuple[str, Mapping[str, Any]]] = []
+        for kind, key in (
+            ("guard", "normalized_guard_payload"),
+            ("value", "normalized_value_payload"),
+            ("address", "normalized_address_payload"),
+        ):
+            payload = proof_content.get(key)
+            if payload is None:
+                continue
+            if not isinstance(payload, Mapping):
+                return False
+            payloads.append((kind, payload))
+        if not payloads:
+            return not required
+        for kind, payload in payloads:
+            if not cls._return_coverage_normalized_payload_is_complete(
+                kind,
+                payload,
+                policy_digest=policy_digest,
+                expected_query_hash=expected_query_hash,
+                correspondence=correspondence,
+                default_raw_identity=raw_identity,
+                default_normalized_identity=normalized_identity,
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _return_coverage_normalized_payload_is_complete(
+        cls,
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        policy_digest: str,
+        expected_query_hash: str,
+        correspondence: Mapping[str, Any],
+        default_raw_identity: Any,
+        default_normalized_identity: Any,
+    ) -> bool:
+        if payload.get("normalization_policy_digest") != policy_digest:
+            return False
+        payload_raw = cls._normalize_nested_tuple(payload.get("raw_identity"))
+        payload_normalized = cls._normalize_nested_tuple(payload.get("normalized_identity"))
+        if payload_raw is None or payload_normalized is None:
+            return False
+        expected_raw = cls._normalize_nested_tuple(correspondence.get(f"raw_{kind}_identity"))
+        expected_normalized = cls._normalize_nested_tuple(
+            correspondence.get(f"normalized_{kind}_identity")
+        )
+        if kind == "guard":
+            expected_raw = expected_raw if expected_raw is not None else default_raw_identity
+            expected_normalized = (
+                expected_normalized
+                if expected_normalized is not None
+                else default_normalized_identity
+            )
+        elif expected_raw is None or expected_normalized is None:
+            return False
+        if expected_raw is not None and payload_raw != expected_raw:
+            return False
+        if expected_normalized is not None and payload_normalized != expected_normalized:
+            return False
+        final_hash = payload.get("final_query_sha256")
+        if not isinstance(final_hash, str) or not final_hash:
+            return False
+        return final_hash == expected_query_hash
+
+    @classmethod
+    def _normalization_policy_digest_from_target(cls, object_target_key: Any) -> Optional[str]:
+        if isinstance(object_target_key, tuple):
+            if (
+                len(object_target_key) == 2
+                and object_target_key[0] == "normalization_policy_digest"
+                and isinstance(object_target_key[1], str)
+            ):
+                return object_target_key[1]
+            for item in object_target_key:
+                found = cls._normalization_policy_digest_from_target(item)
+                if found is not None:
+                    return found
+        return None
 
     @classmethod
     def _return_coverage_structural_proof_content_is_complete(

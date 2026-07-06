@@ -154,6 +154,10 @@ class StateTransitionLoopModel:
     accumulator_placeholder: Expression
     continue_on_true: bool
     loop_blocks: Tuple[object, ...]
+    state_phi_init_index: int = 0
+    accumulator_phi_init_index: int = 0
+    state_phi_backedge_indices: Tuple[int, ...] = ()
+    accumulator_phi_backedge_indices: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -8218,6 +8222,16 @@ class StructuralRecurrenceSummarizer:
         multiplicative_loop_value = loop_value is not None
         if loop_value is not None:
             self._debug("Recovered multiplicative state-transition loop value")
+            zero_iteration_anchor_key = self._state_transition_object_zero_iteration_anchor_key(
+                model=model,
+                result_size=result_size,
+            )
+            if zero_iteration_anchor_key is not None and transition_evidence_key is not None:
+                transition_evidence_key = (
+                    "state_transition_loop_evidence_with_zero_iteration_anchor",
+                    transition_evidence_key,
+                    ("zero_iteration_anchor_proof", zero_iteration_anchor_key),
+                )
         elif self._raw_constant_value(model.accumulator_delta_expr) == 1:
             loop_value = loop_count
         else:
@@ -8451,11 +8465,18 @@ class StructuralRecurrenceSummarizer:
         stop_value = int(stop_value)
         if stop_value == 0:
             return Expression.constant(0, size=max(1, int(size or 4)))
-        if stop_value == 1 and self._has_exact_accumulator_init_return_at_state_one(
-            analysis=analysis,
-            state_expr=model.state_init_expr,
-            accumulator_init=model.accumulator_init_expr,
-            result_size=result_size,
+        if stop_value == 1 and (
+            self._has_exact_accumulator_init_return_at_state_one(
+                analysis=analysis,
+                state_expr=model.state_init_expr,
+                accumulator_init=model.accumulator_init_expr,
+                result_size=result_size,
+            )
+            or self._state_transition_object_zero_iteration_anchor_key(
+                model=model,
+                result_size=result_size,
+            )
+            is not None
         ):
             return Expression.constant(1, size=max(1, int(size or 4)))
         return None
@@ -8519,6 +8540,281 @@ class StructuralRecurrenceSummarizer:
             returns=exact_anchor_returns,
         )
         return coverage_key is not None
+
+    def _state_transition_object_zero_iteration_anchor_key(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        result_size: int,
+    ) -> Optional[Tuple[Any, ...]]:
+        cbranch_op = self._find_cbranch_op(getattr(model, "header_block", None))
+        if cbranch_op is None:
+            return None
+        if not self._state_transition_guard_false_at_stop_value(
+            model.state_guard_expr,
+            model.state_placeholder,
+            stop_value=1,
+        ):
+            return None
+        expected_exit = self._state_transition_guard_false_successor(model)
+        if expected_exit is None or self._block_key(expected_exit) != self._block_key(model.exit_block):
+            return None
+        accumulator_phi = getattr(model, "accumulator_phi_op", None)
+        init_index = int(getattr(model, "accumulator_phi_init_index", 0) or 0)
+        if accumulator_phi is None or self._safe_pcode_input_count(accumulator_phi) <= init_index:
+            return None
+        init_varnode = accumulator_phi.getInput(init_index)
+        init_expr = self._build_pcode_expression(
+            init_varnode,
+            placeholders={
+                getattr(model, "state_phi_output", None): model.state_placeholder,
+                getattr(model, "accumulator_phi_output", None): model.accumulator_placeholder,
+            },
+        )
+        init_expr = self._canonicalize_expression(init_expr)
+        expected_init = self._coerce_summary_expression_to_size(
+            self._canonicalize_expression(model.accumulator_init_expr),
+            max(1, int(result_size or getattr(model.accumulator_init_expr, "size", 0) or 4)),
+            signed=self._expression_prefers_signed_extension(model.accumulator_init_expr),
+        )
+        if init_expr is None or expected_init is None or self._expression_is_unresolved(init_expr):
+            return None
+        if not self._return_value_equals_under_conditions(init_expr, expected_init, ()):
+            return None
+        exit_region_proof = self._exit_region_return_refs_using_value(
+            model.exit_block,
+            init_varnode,
+            forbidden_blocks=tuple(getattr(model, "loop_blocks", ()) or ()),
+        )
+        if exit_region_proof is None:
+            return None
+        return_refs, exit_region_scan_refs = exit_region_proof
+        if not return_refs:
+            return None
+        cbranch_ref = self._make_pcode_op_ref(cbranch_op)
+        exit_ref = self._make_pcode_block_ref(model.exit_block)
+        accumulator_phi_ref = self._make_pcode_op_ref(accumulator_phi)
+        return (
+            "state_transition_zero_iteration_anchor_proof",
+            ("stop_value", 1),
+            ("guard_false_edge", self._block_key(model.header_block), self._block_key(model.exit_block)),
+            ("guard_key", self._summary_expression_evidence_key(model.state_guard_expr)),
+            ("state_placeholder_key", self._summary_expression_evidence_key(model.state_placeholder)),
+            ("accumulator_init_key", self._summary_expression_evidence_key(expected_init)),
+            ("init_varnode_key", self._varnode_cache_key(init_varnode)),
+            ("cbranch_ref", cbranch_ref.stable_key() if cbranch_ref is not None else None),
+            ("exit_block_ref", exit_ref.stable_key() if exit_ref is not None else self._block_key(model.exit_block)),
+            ("accumulator_phi_ref", accumulator_phi_ref.stable_key() if accumulator_phi_ref is not None else None),
+            (
+                "exit_region_purity_policy",
+                (
+                    "state_transition_zero_iteration_exit_region_purity",
+                    1,
+                    "reject_effect_memory_call_indirect_control_fp_unknown",
+                ),
+            ),
+            ("exit_region_scan_refs", exit_region_scan_refs),
+            ("return_refs", tuple(ref.stable_key() for ref in return_refs)),
+        )
+
+    def _state_transition_guard_false_at_stop_value(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+        *,
+        stop_value: int,
+    ) -> bool:
+        proven_stop = self._state_transition_guard_stop_constant(
+            state_guard,
+            state_placeholder,
+            allow_nonzero=True,
+        )
+        if proven_stop is not None and int(proven_stop) == int(stop_value):
+            return True
+        state_size = max(1, int(getattr(state_placeholder, "size", 0) or 4))
+        state_equals_stop = Expression.binary_op(
+            "INT_EQUAL",
+            self._canonicalize_expression(state_placeholder),
+            Expression.constant(int(stop_value), size=state_size),
+        )
+        state_equals_stop.size = 1
+        try:
+            return ConditionSMTOracle.conjunction_is_unsat(
+                [
+                    Condition(self._canonicalize_expression(state_equals_stop), False),
+                    Condition(self._canonicalize_expression(state_guard), False),
+                ]
+            ) is True
+        except Exception:
+            return False
+
+    def _state_transition_guard_false_successor(
+        self,
+        model: StateTransitionLoopModel,
+    ):
+        header = getattr(model, "header_block", None)
+        true_out = getattr(header, "getTrueOut", lambda: None)()
+        false_out = getattr(header, "getFalseOut", lambda: None)()
+        return false_out if bool(getattr(model, "continue_on_true", False)) else true_out
+
+    def _exit_region_return_refs_using_value(
+        self,
+        exit_block,
+        init_varnode,
+        *,
+        forbidden_blocks: Sequence[object],
+        budget: int = 64,
+    ) -> Optional[Tuple[Tuple[PcodeOpRef, ...], Tuple[Tuple[Any, ...], ...]]]:
+        forbidden_keys = {
+            self._block_key(block)
+            for block in forbidden_blocks or ()
+            if self._block_key(block) != self._block_key(exit_block)
+        }
+        refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
+        scanned_op_keys: Set[Tuple[Any, ...]] = set()
+        proven_blocks: Set[Any] = set()
+        visiting: Set[Any] = set()
+
+        def prove_block(block, depth: int) -> bool:
+            if block is None or depth > budget:
+                return False
+            block_key = self._block_key(block)
+            if block_key in forbidden_keys:
+                return False
+            if block_key in proven_blocks:
+                return True
+            if block_key in visiting:
+                return False
+            visiting.add(block_key)
+            has_return = False
+            block_ops = self._strict_zero_iteration_exit_region_block_ops(block)
+            if block_ops is None:
+                visiting.discard(block_key)
+                return False
+            for op in block_ops:
+                mnemonic = str(getattr(op, "getMnemonic", lambda: "")() or "").strip().upper()
+                if not self._zero_iteration_exit_region_mnemonic_is_safe(mnemonic):
+                    visiting.discard(block_key)
+                    return False
+                scanned_op_keys.add(self._zero_iteration_exit_region_op_key(op, block))
+                if mnemonic != "RETURN":
+                    continue
+                has_return = True
+                if not self._return_op_returns_varnode(op, init_varnode):
+                    visiting.discard(block_key)
+                    return False
+                ref = self._make_pcode_op_ref(op)
+                if ref is not None:
+                    refs.setdefault(ref.stable_key(), ref)
+            if has_return:
+                visiting.discard(block_key)
+                proven_blocks.add(block_key)
+                return True
+            successors = self._collect_block_successors(block)
+            if not successors:
+                visiting.discard(block_key)
+                return False
+            for successor in successors:
+                if not prove_block(successor, depth + 1):
+                    visiting.discard(block_key)
+                    return False
+            visiting.discard(block_key)
+            proven_blocks.add(block_key)
+            return True
+
+        if not prove_block(exit_block, 0):
+            return None
+        return (
+            tuple(sorted(refs.values(), key=lambda ref: repr(ref.stable_key()))),
+            tuple(sorted(scanned_op_keys, key=repr)),
+        )
+
+    @staticmethod
+    def _strict_zero_iteration_exit_region_block_ops(block) -> Optional[Tuple[object, ...]]:
+        get_iterator = getattr(block, "getIterator", None)
+        if not callable(get_iterator):
+            return None
+        try:
+            iterator = get_iterator()
+        except Exception:
+            return None
+        if iterator is None:
+            return None
+        has_next = getattr(iterator, "hasNext", None)
+        next_item = getattr(iterator, "next", None)
+        if callable(has_next) and callable(next_item):
+            ops: List[object] = []
+            while True:
+                try:
+                    has_item = has_next()
+                    if not isinstance(has_item, bool):
+                        return None
+                    if not has_item:
+                        break
+                    ops.append(next_item())
+                except Exception:
+                    return None
+            return tuple(ops)
+        try:
+            return tuple(iterator)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _zero_iteration_exit_region_mnemonic_is_safe(mnemonic: object) -> bool:
+        name = str(mnemonic or "").strip().upper()
+        if not name:
+            return False
+        if name in {
+            "CALL",
+            "CALLIND",
+            "CALLOTHER",
+            "LOAD",
+            "STORE",
+            "BRANCH",
+            "CBRANCH",
+            "BRANCHIND",
+            "INDIRECT",
+        }:
+            return False
+        if "FLOAT" in name or name in {"INT2FLOAT", "FLOAT2INT"}:
+            return False
+        if name in {
+            "RETURN",
+            "COPY",
+            "CAST",
+            "SUBPIECE",
+            "PIECE",
+            "MULTIEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+            "BOOL_NEGATE",
+            "PTRADD",
+            "PTRSUB",
+            "SEGMENTOP",
+            "CPOOLREF",
+        }:
+            return True
+        return name.startswith("INT_")
+
+    def _zero_iteration_exit_region_op_key(self, op, block) -> Tuple[Any, ...]:
+        op_ref = self._make_pcode_op_ref(op)
+        if op_ref is not None:
+            return ("pcode_op_ref", op_ref.stable_key())
+        return (
+            "pcode_op_fallback",
+            self._block_key(block),
+            str(getattr(op, "getMnemonic", lambda: "")() or ""),
+            self._safe_pcode_input_count(op),
+        )
+
+    def _return_op_returns_varnode(self, return_op, init_varnode) -> bool:
+        if self._safe_pcode_input_count(return_op) < 2:
+            return False
+        return_value = self._follow_passthrough_varnode(return_op.getInput(1))
+        init_value = self._follow_passthrough_varnode(init_varnode)
+        return self._same_varnode_value(return_value, init_value)
 
     def _return_is_exact_anchor_seed(self, ret: ReturnInfo) -> bool:
         if str(getattr(ret, "return_kind", "exact") or "exact") != "exact":
@@ -8609,6 +8905,10 @@ class StructuralRecurrenceSummarizer:
         ):
             left, right = guard.operands
             right_const = self._raw_constant_value(right)
+            if right_const is not None and self._expr_matches_placeholder(left, state_placeholder):
+                stop = int(right_const)
+                if stop == 0 or allow_nonzero:
+                    return stop
             if right_const == 0:
                 affine = self._extract_affine_placeholder_term(left, state_placeholder)
                 if affine is not None:
@@ -8618,6 +8918,10 @@ class StructuralRecurrenceSummarizer:
                         if stop == 0 or allow_nonzero:
                             return stop
             left_const = self._raw_constant_value(left)
+            if left_const is not None and self._expr_matches_placeholder(right, state_placeholder):
+                stop = int(left_const)
+                if stop == 0 or allow_nonzero:
+                    return stop
             if left_const == 0:
                 affine = self._extract_affine_placeholder_term(right, state_placeholder)
                 if affine is not None:
@@ -9365,7 +9669,15 @@ class StructuralRecurrenceSummarizer:
         )
         if accumulator_model is None:
             return None
-        accumulator_phi, accumulator_output, accumulator_init, accumulator_delta, accumulator_placeholder = accumulator_model
+        (
+            accumulator_phi,
+            accumulator_output,
+            accumulator_init,
+            accumulator_delta,
+            accumulator_placeholder,
+            accumulator_init_index,
+            accumulator_backedge_indices,
+        ) = accumulator_model
 
         return StateTransitionLoopModel(
             header_block=header_block,
@@ -9384,6 +9696,10 @@ class StructuralRecurrenceSummarizer:
             accumulator_placeholder=accumulator_placeholder,
             continue_on_true=continue_on_true,
             loop_blocks=loop_blocks,
+            state_phi_init_index=int(init_index),
+            accumulator_phi_init_index=int(accumulator_init_index),
+            state_phi_backedge_indices=tuple(int(index) for index in backedge_indices),
+            accumulator_phi_backedge_indices=tuple(int(index) for index in accumulator_backedge_indices),
         )
 
     def _try_build_state_transition_model_for_phi(
@@ -9471,7 +9787,15 @@ class StructuralRecurrenceSummarizer:
         )
         if accumulator_model is None:
             return None
-        accumulator_phi, accumulator_output, accumulator_init, accumulator_delta, accumulator_placeholder = accumulator_model
+        (
+            accumulator_phi,
+            accumulator_output,
+            accumulator_init,
+            accumulator_delta,
+            accumulator_placeholder,
+            accumulator_init_index,
+            accumulator_backedge_indices,
+        ) = accumulator_model
 
         return StateTransitionLoopModel(
             header_block=header_block,
@@ -9490,6 +9814,10 @@ class StructuralRecurrenceSummarizer:
             accumulator_placeholder=accumulator_placeholder,
             continue_on_true=continue_on_true,
             loop_blocks=loop_blocks,
+            state_phi_init_index=int(init_index),
+            accumulator_phi_init_index=int(accumulator_init_index),
+            state_phi_backedge_indices=tuple(int(index) for index in backedge_indices),
+            accumulator_phi_backedge_indices=tuple(int(index) for index in accumulator_backedge_indices),
         )
 
     def _state_loop_phi_indices(self, header_block, phi_op) -> Optional[Tuple[int, Tuple[int, ...]]]:
@@ -10109,7 +10437,7 @@ class StructuralRecurrenceSummarizer:
         backedge_indices: Sequence[int],
         analysis=None,
         loop_variable_binder_scope: Optional[Dict[Tuple[str, Tuple[Any, ...]], int]] = None,
-    ) -> Optional[Tuple[object, object, Expression, Expression, Expression]]:
+    ) -> Optional[Tuple[object, object, Expression, Expression, Expression, int, Tuple[int, ...]]]:
         if loop_variable_binder_scope is None:
             loop_variable_binder_scope = self._new_loop_variable_binder_scope()
         candidates = []
@@ -10160,13 +10488,32 @@ class StructuralRecurrenceSummarizer:
                     self._canonicalize_expression(init_expr),
                     self._canonicalize_expression(delta_expr),
                     accumulator_placeholder,
+                    int(phi_init_index),
+                    tuple(int(index) for index in phi_backedge_indices),
                 )
             )
         if not candidates:
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
-        _priority, phi_op, phi_output, init_expr, delta_expr, placeholder = candidates[0]
-        return phi_op, phi_output, init_expr, delta_expr, placeholder
+        (
+            _priority,
+            phi_op,
+            phi_output,
+            init_expr,
+            delta_expr,
+            placeholder,
+            phi_init_index,
+            phi_backedge_indices,
+        ) = candidates[0]
+        return (
+            phi_op,
+            phi_output,
+            init_expr,
+            delta_expr,
+            placeholder,
+            phi_init_index,
+            phi_backedge_indices,
+        )
 
     def _state_loop_accumulator_delta(
         self,

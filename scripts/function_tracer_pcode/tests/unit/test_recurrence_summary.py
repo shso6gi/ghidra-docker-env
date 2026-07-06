@@ -1999,6 +1999,11 @@ class _FakeCfgBlock:
         return self._false_out
 
 
+class _FakeCfgBlockWithoutIterator(_FakeCfgBlock):
+    def getIterator(self):
+        return None
+
+
 class _FakeCfgHighFunction:
     def __init__(self, blocks):
         self._blocks = list(blocks)
@@ -3055,8 +3060,8 @@ def test_multiplicative_state_transition_start_accepts_one_stop_with_exact_ancho
     n = _param("param_1")
     guard = Expression.binary_op(
         "INT_NOTEQUAL",
-        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
-        _const(0),
+        state,
+        _const(1),
     )
     guard.size = 1
     model = StateTransitionLoopModel(
@@ -3110,8 +3115,8 @@ def test_multiplicative_state_transition_start_rejects_one_stop_without_exact_an
     n = _param("param_1")
     guard = Expression.binary_op(
         "INT_NOTEQUAL",
-        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
-        _const(0),
+        state,
+        _const(1),
     )
     guard.size = 1
     model = StateTransitionLoopModel(
@@ -3379,6 +3384,303 @@ def test_multiplicative_state_transition_start_rejects_model_only_zero_iteration
         returns=[],
     )
 
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=no_exact_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_accepts_object_zero_iteration_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(1)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    cbranch = _FakeBranchOp(guard)
+    header = _FakeCfgBlock(1, [cbranch])
+    body = _FakeCfgBlock(2, [])
+    exit_block = _FakeCfgBlock(3, [])
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(header)
+
+    init_vn = _FakeVarnode("acc_init", expr=_const(1))
+    next_vn = _FakeVarnode("acc_next", expr=_const(2))
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], acc_phi_vn)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), init_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+    model = StateTransitionLoopModel(
+        header_block=header,
+        body_block=body,
+        exit_block=exit_block,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=acc_phi_op,
+        accumulator_phi_output=acc_phi_vn,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(header, body),
+        accumulator_phi_init_index=0,
+        accumulator_phi_backedge_indices=(1,),
+    )
+    no_exact_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[],
+    )
+    anchor_key = summarizer._state_transition_object_zero_iteration_anchor_key(
+        model=model,
+        result_size=4,
+    )
+
+    start = summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=no_exact_anchor,
+        result_size=4,
+        size=4,
+    )
+
+    assert anchor_key is not None
+    anchor_fields = {
+        item[0]: item[1]
+        for item in anchor_key[1:]
+        if isinstance(item, tuple) and len(item) == 2
+    }
+    assert anchor_fields["exit_region_purity_policy"] == (
+        "state_transition_zero_iteration_exit_region_purity",
+        1,
+        "reject_effect_memory_call_indirect_control_fp_unknown",
+    )
+    assert anchor_fields["exit_region_scan_refs"]
+    assert start is not None
+    assert start.structural_key() == _const(1).structural_key()
+
+
+def test_multiplicative_state_transition_start_rejects_object_anchor_wrong_return_operand():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(1)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    cbranch = _FakeBranchOp(guard)
+    header = _FakeCfgBlock(1, [cbranch])
+    body = _FakeCfgBlock(2, [])
+    exit_block = _FakeCfgBlock(3, [])
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(header)
+
+    init_vn = _FakeVarnode("acc_init", expr=_const(1))
+    wrong_vn = _FakeVarnode("wrong_return", expr=_const(2))
+    next_vn = _FakeVarnode("acc_next", expr=_const(2))
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], acc_phi_vn)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), wrong_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+    model = StateTransitionLoopModel(
+        header_block=header,
+        body_block=body,
+        exit_block=exit_block,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=acc_phi_op,
+        accumulator_phi_output=acc_phi_vn,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(header, body),
+        accumulator_phi_init_index=0,
+        accumulator_phi_backedge_indices=(1,),
+    )
+    no_exact_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[],
+    )
+
+    assert summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=no_exact_anchor,
+        result_size=4,
+        size=4,
+    ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_object_anchor_exit_region_effects():
+    for forbidden_mnemonic in (
+        "CALL",
+        "CALLIND",
+        "STORE",
+        "LOAD",
+        "BRANCH",
+        "CBRANCH",
+        "BRANCHIND",
+        "CALLOTHER",
+        "FLOAT_ADD",
+        "INT2FLOAT",
+        "UNKNOWN_OP",
+    ):
+        summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(1)), debug=False)
+        state = Expression.variable("__loop_state", size=4)
+        n = _param("param_1")
+        guard = Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+            _const(0),
+        )
+        guard.size = 1
+        cbranch = _FakeBranchOp(guard)
+        header = _FakeCfgBlock(1, [cbranch])
+        body = _FakeCfgBlock(2, [])
+        exit_block = _FakeCfgBlock(3, [])
+        header.add_edge(body, truth=True)
+        header.add_edge(exit_block, truth=False)
+        body.add_edge(header)
+
+        init_vn = _FakeVarnode("acc_init", expr=_const(1))
+        next_vn = _FakeVarnode("acc_next", expr=_const(2))
+        acc_phi_vn = _FakeVarnode("acc_phi")
+        acc_phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], acc_phi_vn)
+        forbidden_op = _FakePcodeOp(forbidden_mnemonic, [_FakeVarnode("effect_arg")], None)
+        return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), init_vn], None)
+        exit_block._ops[:] = [forbidden_op, return_op]
+        forbidden_op.setParent(exit_block)
+        return_op.setParent(exit_block)
+        model = StateTransitionLoopModel(
+            header_block=header,
+            body_block=body,
+            exit_block=exit_block,
+            state_phi_op=None,
+            state_phi_output=None,
+            state_init_expr=n,
+            state_placeholder=state,
+            state_guard_expr=guard,
+            state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+            accumulator_phi_op=acc_phi_op,
+            accumulator_phi_output=acc_phi_vn,
+            accumulator_init_expr=_const(1),
+            accumulator_delta_expr=Expression.binary_op(
+                "INT_LEFT",
+                Expression.variable("__loop_acc", size=4),
+                _const(1),
+            ),
+            accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+            continue_on_true=True,
+            loop_blocks=(header, body),
+            accumulator_phi_init_index=0,
+            accumulator_phi_backedge_indices=(1,),
+        )
+        no_exact_anchor = create_mock_analysis(
+            "multiplicative_state_transition",
+            parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+            returns=[],
+        )
+
+        assert summarizer._state_transition_object_zero_iteration_anchor_key(
+            model=model,
+            result_size=4,
+        ) is None
+        assert summarizer._multiplicative_state_transition_iteration_start_expr(
+            model=model,
+            analysis=no_exact_anchor,
+            result_size=4,
+            size=4,
+        ) is None
+
+
+def test_multiplicative_state_transition_start_rejects_object_anchor_unscannable_exit_block():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(1)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    cbranch = _FakeBranchOp(guard)
+    header = _FakeCfgBlock(1, [cbranch])
+    body = _FakeCfgBlock(2, [])
+    unscannable_exit = _FakeCfgBlockWithoutIterator(3, [])
+    return_block = _FakeCfgBlock(4, [])
+    header.add_edge(body, truth=True)
+    header.add_edge(unscannable_exit, truth=False)
+    body.add_edge(header)
+    unscannable_exit.add_edge(return_block)
+
+    init_vn = _FakeVarnode("acc_init", expr=_const(1))
+    next_vn = _FakeVarnode("acc_next", expr=_const(2))
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], acc_phi_vn)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), init_vn], None)
+    return_block._ops[:] = [return_op]
+    return_op.setParent(return_block)
+    model = StateTransitionLoopModel(
+        header_block=header,
+        body_block=body,
+        exit_block=unscannable_exit,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=acc_phi_op,
+        accumulator_phi_output=acc_phi_vn,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(header, body),
+        accumulator_phi_init_index=0,
+        accumulator_phi_backedge_indices=(1,),
+    )
+    no_exact_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[],
+    )
+
+    assert summarizer._state_transition_object_zero_iteration_anchor_key(
+        model=model,
+        result_size=4,
+    ) is None
     assert summarizer._multiplicative_state_transition_iteration_start_expr(
         model=model,
         analysis=no_exact_anchor,
