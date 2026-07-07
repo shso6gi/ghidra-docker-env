@@ -2699,6 +2699,102 @@ def _build_decrement_accumulator_sum_cfg():
     return _FakeCfgHighFunction([preheader, header, body, exit_block])
 
 
+def _build_progress_guarded_unit_state_transition_cfg():
+    t_param = _param("param_1")
+    c_param = _param("param_2")
+    zero_expr = _const(0)
+
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1)
+    body = _FakeCfgBlock(2)
+    exit_block = _FakeCfgBlock(3)
+
+    preheader.add_edge(header)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(header)
+
+    t_param_vn = _FakeVarnode("t_param", expr=t_param)
+    c_param_vn = _FakeVarnode("c_param", expr=c_param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_next_vn = _FakeVarnode("state_next")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_next_vn = _FakeVarnode("acc_next")
+    state_guard_vn = _FakeVarnode("state_guard", size=1)
+    progress_guard_vn = _FakeVarnode("progress_guard", size=1)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [c_param_vn, state_next_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    state_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_phi_vn], state_guard_vn)
+    branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), state_guard_vn], None)
+    header._ops[:] = [state_phi_op, acc_phi_op, state_guard_op, branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    progress_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, t_param_vn], progress_guard_vn)
+    state_next_op = _FakePcodeOp("INT_SUB", [state_phi_vn, progress_guard_vn], state_next_vn)
+    acc_next_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, progress_guard_vn], acc_next_vn)
+    body._ops[:] = [progress_guard_op, state_next_op, acc_next_op]
+    for op in body._ops:
+        op.setParent(body)
+
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_phi_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+
+    return _FakeCfgHighFunction([preheader, header, body, exit_block])
+
+
+def _build_latch_progress_guarded_unit_state_transition_cfg():
+    t_param = _param("param_1")
+    c_param = _param("param_2")
+    zero_expr = _const(0)
+
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1)
+    latch = _FakeCfgBlock(2)
+    exit_block = _FakeCfgBlock(3)
+
+    preheader.add_edge(header)
+    header.add_edge(latch)
+    latch.add_edge(header, truth=True)
+    latch.add_edge(exit_block, truth=False)
+
+    t_param_vn = _FakeVarnode("t_param", expr=t_param)
+    c_param_vn = _FakeVarnode("c_param", expr=c_param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_next_vn = _FakeVarnode("state_next")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_next_vn = _FakeVarnode("acc_next")
+    progress_guard_vn = _FakeVarnode("progress_guard", size=1)
+    latch_guard_vn = _FakeVarnode("latch_guard", size=1)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [c_param_vn, state_next_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    header._ops[:] = [state_phi_op, acc_phi_op]
+    for op in header._ops:
+        op.setParent(header)
+
+    progress_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, t_param_vn], progress_guard_vn)
+    state_next_op = _FakePcodeOp("INT_SUB", [state_phi_vn, progress_guard_vn], state_next_vn)
+    acc_next_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, progress_guard_vn], acc_next_vn)
+    latch_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_next_vn], latch_guard_vn)
+    latch_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("latch_target"), latch_guard_vn], None)
+    latch._ops[:] = [progress_guard_op, state_next_op, acc_next_op, latch_guard_op, latch_branch]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_next_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+
+    return _FakeCfgHighFunction([preheader, header, latch, exit_block])
+
+
 def _build_latch_exit_decrement_accumulator_sum_cfg():
     param = _param("param_1")
     zero_expr = _const(0)
@@ -2963,6 +3059,91 @@ def test_state_transition_loop_summary_recovers_state_affine_accumulator_sum():
     assert "zero_extend" in positive_smt
     assert "(bvmul ((_ zero_extend" in positive_smt
     assert "extract 31 0" in positive_smt
+
+
+def test_state_transition_loop_summary_recovers_progress_guarded_unit_step():
+    analysis = create_mock_analysis(
+        "progress_guarded_state",
+        return_type="int",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", _param("param_2"), _const(0))]),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", Expression.unknown("phi_circular"), _const(1)),
+                conditions=[
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                    _cond("INT_SLESS", _const(0), _param("param_1")),
+                ],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_state_transition_loop(
+        _FakeFunction("progress_guarded_state"),
+        _build_progress_guarded_unit_state_transition_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    assert len(summarized_returns) == 2
+    positive_case = next(ret for ret in summarized_returns if ret.branch_index == 10_200)
+    assert [condition.to_string() for condition in positive_case.conditions] == [
+        "(0 < param_2)",
+        "(0 < param_1)",
+    ]
+    assert positive_case.value.structural_key() == _param("param_2").structural_key()
+    assert expression_has_unresolved_value(positive_case.value) is False
+    positive_smt = expression_to_smt(positive_case.value)
+    assert "rt_state_transition_loop_count_" not in positive_smt
+    assert "rtunk_" not in positive_smt
+
+
+def test_state_transition_loop_summary_recovers_latch_progress_guarded_unit_step_with_anchor():
+    c_minus_one = Expression.binary_op("INT_SUB", _param("param_2"), _const(1))
+    analysis = create_mock_analysis(
+        "latch_progress_guarded_state",
+        return_type="int",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", _param("param_2"), _const(0))]),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                    _cond("INT_SLESS", _const(0), _param("param_1")),
+                    Condition(Expression.binary_op("INT_SLESS", _const(0), c_minus_one), True),
+                ],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_state_transition_loop(
+        _FakeFunction("latch_progress_guarded_state"),
+        _build_latch_progress_guarded_unit_state_transition_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    positive_case = next(ret for ret in summarized_returns if ret.branch_index == 10_200)
+    assert [condition.to_string() for condition in positive_case.conditions] == [
+        "(0 < param_2)",
+        "(0 < param_1)",
+    ]
+    assert positive_case.value.structural_key() == _param("param_2").structural_key()
 
 
 def test_multiplicative_accumulator_delta_accepts_left_shift_multiplier():

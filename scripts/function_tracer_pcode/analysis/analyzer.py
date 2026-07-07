@@ -3162,6 +3162,7 @@ class ReturnAnalyzer:
 
         zero_ret, initial_c_ret = self._find_branch_guarded_while_return_partition(
             analysis,
+            high_function=high_function,
             c_param=c_param,
             c_nonpositive=c_nonpositive,
             c_positive=c_positive,
@@ -3174,6 +3175,13 @@ class ReturnAnalyzer:
             high_function,
             invariant_conditions=(c_positive, t_nonpositive),
         )
+        if divergence_proof is None:
+            divergence_proof = self._prove_branch_guarded_structural_nonprogress_must_diverge(
+                high_function,
+                analysis=analysis,
+                initial_c_ret=initial_c_ret,
+                invariant_conditions=(c_positive, t_nonpositive),
+            )
         analysis.returns = [zero_ret, initial_c_ret]
         analysis.return_outcomes = (
             ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=zero_ret),
@@ -3209,10 +3217,349 @@ class ReturnAnalyzer:
                 analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
         return True
 
+    def _prove_branch_guarded_structural_nonprogress_must_diverge(
+        self,
+        high_function,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        initial_c_ret: ReturnInfo,
+        invariant_conditions: Sequence[Condition],
+    ) -> Optional[Dict[str, Any]]:
+        if high_function is None:
+            return None
+        structural_proof = self._branch_guarded_structural_proof_from_return(initial_c_ret)
+        if structural_proof is None:
+            return None
+        if not self._validate_branch_guarded_structural_proof(
+            high_function,
+            structural_proof=structural_proof,
+            analysis=analysis,
+            initial_c_ret=initial_c_ret,
+            invariant_conditions=invariant_conditions,
+        ):
+            return None
+        nonprogress_backedges = self._tuple_field_from_structural_proof(
+            structural_proof,
+            "nonprogress_backedges",
+        )
+        conditional_progress_backedges = self._tuple_field_from_structural_proof(
+            structural_proof,
+            "conditional_progress_backedges",
+        )
+        conditional_progress_guard_keys = self._conditional_progress_guard_keys_from_structural_proof(
+            structural_proof,
+        )
+        conditional_progress_guards_blocked = self._conditional_progress_guards_contradict_invariant(
+            conditional_progress_guard_keys,
+            target_conditions=tuple(getattr(initial_c_ret, "conditions", ()) or ()),
+            invariant_conditions=tuple(invariant_conditions or ()),
+        )
+        if not nonprogress_backedges and not (conditional_progress_backedges and conditional_progress_guards_blocked):
+            return None
+        if not self._high_function_has_cfg_cycle(high_function):
+            return None
+        if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            return None
+        return {
+            "proof_kind": "branch_guarded_structural_nonprogress_must_diverge",
+            "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+            "invariant": [condition.to_string() for condition in invariant_conditions or ()],
+            "structural_recurrence_proof": structural_proof,
+            "nonprogress_backedges": tuple(nonprogress_backedges),
+            "conditional_progress_backedges": tuple(conditional_progress_backedges),
+            "conditional_progress_guard_keys": tuple(sorted(conditional_progress_guard_keys.items(), key=repr)),
+            "conditional_progress_guard_negated_by_invariant": bool(conditional_progress_guards_blocked),
+            "state_preservation": "state_phi_nonprogress_backedge_identity",
+            "accumulator_preservation": "accumulator_phi_nonprogress_backedge_identity",
+            "loop_has_cfg_cycle": True,
+            "forbidden_control_effect_ops_absent": True,
+        }
+
+    def _branch_guarded_structural_proof_from_return(
+        self,
+        ret: ReturnInfo,
+    ) -> Optional[Tuple[Any, ...]]:
+        source_key = getattr(ret, "summary_candidate_source_key", None)
+        return self._find_branch_guarded_structural_proof_tuple(source_key)
+
+    def _find_branch_guarded_structural_proof_tuple(
+        self,
+        value,
+    ) -> Optional[Tuple[Any, ...]]:
+        if not isinstance(value, tuple):
+            return None
+        if value and value[0] == "branch_guarded_affine_unit_count_structural_proof":
+            return value
+        for item in value:
+            found = self._find_branch_guarded_structural_proof_tuple(item)
+            if found is not None:
+                return found
+        return None
+
+    def _validate_branch_guarded_structural_proof(
+        self,
+        high_function,
+        *,
+        structural_proof: Tuple[Any, ...],
+        analysis: Optional[FunctionReturnAnalysis],
+        initial_c_ret: ReturnInfo,
+        invariant_conditions: Sequence[Condition],
+    ) -> bool:
+        if high_function is None:
+            return False
+        if self._field_value_from_structural_proof(structural_proof, "schema_version") != 1:
+            return False
+        if analysis is not None and self._field_value_from_structural_proof(
+            structural_proof,
+            "function",
+        ) != getattr(analysis, "function_name", None):
+            return False
+        proof_target_keys = self._tuple_field_from_structural_proof(
+            structural_proof,
+            "target_guard_keys",
+        )
+        current_target_keys = tuple(
+            sorted(
+                (self._condition_identity_key(condition) for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())),
+                key=repr,
+            )
+        )
+        if proof_target_keys != current_target_keys:
+            return False
+        acc_phi_key = self._field_value_from_structural_proof(structural_proof, "acc_phi")
+        state_phi_key = self._field_value_from_structural_proof(structural_proof, "state_phi")
+        if not isinstance(acc_phi_key, tuple) or not isinstance(state_phi_key, tuple):
+            return False
+        try:
+            tracer = self._make_tracer(high_function)
+        except Exception:
+            return False
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=False,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+        )
+        acc_phi = None
+        state_phi = None
+        header_block = None
+        for block in summarizer._iter_basic_blocks(high_function):
+            for op in summarizer._iter_block_ops(block):
+                if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                    continue
+                op_key = self._pcode_op_stable_key(op)
+                if op_key == acc_phi_key:
+                    acc_phi = op
+                    header_block = block
+                if op_key == state_phi_key:
+                    state_phi = op
+                    header_block = block if header_block is None else header_block
+        if acc_phi is None or state_phi is None or header_block is None:
+            return False
+        acc_parent = getattr(acc_phi, "getParent", lambda: None)()
+        state_parent = getattr(state_phi, "getParent", lambda: None)()
+        if acc_parent is None or state_parent is None:
+            return False
+        if self._block_debug_key(acc_parent) != self._block_debug_key(state_parent):
+            return False
+        header_block = acc_parent
+        acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
+        state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
+        if acc_indices is None or state_indices is None:
+            return False
+        _acc_init_index, acc_backedge_indices = acc_indices
+        _state_init_index, state_backedge_indices = state_indices
+        if tuple(int(index) for index in acc_backedge_indices) != tuple(int(index) for index in state_backedge_indices):
+            return False
+        progress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "progress_backedges"))
+        nonprogress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "nonprogress_backedges"))
+        conditional_progress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "conditional_progress_backedges"))
+        expected_conditional_guard_keys = self._conditional_progress_guard_keys_from_structural_proof(
+            structural_proof,
+        )
+        proof_backedges = progress_backedges | nonprogress_backedges
+        if not progress_backedges:
+            return False
+        if conditional_progress_backedges:
+            proof_backedges |= conditional_progress_backedges
+        if proof_backedges != set(int(index) for index in acc_backedge_indices):
+            return False
+        target_conditions = tuple(getattr(initial_c_ret, "conditions", ()) or ())
+        if conditional_progress_backedges and not expected_conditional_guard_keys:
+            return False
+        if conditional_progress_backedges and set(expected_conditional_guard_keys) != conditional_progress_backedges:
+            return False
+        if conditional_progress_backedges and not self._conditional_progress_guards_contradict_invariant(
+            expected_conditional_guard_keys,
+            target_conditions=target_conditions,
+            invariant_conditions=tuple(invariant_conditions or ()),
+        ):
+            return False
+        acc_output = getattr(acc_phi, "getOutput", lambda: None)()
+        state_output = getattr(state_phi, "getOutput", lambda: None)()
+        if acc_output is None or state_output is None:
+            return False
+        acc_placeholder = Expression.variable("__branch_guarded_acc", size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)))
+        state_placeholder = Expression.variable("__branch_guarded_state", size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)))
+        for backedge_index in acc_backedge_indices:
+            index = int(backedge_index)
+            acc_expr = summarizer._build_pcode_expression(
+                acc_phi.getInput(index),
+                placeholders={acc_output: acc_placeholder},
+            )
+            state_expr = summarizer._build_pcode_expression(
+                state_phi.getInput(index),
+                placeholders={state_output: state_placeholder},
+            )
+            if index in nonprogress_backedges:
+                if not self._expressions_same_key(acc_expr, acc_placeholder):
+                    return False
+                if not self._expressions_same_key(state_expr, state_placeholder):
+                    return False
+                continue
+            if index in conditional_progress_backedges:
+                acc_guard_key = self._placeholder_plus_unit_condition_guard_key(
+                    acc_expr,
+                    acc_placeholder,
+                    target_conditions,
+                )
+                state_guard_key = self._placeholder_minus_one_unit_condition_guard_key(
+                    state_expr,
+                    state_placeholder,
+                    target_conditions,
+                )
+                if acc_guard_key is None or state_guard_key is None:
+                    return False
+                if acc_guard_key != state_guard_key:
+                    return False
+                if expected_conditional_guard_keys.get(index) != acc_guard_key:
+                    return False
+                continue
+            if index in progress_backedges:
+                if not self._expression_is_placeholder_plus_one(acc_expr, acc_placeholder):
+                    return False
+                if not self._expression_is_placeholder_minus_one(state_expr, state_placeholder):
+                    return False
+                continue
+            return False
+        return self._state_phi_feeds_positive_loop_guard(
+            high_function,
+            summarizer=summarizer,
+            header_block=header_block,
+            backedge_indices=tuple(int(index) for index in state_backedge_indices),
+            state_phi=state_phi,
+            state_placeholder=state_placeholder,
+            target_conditions=target_conditions,
+            allow_latch_progress_guard=bool(conditional_progress_backedges),
+        )
+
+    @staticmethod
+    def _tuple_field_from_structural_proof(
+        proof: Tuple[Any, ...],
+        field_name: str,
+    ) -> Tuple[Any, ...]:
+        for item in proof or ():
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == field_name:
+                value = item[1]
+                return tuple(value) if isinstance(value, (tuple, list)) else (value,)
+        return ()
+
+    @staticmethod
+    def _field_value_from_structural_proof(
+        proof: Tuple[Any, ...],
+        field_name: str,
+    ) -> Any:
+        for item in proof or ():
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == field_name:
+                return item[1]
+        return None
+
+    @staticmethod
+    def _condition_identity_key(condition: Condition) -> Tuple[Any, ...]:
+        return (
+            "condition",
+            expression_key_safe(getattr(condition, "expression", None)),
+            bool(getattr(condition, "negated", False)),
+        )
+
+    def _conditional_progress_guard_keys_from_structural_proof(
+        self,
+        proof: Tuple[Any, ...],
+    ) -> Dict[int, Tuple[Any, ...]]:
+        result: Dict[int, Tuple[Any, ...]] = {}
+        for item in self._tuple_field_from_structural_proof(proof, "conditional_progress_guard_keys"):
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            index, key = item
+            if not isinstance(key, tuple):
+                continue
+            try:
+                result[int(index)] = key
+            except Exception:
+                continue
+        return result
+
+    def _condition_for_identity_key(
+        self,
+        key: Tuple[Any, ...],
+        conditions: Sequence[Condition],
+    ) -> Optional[Condition]:
+        if not isinstance(key, tuple):
+            return None
+        for condition in conditions or ():
+            if condition is not None and self._condition_identity_key(condition) == key:
+                return condition
+        return None
+
+    def _conditional_progress_guards_contradict_invariant(
+        self,
+        guard_keys: Dict[int, Tuple[Any, ...]],
+        *,
+        target_conditions: Sequence[Condition],
+        invariant_conditions: Sequence[Condition],
+    ) -> bool:
+        if not guard_keys:
+            return False
+        for guard_key in guard_keys.values():
+            guard = self._condition_for_identity_key(guard_key, target_conditions)
+            if guard is None:
+                return False
+            try:
+                if ConditionSMTOracle.conjunction_is_unsat([guard] + list(invariant_conditions or ())) is not True:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _conditions_have_contradictory_pair(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
+        for left_condition in left or ():
+            if left_condition is None:
+                continue
+            for right_condition in right or ():
+                if right_condition is None:
+                    continue
+                if (
+                    left_condition.negate().equals(right_condition)
+                    or right_condition.negate().equals(left_condition)
+                    or ConditionNormalizer.are_equivalent(left_condition.negate(), right_condition)
+                    or ConditionNormalizer.are_equivalent(right_condition.negate(), left_condition)
+                ):
+                    return True
+                try:
+                    if ConditionSMTOracle.conjunction_is_unsat([left_condition, right_condition]) is True:
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _find_branch_guarded_while_return_partition(
         self,
         analysis: FunctionReturnAnalysis,
         *,
+        high_function,
         c_param: Expression,
         c_nonpositive: Condition,
         c_positive: Condition,
@@ -3237,6 +3584,7 @@ class ReturnAnalyzer:
                     initial_c_ret = ret
         if zero_ret is not None and initial_c_ret is None:
             initial_c_ret = self._synthesize_branch_guarded_affine_initial_count_return(
+                high_function,
                 analysis,
                 c_param=c_param,
                 c_positive=c_positive,
@@ -3247,6 +3595,7 @@ class ReturnAnalyzer:
 
     def _synthesize_branch_guarded_affine_initial_count_return(
         self,
+        high_function,
         analysis: FunctionReturnAnalysis,
         *,
         c_param: Expression,
@@ -3299,9 +3648,6 @@ class ReturnAnalyzer:
                 )
             ignored_artifacts.append(ret)
 
-        if not exact_base_returns:
-            self._debug_print("Outcome branch-guarded affine proof declined: exact base return missing")
-            return None
         if not recursive_returns:
             self._debug_print("Outcome branch-guarded affine proof declined: recursive phi step missing")
             return None
@@ -3313,9 +3659,47 @@ class ReturnAnalyzer:
         if step <= 0 or step > 4:
             self._debug_print(f"Outcome branch-guarded affine proof declined: unsupported recursive step {step}")
             return None
-        if not self._return_conditions_cover_region(target_conditions, exact_base_returns):
-            self._debug_print("Outcome branch-guarded affine proof declined: exact base returns do not cover target")
-            return None
+        structural_proof = None
+        exact_base_covers_target = bool(exact_base_returns) and self._return_conditions_cover_region(
+            target_conditions,
+            exact_base_returns,
+        )
+        if not exact_base_covers_target:
+            structural_proof = self._prove_branch_guarded_affine_unit_count_recurrence(
+                high_function,
+                analysis=analysis,
+                c_param=c_param,
+                target_conditions=target_conditions,
+                recursive_returns=tuple(ret for ret, _step in recursive_returns),
+                allow_latch_progress_guard=bool(exact_base_returns),
+            )
+            if structural_proof is None:
+                if exact_base_returns:
+                    self._debug_print("Outcome branch-guarded affine proof declined: exact base returns do not cover target")
+                else:
+                    self._debug_print("Outcome branch-guarded affine proof declined: exact base return missing")
+                return None
+            ignored_artifacts = [
+                artifact for artifact in ignored_artifacts
+                if not self._branch_guarded_artifact_is_imprecise_zero_seed(
+                    artifact,
+                    zero_ret=zero_ret,
+                    parameters=getattr(analysis, "parameters", ()) or (),
+                )
+                and not self._branch_guarded_artifact_is_structural_accumulator_seed_projection(
+                    artifact,
+                    recursive_returns=tuple(ret for ret, _step in recursive_returns),
+                    parameters=getattr(analysis, "parameters", ()) or (),
+                )
+            ]
+            if ignored_artifacts and self.debug:
+                for artifact in ignored_artifacts:
+                    self._debug_print(
+                        "Outcome branch-guarded affine artifact retained: "
+                        f"value={getattr(getattr(artifact, 'value', None), 'to_string', lambda: getattr(artifact, 'value', None))()}, "
+                        f"conditions={[condition.to_string() for condition in tuple(getattr(artifact, 'conditions', ()) or ())]}, "
+                        f"site={self._return_site_key(artifact)}"
+                    )
         proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]
         if not self._branch_guarded_affine_ignored_artifacts_are_shadowed(
             ignored_artifacts,
@@ -3345,8 +3729,534 @@ class ReturnAnalyzer:
             summary_candidate_source_key=(
                 "branch_guarded_affine_initial_count",
                 ("step", step),
+                ("structural_proof", structural_proof),
                 ("sources", source_keys),
             ),
+        )
+
+    def _branch_guarded_artifact_is_imprecise_zero_seed(
+        self,
+        artifact: ReturnInfo,
+        *,
+        zero_ret: ReturnInfo,
+        parameters: Sequence[Dict],
+    ) -> bool:
+        artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
+        zero_conditions = tuple(getattr(zero_ret, "conditions", ()) or ())
+        if not self._expressions_equal_under_conditions_smt(
+            getattr(artifact, "value", None),
+            getattr(zero_ret, "value", None),
+            artifact_conditions + zero_conditions,
+            parameters,
+        ):
+            return False
+        if not self._conditions_imply(zero_conditions, artifact_conditions):
+            return False
+        if self._conditions_imply(artifact_conditions, zero_conditions):
+            return False
+        return True
+
+    def _branch_guarded_artifact_is_structural_accumulator_seed_projection(
+        self,
+        artifact: ReturnInfo,
+        *,
+        recursive_returns: Sequence[ReturnInfo],
+        parameters: Sequence[Dict],
+    ) -> bool:
+        if self._constant_int_value(getattr(artifact, "value", None)) != 0:
+            return False
+        artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
+        artifact_site = self._return_site_key(artifact)
+        for recursive in recursive_returns or ():
+            recursive_conditions = tuple(getattr(recursive, "conditions", ()) or ())
+            if artifact_site != self._return_site_key(recursive):
+                continue
+            if not (
+                self._condition_lists_equivalent(list(artifact_conditions), list(recursive_conditions))
+                or (
+                    self._conditions_imply(artifact_conditions, recursive_conditions)
+                    and self._conditions_imply(recursive_conditions, artifact_conditions)
+                )
+            ):
+                continue
+            if self._branch_guarded_affine_phi_step(getattr(recursive, "value", None)) == 1:
+                return True
+        return False
+
+    def _prove_branch_guarded_affine_unit_count_recurrence(
+        self,
+        high_function,
+        *,
+        analysis: FunctionReturnAnalysis,
+        c_param: Expression,
+        target_conditions: Sequence[Condition],
+        recursive_returns: Sequence[ReturnInfo],
+        allow_latch_progress_guard: bool,
+    ) -> Optional[Tuple[Any, ...]]:
+        if high_function is None or self.program is None:
+            return None
+        recursive_origin_keys = set()
+        for ret in recursive_returns or ():
+            recursive_origin_keys.update(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+        if not recursive_origin_keys:
+            self._debug_print("Outcome branch-guarded structural proof declined: recursive phi origin unavailable")
+            return None
+        try:
+            tracer = self._make_tracer(high_function)
+        except Exception:
+            self._debug_print("Outcome branch-guarded structural proof declined: tracer unavailable")
+            return None
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=False,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+        )
+        saw_acc_candidate = False
+        saw_acc_transition = False
+        saw_state_transition = False
+        saw_state_guard = False
+        for header_block in summarizer._iter_basic_blocks(high_function):
+            phi_ops = [
+                op for op in summarizer._iter_block_ops(header_block)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+                and getattr(op, "getOutput", lambda: None)() is not None
+            ]
+            if len(phi_ops) < 2:
+                continue
+            acc_candidates = [
+                phi_op for phi_op in phi_ops
+                if self._pcode_op_stable_key(phi_op) in recursive_origin_keys
+            ]
+            if acc_candidates:
+                saw_acc_candidate = True
+            for acc_phi in acc_candidates:
+                acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
+                if acc_indices is None:
+                    continue
+                acc_init_index, acc_backedge_indices = acc_indices
+                acc_output = getattr(acc_phi, "getOutput", lambda: None)()
+                if acc_output is None:
+                    continue
+                acc_placeholder = Expression.variable(
+                    "__branch_guarded_acc",
+                    size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)),
+                )
+                acc_init = summarizer._build_pcode_expression(
+                    acc_phi.getInput(acc_init_index),
+                    placeholders={acc_output: acc_placeholder},
+                )
+                if self._constant_int_value(acc_init) != 0:
+                    continue
+                acc_progress_indices: Set[int] = set()
+                acc_nonprogress_indices: Set[int] = set()
+                acc_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
+                acc_unknown_transition = False
+                for backedge_index in acc_backedge_indices:
+                    backedge_index_int = int(backedge_index)
+                    acc_backedge_expr = summarizer._build_pcode_expression(
+                        acc_phi.getInput(backedge_index),
+                        placeholders={acc_output: acc_placeholder},
+                    )
+                    if self._expression_is_placeholder_plus_one(acc_backedge_expr, acc_placeholder):
+                        acc_progress_indices.add(backedge_index_int)
+                        continue
+                    acc_guard_key = self._placeholder_plus_unit_condition_guard_key(
+                        acc_backedge_expr,
+                        acc_placeholder,
+                        target_conditions,
+                    )
+                    if acc_guard_key is not None:
+                        acc_progress_indices.add(backedge_index_int)
+                        acc_conditional_progress_keys[backedge_index_int] = acc_guard_key
+                        continue
+                    if self._expressions_same_key(acc_backedge_expr, acc_placeholder):
+                        acc_nonprogress_indices.add(backedge_index_int)
+                        continue
+                    acc_unknown_transition = True
+                    break
+                if acc_unknown_transition or not acc_progress_indices:
+                    continue
+                saw_acc_transition = True
+                for state_phi in phi_ops:
+                    if state_phi is acc_phi:
+                        continue
+                    state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
+                    if state_indices is None:
+                        continue
+                    state_init_index, state_backedge_indices = state_indices
+                    if tuple(int(index) for index in state_backedge_indices) != tuple(int(index) for index in acc_backedge_indices):
+                        continue
+                    state_output = getattr(state_phi, "getOutput", lambda: None)()
+                    if state_output is None:
+                        continue
+                    state_placeholder = Expression.variable(
+                        "__branch_guarded_state",
+                        size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
+                    )
+                    state_init = summarizer._build_pcode_expression(
+                        state_phi.getInput(state_init_index),
+                        placeholders={state_output: state_placeholder},
+                    )
+                    if not self._expression_is_same_parameter_ignoring_subpiece(state_init, c_param):
+                        continue
+                    state_progress_indices: Set[int] = set()
+                    state_nonprogress_indices: Set[int] = set()
+                    state_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
+                    state_unknown_transition = False
+                    for backedge_index in state_backedge_indices:
+                        backedge_index_int = int(backedge_index)
+                        state_backedge_expr = summarizer._build_pcode_expression(
+                            state_phi.getInput(backedge_index),
+                            placeholders={state_output: state_placeholder},
+                        )
+                        if self._expression_is_placeholder_minus_one(state_backedge_expr, state_placeholder):
+                            state_progress_indices.add(backedge_index_int)
+                            continue
+                        state_guard_key = self._placeholder_minus_one_unit_condition_guard_key(
+                            state_backedge_expr,
+                            state_placeholder,
+                            target_conditions,
+                        )
+                        if state_guard_key is not None:
+                            state_progress_indices.add(backedge_index_int)
+                            state_conditional_progress_keys[backedge_index_int] = state_guard_key
+                            continue
+                        if self._expressions_same_key(state_backedge_expr, state_placeholder):
+                            state_nonprogress_indices.add(backedge_index_int)
+                            continue
+                        state_unknown_transition = True
+                        break
+                    if (
+                        state_unknown_transition
+                        or not state_progress_indices
+                        or state_progress_indices != acc_progress_indices
+                        or state_nonprogress_indices != acc_nonprogress_indices
+                        or state_conditional_progress_keys != acc_conditional_progress_keys
+                    ):
+                        continue
+                    saw_state_transition = True
+                    if not self._state_phi_feeds_positive_loop_guard(
+                        high_function,
+                        summarizer=summarizer,
+                        header_block=header_block,
+                        backedge_indices=tuple(int(index) for index in state_backedge_indices),
+                        state_phi=state_phi,
+                        state_placeholder=state_placeholder,
+                        target_conditions=target_conditions,
+                        allow_latch_progress_guard=allow_latch_progress_guard,
+                    ):
+                        continue
+                    saw_state_guard = True
+                    return (
+                        "branch_guarded_affine_unit_count_structural_proof",
+                        ("schema_version", 1),
+                        ("function", getattr(analysis, "function_name", None)),
+                        ("acc_phi", self._pcode_op_stable_key(acc_phi)),
+                        ("state_phi", self._pcode_op_stable_key(state_phi)),
+                        ("progress_backedges", tuple(sorted(acc_progress_indices))),
+                        ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
+                        ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
+                        ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
+                        ("target", tuple(condition.to_string() for condition in target_conditions or ())),
+                        ("target_guard_keys", tuple(sorted((self._condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
+                    )
+        self._debug_print(
+            "Outcome branch-guarded structural proof declined: "
+            f"saw_acc_candidate={saw_acc_candidate}, "
+            f"saw_acc_transition={saw_acc_transition}, "
+            f"saw_state_transition={saw_state_transition}, "
+            f"saw_state_guard={saw_state_guard}"
+        )
+        return None
+
+    def _pcode_op_stable_key(self, op) -> Optional[Tuple[Any, ...]]:
+        op_ref = PcodeOpRef.from_pcode_op(
+            op,
+            binary_id=self._binary_id,
+            program_uid=self._program_identity(),
+            function_entry=self._current_function_entry_address(),
+        )
+        if op_ref is None:
+            return None
+        try:
+            return op_ref.stable_key()
+        except Exception:
+            return None
+
+    def _phi_circular_origin_stable_keys(self, expr: Optional[Expression]) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+        for node in _iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.UNKNOWN:
+                continue
+            if not self._expression_contains_phi_circular_marker(node):
+                continue
+            runtime_ref = getattr(node, "runtime_ref", None)
+            origin_ref = getattr(runtime_ref, "origin_ref", None)
+            stable_key = getattr(origin_ref, "stable_key", None)
+            if callable(stable_key):
+                try:
+                    key = stable_key()
+                except Exception:
+                    key = None
+                if isinstance(key, tuple):
+                    keys.add(key)
+        return keys
+
+    def _expression_is_placeholder_plus_one(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+    ) -> bool:
+        return self._expression_is_placeholder_plus_constant(expr, placeholder, 1)
+
+    def _expression_is_placeholder_minus_one(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+    ) -> bool:
+        return self._expression_is_placeholder_plus_constant(expr, placeholder, -1)
+
+    def _expression_is_placeholder_plus_one_under_conditions(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        if self._expression_is_placeholder_plus_one(expr, placeholder):
+            return True
+        return self._expression_is_placeholder_plus_unit_condition(expr, placeholder, conditions)
+
+    def _expression_is_placeholder_minus_one_under_conditions(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        if self._expression_is_placeholder_minus_one(expr, placeholder):
+            return True
+        return self._expression_is_placeholder_minus_one_unit_condition(expr, placeholder, conditions)
+
+    def _expression_is_placeholder_minus_one_unit_condition(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        return self._placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions) is not None
+
+    def _placeholder_minus_one_unit_condition_guard_key(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        current = self._strip_transparent_unary(expr)
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(current, "operator", None) != "INT_SUB":
+            return None
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        if not self._expressions_same_key(operands[0], placeholder):
+            return None
+        return self._unit_condition_key_for_expression(operands[1], conditions)
+
+    def _expression_is_placeholder_plus_unit_condition(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        return self._placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions) is not None
+
+    def _placeholder_plus_unit_condition_guard_key(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        current = self._strip_transparent_unary(expr)
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(current, "operator", None) != "INT_ADD":
+            return None
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        left, right = operands
+        if self._expressions_same_key(left, placeholder):
+            return self._unit_condition_key_for_expression(right, conditions)
+        if self._expressions_same_key(right, placeholder):
+            return self._unit_condition_key_for_expression(left, conditions)
+        return None
+
+    def _unit_condition_key_for_expression(
+        self,
+        expr: Optional[Expression],
+        conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        current = self._strip_transparent_unary(expr)
+        if current is None:
+            return None
+        for condition in conditions or ():
+            if condition is None:
+                continue
+            if self._expression_is_one_under_conditions(current, (condition,)):
+                return self._condition_identity_key(condition)
+        return None
+
+    @staticmethod
+    def _strip_transparent_unary(expr: Optional[Expression]) -> Optional[Expression]:
+        current = expr
+        while (
+            current is not None
+            and getattr(current, "expr_type", None) == ExpressionType.UNARY_OP
+            and getattr(current, "operator", None) in {"COPY", "CAST", "SUBPIECE", "INT_ZEXT", "INT_SEXT"}
+            and len(tuple(getattr(current, "operands", ()) or ())) == 1
+        ):
+            current = tuple(getattr(current, "operands", ()) or ())[0]
+        return current
+
+    def _expression_is_placeholder_plus_constant(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        constant: int,
+    ) -> bool:
+        current = expr
+        while (
+            current is not None
+            and getattr(current, "expr_type", None) == ExpressionType.UNARY_OP
+            and getattr(current, "operator", None) in {"COPY", "CAST", "SUBPIECE", "INT_ZEXT", "INT_SEXT"}
+            and len(tuple(getattr(current, "operands", ()) or ())) == 1
+        ):
+            current = tuple(getattr(current, "operands", ()) or ())[0]
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2:
+            return False
+        operator = getattr(current, "operator", None)
+        left, right = operands
+        if operator == "INT_ADD":
+            if self._expressions_same_key(left, placeholder) and self._constant_int_value(right) == constant:
+                return True
+            if self._expressions_same_key(right, placeholder) and self._constant_int_value(left) == constant:
+                return True
+            wrapped = self._constant_int_value(right)
+            if self._expressions_same_key(left, placeholder) and wrapped is not None:
+                return self._signed_unit_constant_matches(wrapped, constant, getattr(current, "size", None))
+        if operator == "INT_SUB":
+            if self._expressions_same_key(left, placeholder) and self._constant_int_value(right) == -constant:
+                return True
+        return False
+
+    def _signed_unit_constant_matches(self, value: int, expected: int, size: Optional[int]) -> bool:
+        if value == expected:
+            return True
+        bits = max(1, int(size or 4)) * 8
+        mask = (1 << bits) - 1
+        return (int(value) & mask) == (int(expected) & mask)
+
+    def _expressions_same_key(self, left: Optional[Expression], right: Optional[Expression]) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return left.structural_key() == right.structural_key()
+        except Exception:
+            return False
+
+    def _state_phi_feeds_positive_loop_guard(
+        self,
+        high_function,
+        *,
+        summarizer: StructuralRecurrenceSummarizer,
+        header_block,
+        backedge_indices: Sequence[int],
+        state_phi,
+        state_placeholder: Expression,
+        target_conditions: Sequence[Condition],
+        allow_latch_progress_guard: bool,
+    ) -> bool:
+        state_output = getattr(state_phi, "getOutput", lambda: None)()
+        if state_output is None:
+            return False
+        positive_guard = Expression.binary_op("INT_SLESS", Expression.constant(0, size=state_placeholder.size or 4), state_placeholder)
+        positive_guard.size = 1
+        candidate_blocks = [header_block]
+        try:
+            in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
+        except Exception:
+            in_size = 0
+        for backedge_index in backedge_indices or ():
+            if 0 <= int(backedge_index) < in_size:
+                try:
+                    predecessor = header_block.getIn(int(backedge_index))
+                except Exception:
+                    predecessor = None
+                if predecessor is not None and predecessor not in candidate_blocks:
+                    candidate_blocks.append(predecessor)
+        header_key = self._block_debug_key(header_block)
+        for block in candidate_blocks:
+            cbranch = summarizer._find_cbranch_op(block)
+            if cbranch is None or summarizer._safe_pcode_input_count(cbranch) < 2:
+                continue
+            if block is not header_block:
+                successor_keys = {self._block_debug_key(successor) for successor in self._block_successors(block)}
+                if header_key not in successor_keys:
+                    continue
+            guard_expr = summarizer._build_pcode_expression(
+                cbranch.getInput(1),
+                placeholders={state_output: state_placeholder},
+            )
+            if guard_expr is None:
+                continue
+            if self._expressions_same_key(
+                summarizer._canonicalize_expression(guard_expr),
+                summarizer._canonicalize_expression(positive_guard),
+            ):
+                return True
+            if allow_latch_progress_guard and self._expression_is_positive_after_unit_progress_guard(
+                guard_expr,
+                state_placeholder,
+                target_conditions,
+            ):
+                return True
+        return False
+
+    def _expression_is_positive_after_unit_progress_guard(
+        self,
+        expr: Optional[Expression],
+        state_placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        current = expr
+        while (
+            current is not None
+            and getattr(current, "expr_type", None) == ExpressionType.UNARY_OP
+            and getattr(current, "operator", None) in {"COPY", "CAST", "SUBPIECE", "INT_ZEXT", "INT_SEXT"}
+            and len(tuple(getattr(current, "operands", ()) or ())) == 1
+        ):
+            current = tuple(getattr(current, "operands", ()) or ())[0]
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(current, "operator", None) != "INT_SLESS":
+            return False
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2 or self._constant_int_value(operands[0]) != 0:
+            return False
+        right = operands[1]
+        if getattr(right, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(right, "operator", None) != "INT_SUB":
+            return False
+        right_operands = tuple(getattr(right, "operands", ()) or ())
+        if len(right_operands) != 2:
+            return False
+        return self._expressions_same_key(right_operands[0], state_placeholder) and self._expression_is_one_under_conditions(
+            right_operands[1],
+            conditions,
         )
 
     def _branch_guarded_affine_ignored_artifacts_are_shadowed(

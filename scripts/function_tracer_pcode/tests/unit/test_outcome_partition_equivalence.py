@@ -1268,6 +1268,100 @@ def test_analyzer_rejects_whileif_divergence_when_guard_condition_def_is_unsuppo
         assert analysis.divergence_outcomes == ()
 
 
+def test_analyzer_rejects_structural_conditional_nonprogress_without_current_cfg_proof():
+    analyzer = ReturnAnalyzer(None)
+    target_conditions = (_positive2(), _positive())
+    structural_proof = (
+        "branch_guarded_affine_unit_count_structural_proof",
+        ("schema_version", 1),
+        ("function", "f"),
+        ("acc_phi", ("pcode_op", "stale-acc")),
+        ("state_phi", ("pcode_op", "stale-state")),
+        ("progress_backedges", (1,)),
+        ("nonprogress_backedges", ()),
+        ("conditional_progress_backedges", (1,)),
+        ("target", ("(0 < param_2)", "(0 < param_1)")),
+        ("target_guard_keys", tuple(sorted((analyzer._condition_identity_key(condition) for condition in target_conditions), key=repr))),
+    )
+    ret = ReturnInfo(
+        address="0x1000",
+        value=_param2(),
+        conditions=list(target_conditions),
+        summary_candidate_source_key=(
+            "branch_guarded_affine_initial_count",
+            ("structural_proof", structural_proof),
+        ),
+    )
+
+    proof = analyzer._prove_branch_guarded_structural_nonprogress_must_diverge(
+        _branch_guarded_while_proved_high_function(),
+        initial_c_ret=ret,
+        invariant_conditions=(_positive2(), _nonpositive()),
+    )
+
+    assert proof is None
+
+
+def test_analyzer_rejects_structural_conditional_nonprogress_without_negated_guard():
+    analyzer = ReturnAnalyzer(None)
+    target_conditions = (_positive2(), _positive())
+    structural_proof = (
+        "branch_guarded_affine_unit_count_structural_proof",
+        ("schema_version", 1),
+        ("function", "f"),
+        ("acc_phi", ("pcode_op", "stale-acc")),
+        ("state_phi", ("pcode_op", "stale-state")),
+        ("progress_backedges", (1,)),
+        ("nonprogress_backedges", ()),
+        ("conditional_progress_backedges", (1,)),
+        ("target", ("(0 < param_2)", "(0 < param_1)")),
+        ("target_guard_keys", tuple(sorted((analyzer._condition_identity_key(condition) for condition in target_conditions), key=repr))),
+    )
+    ret = ReturnInfo(
+        address="0x1000",
+        value=_param2(),
+        conditions=list(target_conditions),
+        summary_candidate_source_key=(
+            "branch_guarded_affine_initial_count",
+            ("structural_proof", structural_proof),
+        ),
+    )
+
+    proof = analyzer._prove_branch_guarded_structural_nonprogress_must_diverge(
+        _branch_guarded_while_proved_high_function(),
+        initial_c_ret=ret,
+        invariant_conditions=(_positive2(), _positive()),
+    )
+
+    assert proof is None
+
+
+def test_analyzer_requires_conditional_progress_guard_itself_to_contradict_invariant():
+    analyzer = ReturnAnalyzer(None)
+    c_positive = _positive2()
+    t_positive = _positive()
+    t_nonpositive = _nonpositive()
+
+    assert analyzer._conditional_progress_guards_contradict_invariant(
+        {1: analyzer._condition_identity_key(c_positive)},
+        target_conditions=(c_positive, t_positive),
+        invariant_conditions=(c_positive, t_nonpositive),
+    ) is False
+
+
+def test_analyzer_accepts_conditional_progress_only_when_progress_guard_contradicts_invariant():
+    analyzer = ReturnAnalyzer(None)
+    c_positive = _positive2()
+    t_positive = _positive()
+    t_nonpositive = _nonpositive()
+
+    assert analyzer._conditional_progress_guards_contradict_invariant(
+        {1: analyzer._condition_identity_key(t_positive)},
+        target_conditions=(c_positive, t_positive),
+        invariant_conditions=(c_positive, t_nonpositive),
+    ) is True
+
+
 def test_analyzer_rejects_whileif_affine_step_two_without_structural_recurrence_proof():
     phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
     t_param = _param()

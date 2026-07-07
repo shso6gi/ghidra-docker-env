@@ -8337,53 +8337,75 @@ class StructuralRecurrenceSummarizer:
                 "pcode_time": pcode_ref.seq_time,
                 "pcode_order": pcode_ref.seq_order,
             }
-        loop_value = self._build_multiplicative_state_transition_loop_value(
+        progress_guard_expr = None
+        progress_entry_guard_expr = None
+        loop_value = self._build_progress_guarded_unit_state_transition_value(
             model=model,
             analysis=analysis,
-            side_effect_profile=side_effect_profile,
             result_size=result_size,
         )
-        multiplicative_loop_value = loop_value is not None
-        if loop_value is not None:
-            self._debug("Recovered multiplicative state-transition loop value")
-            zero_iteration_anchor_key = self._state_transition_object_zero_iteration_anchor_key(
-                model=model,
-                result_size=result_size,
-            )
-            if zero_iteration_anchor_key is not None and transition_evidence_key is not None:
-                transition_evidence_key = (
-                    "state_transition_loop_evidence_with_zero_iteration_anchor",
-                    transition_evidence_key,
-                    ("zero_iteration_anchor_proof", zero_iteration_anchor_key),
-                )
-        elif self._raw_constant_value(model.accumulator_delta_expr) == 1:
-            loop_value = loop_count
-        else:
-            loop_value = self._build_state_decrement_accumulator_sum_value(
-                model=model,
-                result_size=result_size,
-            )
-            if loop_value is None:
-                latch_exit_returns = self._try_build_latch_exit_decrement_accumulator_sum_returns(
-                    function=function,
-                    model=model,
-                    analysis=analysis,
-                    result_size=result_size,
-                    accumulator_init=accumulator_init,
-                )
-                if latch_exit_returns is not None:
-                    self._debug("Recovered latch-exit decrement accumulator sum summary")
-                    return latch_exit_returns, "state_transition_loop_summary"
-                self._debug(
-                    "Declined state-transition loop summary: accumulator delta is not one "
-                    "or supported state affine "
-                    f"(state_init={self._safe_expr_text(model.state_init_expr)}, "
-                    f"state_guard={self._safe_expr_text(model.state_guard_expr)}, "
-                    f"state_transition={self._safe_expr_text(model.state_transition_expr)}, "
-                    f"accumulator_init={self._safe_expr_text(model.accumulator_init_expr)}, "
-                    f"accumulator_delta={self._safe_expr_text(model.accumulator_delta_expr)})"
-                )
+        progress_guarded_loop_value = loop_value is not None
+        if progress_guarded_loop_value:
+            progress_guard_expr = self._progress_guarded_unit_step_expression(model)
+            if progress_guard_expr is None:
                 return None
+            progress_entry_guard_expr = self._progress_guarded_unit_entry_guard_expression(
+                model=model,
+                progress_guard_expr=progress_guard_expr,
+                analysis=analysis,
+            )
+            if progress_entry_guard_expr is None:
+                return None
+            self._debug("Recovered progress-guarded unit state-transition loop value")
+        multiplicative_loop_value = False
+        if not progress_guarded_loop_value:
+            loop_value = self._build_multiplicative_state_transition_loop_value(
+                model=model,
+                analysis=analysis,
+                side_effect_profile=side_effect_profile,
+                result_size=result_size,
+            )
+            multiplicative_loop_value = loop_value is not None
+            if loop_value is not None:
+                self._debug("Recovered multiplicative state-transition loop value")
+                zero_iteration_anchor_key = self._state_transition_object_zero_iteration_anchor_key(
+                    model=model,
+                    result_size=result_size,
+                )
+                if zero_iteration_anchor_key is not None and transition_evidence_key is not None:
+                    transition_evidence_key = (
+                        "state_transition_loop_evidence_with_zero_iteration_anchor",
+                        transition_evidence_key,
+                        ("zero_iteration_anchor_proof", zero_iteration_anchor_key),
+                    )
+            elif self._raw_constant_value(model.accumulator_delta_expr) == 1:
+                loop_value = loop_count
+            else:
+                loop_value = self._build_state_decrement_accumulator_sum_value(
+                    model=model,
+                    result_size=result_size,
+                )
+                if loop_value is None:
+                    latch_exit_returns = self._try_build_latch_exit_decrement_accumulator_sum_returns(
+                        function=function,
+                        model=model,
+                        analysis=analysis,
+                        result_size=result_size,
+                        accumulator_init=accumulator_init,
+                    )
+                    if latch_exit_returns is not None:
+                        self._debug("Recovered latch-exit decrement accumulator sum summary")
+                        return latch_exit_returns, "state_transition_loop_summary"
+                    self._debug(
+                        "Declined state-transition loop summary: accumulator delta is not one "
+                        "or supported state affine "
+                        f"(state_init={self._safe_expr_text(model.state_init_expr)}, "
+                        f"state_guard={self._safe_expr_text(model.state_guard_expr)}, "
+                        f"state_transition={self._safe_expr_text(model.state_transition_expr)}, "
+                        f"accumulator_init={self._safe_expr_text(model.accumulator_init_expr)}, "
+                        f"accumulator_delta={self._safe_expr_text(model.accumulator_delta_expr)})"
+                    )
+                    return None
         if not multiplicative_loop_value:
             loop_value = self._add_state_transition_accumulator_seed(
                 accumulator_init,
@@ -8393,10 +8415,13 @@ class StructuralRecurrenceSummarizer:
             if loop_value is None:
                 self._debug("Declined state-transition loop summary: accumulator seed could not be combined")
                 return None
-        loop_conditions = [Condition(entry_guard_expr, False)]
+        loop_conditions = [Condition(progress_entry_guard_expr or entry_guard_expr, False)]
+        if progress_guard_expr is not None:
+            loop_conditions.append(Condition(progress_guard_expr, False))
         exact_exclusion_conditions = self._state_transition_exact_return_exclusion_conditions(
             analysis,
             loop_conditions,
+            loop_value,
         )
         if exact_exclusion_conditions:
             loop_conditions.extend(exact_exclusion_conditions)
@@ -8424,10 +8449,183 @@ class StructuralRecurrenceSummarizer:
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
 
+    def _build_progress_guarded_unit_state_transition_value(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        analysis,
+        result_size: int,
+    ) -> Optional[Expression]:
+        progress_guard = self._progress_guarded_unit_step_expression(model)
+        if progress_guard is None:
+            return None
+        if self._progress_guarded_unit_entry_guard_expression(
+            model=model,
+            progress_guard_expr=progress_guard,
+            analysis=analysis,
+        ) is None:
+            return None
+        state_value = self._coerce_summary_expression_to_size(
+            model.state_init_expr,
+            max(1, int(result_size or getattr(model.state_init_expr, "size", 0) or 4)),
+            signed=self._expression_prefers_signed_extension(model.state_init_expr),
+        )
+        if state_value is None or self._expression_is_unresolved(state_value):
+            return None
+        return self._canonicalize_expression(state_value)
+
+    def _progress_guarded_unit_entry_guard_expression(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        progress_guard_expr: Expression,
+        analysis,
+    ) -> Optional[Expression]:
+        if self._state_guard_proves_signed_positive_placeholder(
+            model.state_guard_expr,
+            model.state_placeholder,
+        ):
+            return self._positive_state_init_guard_expression(model)
+        if not self._state_guard_is_positive_after_progress_step(
+            model.state_guard_expr,
+            model.state_placeholder,
+            progress_guard_expr,
+        ):
+            return None
+        positive_entry_guard = self._positive_state_init_guard_expression(model)
+        if positive_entry_guard is None:
+            return None
+        if not self._progress_guarded_stop_one_anchor_is_proved(
+            analysis=analysis,
+            model=model,
+            positive_entry_guard=positive_entry_guard,
+            progress_guard_expr=progress_guard_expr,
+        ):
+            return None
+        return positive_entry_guard
+
+    def _positive_state_init_guard_expression(
+        self,
+        model: StateTransitionLoopModel,
+    ) -> Optional[Expression]:
+        positive_guard = self._positive_state_guard_expression(model.state_placeholder)
+        entry_guard = self._substitute_exact_expression(
+            positive_guard,
+            model.state_placeholder,
+            model.state_init_expr,
+        )
+        if entry_guard is None or self._expression_is_unresolved(entry_guard):
+            return None
+        return self._canonicalize_expression(entry_guard)
+
+    def _state_guard_is_positive_after_progress_step(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+        progress_guard_expr: Expression,
+    ) -> bool:
+        if state_guard is None or getattr(state_guard, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(state_guard, "operator", None) != "INT_SLESS":
+            return False
+        operands = tuple(getattr(state_guard, "operands", ()) or ())
+        if len(operands) != 2 or self._raw_constant_value(operands[0]) != 0:
+            return False
+        right = operands[1]
+        if getattr(right, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(right, "operator", None) != "INT_SUB":
+            return False
+        right_operands = tuple(getattr(right, "operands", ()) or ())
+        if len(right_operands) != 2:
+            return False
+        return (
+            self._expressions_have_same_structural_key(right_operands[0], state_placeholder)
+            and self._expressions_have_same_structural_key(right_operands[1], progress_guard_expr)
+        )
+
+    def _progress_guarded_stop_one_anchor_is_proved(
+        self,
+        *,
+        analysis,
+        model: StateTransitionLoopModel,
+        positive_entry_guard: Expression,
+        progress_guard_expr: Expression,
+    ) -> bool:
+        if analysis is None:
+            return False
+        entry_continue_guard = self._substitute_exact_expression(
+            model.state_guard_expr,
+            model.state_placeholder,
+            model.state_init_expr,
+        )
+        if entry_continue_guard is None or self._expression_is_unresolved(entry_continue_guard):
+            return False
+        anchor_region = (
+            Condition(positive_entry_guard, False),
+            Condition(progress_guard_expr, False),
+            Condition(self._canonicalize_expression(entry_continue_guard), True),
+        )
+        for ret in getattr(analysis, "returns", ()) or ():
+            ret_conditions = tuple(getattr(ret, "conditions", ()) or ())
+            if not self._conditions_equivalent_object_centric(ret_conditions, anchor_region):
+                continue
+            if self._return_value_equals_under_conditions(
+                getattr(ret, "value", None),
+                model.state_init_expr,
+                ret_conditions + anchor_region,
+            ):
+                return True
+        return False
+
+    def _progress_guarded_unit_step_expression(
+        self,
+        model: StateTransitionLoopModel,
+    ) -> Optional[Expression]:
+        transition = getattr(model, "state_transition_expr", None)
+        if transition is None or getattr(transition, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(transition, "operator", None) != "INT_SUB":
+            return None
+        operands = tuple(getattr(transition, "operands", ()) or ())
+        if len(operands) != 2:
+            return None
+        state_expr, step_expr = operands
+        if not self._expressions_have_same_structural_key(state_expr, model.state_placeholder):
+            return None
+        if self._expression_mentions_placeholder(step_expr, model.state_placeholder):
+            return None
+        if self._expression_mentions_placeholder(step_expr, model.accumulator_placeholder):
+            return None
+        accumulator_delta = getattr(model, "accumulator_delta_expr", None)
+        if not self._expressions_have_same_structural_key(accumulator_delta, step_expr):
+            return None
+        if not self._expression_is_boolean_condition_value(step_expr):
+            return None
+        return self._canonicalize_expression(step_expr)
+
+    def _expression_is_boolean_condition_value(self, expr: Optional[Expression]) -> bool:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if int(getattr(expr, "size", 0) or 1) != 1:
+            return False
+        return getattr(expr, "operator", None) in {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        }
+
     def _state_transition_exact_return_exclusion_conditions(
         self,
         analysis,
         loop_conditions: Sequence[Condition],
+        loop_value: Optional[Expression] = None,
     ) -> Tuple[Condition, ...]:
         exclusions: List[Condition] = []
         for ret in tuple(getattr(analysis, "returns", ()) or ()):
@@ -8440,6 +8638,12 @@ class StructuralRecurrenceSummarizer:
             if not self._conditions_overlap_conditions(
                 tuple(getattr(ret, "conditions", None) or ()),
                 tuple(loop_conditions or ()),
+            ):
+                continue
+            if loop_value is not None and self._return_value_equals_under_conditions(
+                getattr(ret, "value", None),
+                loop_value,
+                tuple(getattr(ret, "conditions", None) or ()) + tuple(loop_conditions or ()),
             ):
                 continue
             exclusion = self._negated_return_region_condition(ret.conditions)
