@@ -9,7 +9,13 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     ResidueLoopCase,
     StructuralRecurrenceSummarizer,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, LoopCaseRef, LoopSideEffectProfileRef
+from scripts.function_tracer_pcode.model import (
+    Condition,
+    Expression,
+    LoopCaseRef,
+    LoopSideEffectProfileRef,
+    UnknownValueRef,
+)
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -477,6 +483,42 @@ def test_apply_structural_recurrence_summary_skips_resolved_plain_memory_return_
         )
 
     assert result is None
+
+
+def test_prune_preserves_runtime_ref_phi_circular_multiplicative_candidate():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    condition = Condition(
+        Expression.binary_op(
+            "INT_SLESS",
+            Expression.constant(0, 4),
+            Expression.parameter("param_1", 0),
+        )
+    )
+    phi_unknown = Expression.unknown(
+        "opaque_loop_value",
+        runtime_ref=UnknownValueRef.opaque(
+            reason="phi_circular",
+            display_hint="phi_circular",
+        ),
+    )
+    recursive_value = Expression.binary_op("INT_MULT", phi_unknown, Expression.constant(2, 4))
+    recursive_value.size = 4
+    precise = analyzer._make_return_info(
+        address="0x1000",
+        value=Expression.constant(1, 4),
+        conditions=[condition],
+        branch_index=0,
+    )
+    recursive = analyzer._make_return_info(
+        address="0x1000",
+        value=recursive_value,
+        conditions=[condition],
+        branch_index=1,
+    )
+
+    pruned = analyzer._prune_less_precise_return_infos([precise, recursive])
+
+    assert pruned == [precise, recursive]
 
 
 def test_apply_structural_recurrence_summary_uses_structural_summarizer():

@@ -3344,6 +3344,63 @@ def test_multiplicative_state_transition_start_rejects_phi_expansion_one_anchor(
     ) is None
 
 
+def test_multiplicative_state_transition_start_accepts_stable_resolved_phi_anchor():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    n = _param("param_1")
+    guard = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        _const(0),
+    )
+    guard.size = 1
+    model = StateTransitionLoopModel(
+        header_block=None,
+        body_block=None,
+        exit_block=None,
+        state_phi_op=None,
+        state_phi_output=None,
+        state_init_expr=n,
+        state_placeholder=state,
+        state_guard_expr=guard,
+        state_transition_expr=Expression.binary_op("INT_ADD", state, Expression.constant(0xFFFFFFFF, size=4)),
+        accumulator_phi_op=None,
+        accumulator_phi_output=None,
+        accumulator_init_expr=_const(1),
+        accumulator_delta_expr=Expression.binary_op(
+            "INT_LEFT",
+            Expression.variable("__loop_acc", size=4),
+            _const(1),
+        ),
+        accumulator_placeholder=Expression.variable("__loop_acc", size=4),
+        continue_on_true=True,
+        loop_blocks=(),
+    )
+    stable_phi_anchor = create_mock_analysis(
+        "multiplicative_state_transition",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(1),
+                conditions=[_cond("INT_EQUAL", n, _const(1))],
+                return_kind="phi_expansion",
+                pcode_identity="00100054:t22",
+            ),
+        ],
+    )
+
+    start = summarizer._multiplicative_state_transition_iteration_start_expr(
+        model=model,
+        analysis=stable_phi_anchor,
+        result_size=4,
+        size=4,
+    )
+
+    assert start is not None
+    assert start.structural_key() == _const(1).structural_key()
+
+
 def test_multiplicative_state_transition_start_rejects_model_only_zero_iteration_anchor(monkeypatch):
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
     monkeypatch.setattr(summarizer, "_varnode_reaches_return", lambda _varnode: True)
@@ -3414,7 +3471,7 @@ def test_multiplicative_state_transition_start_accepts_object_zero_iteration_anc
     next_vn = _FakeVarnode("acc_next", expr=_const(2))
     acc_phi_vn = _FakeVarnode("acc_phi")
     acc_phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], acc_phi_vn)
-    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), init_vn], None)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_phi_vn], None)
     exit_block._ops[:] = [return_op]
     return_op.setParent(exit_block)
     model = StateTransitionLoopModel(
@@ -3469,6 +3526,7 @@ def test_multiplicative_state_transition_start_accepts_object_zero_iteration_anc
         1,
         "reject_effect_memory_call_indirect_control_fp_unknown",
     )
+    assert anchor_fields["accumulator_phi_output_key"] is not None
     assert anchor_fields["exit_region_scan_refs"]
     assert start is not None
     assert start.structural_key() == _const(1).structural_key()
@@ -3811,7 +3869,53 @@ def test_multiplicative_phi_return_region_recovers_direct_state_value():
     assert positive_case.summary_transition_evidence_key is not None
 
 
-def test_multiplicative_phi_return_region_requires_zero_base_return_proof():
+def test_multiplicative_phi_return_region_rejects_mixed_recursive_multipliers():
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value_2 = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value_2.size = 4
+    recursive_value_3 = Expression.binary_op("INT_MULT", phi_value, _const(3))
+    recursive_value_3.size = 4
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value_2,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+            ReturnInfo(
+                address="0x100c",
+                value=recursive_value_3,
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    ) is None
+
+
+def test_multiplicative_phi_return_region_keeps_nonzero_base_exact_return():
     phi_value = Expression.unknown("phi_circular")
     recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
     recursive_value.size = 4
@@ -3842,14 +3946,19 @@ def test_multiplicative_phi_return_region_requires_zero_base_return_proof():
 
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
 
-    assert summarizer._try_summarize_multiplicative_phi_return_region(
+    summary = summarizer._try_summarize_multiplicative_phi_return_region(
         _FakeFunction("multiplicative_phi_region"),
         _build_decrement_accumulator_sum_cfg(),
         analysis,
-    ) is None
+    )
+
+    assert summary is not None
+    summarized_returns, _note = summary
+    assert len(summarized_returns) == 1
+    assert summarized_returns[0].value.opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE
 
 
-def test_multiplicative_phi_return_region_accepts_unconditional_zero_base_witness():
+def test_multiplicative_phi_return_region_rejects_unconditional_conflicting_zero_return():
     phi_value = Expression.unknown("phi_circular")
     recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
     recursive_value.size = 4
@@ -3881,9 +3990,121 @@ def test_multiplicative_phi_return_region_accepts_unconditional_zero_base_witnes
         analysis,
     )
 
+    assert summary is None
+
+
+def test_multiplicative_phi_return_region_uses_common_bounded_guard_and_keeps_outer_zero():
+    n = _param("param_1")
+    n_minus_one = Expression.binary_op("INT_SUB", n, _const(1))
+    n_minus_one.size = 4
+    bounded_guard = _cond("INT_LESS", n_minus_one, _const(4))
+    seed_guard = _cond("INT_EQUAL", n_minus_one, _const(0))
+    recursive_guard = _cond("INT_NOTEQUAL", n_minus_one, _const(0))
+    outer_zero_guard = _cond("INT_LESSEQUAL", _const(4), n_minus_one)
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value.size = 4
+    zero_return = ReturnInfo(
+        address="0x1000",
+        value=_const(0),
+        conditions=[outer_zero_guard],
+    )
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            zero_return,
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[bounded_guard, seed_guard],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[bounded_guard, recursive_guard],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    )
+
     assert summary is not None
-    summarized_returns, _note = summary
-    assert any(ret.conditions and ret.conditions[0].to_string() == "(param_1 <= 0)" for ret in summarized_returns)
+    summarized_returns, note = summary
+    assert note == "multiplicative_phi_return_region_summary"
+    assert len(summarized_returns) == 1
+    positive_case = summarized_returns[0]
+    assert [condition.to_string() for condition in positive_case.conditions] == [
+        "((param_1 - 1) < 4)",
+        "(0 < param_1)",
+    ]
+    proof_target = positive_case.summary_transition_evidence_key[2]
+    superseded_keys = proof_target[6][1]
+    assert summarizer._return_info_summary_identity_key(zero_return) not in superseded_keys
+
+
+def test_multiplicative_phi_return_region_keeps_common_negated_bounded_guard():
+    n = _param("param_1")
+    n_minus_one = Expression.binary_op("INT_SUB", n, _const(1))
+    n_minus_one.size = 4
+    outer_zero_guard = _cond("INT_LESSEQUAL", _const(4), n_minus_one)
+    bounded_guard = outer_zero_guard.negate()
+    seed_guard = _cond("INT_EQUAL", n_minus_one, _const(0))
+    recursive_guard = _cond("INT_NOTEQUAL", n_minus_one, _const(0))
+    phi_value = Expression.unknown("phi_circular")
+    recursive_value = Expression.binary_op("INT_MULT", phi_value, _const(2))
+    recursive_value.size = 4
+    zero_return = ReturnInfo(
+        address="0x1000",
+        value=_const(0),
+        conditions=[outer_zero_guard],
+    )
+    analysis = create_mock_analysis(
+        "multiplicative_phi_region",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            zero_return,
+            ReturnInfo(
+                address="0x1004",
+                value=_const(1),
+                conditions=[bounded_guard, seed_guard],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=recursive_value,
+                conditions=[bounded_guard, recursive_guard],
+                return_kind="phi_expansion",
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_multiplicative_phi_return_region(
+        _FakeFunction("multiplicative_phi_region"),
+        _build_decrement_accumulator_sum_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "multiplicative_phi_return_region_summary"
+    assert len(summarized_returns) == 1
+    positive_case = summarized_returns[0]
+    assert [condition.to_string() for condition in positive_case.conditions] == [
+        "(not (4 <= (param_1 - 1)))",
+        "(0 < param_1)",
+    ]
+    proof_target = positive_case.summary_transition_evidence_key[2]
+    superseded_keys = proof_target[6][1]
+    assert summarizer._return_info_summary_identity_key(zero_return) not in superseded_keys
 
 
 def test_multiplicative_phi_return_region_ignores_unrelated_high_function_multiplier():

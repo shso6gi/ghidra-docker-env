@@ -10757,6 +10757,17 @@ class ReturnAnalyzer:
                     )
                 pruned.extend(group)
                 continue
+            if any(
+                self._return_value_is_multiplicative_phi_recurrence_candidate(info.value)
+                for info in unresolved_group
+            ):
+                if self.debug:
+                    self._debug_print(
+                        "Preserved unresolved multiplicative PHI return cases for "
+                        "structural recurrence summary validation"
+                    )
+                pruned.extend(group)
+                continue
 
             dropped = len(unresolved_group)
             if dropped > 0 and self.debug:
@@ -10767,6 +10778,37 @@ class ReturnAnalyzer:
             pruned.extend(precise_group)
 
         return pruned
+
+    def _return_value_is_multiplicative_phi_recurrence_candidate(self, value: Optional[Expression]) -> bool:
+        if getattr(value, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(value, "operator", None) not in {"INT_MULT", "INT_LEFT"}:
+            return False
+        operands = tuple(getattr(value, "operands", ()) or ())
+        if len(operands) != 2:
+            return False
+        has_phi_unknown = any(self._expression_contains_phi_circular_marker(operand) for operand in operands)
+        has_constant = any(getattr(operand, "expr_type", None) == ExpressionType.CONSTANT for operand in operands)
+        return bool(has_phi_unknown and has_constant)
+
+    def _expression_contains_phi_circular_marker(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if getattr(expr, "expr_type", None) == ExpressionType.UNKNOWN:
+            if str(getattr(expr, "name", "") or getattr(expr, "value", "") or "") == "phi_circular":
+                return True
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            if (
+                isinstance(runtime_ref, UnknownValueRef)
+                and getattr(runtime_ref, "reason", None) == "phi_circular"
+            ):
+                return True
+            if getattr(runtime_ref, "kind", None) == "phi_circular":
+                return True
+        return any(
+            self._expression_contains_phi_circular_marker(operand)
+            for operand in (getattr(expr, "operands", None) or ())
+        )
 
     def _exclusivize_return_regions(
         self,

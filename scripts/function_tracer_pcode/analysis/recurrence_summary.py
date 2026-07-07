@@ -2945,6 +2945,17 @@ class StructuralRecurrenceSummarizer:
             if self._return_overlaps_conditions(ret, positive_conditions)
             and self._return_value_contains_phi_circular(getattr(ret, "value", None))
         )
+        if not recursive_returns:
+            self._debug("Declined multiplicative PHI return summary: recursive return missing")
+            return None
+        summary_conditions = self._multiplicative_phi_return_summary_conditions(
+            positive_conditions=positive_conditions,
+            seed_returns=seed_returns,
+            recursive_returns=recursive_returns,
+        )
+        if not summary_conditions:
+            self._debug("Declined multiplicative PHI return summary: summary guard proof unavailable")
+            return None
         model = self._find_state_transition_loop_model(high_function, analysis=analysis)
         if model is None:
             self._debug("Declined multiplicative PHI return summary: loop counter model missing")
@@ -2979,107 +2990,189 @@ class StructuralRecurrenceSummarizer:
             base_conditions=base_conditions,
             result_size=result_size,
         )
-        if not base_witness_returns:
-            self._debug(
-                "Declined multiplicative PHI return summary: zero base return proof unavailable"
-            )
-            return None
-        multiplier_candidates: List[int] = []
-        for ret in recursive_returns:
-            for candidate in self._multiplicative_phi_transition_multiplier_candidates(
-                getattr(ret, "value", None)
-            ):
-                candidate = int(candidate)
-                if candidate in {0, 1}:
-                    continue
-                if candidate not in multiplier_candidates:
-                    multiplier_candidates.append(candidate)
-        if not multiplier_candidates:
-            self._debug("Declined multiplicative PHI return summary: multiplier candidate missing")
-            return None
-
-        base_anchor_source = base_witness_returns[0]
-        base_anchor = ReturnInfo(
-            address=str(
-                getattr(base_anchor_source, "address", None)
-                or getattr(function, "getEntryPoint", lambda: "0x0")()
-            ),
-            value=Expression.constant(0, size=result_size),
-            conditions=list(base_conditions),
-            branch_index=30_199,
-            pcode_identity=getattr(base_anchor_source, "pcode_identity", None),
-            pcode_order=getattr(base_anchor_source, "pcode_order", None),
-            pcode_time=getattr(base_anchor_source, "pcode_time", None),
-            pcode_op_ref=getattr(base_anchor_source, "pcode_op_ref", None),
-            return_value_pcode_op_refs=tuple(
-                getattr(base_anchor_source, "return_value_pcode_op_refs", ()) or ()
-            ),
-        )
         coverage_key = self._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
             active_preconditions=self._analysis_active_preconditions(analysis),
-            summary_conditions=positive_conditions,
-            exact_returns=[base_anchor],
+            summary_conditions=summary_conditions,
+            exact_returns=returns,
+            parameters=parameters,
         )
         if coverage_key is None:
             self._debug("Declined multiplicative PHI return summary: coverage proof unavailable")
             return None
+        multiplier = self._single_multiplicative_phi_transition_multiplier(recursive_returns)
+        if multiplier is None:
+            self._debug("Declined multiplicative PHI return summary: recursive multipliers are not uniform")
+            return None
 
-        for multiplier in multiplier_candidates:
-            summary_value = self._build_direct_multiplicative_state_value(
-                count_expr=count_expr,
-                multiplier=int(multiplier),
-                result_size=result_size,
-                guard_constraints=positive_conditions,
+        base_anchor: Optional[ReturnInfo] = None
+        if base_witness_returns and self._base_witnesses_exactly_cover_region(
+            base_witness_returns,
+            base_conditions,
+        ):
+            base_anchor_source = base_witness_returns[0]
+            base_anchor = ReturnInfo(
+                address=str(
+                    getattr(base_anchor_source, "address", None)
+                    or getattr(function, "getEntryPoint", lambda: "0x0")()
+                ),
+                value=Expression.constant(0, size=result_size),
+                conditions=list(base_conditions),
+                branch_index=30_199,
+                pcode_identity=getattr(base_anchor_source, "pcode_identity", None),
+                pcode_order=getattr(base_anchor_source, "pcode_order", None),
+                pcode_time=getattr(base_anchor_source, "pcode_time", None),
+                pcode_op_ref=getattr(base_anchor_source, "pcode_op_ref", None),
+                return_value_pcode_op_refs=tuple(
+                    getattr(base_anchor_source, "return_value_pcode_op_refs", ()) or ()
+                ),
             )
-            if summary_value is None:
-                continue
-            proof_ref = self._record_structural_multiplicative_return_region_proof(
-                analysis=analysis,
-                summary_value=summary_value,
-                summary_conditions=positive_conditions,
-                seed_returns=seed_returns,
-                recursive_returns=recursive_returns,
-                base_witness_returns=base_witness_returns,
-                superseded_returns=returns,
-                coverage_key=coverage_key,
-                multiplier=int(multiplier),
+
+        summary_value = self._build_direct_multiplicative_state_value(
+            count_expr=count_expr,
+            multiplier=int(multiplier),
+            result_size=result_size,
+            guard_constraints=summary_conditions,
+        )
+        if summary_value is None:
+            return None
+        proof_ref = self._record_structural_multiplicative_return_region_proof(
+            analysis=analysis,
+            summary_value=summary_value,
+            summary_conditions=summary_conditions,
+            seed_returns=seed_returns,
+            recursive_returns=recursive_returns,
+            base_witness_returns=base_witness_returns,
+            superseded_returns=tuple(seed_returns)
+            + tuple(recursive_returns)
+            + (tuple(base_witness_returns) if base_anchor is not None else ()),
+            coverage_key=coverage_key,
+            multiplier=int(multiplier),
+        )
+        if proof_ref is None:
+            return None
+        anchor = (recursive_returns or seed_returns)[0]
+        source_key = self._summary_value_source_key(summary_value)
+        if source_key is None:
+            source_key = (
+                "multiplicative_phi_return_region",
+                _runtime_expression_signature(summary_value),
+                int(multiplier),
             )
-            if proof_ref is None:
+        summary_return = ReturnInfo(
+            address=str(getattr(anchor, "address", None) or getattr(function, "getEntryPoint", lambda: "0x0")()),
+            value=summary_value,
+            conditions=list(summary_conditions),
+            branch_index=30_200,
+            pcode_identity=getattr(anchor, "pcode_identity", None),
+            pcode_order=getattr(anchor, "pcode_order", None),
+            pcode_time=getattr(anchor, "pcode_time", None),
+            pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
+            return_kind="summary_derived",
+            summary_candidate_source_key=source_key,
+            summary_transition_evidence_key=proof_ref,
+        )
+        proposed_returns = [summary_return]
+        if base_anchor is not None:
+            proposed_returns.insert(
+                0,
+                replace(
+                    base_anchor,
+                    return_kind="summary_derived",
+                    summary_candidate_source_key=source_key,
+                    summary_transition_evidence_key=proof_ref,
+                ),
+            )
+        self._debug(
+            "Recovered multiplicative PHI return-region summary "
+            f"(multiplier={int(multiplier)})"
+        )
+        return proposed_returns, "multiplicative_phi_return_region_summary"
+
+    def _multiplicative_phi_return_summary_conditions(
+        self,
+        *,
+        positive_conditions: Sequence[Condition],
+        seed_returns: Sequence[ReturnInfo],
+        recursive_returns: Sequence[ReturnInfo],
+    ) -> Tuple[Condition, ...]:
+        """Build a narrow guard for multiplicative PHI summaries.
+
+        The old fallback used only ``n > 0``.  That is too broad for bounded
+        callers such as ``if (x < 5) return lib(x); else return 0`` because it
+        would overlap the outer zero-return region.  Keep only resolved guard
+        conditions that are common to the seed and recursive return witnesses,
+        then add the positive induction guard.
+        """
+
+        witness_returns = tuple(seed_returns or ()) + tuple(recursive_returns or ())
+        if not witness_returns:
+            return ()
+        common: List[Condition] = []
+        first_conditions = tuple(getattr(witness_returns[0], "conditions", None) or ())
+        remaining = [
+            tuple(getattr(ret, "conditions", None) or ())
+            for ret in witness_returns[1:]
+        ]
+        for condition in first_conditions:
+            if condition is None:
                 continue
-            anchor = (recursive_returns or seed_returns)[0]
-            source_key = self._summary_value_source_key(summary_value)
-            if source_key is None:
-                source_key = (
-                    "multiplicative_phi_return_region",
-                    _runtime_expression_signature(summary_value),
-                    int(multiplier),
+            if self._expression_is_unresolved(getattr(condition, "expression", None)):
+                continue
+            condition_key = _runtime_conditions_signature((condition,))
+            if all(
+                any(
+                    condition.equals(other)
+                    or _runtime_conditions_signature((other,)) == condition_key
+                    for other in conditions
+                    if other is not None
                 )
-            summary_return = ReturnInfo(
-                address=str(getattr(anchor, "address", None) or getattr(function, "getEntryPoint", lambda: "0x0")()),
-                value=summary_value,
-                conditions=list(positive_conditions),
-                branch_index=30_200,
-                pcode_identity=getattr(anchor, "pcode_identity", None),
-                pcode_order=getattr(anchor, "pcode_order", None),
-                pcode_time=getattr(anchor, "pcode_time", None),
-                pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
-                return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
-                return_kind="summary_derived",
-                summary_candidate_source_key=source_key,
-                summary_transition_evidence_key=proof_ref,
-            )
-            base_return = replace(
-                base_anchor,
-                return_kind="summary_derived",
-                summary_candidate_source_key=source_key,
-                summary_transition_evidence_key=proof_ref,
-            )
-            self._debug(
-                "Recovered multiplicative PHI return-region summary "
-                f"(multiplier={int(multiplier)})"
-            )
-            return [base_return, summary_return], "multiplicative_phi_return_region_summary"
-        return None
+                for conditions in remaining
+            ):
+                common.append(condition)
+
+        result: List[Condition] = []
+        for condition in list(common) + list(positive_conditions or ()):
+            if condition is None:
+                continue
+            if self._expression_is_unresolved(getattr(condition, "expression", None)):
+                return ()
+            if not any(condition.equals(existing) for existing in result):
+                result.append(condition)
+        if not result:
+            return ()
+        try:
+            if ConditionSMTOracle.conjunction_is_unsat(result) is not False:
+                return ()
+        except Exception:
+            return ()
+        return tuple(result)
+
+    def _base_witnesses_exactly_cover_region(
+        self,
+        witnesses: Sequence[ReturnInfo],
+        base_conditions: Sequence[Condition],
+    ) -> bool:
+        if not witnesses:
+            return False
+        for ret in witnesses or ():
+            ret_conditions = tuple(getattr(ret, "conditions", None) or ())
+            if not ret_conditions:
+                return False
+            try:
+                base_implies_ret = ConditionSMTOracle.conjunction_is_unsat(
+                    list(base_conditions or [])
+                    + [condition.negate() for condition in ret_conditions]
+                )
+                ret_implies_base = ConditionSMTOracle.conjunction_is_unsat(
+                    list(ret_conditions)
+                    + [condition.negate() for condition in base_conditions or ()]
+                )
+            except Exception:
+                return False
+            if base_implies_ret is True and ret_implies_base is True:
+                return True
+        return False
 
     def _zero_base_return_witnesses_for_region(
         self,
@@ -3405,6 +3498,37 @@ class StructuralRecurrenceSummarizer:
             expr,
             max_candidates=max_candidates,
         )
+
+    def _single_multiplicative_phi_transition_multiplier(
+        self,
+        recursive_returns: Sequence[ReturnInfo],
+    ) -> Optional[int]:
+        """Return the shared multiplier only when every witness proves it.
+
+        The PHI return-region summary emits one transition over one guard.  A
+        mix such as ``phi * 2`` and ``phi * 3`` needs partitioned transition
+        cases plus coverage proof, so Phase 1.5 rejects it conservatively.
+        """
+
+        expected: Optional[int] = None
+        for ret in recursive_returns or ():
+            candidates: List[int] = []
+            for candidate in self._multiplicative_phi_transition_multiplier_candidates(
+                getattr(ret, "value", None)
+            ):
+                candidate = int(candidate)
+                if candidate in {0, 1}:
+                    continue
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            if len(candidates) != 1:
+                return None
+            candidate = int(candidates[0])
+            if expected is None:
+                expected = candidate
+            elif candidate != expected:
+                return None
+        return expected
 
     def _varnode_def_is_multiequal(self, varnode) -> bool:
         if varnode is None:
@@ -8479,6 +8603,8 @@ class StructuralRecurrenceSummarizer:
             is not None
         ):
             return Expression.constant(1, size=max(1, int(size or 4)))
+        if stop_value == 1:
+            self._debug("Declined multiplicative state-transition start=1: anchor proof unavailable")
         return None
 
     def _has_exact_accumulator_init_return_at_state_one(
@@ -8511,7 +8637,10 @@ class StructuralRecurrenceSummarizer:
         region_conditions = tuple(active_preconditions or ()) + (state_one_condition,)
         exact_anchor_returns: List[ReturnInfo] = []
         for ret in tuple(getattr(analysis, "returns", ()) or ()):
-            if not self._return_is_exact_anchor_seed(ret):
+            if not (
+                self._return_is_exact_anchor_seed(ret)
+                or self._return_is_stable_resolved_phi_anchor_seed(ret)
+            ):
                 continue
             conditions = tuple(getattr(ret, "conditions", ()) or ())
             if not self._conditions_overlap_conditions(conditions, region_conditions):
@@ -8549,19 +8678,23 @@ class StructuralRecurrenceSummarizer:
     ) -> Optional[Tuple[Any, ...]]:
         cbranch_op = self._find_cbranch_op(getattr(model, "header_block", None))
         if cbranch_op is None:
+            self._debug("Declined zero-iteration anchor proof: header CBRANCH missing")
             return None
         if not self._state_transition_guard_false_at_stop_value(
             model.state_guard_expr,
             model.state_placeholder,
             stop_value=1,
         ):
+            self._debug("Declined zero-iteration anchor proof: guard false at stop=1 not proved")
             return None
         expected_exit = self._state_transition_guard_false_successor(model)
         if expected_exit is None or self._block_key(expected_exit) != self._block_key(model.exit_block):
+            self._debug("Declined zero-iteration anchor proof: false successor is not model exit block")
             return None
         accumulator_phi = getattr(model, "accumulator_phi_op", None)
         init_index = int(getattr(model, "accumulator_phi_init_index", 0) or 0)
         if accumulator_phi is None or self._safe_pcode_input_count(accumulator_phi) <= init_index:
+            self._debug("Declined zero-iteration anchor proof: accumulator PHI init input missing")
             return None
         init_varnode = accumulator_phi.getInput(init_index)
         init_expr = self._build_pcode_expression(
@@ -8578,18 +8711,23 @@ class StructuralRecurrenceSummarizer:
             signed=self._expression_prefers_signed_extension(model.accumulator_init_expr),
         )
         if init_expr is None or expected_init is None or self._expression_is_unresolved(init_expr):
+            self._debug("Declined zero-iteration anchor proof: init expression unresolved")
             return None
         if not self._return_value_equals_under_conditions(init_expr, expected_init, ()):
+            self._debug("Declined zero-iteration anchor proof: init expression does not match accumulator init")
             return None
         exit_region_proof = self._exit_region_return_refs_using_value(
             model.exit_block,
             init_varnode,
+            phi_output_varnode=getattr(model, "accumulator_phi_output", None),
             forbidden_blocks=tuple(getattr(model, "loop_blocks", ()) or ()),
         )
         if exit_region_proof is None:
+            self._debug("Declined zero-iteration anchor proof: exit region does not purely return init value")
             return None
         return_refs, exit_region_scan_refs = exit_region_proof
         if not return_refs:
+            self._debug("Declined zero-iteration anchor proof: return refs missing")
             return None
         cbranch_ref = self._make_pcode_op_ref(cbranch_op)
         exit_ref = self._make_pcode_block_ref(model.exit_block)
@@ -8602,6 +8740,7 @@ class StructuralRecurrenceSummarizer:
             ("state_placeholder_key", self._summary_expression_evidence_key(model.state_placeholder)),
             ("accumulator_init_key", self._summary_expression_evidence_key(expected_init)),
             ("init_varnode_key", self._varnode_cache_key(init_varnode)),
+            ("accumulator_phi_output_key", self._varnode_cache_key(getattr(model, "accumulator_phi_output", None))),
             ("cbranch_ref", cbranch_ref.stable_key() if cbranch_ref is not None else None),
             ("exit_block_ref", exit_ref.stable_key() if exit_ref is not None else self._block_key(model.exit_block)),
             ("accumulator_phi_ref", accumulator_phi_ref.stable_key() if accumulator_phi_ref is not None else None),
@@ -8662,6 +8801,7 @@ class StructuralRecurrenceSummarizer:
         exit_block,
         init_varnode,
         *,
+        phi_output_varnode=None,
         forbidden_blocks: Sequence[object],
         budget: int = 64,
     ) -> Optional[Tuple[Tuple[PcodeOpRef, ...], Tuple[Tuple[Any, ...], ...]]]:
@@ -8700,7 +8840,23 @@ class StructuralRecurrenceSummarizer:
                 if mnemonic != "RETURN":
                     continue
                 has_return = True
-                if not self._return_op_returns_varnode(op, init_varnode):
+                if not self._return_op_returns_varnode(
+                    op,
+                    init_varnode,
+                    phi_output_varnode=phi_output_varnode,
+                ):
+                    try:
+                        return_operand = op.getInput(1) if self._safe_pcode_input_count(op) >= 2 else None
+                    except Exception:
+                        return_operand = None
+                    self._debug(
+                        "Declined zero-iteration anchor proof: return operand mismatch "
+                        f"(return={self._varnode_cache_key(return_operand)}, "
+                        f"return_followed={self._varnode_cache_key(self._follow_passthrough_varnode(return_operand))}, "
+                        f"init={self._varnode_cache_key(init_varnode)}, "
+                        f"init_followed={self._varnode_cache_key(self._follow_passthrough_varnode(init_varnode))}, "
+                        f"phi_output={self._varnode_cache_key(phi_output_varnode)})"
+                    )
                     visiting.discard(block_key)
                     return False
                 ref = self._make_pcode_op_ref(op)
@@ -8809,12 +8965,17 @@ class StructuralRecurrenceSummarizer:
             self._safe_pcode_input_count(op),
         )
 
-    def _return_op_returns_varnode(self, return_op, init_varnode) -> bool:
+    def _return_op_returns_varnode(self, return_op, init_varnode, *, phi_output_varnode=None) -> bool:
         if self._safe_pcode_input_count(return_op) < 2:
             return False
         return_value = self._follow_passthrough_varnode(return_op.getInput(1))
         init_value = self._follow_passthrough_varnode(init_varnode)
-        return self._same_varnode_value(return_value, init_value)
+        if self._same_varnode_value(return_value, init_value):
+            return True
+        if phi_output_varnode is None:
+            return False
+        phi_output = self._follow_passthrough_varnode(phi_output_varnode)
+        return self._same_varnode_value(return_value, phi_output)
 
     def _return_is_exact_anchor_seed(self, ret: ReturnInfo) -> bool:
         if str(getattr(ret, "return_kind", "exact") or "exact") != "exact":
@@ -8838,6 +8999,25 @@ class StructuralRecurrenceSummarizer:
                 stable_key = self._stable_key_or_none(owner)
                 if stable_key is not None and self._stable_key_looks_like_loop_summary(stable_key):
                     return False
+        return True
+
+    def _return_is_stable_resolved_phi_anchor_seed(self, ret: ReturnInfo) -> bool:
+        if str(getattr(ret, "return_kind", "exact") or "exact") != "phi_expansion":
+            return False
+        if self._expression_is_unresolved(getattr(ret, "value", None)):
+            return False
+        if getattr(ret, "summary_candidate_id", None) is not None:
+            return False
+        if getattr(ret, "summary_candidate_source_key", None) is not None:
+            return False
+        if getattr(ret, "summary_transition_evidence_key", None) is not None:
+            return False
+        if not (
+            getattr(ret, "pcode_op_ref", None) is not None
+            or getattr(ret, "pcode_identity", None)
+            or tuple(getattr(ret, "return_value_pcode_op_refs", ()) or ())
+        ):
+            return False
         return True
 
     def _stable_key_or_none(self, value) -> Optional[Tuple[Any, ...]]:
