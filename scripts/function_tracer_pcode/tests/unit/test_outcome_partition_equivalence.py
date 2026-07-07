@@ -170,7 +170,7 @@ class _FakeIterator:
 
 
 class _FakeBlock:
-    def __init__(self, ops, *, index=None):
+    def __init__(self, ops, *, index=None, start=None):
         self._ops = list(ops)
         self._outs = []
         self._ins = []
@@ -178,6 +178,7 @@ class _FakeBlock:
         self._true_out = None
         self._false_out = None
         self._index = index
+        self._start = _FakeAddress("ram", int(start if start is not None else 0x3000 + int(index or 0) * 0x10))
 
     def add_out(self, block, *, condition=None, is_true=None):
         self._outs.append(block)
@@ -213,6 +214,9 @@ class _FakeBlock:
     def getIndex(self):
         return self._index
 
+    def getStart(self):
+        return self._start
+
 
 class _FakeHighFunction:
     def __init__(self, blocks):
@@ -245,6 +249,35 @@ def _guard_cbranch_ops(condition: Condition | None = None, *, writes_guard_state
     return [compare, cbranch]
 
 
+def _condition_cbranch_op(
+    condition: Condition,
+    state: _FakeVarnode,
+    *,
+    target_offset: int = 0x3000,
+    target_space: str = "const",
+    target_is_constant: bool = True,
+    condition_def_mnemonic: str = "INT_SLESS",
+    root_condition_without_def: bool = False,
+):
+    if root_condition_without_def:
+        cbranch = _FakeOp(
+            "CBRANCH",
+            condition_expr=condition.expression,
+            inputs=(_FakeVarnode(target_space, target_offset, 8, is_constant=target_is_constant), state),
+        )
+        return None, cbranch
+    zero = _FakeVarnode("const", 0, 4, is_constant=True)
+    compare_out = _FakeVarnode("unique", target_offset + 0x1000, 1)
+    compare = _FakeOp(condition_def_mnemonic, inputs=(zero, state), output=compare_out)
+    compare_out._def_op = compare
+    cbranch = _FakeOp(
+        "CBRANCH",
+        condition_expr=condition.expression,
+        inputs=(_FakeVarnode(target_space, target_offset, 8, is_constant=target_is_constant), compare_out),
+    )
+    return compare, cbranch
+
+
 def _proved_nonprogress_high_function(*, exit_condition=None, writes_guard_state=False):
     entry = _FakeBlock([], index=0)
     loop = _FakeBlock(
@@ -268,6 +301,88 @@ def _guarded_closed_self_loop_high_function():
     entry.add_out(ret, condition=_nonpositive(), is_true=False)
     loop.add_out(loop)
     return _FakeHighFunction([entry, ret, loop])
+
+
+def _branch_guarded_while_proved_high_function(
+    *,
+    redefine_cycle_guard_dependency=False,
+    redefine_precycle_guard_dependency=False,
+    condition_def_mnemonic: str = "INT_SLESS",
+    root_condition_without_def: bool = False,
+):
+    t_state = _FakeVarnode("register", 0x4000, 4)
+    c_state = _FakeVarnode("register", 0x4004, 4)
+    c_compare, c_cbranch = _condition_cbranch_op(
+        _positive2(),
+        c_state,
+        target_offset=0x3020,
+        condition_def_mnemonic=condition_def_mnemonic,
+        root_condition_without_def=root_condition_without_def,
+    )
+    t_compare, t_cbranch = _condition_cbranch_op(
+        _positive(),
+        t_state,
+        target_offset=0x3030,
+        condition_def_mnemonic=condition_def_mnemonic,
+        root_condition_without_def=root_condition_without_def,
+    )
+    entry_ops = []
+    if redefine_precycle_guard_dependency:
+        entry_ops.append(_FakeOp("COPY", inputs=(_const(0),), output=t_state))
+    entry = _FakeBlock(entry_ops, index=0)
+    header = _FakeBlock([op for op in (c_compare, c_cbranch) if op is not None], index=1)
+    branch_ops = [op for op in (t_compare, t_cbranch) if op is not None]
+    if redefine_cycle_guard_dependency:
+        branch_ops.append(_FakeOp("COPY", inputs=(_const(0),), output=t_state))
+    branch = _FakeBlock(branch_ops, index=2)
+    body = _FakeBlock([_FakeOp("COPY", writes_guard_state=True)], index=3)
+    ret = _FakeBlock([_FakeOp("RETURN")], index=4)
+    entry.add_out(header)
+    header.add_out(branch, condition=_positive2(), is_true=True)
+    header.add_out(ret, condition=_nonpositive2(), is_true=False)
+    branch.add_out(body, condition=_positive(), is_true=True)
+    branch.add_out(header, condition=_nonpositive(), is_true=False)
+    body.add_out(header)
+    return _FakeHighFunction([entry, header, branch, body, ret])
+
+
+def _branch_guarded_while_direct_target_high_function(*, target_space: str = "const", target_is_constant: bool = True):
+    t_state = _FakeVarnode("register", 0x4000, 4)
+    c_state = _FakeVarnode("register", 0x4004, 4)
+    c_compare, c_cbranch = _condition_cbranch_op(
+        _positive2(),
+        c_state,
+        target_offset=0x3020,
+        target_space=target_space,
+        target_is_constant=target_is_constant,
+    )
+    t_compare, t_cbranch = _condition_cbranch_op(
+        _positive(),
+        t_state,
+        target_offset=0x3030,
+        target_space=target_space,
+        target_is_constant=target_is_constant,
+    )
+    entry = _FakeBlock([], index=0, start=0x3000)
+    header = _FakeBlock(
+        [c_compare, c_cbranch],
+        index=1,
+        start=0x3010,
+    )
+    branch = _FakeBlock(
+        [t_compare, t_cbranch],
+        index=2,
+        start=0x3020,
+    )
+    body = _FakeBlock([_FakeOp("COPY", writes_guard_state=True)], index=3, start=0x3030)
+    ret = _FakeBlock([_FakeOp("RETURN")], index=4, start=0x3040)
+    entry.add_out(header)
+    header.add_out(branch)
+    header.add_out(ret)
+    branch.add_out(body)
+    branch.add_out(header)
+    body.add_out(header)
+    return _FakeHighFunction([entry, header, branch, body, ret])
 
 
 def _unreachable_guarded_self_loop_high_function():
@@ -316,6 +431,31 @@ def _base_analysis(function_name: str, params, returns):
         parameters=params,
         returns=returns,
         return_type="int",
+    )
+
+
+def _branch_guarded_while_analysis():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    return _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
     )
 
 
@@ -886,6 +1026,7 @@ def test_analyzer_keeps_whileif_divergence_unknown_without_recurrence_proof():
     t_param = _param()
     c_param = _param2()
     t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
     c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
     c_nonpositive = c_positive.negate()
     analysis = _base_analysis(
@@ -910,6 +1051,415 @@ def test_analyzer_keeps_whileif_divergence_unknown_without_recurrence_proof():
     assert len(analysis.returns) == 2
     assert analysis.returns[1].value.expr_type == ExpressionType.PARAMETER
     assert analysis.returns[1].value.value == 1
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
+
+
+def test_analyzer_proves_whileif_affine_return_and_nonprogress_divergence():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(),
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
+    assert analysis.returns[1].value.expr_type == ExpressionType.PARAMETER
+    assert analysis.returns[1].value.value == 1
+    assert len(analysis.return_outcomes) == 2
+    assert len(analysis.divergence_outcomes) == 1
+    assert analysis.divergence_outcomes[0].proof["proof_kind"] == "branch_guarded_while_nonprogress_must_diverge"
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_proves_whileif_divergence_from_direct_cbranch_targets():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_direct_target_high_function(),
+        analysis,
+    )
+
+    assert len(analysis.divergence_outcomes) == 1
+    assert analysis.divergence_outcomes[0].proof["excluded_edges"]
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_whileif_divergence_from_direct_cbranch_target_space_mismatch():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_direct_target_high_function(target_space="rom", target_is_constant=False),
+        analysis,
+    )
+
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
+
+
+def test_analyzer_rejects_whileif_divergence_when_cycle_redefines_guard_dependency():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(redefine_cycle_guard_dependency=True),
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
+
+
+def test_analyzer_rejects_whileif_divergence_when_precycle_redefines_guard_dependency():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(redefine_precycle_guard_dependency=True),
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
+
+
+def test_analyzer_rejects_whileif_divergence_when_root_guard_varnode_is_redefined():
+    analysis = _branch_guarded_while_analysis()
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(
+            root_condition_without_def=True,
+            redefine_precycle_guard_dependency=True,
+        ),
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
+    assert analysis.divergence_outcomes == ()
+    assert len(analysis.unknown_outcomes) == 1
+    assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
+
+
+def test_analyzer_rejects_whileif_divergence_when_guard_condition_def_is_unsupported():
+    for mnemonic in ("LOAD", "FLOAT_ADD", "PIECE"):
+        analysis = _branch_guarded_while_analysis()
+
+        ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+            None,
+            _branch_guarded_while_proved_high_function(condition_def_mnemonic=mnemonic),
+            analysis,
+        )
+
+        assert analysis.divergence_outcomes == ()
+
+
+def test_analyzer_rejects_whileif_affine_step_two_without_structural_recurrence_proof():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    c_minus_one = Expression.binary_op("INT_SUB", c_param, _const(1))
+    base_guard = Condition(Expression.binary_op("INT_SLESSEQUAL", c_minus_one, _const(0)), False)
+    step_guard = Condition(Expression.binary_op("INT_SLESS", _const(0), c_minus_one), False)
+    recursive_value = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", phi, _const(1)),
+        _const(1),
+    )
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=_const(1), conditions=[c_positive, t_positive, base_guard]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive, step_guard]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_whileif_affine_step_two_wrong_base_anchor_value():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    c_minus_one = Expression.binary_op("INT_SUB", c_param, _const(1))
+    base_guard = Condition(Expression.binary_op("INT_SLESSEQUAL", c_minus_one, _const(0)), False)
+    step_guard = Condition(Expression.binary_op("INT_SLESS", _const(0), c_minus_one), False)
+    recursive_value = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", phi, _const(1)),
+        _const(1),
+    )
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=_const(2), conditions=[c_positive, t_positive, base_guard]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive, step_guard]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_whileif_affine_summary_without_exact_base_return():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_whileif_affine_summary_with_conflicting_same_site_artifact():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    c_minus_one = Expression.binary_op("INT_SUB", c_param, _const(1))
+    base_guard = Condition(Expression.binary_op("INT_SLESSEQUAL", c_minus_one, _const(0)), False)
+    step_guard = Condition(Expression.binary_op("INT_SLESS", _const(0), c_minus_one), False)
+    recursive_value = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", phi, _const(1)),
+        _const(1),
+    )
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=_const(1), conditions=[c_positive, t_positive, base_guard]),
+            ReturnInfo(address="0x100c", value=_const(0), conditions=[c_positive, t_positive, step_guard]),
+            ReturnInfo(address="0x100c", value=recursive_value, conditions=[c_positive, t_positive, step_guard]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _branch_guarded_while_proved_high_function(),
+        analysis,
+    )
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_does_not_prune_return_edge_from_final_return_partition_only():
+    phi = Expression(ExpressionType.UNKNOWN, value="phi_circular", size=4)
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    t_nonpositive = t_positive.negate()
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    recursive_value = Expression.binary_op("INT_ADD", phi, _const(1))
+    recursive_value.size = 4
+    analysis = _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1000", value=phi, conditions=[c_positive, t_nonpositive]),
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
+            ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+    ReturnAnalyzer(None)._apply_outcome_partition_summaries(
+        None,
+        _cyclic_high_function("CBRANCH", "CBRANCH", "MULTIEQUAL"),
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
     assert analysis.divergence_outcomes == ()
     assert len(analysis.unknown_outcomes) == 1
     assert analysis.unknown_outcomes[0].reason == "branch_guarded_recurrence_proof_missing"
