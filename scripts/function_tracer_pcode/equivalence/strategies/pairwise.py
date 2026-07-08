@@ -2685,10 +2685,22 @@ class PairwiseStrategy(CheckStrategy):
             or left_base_key is None
             or right_base_key is None
             or left_base_key != right_base_key
-            or not self._readonly_count_identities_compatible(left_ref, right_ref)
+            or not self._readonly_contract_count_identities_compatible(left_ref, right_ref)
             or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), effective_result_size)
             != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), effective_result_size)
         ):
+            if self.debug:
+                print(
+                    "[PairwiseStrategy] readonly contract surface mismatch: "
+                    f"left_kind={getattr(left_ref, 'reduction_kind', None)}, "
+                    f"right_kind={getattr(right_ref, 'reduction_kind', None)}, "
+                    f"left_base={left_base_key}, right_base={right_base_key}, "
+                    f"left_count_identities={tuple(sorted(self._readonly_count_identity_keys(left_ref), key=repr))}, "
+                    f"right_count_identities={tuple(sorted(self._readonly_count_identity_keys(right_ref), key=repr))}, "
+                    f"count_compatible={self._readonly_contract_count_identities_compatible(left_ref, right_ref)}, "
+                    f"left_bias={self._normalize_constant_bias(int(getattr(left_ref, 'constant_bias', 0) or 0), effective_result_size)}, "
+                    f"right_bias={self._normalize_constant_bias(int(getattr(right_ref, 'constant_bias', 0) or 0), effective_result_size)}"
+                )
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_mismatch")
         left_semantic_key = self._readonly_reduction_term_sequence_contract_key(
             left_ref,
@@ -2796,13 +2808,130 @@ class PairwiseStrategy(CheckStrategy):
             or right_key[0] != "readonly_reduction_term_sequence_contract"
         ):
             return False
-        if left_key[:3] != right_key[:3] or left_key[4:] != right_key[4:]:
+        if left_key[:3] != right_key[:3] or left_key[5:] != right_key[5:]:
             return False
-        if not self._readonly_count_identities_compatible(left_ref, right_ref):
+        if not self._readonly_contract_count_identities_compatible(left_ref, right_ref):
+            return False
+        if not self._readonly_contract_limit_keys_compatible(left_key[4], right_key[4], left_ref, right_ref):
             return False
         return tuple(left_key[3]) in self._readonly_count_identity_keys(left_ref) and tuple(
             right_key[3]
         ) in self._readonly_count_identity_keys(right_ref)
+
+    def _readonly_contract_limit_keys_compatible(
+        self,
+        left_limit_key: tuple,
+        right_limit_key: tuple,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        if left_limit_key == right_limit_key:
+            return True
+        left_limit = tuple(left_limit_key or ())
+        right_limit = tuple(right_limit_key or ())
+        if self._loop_limit_storage_key_is_legacy_index_compatible(left_limit, right_limit, left_ref, right_ref):
+            return True
+        if self._loop_limit_storage_key_is_legacy_index_compatible(right_limit, left_limit, right_ref, left_ref):
+            return True
+        return False
+
+    def _readonly_projection_contract_limit_keys_compatible(
+        self,
+        left_limit_key: tuple,
+        right_limit_key: tuple,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        if self._readonly_contract_limit_keys_compatible(left_limit_key, right_limit_key, left_ref, right_ref):
+            return True
+        left_limit = tuple(left_limit_key or ())
+        right_limit = tuple(right_limit_key or ())
+        left_storage = self._loop_limit_storage_identity_key(left_limit)
+        right_storage = self._loop_limit_storage_identity_key(right_limit)
+        if left_storage is None or right_storage is None:
+            return False
+        if left_storage != self._readonly_count_storage_identity_key(left_ref):
+            return False
+        if right_storage != self._readonly_count_storage_identity_key(right_ref):
+            return False
+        return self._readonly_contract_count_projection_compatible(left_ref, right_ref)
+
+    def _loop_limit_storage_identity_key(self, limit_key: tuple) -> Optional[tuple]:
+        normalized = tuple(limit_key or ())
+        if len(normalized) != 2:
+            return None
+        tag, value = normalized
+        if tag == "loop_limit_parameter_storage":
+            value_tuple = tuple(value or ())
+            if len(value_tuple) == 2 and value_tuple[0] == "storage_identity":
+                return ("parameter_storage", tuple(value_tuple[1]))
+            return ("parameter_storage", value_tuple)
+        if tag == "loop_limit_count_storage_identity":
+            return ("parameter_storage", tuple(value or ()))
+        return None
+
+    def _loop_limit_storage_key_is_legacy_index_compatible(
+        self,
+        storage_limit_key: tuple,
+        index_limit_key: tuple,
+        storage_ref: ReadonlyReductionRef,
+        index_ref: ReadonlyReductionRef,
+    ) -> bool:
+        if not storage_limit_key or storage_limit_key[0] not in {
+            "loop_limit_parameter_storage",
+            "loop_limit_count_storage_identity",
+        }:
+            return False
+        if len(index_limit_key) != 2 or index_limit_key[0] != "loop_limit_parameter":
+            return False
+        if self._readonly_count_storage_identity_key(index_ref) is not None:
+            return False
+        storage_index = self._readonly_count_index_identity_key(storage_ref)
+        index_identity = self._readonly_count_index_identity_key(index_ref)
+        try:
+            limit_index_identity = ("parameter", int(index_limit_key[1]))
+        except (TypeError, ValueError):
+            return False
+        return (
+            storage_index is not None
+            and index_identity is not None
+            and storage_index == index_identity
+            and storage_index == limit_index_identity
+        )
+
+    def _readonly_contract_count_identities_compatible(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        return self._readonly_count_identities_compatible(left_ref, right_ref)
+
+    def _readonly_projection_contract_count_identities_compatible(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        if self._readonly_count_identities_compatible(left_ref, right_ref):
+            return True
+        return self._readonly_contract_count_projection_compatible(left_ref, right_ref)
+
+    def _readonly_contract_count_projection_compatible(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        left_storage = self._readonly_count_storage_identity_key(left_ref)
+        right_storage = self._readonly_count_storage_identity_key(right_ref)
+        left_index = self._readonly_count_index_identity_key(left_ref)
+        right_index = self._readonly_count_index_identity_key(right_ref)
+        return (
+            left_storage is not None
+            and right_storage is not None
+            and left_index is not None
+            and right_index is not None
+            and left_index == right_index
+            and self._count_storage_low_projection_compatible(left_storage, right_storage)
+        )
 
     def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
         identity_fn = getattr(readonly_ref, "count_parameter_semantic_identity", None)
@@ -2874,14 +3003,12 @@ class PairwiseStrategy(CheckStrategy):
         if left_storage is not None and right_storage is not None:
             if left_storage == right_storage:
                 return True
-            if (
-                str(getattr(left_ref, "reduction_kind", "") or "").startswith("fp_")
-                and str(getattr(right_ref, "reduction_kind", "") or "").startswith("fp_")
-                and left_index is not None
-                and right_index is not None
-            ):
-                return left_index == right_index
-            return False
+            return self._count_identity_components_compatible(
+                left_storage,
+                left_index,
+                right_storage,
+                right_index,
+            )
         return self._count_identity_components_compatible(
             left_storage,
             left_index,
@@ -3012,7 +3139,12 @@ class PairwiseStrategy(CheckStrategy):
             or right_key[0] != "readonly_reduction_term_sequence_contract"
         ):
             return False
-        return left_key[:3] == right_key[:3] and left_key[4:] == right_key[4:]
+        return (
+            left_key[:3] == right_key[:3]
+            and left_key[5:] == right_key[5:]
+            and self._readonly_projection_contract_count_identities_compatible(left_ref, right_ref)
+            and self._readonly_projection_contract_limit_keys_compatible(left_key[4], right_key[4], left_ref, right_ref)
+        )
 
     def _readonly_projection_semantic_witnesses_match(
         self,
@@ -5481,12 +5613,7 @@ class PairwiseStrategy(CheckStrategy):
         if left_storage is not None and right_storage is not None:
             if left_storage == right_storage:
                 return True
-            return (
-                left_index is not None
-                and right_index is not None
-                and left_index == right_index
-                and self._count_storage_low_projection_compatible(left_storage, right_storage)
-            )
+            return False
         return left_index is not None and right_index is not None and left_index == right_index
 
     def _count_storage_low_projection_compatible(

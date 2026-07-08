@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
-from ..model import Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
+from ..model import Expression, ExpressionType, FunctionReturnAnalysis, ReadonlyReductionRef, StorageInfo
 from ..model.signature import get_declared_type_signedness
 
 
@@ -70,6 +70,18 @@ def _infer_parameter_semantics_object_keyed(
         if ret_info.value is not None:
             _collect_from_expression(ret_info.value, evidence)
         for cond in ret_info.conditions or []:
+            expr = getattr(cond, "expression", None)
+            if expr is not None:
+                _collect_from_expression(expr, evidence)
+    for candidate in getattr(analysis, "summary_return_candidates", ()) or ():
+        if getattr(candidate, "acceptance_status", None) not in {"accepted", "validated"}:
+            continue
+        ret_info = getattr(candidate, "return_info", None)
+        if ret_info is None:
+            continue
+        if getattr(ret_info, "value", None) is not None:
+            _collect_from_expression(ret_info.value, evidence)
+        for cond in getattr(ret_info, "conditions", None) or []:
             expr = getattr(cond, "expression", None)
             if expr is not None:
                 _collect_from_expression(expr, evidence)
@@ -211,6 +223,10 @@ def _collect_from_expression(
     if expr is None:
         return
 
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if _is_readonly_reduction_ref(runtime_ref):
+        _record_readonly_reduction_counter_evidence(runtime_ref, evidence)
+
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         operand = expr.operands[0]
         refs = _extract_param_reference(operand)
@@ -246,6 +262,55 @@ def _collect_from_expression(
                 _collect_from_expression(value, evidence)
             if cond is not None and hasattr(cond, "expression"):
                 _collect_from_expression(cond.expression, evidence)
+
+
+def _record_readonly_reduction_counter_evidence(
+    runtime_ref: ReadonlyReductionRef,
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
+) -> None:
+    identities: Set[ParameterIdentityKey] = set()
+    identities_fn = getattr(runtime_ref, "count_parameter_semantic_identities", None)
+    if callable(identities_fn):
+        try:
+            identities.update(
+                identity for identity in identities_fn() if isinstance(identity, tuple)
+            )
+        except Exception:
+            pass
+    index = _normalize_parameter_index(getattr(runtime_ref, "count_parameter_index", None))
+    if index is not None:
+        identities.add(("parameter_index", index))
+    storage_key = _storage_identity_key(
+        getattr(runtime_ref, "count_parameter_storage_identity_key", None)
+    )
+    if storage_key is not None:
+        identities.add(("parameter_storage", storage_key))
+    if not identities:
+        return
+    signed_counter = bool(getattr(runtime_ref, "signed_counter", True))
+    for identity in identities:
+        _record_signedness_evidence(
+            evidence,
+            identity,
+            signed_score=4 if signed_counter else 0,
+            unsigned_score=4 if not signed_counter else 0,
+            direct_operand=True,
+        )
+
+
+def _is_readonly_reduction_ref(runtime_ref: Any) -> bool:
+    if isinstance(runtime_ref, ReadonlyReductionRef):
+        return True
+    if runtime_ref is None:
+        return False
+    return (
+        hasattr(runtime_ref, "reduction_kind")
+        and (
+            hasattr(runtime_ref, "count_parameter_index")
+            or hasattr(runtime_ref, "count_parameter_storage_identity_key")
+            or hasattr(runtime_ref, "count_parameter_name")
+        )
+    )
 
 
 def _record_compare_signedness(

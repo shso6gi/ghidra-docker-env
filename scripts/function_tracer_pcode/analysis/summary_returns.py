@@ -70,6 +70,22 @@ def accept_summary_return_candidates(
             active_preconditions,
         )
     )
+    exact_return_keys = {_return_info_identity_key(ret) for ret in exact_returns}
+    proposed_exact_returns = tuple(
+        ret
+        for ret in proposed_returns
+        if _return_info_identity_key(ret) not in exact_return_keys
+        and (
+            _return_is_exact_seed(ret)
+            or _return_is_disjoint_resolved_phi_expansion_seed(
+                ret,
+                proposed_summary_returns,
+                active_preconditions,
+            )
+        )
+    )
+    if proposed_exact_returns:
+        exact_returns = tuple(exact_returns) + proposed_exact_returns
 
     exact_keys = {_return_info_identity_key(ret) for ret in exact_returns}
     candidates: List[SummaryReturnCandidate] = []
@@ -796,6 +812,11 @@ def _return_partition_covers_active_precondition(
         if combined is None:
             return False
         region_exprs.append(_condition_as_expression(combined))
+        canonical_singleton_conditions = _full_width_mask_singleton_canonical_conditions(conditions)
+        if canonical_singleton_conditions is not None:
+            canonical_combined = Condition.combine_and(canonical_singleton_conditions)
+            if canonical_combined is not None:
+                region_exprs.append(_condition_as_expression(canonical_combined))
     if has_unconditional:
         return True
     if not region_exprs:
@@ -808,6 +829,91 @@ def _return_partition_covers_active_precondition(
         miss_conditions.append(Condition(_condition_as_expression(combined), True))
     miss_unsat = _conditions_unsat(miss_conditions)
     return miss_unsat is True
+
+
+def _full_width_mask_singleton_canonical_conditions(
+    conditions: Sequence[Condition],
+) -> Optional[List[Condition]]:
+    rewritten: List[Condition] = []
+    changed = False
+    for condition in conditions or ():
+        replacement = _full_width_mask_singleton_condition(condition)
+        if replacement is None:
+            rewritten.append(condition)
+            continue
+        rewritten.append(replacement)
+        changed = True
+    return rewritten if changed else None
+
+
+def _full_width_mask_singleton_condition(condition: Condition) -> Optional[Condition]:
+    expr = getattr(condition, "expression", None)
+    if (
+        getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or len(getattr(expr, "operands", ()) or ()) != 2
+    ):
+        return None
+    operator = getattr(expr, "operator", None)
+    if bool(getattr(condition, "negated", False)):
+        if operator != "INT_NOTEQUAL":
+            return None
+    elif operator != "INT_EQUAL":
+        return None
+    left, right = expr.operands
+    if (
+        getattr(left, "expr_type", None) != ExpressionType.BINARY_OP
+        or getattr(left, "operator", None) != "INT_SUB"
+        or len(getattr(left, "operands", ()) or ()) != 2
+    ):
+        if (
+            getattr(right, "expr_type", None) != ExpressionType.BINARY_OP
+            or getattr(right, "operator", None) != "INT_SUB"
+            or len(getattr(right, "operands", ()) or ()) != 2
+        ):
+            return None
+        if _raw_constant_value(left) != 0:
+            return None
+        left = right
+    elif _raw_constant_value(right) != 0:
+        return None
+    masked, target = left.operands
+    target_value = _raw_constant_value(target)
+    if target_value is None:
+        return None
+    if (
+        getattr(masked, "expr_type", None) != ExpressionType.BINARY_OP
+        or getattr(masked, "operator", None) != "INT_AND"
+        or len(getattr(masked, "operands", ()) or ()) != 2
+    ):
+        return None
+    first, second = masked.operands
+    first_const = _raw_constant_value(first)
+    second_const = _raw_constant_value(second)
+    if first_const is not None and getattr(second, "expr_type", None) == ExpressionType.PARAMETER:
+        mask = first
+        source = second
+        mask_value = first_const
+    elif second_const is not None and getattr(first, "expr_type", None) == ExpressionType.PARAMETER:
+        source = first
+        mask = second
+        mask_value = second_const
+    else:
+        return None
+    if getattr(source, "expr_type", None) != ExpressionType.PARAMETER or mask_value is None:
+        return None
+    source_bits = _expr_width_bits(source)
+    if source_bits <= 0:
+        return None
+    if int(mask_value) != (1 << int(source_bits)) - 1:
+        return None
+    return Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            source,
+            Expression.constant(int(target_value), size=max(1, int(source_bits) // 8)),
+        ),
+        False,
+    )
 
 
 def _canonicalize_conditions_for_analysis_parameters(
@@ -1060,6 +1166,13 @@ def _readonly_reduction_exact_matches_summary(
     accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
     if accumulator_proof is None:
         return False
+    if _readonly_reduction_return_region_overlap_is_proved(
+        exact_ret,
+        summary_ret,
+        active_preconditions,
+        accumulator_proof,
+    ):
+        return True
     exact_value = getattr(exact_ret, "value", None)
     exact_bits = int(expression_smt_bit_width(exact_value) or 0)
     if exact_bits <= 0 or exact_bits % 8 != 0:
@@ -1110,6 +1223,105 @@ def _readonly_reduction_exact_matches_summary(
         ):
             return True
     return False
+
+
+def _readonly_reduction_return_region_overlap_is_proved(
+    exact_ret: ReturnInfo,
+    summary_ret: ReturnInfo,
+    active_preconditions: Sequence[Condition],
+    accumulator_proof: Any,
+) -> bool:
+    if not bool(getattr(accumulator_proof, "return_region_value_proven", False)):
+        return False
+    site_refs = tuple(getattr(accumulator_proof, "return_op_refs", ()) or ()) + tuple(
+        getattr(accumulator_proof, "return_value_op_refs", ()) or ()
+    )
+    if not site_refs:
+        return False
+    if not any(_return_info_matches_pcode_ref(exact_ret, ref) for ref in site_refs):
+        return False
+    overlap_conditions = (
+        list(getattr(exact_ret, "conditions", None) or ())
+        + list(getattr(summary_ret, "conditions", None) or ())
+        + list(active_preconditions or ())
+    )
+    return _conditions_unsat(overlap_conditions) is not True
+
+
+def _return_info_matches_pcode_ref(ret: ReturnInfo, ref: Any) -> bool:
+    ref_key_fn = getattr(ref, "stable_key", None)
+    ref_key = None
+    if callable(ref_key_fn):
+        try:
+            ref_key = ref_key_fn()
+        except (AttributeError, TypeError, ValueError):
+            ref_key = None
+    if ref_key is not None:
+        ret_ref = getattr(ret, "pcode_op_ref", None)
+        ret_key_fn = getattr(ret_ref, "stable_key", None)
+        if callable(ret_key_fn):
+            try:
+                if ret_key_fn() == ref_key:
+                    return True
+            except (AttributeError, TypeError, ValueError):
+                pass
+        for value_ref in getattr(ret, "return_value_pcode_op_refs", ()) or ():
+            value_key_fn = getattr(value_ref, "stable_key", None)
+            if not callable(value_key_fn):
+                continue
+            try:
+                if value_key_fn() == ref_key:
+                    return True
+            except (AttributeError, TypeError, ValueError):
+                continue
+    ref_time = getattr(ref, "seq_time", None)
+    ret_time = getattr(ret, "pcode_time", None)
+    if ref_time is not None and ret_time is not None:
+        try:
+            if int(ref_time) == int(ret_time):
+                return _return_info_address_matches_ref(ret, ref)
+        except (TypeError, ValueError):
+            return False
+    ref_order = getattr(ref, "seq_order", None)
+    ret_order = getattr(ret, "pcode_order", None)
+    if ref_order is not None and ret_order is not None:
+        try:
+            if int(ref_order) != int(ret_order):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return _return_info_address_matches_ref(ret, ref)
+    return False
+
+
+def _return_info_address_matches_ref(ret: ReturnInfo, ref: Any) -> bool:
+    ref_address = getattr(ref, "address_offset", None)
+    if ref_address is None:
+        return True
+    ret_address = _return_info_address_offset(ret)
+    return ret_address is not None and int(ret_address) == int(ref_address)
+
+
+def _return_info_address_offset(ret: ReturnInfo) -> Optional[int]:
+    ret_ref = getattr(ret, "pcode_op_ref", None)
+    address = getattr(ret_ref, "address_offset", None)
+    if address is not None:
+        try:
+            return int(address)
+        except (TypeError, ValueError):
+            return None
+    for candidate in (getattr(ret, "address", None), getattr(ret, "pcode_identity", None)):
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        token = candidate.strip().split(":", 1)[0]
+        try:
+            return int(token, 16)
+        except ValueError:
+            try:
+                return int(token, 0)
+            except ValueError:
+                continue
+    return None
 
 
 def _readonly_exact_count_search_bound(accumulator_proof: Any, exact_term_count: int) -> int:
@@ -1178,6 +1390,8 @@ def _conditions_imply_count_value(
     count_expr: Expression,
     count_value: int,
 ) -> bool:
+    if any(_condition_contains_count_storage_conflict(condition, count_expr) for condition in conditions or ()):
+        return False
     count_bits = max(1, int(expression_smt_bit_width(count_expr) or 0))
     count_size = max(1, (count_bits + 7) // 8)
     not_equal = Condition(
@@ -1188,7 +1402,262 @@ def _conditions_imply_count_value(
         ),
         False,
     )
-    return _conditions_unsat(list(conditions or ()) + [not_equal]) is True
+    if _conditions_unsat(list(conditions or ()) + [not_equal]) is True:
+        return True
+    return any(
+        _condition_structurally_implies_count_value(condition, count_expr, count_value)
+        for condition in conditions or ()
+    )
+
+
+def _condition_contains_count_storage_conflict(condition: Condition, count_expr: Expression) -> bool:
+    return _expression_contains_count_storage_conflict(getattr(condition, "expression", None), count_expr)
+
+
+def _expression_contains_count_storage_conflict(expr: Optional[Expression], count_expr: Expression) -> bool:
+    if expr is None:
+        return False
+    if _parameter_expression_storage_conflicts_with_count(expr, count_expr):
+        return True
+    for operand in getattr(expr, "operands", ()) or ():
+        if _expression_contains_count_storage_conflict(operand, count_expr):
+            return True
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+        for condition, value in getattr(expr, "value", ()) or ():
+            if _expression_contains_count_storage_conflict(getattr(condition, "expression", None), count_expr):
+                return True
+            if _expression_contains_count_storage_conflict(value, count_expr):
+                return True
+    return False
+
+
+def _parameter_expression_storage_conflicts_with_count(expr: Expression, count_expr: Expression) -> bool:
+    if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+        return False
+    if getattr(count_expr, "expr_type", None) != ExpressionType.PARAMETER:
+        return False
+    expr_storage = _expression_storage_identity_key(expr)
+    count_storage = _expression_storage_identity_key(count_expr)
+    if expr_storage is None or count_storage is None or expr_storage == count_storage:
+        return False
+    expr_index = getattr(expr, "value", None)
+    count_index = getattr(count_expr, "value", None)
+    try:
+        if int(expr_index) >= 0 and int(count_index) >= 0 and int(expr_index) == int(count_index):
+            return True
+    except (TypeError, ValueError):
+        pass
+    expr_name = str(getattr(expr, "name", "") or "")
+    count_name = str(getattr(count_expr, "name", "") or "")
+    return bool(expr_name and count_name and expr_name == count_name)
+
+
+def _condition_structurally_implies_count_value(
+    condition: Condition,
+    count_expr: Expression,
+    count_value: int,
+) -> bool:
+    if _condition_is_count_singleton(condition, count_expr, count_value):
+        return True
+    canonical = _full_width_mask_singleton_condition(condition)
+    if canonical is not None and _condition_is_count_singleton(canonical, count_expr, count_value):
+        return True
+    expr = getattr(condition, "expression", None)
+    if (
+        getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or len(getattr(expr, "operands", ()) or ()) != 2
+    ):
+        return False
+    operator = getattr(expr, "operator", None)
+    equality = operator == "INT_EQUAL" and not bool(getattr(condition, "negated", False))
+    negated_notequal = operator == "INT_NOTEQUAL" and bool(getattr(condition, "negated", False))
+    if not (equality or negated_notequal):
+        return False
+    left, right = expr.operands
+    return _ptradd_index_equality_implies_count_value(left, right, count_expr, count_value) or _ptradd_index_equality_implies_count_value(
+        right,
+        left,
+        count_expr,
+        count_value,
+    )
+
+
+def _condition_is_count_singleton(
+    condition: Condition,
+    count_expr: Expression,
+    count_value: int,
+) -> bool:
+    expr = getattr(condition, "expression", None)
+    if (
+        getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or len(getattr(expr, "operands", ()) or ()) != 2
+    ):
+        return False
+    operator = getattr(expr, "operator", None)
+    equality = operator == "INT_EQUAL" and not bool(getattr(condition, "negated", False))
+    negated_notequal = operator == "INT_NOTEQUAL" and bool(getattr(condition, "negated", False))
+    if not (equality or negated_notequal):
+        return False
+    left, right = expr.operands
+    left_const = _raw_constant_value(left)
+    right_const = _raw_constant_value(right)
+    if right_const is not None and _expression_is_count_view(left, count_expr):
+        return int(right_const) == int(count_value)
+    if left_const is not None and _expression_is_count_view(right, count_expr):
+        return int(left_const) == int(count_value)
+    return False
+
+
+def _ptradd_index_equality_implies_count_value(
+    ptradd_expr: Expression,
+    other_expr: Expression,
+    count_expr: Expression,
+    count_value: int,
+) -> bool:
+    ptradd_parts = _ptradd_base_index_scale(ptradd_expr)
+    other_parts = _ptradd_base_index_scale(other_expr)
+    if ptradd_parts is None or other_parts is None:
+        return False
+    base, index_expr, scale = ptradd_parts
+    other_base, other_index_expr, other_scale = other_parts
+    if _expression_key(base) != _expression_key(other_base):
+        return False
+    if scale != other_scale:
+        return False
+    affine = _count_affine_from_expression(index_expr, count_expr)
+    other_affine = _count_affine_from_expression(other_index_expr, count_expr)
+    if affine is None or other_affine is None:
+        return False
+    coeff, bias = affine
+    other_coeff, other_bias = other_affine
+    if coeff == other_coeff:
+        return False
+    delta_coeff = coeff - other_coeff
+    delta_bias = other_bias - bias
+    if delta_coeff != 1:
+        return False
+    return int(delta_bias) == int(count_value)
+
+
+def _ptradd_base_index_scale(expr: Expression) -> Optional[Tuple[Expression, Expression, int]]:
+    if (
+        getattr(expr, "expr_type", None) != ExpressionType.INTRINSIC
+        or str(getattr(expr, "operator", None) or getattr(expr, "name", "") or "").upper() != "PTRADD"
+    ):
+        return None
+    operands = tuple(getattr(expr, "operands", ()) or ())
+    if len(operands) != 3:
+        return None
+    scale = _raw_constant_value(operands[2])
+    if scale is None:
+        return None
+    return operands[0], operands[1], int(scale)
+
+
+def _count_affine_from_expression(
+    expr: Expression,
+    count_expr: Expression,
+) -> Optional[Tuple[int, int]]:
+    if _expression_is_count_view(expr, count_expr):
+        return 1, 0
+    if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+        value = _raw_constant_value(expr)
+        return None if value is None else (0, int(value))
+    if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operands", None):
+        operator = getattr(expr, "operator", None)
+        if operator in {"INT_ZEXT", "COPY"}:
+            return _count_affine_from_expression(expr.operands[0], count_expr)
+        if operator == "CAST":
+            operand = expr.operands[0]
+            if int(getattr(expr, "size", 0) or 0) != int(getattr(operand, "size", 0) or 0):
+                return None
+            return _count_affine_from_expression(operand, count_expr)
+        return None
+    if (
+        getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or len(getattr(expr, "operands", ()) or ()) != 2
+    ):
+        return None
+    left = _count_affine_from_expression(expr.operands[0], count_expr)
+    right = _count_affine_from_expression(expr.operands[1], count_expr)
+    if getattr(expr, "operator", None) == "INT_ADD" and left is not None and right is not None:
+        return left[0] + right[0], left[1] + right[1]
+    if getattr(expr, "operator", None) == "INT_SUB" and left is not None and right is not None:
+        return left[0] - right[0], left[1] - right[1]
+    return None
+
+
+def _expression_is_count_view(expr: Expression, count_expr: Expression) -> bool:
+    if _parameter_expression_matches(expr, count_expr):
+        return True
+    if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operands", None):
+        if getattr(expr, "operator", None) in {"INT_ZEXT", "COPY"}:
+            return _expression_is_count_view(expr.operands[0], count_expr)
+        if getattr(expr, "operator", None) == "CAST":
+            operand = expr.operands[0]
+            return int(getattr(expr, "size", 0) or 0) == int(getattr(operand, "size", 0) or 0) and _expression_is_count_view(
+                operand,
+                count_expr,
+            )
+    if (
+        getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+        and getattr(expr, "operator", None) == "SUBPIECE"
+        and len(getattr(expr, "operands", ()) or ()) == 2
+    ):
+        source, offset = expr.operands
+        if _raw_constant_value(offset) == 0 and _parameter_expression_matches(source, count_expr):
+            bits = _expr_width_bits(expr)
+            return bits > 0 and int(bits) <= int(_expr_width_bits(source) or bits)
+    if (
+        getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+        and getattr(expr, "operator", None) == "INT_AND"
+        and len(getattr(expr, "operands", ()) or ()) == 2
+    ):
+        left, right = expr.operands
+        for source, mask_expr in ((left, right), (right, left)):
+            mask = _raw_constant_value(mask_expr)
+            if mask is None or not _expression_is_count_view(source, count_expr):
+                continue
+            source_bits = _expr_width_bits(source)
+            if source_bits <= 0:
+                continue
+            if int(mask) == (1 << int(source_bits)) - 1:
+                return True
+    return False
+
+
+def _parameter_expression_matches(left: Expression, right: Expression) -> bool:
+    if getattr(left, "expr_type", None) != ExpressionType.PARAMETER:
+        return False
+    if getattr(right, "expr_type", None) != ExpressionType.PARAMETER:
+        return False
+    left_storage = _expression_storage_identity_key(left)
+    right_storage = _expression_storage_identity_key(right)
+    if left_storage is not None and right_storage is not None:
+        return left_storage == right_storage
+    left_index = getattr(left, "value", None)
+    right_index = getattr(right, "value", None)
+    try:
+        if int(left_index) >= 0 and int(right_index) >= 0:
+            return int(left_index) == int(right_index)
+    except (TypeError, ValueError):
+        pass
+    return str(getattr(left, "name", "") or "") == str(getattr(right, "name", "") or "") and bool(
+        getattr(left, "name", None)
+    )
+
+
+def _expression_storage_identity_key(expr: Expression) -> Optional[Tuple[Any, ...]]:
+    storage = getattr(expr, "storage_info", None)
+    storage_key_fn = getattr(storage, "storage_identity_key", None)
+    if callable(storage_key_fn):
+        try:
+            storage_key = storage_key_fn()
+        except (AttributeError, TypeError, ValueError):
+            storage_key = None
+        if storage_key is not None:
+            return _normalize_parameter_storage_identity_key(tuple(storage_key))
+    return None
 
 
 def _reduction_count_parameter_expression(

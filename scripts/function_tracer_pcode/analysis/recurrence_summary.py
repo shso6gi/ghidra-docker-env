@@ -3914,6 +3914,10 @@ class StructuralRecurrenceSummarizer:
         disjuncts.append(summary_expr)
         disjoint_returns: List[ReturnInfo] = []
         positive_param_key = self._positive_summary_parameter_key(normalized_summary_conditions)
+        excluded_counter_values = self._summary_excluded_counter_values(
+            normalized_summary_conditions,
+            parameters,
+        )
         for ret in exact_returns or ():
             normalized_return_conditions = self._canonicalize_condition_parameters_for_analysis(
                 getattr(ret, "conditions", None) or (),
@@ -3930,6 +3934,11 @@ class StructuralRecurrenceSummarizer:
                         normalized_return_conditions,
                         positive_param_key,
                     )
+                )
+                or self._conditions_cover_summary_excluded_counter_value(
+                    normalized_return_conditions,
+                    excluded_counter_values,
+                    parameters,
                 )
             ):
                 continue
@@ -3956,7 +3965,9 @@ class StructuralRecurrenceSummarizer:
         if miss_unsat is not True:
             self._debug(
                 "Declined summary-region coverage proof: summary plus disjoint exact returns is not total "
-                f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat})"
+                f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat}, "
+                f"summary_conditions={[cond.to_string() for cond in normalized_summary_conditions or ()]}, "
+                f"exact_return_conditions={[[cond.to_string() for cond in self._canonicalize_condition_parameters_for_analysis(getattr(ret, 'conditions', None) or (), parameters)] for ret in exact_returns or ()]})"
             )
             return None
         return (
@@ -3976,6 +3987,138 @@ class StructuralRecurrenceSummarizer:
                 for ret in disjoint_returns
             ),
         )
+
+    def _summary_excluded_counter_values(
+        self,
+        conditions: Sequence[Condition],
+        parameters: Optional[Sequence[dict]] = None,
+    ) -> Tuple[Tuple[Tuple[Any, ...], int], ...]:
+        excluded: List[Tuple[Tuple[Any, ...], int]] = []
+        for condition in conditions or ():
+            if not bool(getattr(condition, "negated", False)):
+                continue
+            expr = getattr(condition, "expression", None)
+            if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(expr, "operator", None) != "INT_EQUAL":
+                continue
+            operands = list(getattr(expr, "operands", ()) or ())
+            if len(operands) != 2:
+                continue
+            left, right = operands
+            left_const = self._constant_value(left)
+            right_const = self._constant_value(right)
+            if getattr(left, "expr_type", None) == ExpressionType.PARAMETER and right_const is not None:
+                key = self._counter_parameter_identity_key(left, parameters)
+                if key is not None:
+                    excluded.append((key, int(right_const)))
+            elif getattr(right, "expr_type", None) == ExpressionType.PARAMETER and left_const is not None:
+                key = self._counter_parameter_identity_key(right, parameters)
+                if key is not None:
+                    excluded.append((key, int(left_const)))
+        return tuple(dict.fromkeys(excluded))
+
+    def _conditions_cover_summary_excluded_counter_value(
+        self,
+        conditions: Sequence[Condition],
+        excluded_counter_values: Sequence[Tuple[Tuple[Any, ...], int]],
+        parameters: Optional[Sequence[dict]] = None,
+    ) -> bool:
+        if not excluded_counter_values:
+            return False
+        for param_key, value in excluded_counter_values or ():
+            if self._conditions_imply_counter_identity_value(conditions or (), param_key, int(value), parameters):
+                return True
+        return False
+
+    def _conditions_imply_counter_identity_value(
+        self,
+        conditions: Sequence[Condition],
+        param_key: Tuple[Any, ...],
+        value: int,
+        parameters: Optional[Sequence[dict]] = None,
+    ) -> bool:
+        for condition in conditions or ():
+            expr = getattr(condition, "expression", None)
+            if (
+                getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+                or len(getattr(expr, "operands", ()) or ()) != 2
+            ):
+                continue
+            operator = getattr(expr, "operator", None)
+            if bool(getattr(condition, "negated", False)):
+                if operator != "INT_NOTEQUAL":
+                    continue
+            elif operator != "INT_EQUAL":
+                continue
+            left, right = expr.operands
+            left_const = self._constant_value(left)
+            right_const = self._constant_value(right)
+            if right_const is not None and int(right_const) == int(value):
+                left_key = self._counter_parameter_identity_key(left, parameters)
+                if left_key == param_key:
+                    return True
+            if left_const is not None and int(left_const) == int(value):
+                right_key = self._counter_parameter_identity_key(right, parameters)
+                if right_key == param_key:
+                    return True
+        return False
+
+    def _counter_parameter_identity_key(
+        self,
+        expr: Optional[Expression],
+        parameters: Optional[Sequence[dict]] = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        if getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return None
+        storage_key = self._expression_storage_identity_key(expr)
+        if storage_key is not None:
+            return ("parameter_storage", tuple(storage_key))
+        try:
+            index = int(getattr(expr, "value", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            descriptor = None
+            for parameter in parameters or ():
+                if not isinstance(parameter, dict):
+                    continue
+                try:
+                    if int(parameter.get("index", -1)) == index:
+                        descriptor = parameter
+                        break
+                except (TypeError, ValueError):
+                    continue
+            descriptor_storage = self._parameter_storage_identity_key(descriptor) if descriptor is not None else None
+            if descriptor_storage is not None:
+                return ("parameter_storage", tuple(descriptor_storage))
+            return ("parameter_index", index)
+        name = str(getattr(expr, "name", "") or "")
+        if not name:
+            return None
+        unique_by_name = self._unique_parameters_by_name(parameters)
+        descriptor = unique_by_name.get(name) if unique_by_name else None
+        if descriptor is None:
+            return None
+        descriptor_storage = self._parameter_storage_identity_key(descriptor)
+        if descriptor_storage is not None:
+            return ("parameter_storage", tuple(descriptor_storage))
+        try:
+            return ("parameter_index", int(descriptor.get("index")))
+        except (TypeError, ValueError):
+            return None
+
+    def _expression_storage_identity_key(self, expr: Expression) -> Optional[Tuple[Any, ...]]:
+        storage = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                storage_key = None
+            if storage_key is not None:
+                return tuple(storage_key)
+        return None
 
     def _canonicalize_condition_parameters_for_analysis(
         self,
@@ -4176,8 +4319,6 @@ class StructuralRecurrenceSummarizer:
         positive_param_key: Tuple[Any, ...],
     ) -> bool:
         for condition in conditions or ():
-            if bool(getattr(condition, "negated", False)):
-                continue
             expr = getattr(condition, "expression", None)
             if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
                 continue
@@ -4187,6 +4328,18 @@ class StructuralRecurrenceSummarizer:
             if len(operands) != 2:
                 continue
             left, right = operands
+            if bool(getattr(condition, "negated", False)):
+                if _runtime_expression_signature(right) != positive_param_key:
+                    continue
+                left_value = self._raw_constant_value(left)
+                if left_value is None:
+                    continue
+                operator = getattr(expr, "operator", None)
+                if operator in {"INT_SLESS", "INT_LESS"} and int(left_value) == 0:
+                    return True
+                if operator in {"INT_SLESSEQUAL", "INT_LESSEQUAL"} and int(left_value) == 1:
+                    return True
+                continue
             if _runtime_expression_signature(left) != positive_param_key:
                 continue
             right_value = self._raw_constant_value(right)
@@ -11514,6 +11667,20 @@ class StructuralRecurrenceSummarizer:
             initial_exact_witnesses,
             semantic_witnesses,
         ) = normalized_candidate
+        count_positive_param_key = _runtime_expression_signature(self._parameter_expression(count_param))
+        overlapping_positive_returns = [
+            ret
+            for ret in overlapping_positive_returns
+            if not self._return_covers_nonpositive_parameter_region(
+                ret,
+                count_positive_param_key,
+            )
+        ]
+        if not overlapping_positive_returns:
+            self._debug(
+                "Declined readonly reduction summary: replaceable returns only cover nonpositive counter region"
+            )
+            return None
         summary_positive_conditions = list(positive_conditions)
         preserved_exact_positive_returns: List[ReturnInfo] = []
         retained_positive_returns: List[ReturnInfo] = []
@@ -11529,6 +11696,11 @@ class StructuralRecurrenceSummarizer:
             exact_count = self._exact_counter_value_from_conditions(
                 ret.conditions or [],
                 str(count_param.get("name") or ""),
+            )
+            self._debug(
+                "Readonly overlapping positive return classification: "
+                f"exact_count={exact_count}, "
+                f"conditions={[cond.to_string() for cond in ret.conditions or ()]}"
             )
             if exact_count is None:
                 retained_positive_returns.append(ret)
@@ -11546,6 +11718,10 @@ class StructuralRecurrenceSummarizer:
                 ret,
                 preliminary_proof,
                 exact_count=int(exact_count),
+            )
+            self._debug(
+                "Readonly exact positive return proof status: "
+                f"exact_count={exact_count}, absorbable={absorbable}, prefix_score={prefix_score}"
             )
             if prefix_score <= 0 and absorbable:
                 retained_positive_returns.append(ret)
@@ -11585,6 +11761,11 @@ class StructuralRecurrenceSummarizer:
                 ret.conditions or [],
                 str(count_param.get("name") or ""),
             )
+            self._debug(
+                "Readonly analysis positive return classification: "
+                f"exact_count={exact_count}, "
+                f"conditions={[cond.to_string() for cond in ret.conditions or ()]}"
+            )
             if exact_count is None or int(exact_count) in preserved_exact_counts:
                 continue
             absorbable = self._readonly_exact_positive_return_is_absorbable(
@@ -11601,6 +11782,10 @@ class StructuralRecurrenceSummarizer:
                 preliminary_proof,
                 exact_count=int(exact_count),
             )
+            self._debug(
+                "Readonly analysis exact return proof status: "
+                f"exact_count={exact_count}, absorbable={absorbable}, prefix_score={prefix_score}"
+            )
             if prefix_score <= 0 and absorbable:
                 continue
             if not self._readonly_exact_count_region_is_fully_covered_by_return(
@@ -11609,6 +11794,10 @@ class StructuralRecurrenceSummarizer:
                 count_param,
                 int(exact_count),
             ):
+                self._debug(
+                    "Declined readonly reduction summary: exact analysis return "
+                    f"does not fully cover singleton count={exact_count}"
+                )
                 return None
             preserved_exact_positive_returns.append(ret)
             preserved_exact_counts.add(int(exact_count))
@@ -11625,12 +11814,14 @@ class StructuralRecurrenceSummarizer:
         if retained_positive_returns:
             overlapping_positive_returns = retained_positive_returns
         if not overlapping_positive_returns:
+            self._debug("Declined readonly reduction summary: no overlapping positive returns after exact preservation")
             return None
         preserved_returns = [
             ret for ret in (analysis.returns or [])
             if ret not in overlapping_positive_returns and ret not in preserved_exact_positive_returns
         ]
         if not preserved_returns and not overlapping_positive_returns:
+            self._debug("Declined readonly reduction summary: no preserved or overlapping returns remain")
             return None
         for ret in preserved_returns:
             if ret not in exact_return_candidates:
@@ -11660,6 +11851,14 @@ class StructuralRecurrenceSummarizer:
         if reduction_ref is None:
             self._debug("Declined readonly reduction summary: accumulator proof cannot lower to READONLY_SUM")
             return None
+        self._debug(
+            "Readonly reduction summary lowering succeeded: "
+            f"preserved_returns={len(preserved_returns)}, "
+            f"overlapping_positive_returns={len(overlapping_positive_returns)}, "
+            f"preserved_exact_positive_returns={len(preserved_exact_positive_returns)}, "
+            f"exact_witnesses={len(exact_return_witnesses)}, "
+            f"semantic_witnesses={len(semantic_witnesses)}"
+        )
         preserved_returns = [
             ret for ret in preserved_returns
             if not self._readonly_preserved_summary_is_subsumed_by_replacement(
@@ -11692,10 +11891,10 @@ class StructuralRecurrenceSummarizer:
         superseded_returns = [
             ret
             for ret in (analysis.returns or [])
-            if self._conditions_overlap_for_analysis_parameters(
-                getattr(ret, "conditions", None) or (),
+            if self._readonly_return_is_superseded_by_summary_region(
+                ret,
                 summary_positive_conditions,
-                getattr(analysis, "parameters", None),
+                overlapping_positive_returns,
             )
         ]
         retained_original_returns = [
@@ -11721,6 +11920,10 @@ class StructuralRecurrenceSummarizer:
                 "readonly_pointer_reduction_summary",
                 _runtime_expression_signature(summary_expr),
             )
+        preserved_returns = [
+            self._readonly_preserved_return_as_exact_seed(ret)
+            for ret in preserved_returns
+        ]
         summary_return = ReturnInfo(
             address=positive_anchor.address,
             value=summary_expr,
@@ -11781,6 +11984,40 @@ class StructuralRecurrenceSummarizer:
             f"stride={accumulator_proof.stride}, element_size={accumulator_proof.element_size})"
         )
         return summarized_returns, "readonly_pointer_reduction_summary"
+
+    def _readonly_preserved_return_as_exact_seed(self, ret: ReturnInfo) -> ReturnInfo:
+        """Expose resolved preserved returns as exact seeds to the summary gate."""
+        if str(getattr(ret, "return_kind", "exact") or "exact") == "exact":
+            return ret
+        if getattr(ret, "summary_candidate_source_key", None) is not None:
+            return ret
+        if getattr(ret, "summary_transition_evidence_key", None) is not None:
+            return ret
+        if self._expression_tree_contains_type(getattr(ret, "value", None), ExpressionType.UNKNOWN):
+            return ret
+        if self._readonly_reduction_ref_from_return(ret) is not None:
+            return ret
+        return replace(
+            ret,
+            return_kind="exact",
+            summary_candidate_id=None,
+            summary_candidate_source_key=None,
+            summary_transition_evidence_key=None,
+            validation_blockers=(),
+        )
+
+    def _readonly_return_is_superseded_by_summary_region(
+        self,
+        ret: ReturnInfo,
+        summary_conditions: Sequence[Condition],
+        overlapping_positive_returns: Sequence[ReturnInfo],
+    ) -> bool:
+        if ret in (overlapping_positive_returns or ()):
+            return True
+        return self._conditions_imply_with_smt(
+            getattr(ret, "conditions", None) or (),
+            summary_conditions or (),
+        )
 
     def _record_readonly_reduction_return_region_proof(
         self,
@@ -14144,6 +14381,10 @@ class StructuralRecurrenceSummarizer:
         ret_ref = getattr(ret, "pcode_op_ref", None)
         if isinstance(ret_ref, PcodeOpRef):
             return ret_ref.stable_key() == ref.stable_key()
+        ref_key = ref.stable_key()
+        for value_ref in getattr(ret, "return_value_pcode_op_refs", ()) or ():
+            if isinstance(value_ref, PcodeOpRef) and value_ref.stable_key() == ref_key:
+                return True
         _ret_address, ret_time, ret_order = self._return_info_pcode_site(ret)
         if ret_time is not None and ref.seq_time is not None:
             if int(ret_time) == int(ref.seq_time):
@@ -14487,11 +14728,33 @@ class StructuralRecurrenceSummarizer:
         )
         if full_region.implies_all(ret.conditions or []):
             return True
-        return self._counter_singleton_region_covers_return_conditions(
+        residual_conditions = self._readonly_exact_count_return_residual_conditions(
             ret.conditions or [],
+            positive_conditions or [],
+        )
+        return self._counter_singleton_region_covers_return_conditions(
+            residual_conditions,
             count_param,
             int(exact_count),
         )
+
+    def _readonly_exact_count_return_residual_conditions(
+        self,
+        return_conditions: Sequence[Condition],
+        positive_conditions: Sequence[Condition],
+    ) -> List[Condition]:
+        positive_constraint_set = ConditionConstraintSet.from_conditions(positive_conditions or [])
+        residual: List[Condition] = []
+        for condition in return_conditions or []:
+            if positive_constraint_set.implies_condition(condition):
+                continue
+            solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(positive_conditions or []) + [condition.negate()]
+            )
+            if solver_unsat is True:
+                continue
+            residual.append(condition)
+        return residual
 
     def _counter_singleton_region_covers_return_conditions(
         self,

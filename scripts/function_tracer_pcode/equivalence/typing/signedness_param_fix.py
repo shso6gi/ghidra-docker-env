@@ -42,6 +42,9 @@ class ParamSignednessFixer:
 
         hints = infer_parameter_semantics(analysis)
         if not hints:
+            self._debug_print(
+                f"Function '{analysis.function_name}' has no semantic parameter hints"
+            )
             return override_map
 
         self._debug_print(
@@ -150,12 +153,54 @@ class ParamSignednessFixer:
             )
             if counterpart is not None:
                 return counterpart
+            fallback = self._fallback_integer_type_spec(
+                size_bytes=target_size_bytes,
+                signed=True,
+                source="param_semantic_hint",
+            )
+            if fallback is not None:
+                return fallback
 
-        return resolve_integer_type_spec(
+        resolved = resolve_integer_type_spec(
             size_bytes=target_size_bytes,
             signed=(effective_signedness == "signed"),
             program=program,
             source="param_semantic_hint",
+        )
+        if resolved is not None:
+            return resolved
+        return self._fallback_integer_type_spec(
+            size_bytes=target_size_bytes,
+            signed=(effective_signedness == "signed"),
+            source="param_semantic_hint",
+        )
+
+    @staticmethod
+    def _fallback_integer_type_spec(
+        *,
+        size_bytes: int,
+        signed: bool,
+        source: str,
+    ) -> ResolvedTypeSpec | None:
+        names = {
+            (True, 1): "char",
+            (False, 1): "unsigned char",
+            (True, 2): "short",
+            (False, 2): "unsigned short",
+            (True, 4): "int",
+            (False, 4): "unsigned int",
+            (True, 8): "long",
+            (False, 8): "unsigned long",
+        }
+        type_name = names.get((bool(signed), int(size_bytes)))
+        if type_name is None:
+            return None
+        return ResolvedTypeSpec(
+            type_name=type_name,
+            data_type_obj=None,
+            size_bytes=int(size_bytes),
+            is_signed=bool(signed),
+            source=source,
         )
 
     def _param_needs_override(

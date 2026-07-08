@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 
+from dataclasses import replace
+
 from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.summary_returns import (
     _canonicalize_conditions_for_analysis_parameters,
     _conditions_unsat,
+    _conditions_imply_count_value,
     _extract_readonly_reduction_term_descriptor,
+    _full_width_mask_singleton_condition,
     _reduction_count_parameter_expression,
     _return_info_identity_key,
     _return_is_exact_seed,
     _return_partition_covers_active_precondition,
+    _readonly_reduction_exact_overlap_is_proved,
     accept_summary_return_candidates,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
@@ -25,6 +30,9 @@ from scripts.function_tracer_pcode.model import (
     ExpressionType,
     FunctionReturnAnalysis,
     LocationBaseRef,
+    PcodeOpRef,
+    ReductionAccumulatorProof,
+    ReadonlyReductionTermRef,
     ReturnInfo,
     UnknownValueRef,
 )
@@ -855,6 +863,28 @@ def test_summary_candidate_non_total_partition_keeps_coverage_gap():
     assert len(analysis.returns) == 2
 
 
+def test_summary_candidate_partition_does_not_treat_return_region_proof_as_total_coverage():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    only_large_n, evidence = _with_return_region_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(2), n)],
+        pcode_identity="summary:n_gt_two",
+    ))
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, only_large_n],
+        summary_note="readonly_pointer_reduction_summary",
+    )
+
+    assert result.accepted_returns == ()
+    assert result.coverage_complete is False
+    assert "summary_partition_not_total:active_precondition_not_covered" in result.blockers
+
+
 def test_summary_partition_coverage_rejects_duplicate_name_only_guard_canonicalization():
     indexed_n = Expression.parameter("n", index=1, size=4)
     name_only_n = Expression.parameter("n", index=-1, size=4)
@@ -887,6 +917,278 @@ def test_summary_partition_coverage_rejects_duplicate_name_only_guard_canonicali
         (),
         parameters=parameters,
     ) is False
+
+
+def test_summary_partition_coverage_accepts_full_width_masked_singleton_gap():
+    pointer = Expression.parameter("param_1", index=0, size=8)
+    count = Expression.parameter("param_2", index=1, size=4)
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer, _const(0, size=8))
+    pointer_null = _cond("INT_EQUAL", pointer, _const(0, size=8))
+    count_positive = _cond("INT_SLESS", _const(0), count)
+    count_nonpositive = Condition(count_positive.expression, negated=True)
+    count_not_one = Condition(
+        Expression.binary_op("INT_EQUAL", count, _const(1)),
+        negated=True,
+    )
+    masked = Expression.binary_op("INT_AND", count, _const(0xFFFFFFFF))
+    masked.size = 4
+    masked_selector = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked, _const(1)),
+        _const(0),
+    )
+    masked_selector.size = 1
+    exact_one = ReturnInfo(
+        address="0x1000",
+        value=_const(1),
+        conditions=[pointer_nonnull, count_positive, Condition(masked_selector, negated=True)],
+        pcode_identity="return:count_one",
+    )
+    exact_null = ReturnInfo(
+        address="0x1004",
+        value=_const(0),
+        conditions=[pointer_null],
+        pcode_identity="return:null",
+    )
+    exact_nonpositive = ReturnInfo(
+        address="0x1008",
+        value=_const(0),
+        conditions=[pointer_nonnull, count_nonpositive],
+        pcode_identity="return:nonpositive",
+    )
+    summary = ReturnInfo(
+        address="0x100c",
+        value=_summary_const(2),
+        conditions=[pointer_nonnull, count_positive, count_not_one],
+        pcode_identity="summary:positive_not_one",
+        return_kind="summary_derived",
+    )
+    parameters = [
+        _param("param_1", index=0, size=8),
+        _param("param_2", index=1, size=4),
+    ]
+
+    assert _return_partition_covers_active_precondition(
+        (exact_one, exact_null, exact_nonpositive, summary),
+        (),
+        parameters=parameters,
+    )
+
+
+def test_summary_partition_coverage_does_not_canonicalize_partial_mask_singleton():
+    count = Expression.parameter("param_2", index=1, size=4)
+    masked = Expression.binary_op("INT_AND", count, _const(0xFFFF))
+    masked.size = 4
+    masked_selector = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked, _const(1)),
+        _const(0),
+    )
+    masked_selector.size = 1
+
+    assert _full_width_mask_singleton_condition(Condition(masked_selector, negated=True)) is None
+
+
+def test_summary_partition_coverage_canonicalizes_commuted_mask_equal_sub_zero():
+    count = Expression.parameter("param_2", index=1, size=4)
+    masked = Expression.binary_op("INT_AND", _const(0xFFFFFFFF), count)
+    masked.size = 4
+    selector = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_SUB", masked, _const(1)),
+        _const(0),
+    )
+    selector.size = 1
+
+    canonical = _full_width_mask_singleton_condition(Condition(selector, negated=False))
+
+    assert canonical is not None
+    assert canonical.to_string() == "(param_2 == 1)"
+
+
+def test_masked_singleton_condition_implies_count_value_for_overlap_proof():
+    count = Expression.parameter("param_2", index=1, size=4)
+    masked = Expression.binary_op("INT_AND", _const(0xFFFFFFFF), count)
+    masked.size = 4
+    selector = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_SUB", masked, _const(1)),
+        _const(0),
+    )
+    selector.size = 1
+
+    assert _conditions_imply_count_value([Condition(selector, negated=False)], count, 1)
+    assert not _conditions_imply_count_value([Condition(selector, negated=False)], count, 2)
+
+
+def test_count_value_proof_rejects_same_index_storage_mismatch():
+    proof_count = Expression.parameter(
+        "count",
+        index=1,
+        size=4,
+        storage_info=_FakeStorageInfo(("register_storage", "a1")),
+    )
+    other_storage_count = Expression.parameter(
+        "count",
+        index=1,
+        size=4,
+        storage_info=_FakeStorageInfo(("register_storage", "a2")),
+    )
+    selector = _cond("INT_EQUAL", other_storage_count, _const(1))
+
+    assert not _conditions_imply_count_value([selector], proof_count, 1)
+
+
+def test_readonly_summary_overlap_proves_masked_count_one_exact_return():
+    pointer = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+        guard_constraints=(_cond("INT_SLESS", _const(0), count),),
+        signed_counter=True,
+    )
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    summary_value = Expression.intrinsic("READONLY_SUM", [pointer, count], size=4, runtime_ref=reduction_ref)
+    summary_ret = _with_summary_proof(ReturnInfo(
+        address="0x1004",
+        value=summary_value,
+        conditions=[
+            _cond("INT_NOTEQUAL", pointer, _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count),
+            Condition(Expression.binary_op("INT_EQUAL", count, _const(1)), negated=True),
+        ],
+        pcode_identity="summary:positive_not_one",
+    ))
+    masked = Expression.binary_op("INT_AND", _const(0xFFFFFFFF), count)
+    masked.size = 4
+    selector = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_SUB", masked, _const(1)),
+        _const(0),
+    )
+    selector.size = 1
+    exact_ret = ReturnInfo(
+        address="0x1000",
+        value=Expression.binary_op("INT_ADD", Expression.memory(pointer, size=4), _const(0)),
+        conditions=[
+            _cond("INT_NOTEQUAL", pointer, _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count),
+            Condition(selector, negated=False),
+        ],
+        pcode_identity="return:count_one",
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[_param("param_1", index=0, size=8), _param("param_2", index=1, size=4)],
+        returns=[exact_ret],
+        return_type="int",
+        effect_summary=_empty_effect_summary(),
+    )
+
+    assert _readonly_reduction_exact_overlap_is_proved(exact_ret, summary_ret, (), analysis)
+
+
+def test_readonly_summary_overlap_uses_return_region_value_proof_for_same_site_artifact():
+    pointer = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    return_ref = PcodeOpRef(address_offset=0x1000, seq_time=30, seq_order=2, mnemonic="RETURN")
+    value_ref = PcodeOpRef(address_offset=0x1000, seq_time=29, seq_order=1, mnemonic="COPY")
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+        guard_constraints=(_cond("INT_SLESS", _const(0), count),),
+        signed_counter=True,
+        return_op_refs=(return_ref,),
+        return_value_op_refs=(value_ref,),
+        return_region_value_proven=True,
+    )
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    summary_ret = ReturnInfo(
+        address="0x1000",
+        value=Expression.intrinsic("READONLY_SUM", [pointer, count], size=4, runtime_ref=reduction_ref),
+        conditions=[_cond("INT_NOTEQUAL", pointer, _const(0, size=8)), _cond("INT_SLESS", _const(0), count)],
+        pcode_identity="summary:positive",
+        return_kind="summary_derived",
+    )
+    same_site_artifact = ReturnInfo(
+        address="0x1000",
+        value=Expression.binary_op("INT_ADD", Expression.memory(pointer, size=4), _const(0)),
+        conditions=[_cond("INT_NOTEQUAL", pointer, _const(0, size=8)), _cond("INT_SLESS", _const(0), count)],
+        pcode_identity="0x1000:t30",
+        pcode_time=30,
+        pcode_order=2,
+    )
+    other_site_artifact = replace(same_site_artifact, address="0x2000", pcode_identity="0x2000:t30")
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[_param("param_1", index=0, size=8), _param("param_2", index=1, size=4)],
+        returns=[same_site_artifact],
+        return_type="int",
+        effect_summary=_empty_effect_summary(),
+    )
+
+    assert _readonly_reduction_exact_overlap_is_proved(same_site_artifact, summary_ret, (), analysis)
+    assert not _readonly_reduction_exact_overlap_is_proved(other_site_artifact, summary_ret, (), analysis)
+
+
+def test_ptradd_index_equality_implies_masked_count_singleton():
+    base = Expression.parameter("param_1", index=0, size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=8)
+    low_count = Expression.binary_op("SUBPIECE", count, _const(0))
+    low_count.size = 4
+    masked = Expression.binary_op("INT_AND", low_count, _const(0xFFFFFFFF))
+    masked.size = 4
+    minus_one = Expression.binary_op("INT_SUB", masked, _const(1))
+    minus_one.size = 4
+    widened = Expression.unary_op("INT_ZEXT", minus_one)
+    widened.size = 8
+    index = Expression.binary_op("INT_ADD", _const(1, size=8), widened)
+    index.size = 8
+    dynamic_ptr = Expression.intrinsic("PTRADD", [base, index, _const(4, size=8)], size=8)
+    fixed_ptr = Expression.intrinsic("PTRADD", [base, _const(1, size=8), _const(4, size=8)], size=8)
+    selector = _cond("INT_EQUAL", dynamic_ptr, fixed_ptr)
+
+    assert _conditions_imply_count_value([selector], count, 1)
+    assert not _conditions_imply_count_value([selector], count, 2)
+
+
+def test_ptradd_index_equality_does_not_match_different_base_or_scale():
+    base = Expression.parameter("param_1", index=0, size=8)
+    other_base = Expression.parameter("param_3", index=2, size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    index = Expression.binary_op("INT_ADD", _const(1), Expression.binary_op("INT_SUB", count, _const(1)))
+    index.size = 4
+    dynamic_ptr = Expression.intrinsic("PTRADD", [base, index, _const(4, size=8)], size=8)
+    different_base = Expression.intrinsic("PTRADD", [other_base, _const(1), _const(4, size=8)], size=8)
+    different_scale = Expression.intrinsic("PTRADD", [base, _const(1), _const(8, size=8)], size=8)
+
+    assert not _conditions_imply_count_value([_cond("INT_EQUAL", dynamic_ptr, different_base)], count, 1)
+    assert not _conditions_imply_count_value([_cond("INT_EQUAL", dynamic_ptr, different_scale)], count, 1)
 
 
 def test_resolved_phi_expansion_counts_as_exact_seed_for_partition_coverage():
@@ -2054,6 +2356,48 @@ def test_wrapping_guard_shape_is_not_total_without_active_no_overflow_preconditi
 
     assert result.accepted_returns == ()
     assert "summary_partition_not_total:active_precondition_not_covered" in result.blockers
+
+
+def test_summary_acceptance_preserves_resolved_proposed_disjoint_phi_expansion_seed():
+    n = _n()
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[_param()],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESSEQUAL", n, _const(0))],
+                pcode_identity="return:non_positive",
+            ),
+        ],
+        return_type="int",
+        effect_summary=_empty_effect_summary(),
+        binary_id="barthe2big-test-binary",
+    )
+    proposed_phi_seed = ReturnInfo(
+        address="0x1004",
+        value=_const(1),
+        conditions=[_cond("INT_EQUAL", n, _const(1))],
+        pcode_identity="return:one",
+        return_kind="phi_expansion",
+    )
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), n)],
+        pcode_identity="summary:n_gt_one",
+    ))
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], proposed_phi_seed, summary_return],
+        summary_note="barthe2big_counted_loop_summary",
+    )
+
+    assert not result.blockers
+    assert any(ret.pcode_identity == "return:one" for ret in result.accepted_returns)
 
 
 def test_summary_partition_not_total_is_exposed_as_structured_reason():

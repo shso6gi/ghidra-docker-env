@@ -174,6 +174,52 @@ def test_return_region_summary_coverage_accepts_pointer_guard_plus_count_partiti
     assert coverage_key is not None
 
 
+def test_return_region_summary_coverage_accepts_masked_singleton_carve_out():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    parameters = [
+        {"name": "param_1", "index": 0, "size": 8, "data_type": "int *", "is_signed": False},
+        {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+    ]
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer, Expression.constant(0, size=8))
+    pointer_null = _cond("INT_EQUAL", pointer, Expression.constant(0, size=8))
+    count_positive = _cond("INT_SLESS", Expression.constant(0, size=4), count)
+    count_nonpositive = count_positive.negate()
+    count_not_one = Condition(Expression.binary_op("INT_EQUAL", count, _const(1)), negated=True)
+    masked_count = Expression.binary_op("INT_AND", count, Expression.constant(0xFFFFFFFF, size=4))
+    masked_count.size = 4
+    masked_selector = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked_count, _const(1)),
+        _const(0),
+    )
+    masked_selector.size = 1
+    exact_count_one = ReturnInfo(
+        address="0x1000",
+        value=_mem("param_1", 0),
+        conditions=[pointer_nonnull, count_positive, Condition(masked_selector, negated=True)],
+    )
+    exact_pointer_null = ReturnInfo(
+        address="0x1004",
+        value=_const(-300),
+        conditions=[pointer_null],
+    )
+    exact_count_nonpositive = ReturnInfo(
+        address="0x1008",
+        value=_const(-300),
+        conditions=[pointer_nonnull, count_nonpositive],
+    )
+
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=[pointer_nonnull, count_positive, count_not_one],
+        exact_returns=[exact_count_one, exact_pointer_null, exact_count_nonpositive],
+        parameters=parameters,
+    )
+
+    assert coverage_key is not None
+
+
 def test_return_region_summary_coverage_rejects_duplicate_name_only_guard_canonicalization():
     summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
     indexed_n = Expression.parameter("n", index=1, data_type="int", size=4)
@@ -839,6 +885,42 @@ def test_counter_parameter_normalization_requires_storage_match_when_present():
 
     assert normalized is expr
     assert normalized.operands[0] is same_name_other_storage
+
+
+def test_excluded_counter_value_coverage_requires_storage_identity_match():
+    storage_a = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="w0",
+        base_register_name="x0",
+        size=4,
+        size_bits=32,
+    )
+    storage_b = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="w1",
+        base_register_name="x1",
+        size=4,
+        size_bits=32,
+    )
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    summary_counter = Expression.parameter("n", index=0, data_type="int", size=4, storage_info=storage_a)
+    exact_counter = Expression.parameter("n", index=0, data_type="int", size=4, storage_info=storage_b)
+    summary_conditions = [
+        Condition(Expression.binary_op("INT_EQUAL", summary_counter, _const(1)), negated=True)
+    ]
+    exact_conditions = [_cond("INT_EQUAL", exact_counter, _const(1))]
+    same_storage_exact_conditions = [_cond("INT_EQUAL", summary_counter, _const(1))]
+
+    excluded = summarizer._summary_excluded_counter_values(summary_conditions)
+
+    assert excluded
+    assert not summarizer._conditions_cover_summary_excluded_counter_value(exact_conditions, excluded)
+    assert summarizer._conditions_cover_summary_excluded_counter_value(
+        same_storage_exact_conditions,
+        excluded,
+    )
 
 
 def test_counter_parameter_normalization_allows_same_register_slot_storage_variant():
@@ -13095,6 +13177,105 @@ def test_structural_recurrence_preserves_exact_positive_return_as_partition_evid
     assert exact_ret in summarized_returns
 
 
+def test_structural_recurrence_preserves_nonpositive_return_misclassified_as_positive_overlap(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    pointer_expr = _param("param_1", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", pointer_expr, _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), count_expr),
+    ]
+    positive_ret = ReturnInfo(
+        address="0x1004",
+        value=_mem("param_1", 0),
+        conditions=list(positive_conditions),
+    )
+    nonpositive_ret = ReturnInfo(
+        address="0x1008",
+        value=_const(0xFFFFFED4, size=4),
+        conditions=[
+            _cond("INT_NOTEQUAL", pointer_expr, _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr, negated=True),
+        ],
+        return_kind="phi_expansion",
+    )
+    analysis = create_mock_analysis(
+        "readonly_preserve_nonpositive_overlap",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[positive_ret, nonpositive_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        result_size=4,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda *_args, **_kwargs: list(positive_conditions),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [nonpositive_ret, positive_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_record_readonly_reduction_return_region_proof",
+        lambda **_kwargs: ("unit", "proof"),
+    )
+
+    class _FakeFunction:
+        def getName(self):
+            return "readonly_preserve_nonpositive_overlap"
+
+    summarized = summarizer._try_summarize_readonly_pointer_reduction(
+        _FakeFunction(),
+        object(),
+        analysis,
+    )
+
+    assert summarized is not None
+    summarized_returns, _note = summarized
+    retained_nonpositive = next(
+        ret for ret in summarized_returns
+        if ret.address == nonpositive_ret.address
+        and [cond.to_string() for cond in ret.conditions] == [cond.to_string() for cond in nonpositive_ret.conditions]
+    )
+    assert retained_nonpositive.return_kind == "exact"
+    readonly_ret = next(
+        ret for ret in summarized_returns
+        if getattr(ret.value, "opcode", None) == READONLY_SUM_OPCODE
+    )
+    assert readonly_ret is not nonpositive_ret
+
+
 def test_structural_recurrence_summary_ignores_unrelated_early_return_signedness(monkeypatch):
     summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
     pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
@@ -13752,6 +13933,20 @@ def test_structural_recurrence_matches_adjacent_copy_with_qualified_identity():
     ref = PcodeOpRef(address_offset=0x1000, seq_time=23, seq_order=0, mnemonic="COPY")
 
     assert summarizer._return_info_matches_pcode_op_ref(ret, ref) is True
+
+
+def test_structural_recurrence_matches_explicit_return_value_pcode_ref():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    value_ref = PcodeOpRef(address_offset=0x2000, seq_time=66, seq_order=6, mnemonic="COPY")
+    ret = ReturnInfo(
+        address="0x2008",
+        pcode_identity="0x2008:t31:o0",
+        conditions=[],
+        value=_const(0),
+        return_value_pcode_op_refs=(value_ref,),
+    )
+
+    assert summarizer._return_info_matches_pcode_op_ref(ret, value_ref) is True
 
 
 def test_structural_recurrence_accepts_reachable_value_ref_for_return_region_proof():
@@ -14886,4 +15081,132 @@ def test_exact_count_region_accepts_masked_negated_notequal_singleton_guard():
         [positive],
         count_param,
         1,
+    )
+
+
+def test_exact_count_region_accepts_positive_noncount_guard_plus_masked_singleton():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    pointer_expr = _param("param_1", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer_expr, _const(0, size=8))
+    positive = _cond("INT_SLESS", _const(0), count_expr)
+    masked_count = Expression.binary_op(
+        "INT_AND",
+        count_expr,
+        Expression.constant(0xFFFFFFFF, size=4),
+    )
+    masked_count.size = 4
+    selector_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked_count, _const(1)),
+        _const(0),
+    )
+    selector_expr.size = 1
+    singleton_selector = Condition(selector_expr, negated=True)
+    ret = ReturnInfo(
+        address="0x1000",
+        value=_mem("param_1", 0),
+        conditions=[pointer_nonnull, positive, singleton_selector],
+    )
+
+    assert summarizer._readonly_exact_count_region_is_fully_covered_by_return(
+        ret,
+        [pointer_nonnull, positive],
+        count_param,
+        1,
+    )
+
+
+def test_exact_count_region_rejects_uncovered_noncount_guard_with_masked_singleton():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    pointer_expr = _param("param_1", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer_expr, _const(0, size=8))
+    positive = _cond("INT_SLESS", _const(0), count_expr)
+    flag_guard = _cond("INT_NOTEQUAL", _param("flag"), _const(0))
+    masked_count = Expression.binary_op(
+        "INT_AND",
+        count_expr,
+        Expression.constant(0xFFFFFFFF, size=4),
+    )
+    masked_count.size = 4
+    selector_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked_count, _const(1)),
+        _const(0),
+    )
+    selector_expr.size = 1
+    singleton_selector = Condition(selector_expr, negated=True)
+    ret = ReturnInfo(
+        address="0x1000",
+        value=_mem("param_1", 0),
+        conditions=[pointer_nonnull, positive, singleton_selector, flag_guard],
+    )
+
+    assert not summarizer._readonly_exact_count_region_is_fully_covered_by_return(
+        ret,
+        [pointer_nonnull, positive],
+        count_param,
+        1,
+    )
+
+
+def test_readonly_summary_supersedes_only_returns_proven_inside_summary_region():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    pointer_expr = _param("param_1", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer_expr, _const(0, size=8))
+    positive = _cond("INT_SLESS", _const(0), count_expr)
+    not_count_one = Condition(
+        Expression.binary_op("INT_EQUAL", count_expr, _const(1)),
+        negated=True,
+    )
+    summary_conditions = [pointer_nonnull, positive, not_count_one]
+    broad_ret = ReturnInfo(
+        address="0x1000",
+        value=_const(0),
+        conditions=list(summary_conditions),
+    )
+    masked_count = Expression.binary_op(
+        "INT_AND",
+        count_expr,
+        Expression.constant(0xFFFFFFFF, size=4),
+    )
+    masked_count.size = 4
+    selector_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", masked_count, _const(1)),
+        _const(0),
+    )
+    selector_expr.size = 1
+    exact_count_one = ReturnInfo(
+        address="0x1004",
+        value=_mem("param_1", 0),
+        conditions=[pointer_nonnull, positive, Condition(selector_expr, negated=True)],
+    )
+    nonpositive = ReturnInfo(
+        address="0x1008",
+        value=_const(0),
+        conditions=[
+            pointer_nonnull,
+            _cond("INT_SLESSEQUAL", count_expr, _const(0)),
+        ],
+    )
+
+    assert summarizer._readonly_return_is_superseded_by_summary_region(
+        broad_ret,
+        summary_conditions,
+        [broad_ret],
+    )
+    assert not summarizer._readonly_return_is_superseded_by_summary_region(
+        exact_count_one,
+        summary_conditions,
+        [broad_ret],
+    )
+    assert not summarizer._readonly_return_is_superseded_by_summary_region(
+        nonpositive,
+        summary_conditions,
+        [broad_ret],
     )

@@ -8,11 +8,15 @@ from scripts.function_tracer_pcode.equivalence.param_semantics import (
     infer_parameter_semantics,
     infer_parameter_semantics_by_identity,
 )
+from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig
+from scripts.function_tracer_pcode.equivalence.typing.signedness_param_fix import ParamSignednessFixer
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
+    ReadonlyReductionRef,
     ReturnInfo,
     StorageInfo,
 )
@@ -355,6 +359,37 @@ def _analysis_with_storage_narrowing_and_pure_composite_signed_compare() -> Func
                     )
                 ],
                 value=_const(1, 4),
+            )
+        ],
+    )
+
+
+def _analysis_with_readonly_sum_signed_counter() -> FunctionReturnAnalysis:
+    base = _param("base", 8, index=0)
+    count = _param("count", 8, index=1)
+    readonly_ref = ReadonlyReductionRef(
+        reduction_kind="unit_test",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        stride=4,
+        element_size=4,
+        result_size=4,
+        signed_counter=True,
+    )
+    value = Expression.intrinsic("READONLY_SUM", [base, count], size=4, runtime_ref=readonly_ref)
+    return FunctionReturnAnalysis(
+        function_name="readonly_sum_signed_counter_like",
+        entry_point="0x3600",
+        parameters=[
+            {"name": "base", "data_type": "int *", "size": 8, "index": 0, "is_signed": False},
+            {"name": "count", "data_type": "ulong", "size": 8, "index": 1, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3600",
+                conditions=[],
+                value=value,
             )
         ],
     )
@@ -780,3 +815,22 @@ def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_bot
 
     assert 0 in override_map
     assert override_map[0].type_name == "unsigned int"
+
+
+def test_readonly_sum_runtime_ref_provides_signed_count_hint():
+    hints = infer_parameter_semantics(_analysis_with_readonly_sum_signed_counter())
+
+    assert 1 in hints
+    assert hints[1].signedness == "signed"
+    assert hints[1].signedness_source == "explicit"
+    assert hints[1].narrow_bits == 64
+
+
+def test_readonly_sum_signed_count_hint_drives_param_signedness_override():
+    fixer = ParamSignednessFixer(TypeFixerConfig(), debug=False)
+
+    overrides = fixer.detect_param_signedness_mismatch(_analysis_with_readonly_sum_signed_counter())
+
+    assert 1 in overrides
+    assert overrides[1].is_signed is True
+    assert overrides[1].size_bytes == 8

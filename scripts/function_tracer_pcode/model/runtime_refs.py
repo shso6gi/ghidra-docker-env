@@ -2457,18 +2457,18 @@ def _loop_summary_limit_semantic_key(
 ) -> Optional[Tuple[Any, ...]]:
     expr_type = getattr(value, "expr_type", None)
     if getattr(expr_type, "name", None) == "PARAMETER":
-        index = getattr(value, "value", None)
-        try:
-            if index is not None and int(index) >= 0:
-                return ("loop_limit_parameter", int(index))
-        except (TypeError, ValueError):
-            pass
         storage = getattr(value, "storage_info", None)
         storage_key = _loop_object_semantic_key(storage, loop_variable_context) if storage is not None else None
         if storage is not None:
             if storage_key is None:
                 return None
             return ("loop_limit_parameter_storage", storage_key)
+        index = getattr(value, "value", None)
+        try:
+            if index is not None and int(index) >= 0:
+                return ("loop_limit_parameter", int(index))
+        except (TypeError, ValueError):
+            pass
         return None
     return _loop_object_semantic_key(value, loop_variable_context)
 

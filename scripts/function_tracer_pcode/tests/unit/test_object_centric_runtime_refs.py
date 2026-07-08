@@ -1046,6 +1046,127 @@ def test_storage_backed_count_identity_keeps_index_backcompat_for_readonly_consu
     ).equivalent
 
 
+def test_readonly_contract_limit_key_compatibility_allows_storage_limit_to_legacy_index():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    count_storage_key = count_storage.storage_identity_key()
+    storage_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="renamed_count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage_key,
+        limit_expr=Expression.parameter(
+            "renamed_count",
+            index=1,
+            data_type="int",
+            size=4,
+            storage_info=count_storage,
+        ),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    legacy_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert storage_ref is not None
+    assert legacy_ref is not None
+    storage_contract = storage_ref.readonly_term_sequence_contract_key(result_size=4)
+    legacy_contract = legacy_ref.readonly_term_sequence_contract_key(result_size=4)
+
+    assert storage_contract is not None
+    assert legacy_contract is not None
+    assert strategy._readonly_contract_limit_keys_compatible(
+        storage_contract[4],
+        legacy_contract[4],
+        storage_ref,
+        legacy_ref,
+    )
+    assert strategy._readonly_contract_limit_keys_compatible(
+        legacy_contract[4],
+        storage_contract[4],
+        legacy_ref,
+        storage_ref,
+    )
+
+
+def test_readonly_contract_limit_key_compatibility_rejects_index_mismatch_or_conflicting_storage():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    other_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a2",
+        base_register_name="a2",
+        size=4,
+        size_bits=32,
+    )
+    storage_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+    )
+    legacy_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+    )
+    conflicting_storage_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=other_storage.storage_identity_key(),
+    )
+    storage_limit_key = (
+        "loop_limit_parameter_storage",
+        count_storage.storage_identity_key(),
+    )
+    legacy_limit_key = ("loop_limit_parameter", 1)
+    mismatched_index_key = ("loop_limit_parameter", 2)
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert not strategy._readonly_contract_limit_keys_compatible(
+        storage_limit_key,
+        mismatched_index_key,
+        storage_ref,
+        legacy_ref,
+    )
+    assert not strategy._readonly_contract_limit_keys_compatible(
+        storage_limit_key,
+        legacy_limit_key,
+        storage_ref,
+        conflicting_storage_ref,
+    )
+
+
 def test_storage_backed_count_identity_conflict_rejects_index_fallback():
     count_storage = StorageInfo(
         is_register=True,
@@ -3831,7 +3952,7 @@ def test_loop_summary_method_b_key_scalarizes_vector_lanes_only_with_scalar_iter
     assert loop_summary_method_b_key(scalar_proven) == loop_summary_method_b_key(vector_lanes)
 
 
-def test_loop_summary_method_b_key_leaves_limit_width_to_smt_parameter_binding():
+def test_loop_summary_method_b_key_leaves_unstored_limit_width_to_smt_parameter_binding():
     int_count = _readonly_loop_summary(start=0)
     long_count = LoopSummaryRef(
         start_expr=Expression.constant(0, size=8),
@@ -3844,6 +3965,62 @@ def test_loop_summary_method_b_key_leaves_limit_width_to_smt_parameter_binding()
 
     assert loop_summary_method_b_key(int_count) == loop_summary_method_b_key(long_count)
     assert compare_loop_summaries(int_count, long_count).status == "equivalent"
+
+
+def test_loop_summary_method_b_key_preserves_stored_limit_width_identity():
+    low_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=4,
+        size_bits=32,
+        register_name="w0",
+        register_offset=0x10,
+        register_size=4,
+        register_size_bits=32,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    wide_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=8,
+        size_bits=64,
+        register_name="x0",
+        register_offset=0x10,
+        register_size=8,
+        register_size_bits=64,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    int_count = _readonly_loop_summary(start=0)
+    low_count = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="uint", size=4, storage_info=low_count_storage),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=int_count.term_descriptor,
+        side_effect_profile=int_count.side_effect_profile,
+        loop_var_unit=int_count.loop_var_unit,
+    )
+    wide_count = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=8),
+        limit_expr=Expression.parameter("count", index=1, data_type="ulong", size=8, storage_info=wide_count_storage),
+        step_expr=Expression.constant(1, size=8),
+        term_descriptor=int_count.term_descriptor,
+        side_effect_profile=int_count.side_effect_profile,
+        loop_var_unit=int_count.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(low_count) != loop_summary_method_b_key(wide_count)
 
 
 def test_storage_info_register_identity_uses_numeric_base_metadata():
@@ -3960,7 +4137,7 @@ def test_fp_readonly_reduction_contract_allows_narrow_result_surface():
     assert key[5] == 8
 
 
-def test_readonly_count_identity_prefers_matching_parameter_index_over_storage_mismatch():
+def test_readonly_count_identity_rejects_storage_mismatch_despite_matching_parameter_index():
     strategy = PairwiseStrategy(None, None, debug=False)
     left = ReadonlyReductionRef(
         reduction_kind="fp_int2float_div_count_sum",
@@ -3983,4 +4160,159 @@ def test_readonly_count_identity_prefers_matching_parameter_index_over_storage_m
         result_size=8,
     )
 
-    assert strategy._readonly_count_identities_compatible(left, right)
+    assert not strategy._readonly_count_identities_compatible(left, right)
+
+
+def test_readonly_count_identity_rejects_same_low_wide_narrow_projection_without_proof():
+    low_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=4,
+        size_bits=32,
+        register_name="w0",
+        register_offset=0x10,
+        register_size=4,
+        register_size_bits=32,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    wide_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=8,
+        size_bits=64,
+        register_name="x0",
+        register_offset=0x10,
+        register_size=8,
+        register_size_bits=64,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    strategy = PairwiseStrategy(None, None, debug=False)
+    low_ref = ReadonlyReductionRef(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=low_count_storage.storage_identity_key(),
+        stride=4,
+        element_size=4,
+        result_size=8,
+    )
+    wide_ref = ReadonlyReductionRef(
+        reduction_kind="fp_int2float_div_count_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_count_storage.storage_identity_key(),
+        stride=4,
+        element_size=4,
+        result_size=8,
+    )
+
+    assert strategy._readonly_count_storage_relation_key(low_ref, wide_ref) == (
+        "same_register_base_projection",
+        ("base", (3, 0x10, 64)),
+        ("left_bits", 0, 32),
+        ("right_bits", 0, 64),
+        ("projection", "right_contains_left"),
+    )
+    assert not strategy._readonly_count_identities_compatible(low_ref, wide_ref)
+
+
+def test_readonly_contract_shortcut_rejects_same_low_projection_without_extension_proof():
+    low_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=4,
+        size_bits=32,
+        register_name="w0",
+        register_offset=0x10,
+        register_size=4,
+        register_size_bits=32,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    wide_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=3,
+        offset=0x10,
+        size=8,
+        size_bits=64,
+        register_name="x0",
+        register_offset=0x10,
+        register_size=8,
+        register_size_bits=64,
+        base_register_name="x0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    low_storage_key = low_count_storage.storage_identity_key()
+    wide_storage_key = wide_count_storage.storage_identity_key()
+    strategy = PairwiseStrategy(None, None, debug=False)
+    low_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=low_storage_key,
+    )
+    wide_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_storage_key,
+    )
+    common_tail = (
+        4,
+        0,
+        1,
+        0,
+        4,
+        True,
+        (),
+        (32, 0),
+        ("loop_side_effect_profile", "pure_memory_read", True, False, False, False, False, False, False, False, False, 0, 0, (), ()),
+    )
+    low_contract = (
+        "readonly_reduction_term_sequence_contract",
+        "memory_sum",
+        ("parameter", 0),
+        ("parameter_storage", low_storage_key),
+        ("loop_limit_parameter_storage", ("storage_identity", low_storage_key)),
+        *common_tail,
+    )
+    wide_contract = (
+        "readonly_reduction_term_sequence_contract",
+        "memory_sum",
+        ("parameter", 0),
+        ("parameter_storage", wide_storage_key),
+        ("loop_limit_parameter_storage", ("storage_identity", wide_storage_key)),
+        *common_tail,
+    )
+
+    assert not strategy._readonly_count_identities_compatible(low_ref, wide_ref)
+    assert not strategy._readonly_contract_count_identities_compatible(low_ref, wide_ref)
+    assert not strategy._readonly_contract_limit_keys_compatible(low_contract[4], wide_contract[4], low_ref, wide_ref)
+    assert not strategy._readonly_reduction_contract_keys_compatible(low_contract, wide_contract, low_ref, wide_ref)
+    assert strategy._readonly_projection_contract_count_identities_compatible(low_ref, wide_ref)
+    assert strategy._readonly_projection_contract_limit_keys_compatible(low_contract[4], wide_contract[4], low_ref, wide_ref)
