@@ -3053,6 +3053,38 @@ class CheckStrategy(ABC):
             completed[slot_id] = evidence
         return completed
 
+    def _set_return_width_bridge_pending_evidence(
+        self,
+        *,
+        object_target_key: Optional[Tuple[Any, ...]],
+        subreason: str,
+        detail: str,
+        pair_id: Optional[str] = None,
+        narrow_width: Optional[int] = None,
+        query_stage: Optional[str] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        evidence: Dict[str, Any] = {
+            "object_derived": True,
+            "status": "pending_proof",
+            "reason_id": UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+            "subreason": str(subreason),
+            "detail": str(detail),
+        }
+        normalized_target = self._normalize_nested_tuple(object_target_key)
+        if normalized_target is not None:
+            evidence["object_target_key"] = normalized_target
+        if pair_id is not None:
+            evidence["pair_id"] = str(pair_id)
+        if narrow_width is not None:
+            evidence["narrow_width"] = int(narrow_width)
+        if query_stage is not None:
+            evidence["query_stage"] = str(query_stage)
+        if extra:
+            evidence.update(dict(extra))
+        self._last_return_width_bridge_pending_evidence = evidence
+        return evidence
+
     def _readonly_identity_proof_is_complete(
         self,
         reason_record: UnknownReasonRecord,
@@ -3227,6 +3259,12 @@ class CheckStrategy(ABC):
             wide_param_replace_fn=wide_param_replace_fn,
         )
         if semantic_content is None:
+            self._set_return_width_bridge_pending_evidence(
+                object_target_key=object_target_key,
+                subreason="wide_surface_coverage_gap",
+                detail="semantic return-width narrowing surface profile unavailable",
+                narrow_width=int(narrow_width),
+            )
             self._debug_print(
                 "  return-width bridge semantic narrowing skipped: surface profile unavailable"
             )
@@ -3430,6 +3468,8 @@ class CheckStrategy(ABC):
                     "object_derived": True,
                     "status": "complete",
                     "reason_id": UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+                    "subreason": "completed_member_narrow_producer_high_bit_proof",
+                    "result": "completed",
                     "proof_kind": "return_member_narrow_producer_high_bit_proof",
                     "recovery_proof_kind": "return_member_narrow_producer_high_bit_proof",
                     "proof_stage": "high_bit_relation",
@@ -5770,8 +5810,12 @@ class CheckStrategy(ABC):
             )
             return (
                 current_content is not None
-                and self._normalize_nested_tuple(provided_content)
-                == self._normalize_nested_tuple(current_content)
+                and self._return_width_bridge_member_narrow_producer_content_fingerprint(
+                    provided_content
+                )
+                == self._return_width_bridge_member_narrow_producer_content_fingerprint(
+                    current_content
+                )
             )
         current_content = self._return_width_bridge_semantic_narrowing_proof_content(
             object_target_key,
@@ -5916,12 +5960,19 @@ class CheckStrategy(ABC):
             counterpart_analysis,
             narrow_width=int(narrow_width),
         )
-        if type_provenance is None or type_provenance.get("narrowing_allowed") is not True:
+        if type_provenance is None:
+            self._set_return_width_bridge_pending_evidence(
+                object_target_key=target,
+                subreason="return_type_provenance_unavailable",
+                detail="return type provenance unavailable",
+                narrow_width=int(narrow_width),
+            )
             self._debug_print(
                 "  return-width bridge member producer proof rejected: "
-                f"return type provenance disallows narrowing ({type_provenance})"
+                "return type provenance unavailable"
             )
             return None
+        global_narrowing_allowed = type_provenance.get("narrowing_allowed") is True
 
         try:
             from .pairwise_query_builder import extract_return_cases
@@ -5944,7 +5995,16 @@ class CheckStrategy(ABC):
                 matched_return_info = return_info
                 break
         if matched_case is None:
-            self._debug_print("  return-width bridge member producer proof rejected: target member not found")
+            self._set_return_width_bridge_pending_evidence(
+                object_target_key=target,
+                subreason="target_member_profile_unavailable",
+                detail="target return partition member was not found in current return cases",
+                narrow_width=int(narrow_width),
+            )
+            self._debug_print(
+                "  return-width bridge member producer proof rejected: "
+                "subreason=target_member_profile_unavailable target member not found"
+            )
             return None
 
         width_entry = self._normalize_nested_tuple(
@@ -5958,7 +6018,17 @@ class CheckStrategy(ABC):
             width_entry[1] if isinstance(width_entry, tuple) and len(width_entry) > 1 else None
         )
         if producer_width is None:
-            self._debug_print("  return-width bridge member producer proof rejected: producer width unavailable")
+            self._set_return_width_bridge_pending_evidence(
+                object_target_key=target,
+                subreason="target_member_profile_unavailable",
+                detail="target return member producer width unavailable",
+                narrow_width=int(narrow_width),
+                extra={"required_wide_member": target_member},
+            )
+            self._debug_print(
+                "  return-width bridge member producer proof rejected: "
+                "subreason=target_member_profile_unavailable producer width unavailable"
+            )
             return None
         expr_profile = self._return_width_bridge_expression_producer_profile(
             getattr(matched_case, "value_expr", None),
@@ -5988,11 +6058,59 @@ class CheckStrategy(ABC):
         if effective_producer_width <= 0 or effective_producer_width > int(narrow_width):
             rejection_reasons.append("effective_producer_width_not_narrow")
         if rejection_reasons:
+            subreason = (
+                "member_producer_has_unresolved_or_wide_effect"
+                if any(
+                    reason
+                    in {
+                        "unsupported_or_unresolved_producer",
+                        "unsupported_expression",
+                        "unresolved_producer",
+                        "wide_load",
+                        "wide_call_result",
+                        "wide_arithmetic",
+                    }
+                    for reason in rejection_reasons
+                )
+                else "member_producer_not_narrow"
+            )
+            self._set_return_width_bridge_pending_evidence(
+                object_target_key=target,
+                subreason=subreason,
+                detail="target return member producer profile did not prove narrow high bits",
+                narrow_width=int(narrow_width),
+                extra={
+                    "required_wide_member": target_member,
+                    "producer_width": int(producer_width),
+                    "effective_producer_width": int(effective_producer_width),
+                    "producer_profile_blockers": tuple(sorted(set(rejection_reasons))),
+                    "load_widths": tuple(sorted(set(expr_profile["load_widths"]))),
+                    "call_result_widths": tuple(sorted(set(expr_profile["call_result_widths"]))),
+                    "constant_widths": tuple(sorted(set(expr_profile["constant_widths"]))),
+                    "unresolved_widths": tuple(sorted(set(expr_profile["unresolved_widths"]))),
+                },
+            )
             self._debug_print(
                 "  return-width bridge member producer proof rejected: "
-                f"producer profile blockers={tuple(sorted(set(rejection_reasons)))}"
+                f"subreason={subreason} producer profile blockers={tuple(sorted(set(rejection_reasons)))}"
             )
             return None
+
+        member_local_override = {
+            "object_derived": True,
+            "status": "proven",
+            "proof_kind": "case_member_narrow_producer_override",
+            "relation": "member_local_high_bits_irrelevant_not_global_return_width_narrowing",
+            "scope": "return_partition_member",
+            "global_semantic_narrowing_allowed": bool(global_narrowing_allowed),
+            "source_return_type_preserved": True,
+            "producer_relation": "target_member_value_expression_has_narrow_producer",
+            "subreason": (
+                "completed"
+                if global_narrowing_allowed
+                else "return_type_provenance_disallows_narrowing"
+            ),
+        }
 
         member_profile = (
             "member_profile",
@@ -6018,6 +6136,7 @@ class CheckStrategy(ABC):
             "object_derived": True,
             "status": "proven",
             "object_target_key": target,
+            "bridge_subreason": "completed_member_narrow_producer_high_bit_proof",
             "member_high_bit_relation": {
                 "object_derived": True,
                 "status": "proven",
@@ -6025,6 +6144,7 @@ class CheckStrategy(ABC):
                 "narrow_width": int(narrow_width),
                 "wide_width": int(wide_return_bits),
                 "proven": True,
+                "case_member_narrow_producer_override": member_local_override,
             },
             "target_member_profile": {
                 "object_derived": True,
@@ -6032,6 +6152,7 @@ class CheckStrategy(ABC):
                 "function_ref": self._analysis_entry_key(wide_analysis),
                 "return_storage": self._return_storage_object_key(wide_analysis),
                 "return_type_provenance": type_provenance,
+                "case_member_narrow_producer_override": member_local_override,
                 "required_wide_member": target_member,
                 "member_profile": member_profile,
                 "max_producer_width": int(effective_producer_width),
@@ -6309,9 +6430,90 @@ class CheckStrategy(ABC):
         if cls._normalize_nested_tuple(profile.get("unresolved_widths")) not in {(), None}:
             return False
         type_provenance = profile.get("return_type_provenance")
-        if not isinstance(type_provenance, Mapping) or type_provenance.get("narrowing_allowed") is not True:
+        if not isinstance(type_provenance, Mapping):
+            return False
+        override = profile.get("case_member_narrow_producer_override")
+        relation_override = relation.get("case_member_narrow_producer_override")
+        if not cls._return_width_bridge_member_local_override_is_complete(
+            override,
+            type_provenance,
+        ):
+            return False
+        if cls._normalize_nested_tuple(override) != cls._normalize_nested_tuple(relation_override):
             return False
         return True
+
+    @classmethod
+    def _return_width_bridge_member_local_override_is_complete(
+        cls,
+        override: Any,
+        type_provenance: Mapping[str, Any],
+    ) -> bool:
+        if not isinstance(override, Mapping):
+            return False
+        if not (
+            override.get("object_derived") is True
+            and override.get("status") == "proven"
+            and override.get("proof_kind") == "case_member_narrow_producer_override"
+            and override.get("relation")
+            == "member_local_high_bits_irrelevant_not_global_return_width_narrowing"
+            and override.get("scope") == "return_partition_member"
+            and override.get("source_return_type_preserved") is True
+            and override.get("producer_relation")
+            == "target_member_value_expression_has_narrow_producer"
+        ):
+            return False
+        global_allowed = type_provenance.get("narrowing_allowed") is True
+        if override.get("global_semantic_narrowing_allowed") is not bool(global_allowed):
+            return False
+        expected_subreason = (
+            "completed"
+            if global_allowed
+            else "return_type_provenance_disallows_narrowing"
+        )
+        return override.get("subreason") == expected_subreason
+
+    @classmethod
+    def _return_width_bridge_member_narrow_producer_content_fingerprint(
+        cls,
+        content: Any,
+    ) -> Optional[Tuple[Any, ...]]:
+        if not isinstance(content, Mapping):
+            return None
+        relation = content.get("member_high_bit_relation")
+        profile = content.get("target_member_profile")
+        if not isinstance(relation, Mapping) or not isinstance(profile, Mapping):
+            return None
+        return (
+            "return_member_narrow_producer_high_bit_proof",
+            ("object_target_key", cls._normalize_nested_tuple(content.get("object_target_key"))),
+            (
+                "member_high_bit_relation",
+                relation.get("relation"),
+                relation.get("narrow_width"),
+                relation.get("wide_width"),
+                cls._normalize_nested_tuple(
+                    relation.get("case_member_narrow_producer_override")
+                ),
+            ),
+            ("function_ref", cls._normalize_nested_tuple(profile.get("function_ref"))),
+            ("return_storage", cls._normalize_nested_tuple(profile.get("return_storage"))),
+            ("required_wide_member", cls._normalize_nested_tuple(profile.get("required_wide_member"))),
+            ("member_profile", cls._normalize_nested_tuple(profile.get("member_profile"))),
+            ("max_producer_width", profile.get("max_producer_width")),
+            ("load_widths", cls._normalize_nested_tuple(profile.get("load_widths"))),
+            ("call_result_widths", cls._normalize_nested_tuple(profile.get("call_result_widths"))),
+            ("constant_widths", cls._normalize_nested_tuple(profile.get("constant_widths"))),
+            ("unresolved_widths", cls._normalize_nested_tuple(profile.get("unresolved_widths"))),
+            (
+                "semantic_narrow_runtime_ref_key",
+                cls._normalize_nested_tuple(profile.get("semantic_narrow_runtime_ref_key")),
+            ),
+            (
+                "case_member_narrow_producer_override",
+                cls._normalize_nested_tuple(profile.get("case_member_narrow_producer_override")),
+            ),
+        )
 
     @classmethod
     def _return_width_bridge_return_type_provenance(

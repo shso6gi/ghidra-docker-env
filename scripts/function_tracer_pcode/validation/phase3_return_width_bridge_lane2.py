@@ -1695,7 +1695,42 @@ def _member_narrow_producer_proof_content_is_specific(
     if _normalize_nested_tuple(profile.get("unresolved_widths")) not in {(), None}:
         return False
     type_provenance = profile.get("return_type_provenance")
-    return isinstance(type_provenance, Mapping) and type_provenance.get("narrowing_allowed") is True
+    if not isinstance(type_provenance, Mapping):
+        return False
+    override = profile.get("case_member_narrow_producer_override")
+    relation_override = relation.get("case_member_narrow_producer_override")
+    if not _member_local_override_is_complete(override, type_provenance):
+        return False
+    return _normalize_nested_tuple(override) == _normalize_nested_tuple(relation_override)
+
+
+def _member_local_override_is_complete(
+    override: Any,
+    type_provenance: Mapping[str, Any],
+) -> bool:
+    if not isinstance(override, Mapping):
+        return False
+    if not (
+        override.get("object_derived") is True
+        and override.get("status") == "proven"
+        and override.get("proof_kind") == "case_member_narrow_producer_override"
+        and override.get("relation")
+        == "member_local_high_bits_irrelevant_not_global_return_width_narrowing"
+        and override.get("scope") == "return_partition_member"
+        and override.get("source_return_type_preserved") is True
+        and override.get("producer_relation")
+        == "target_member_value_expression_has_narrow_producer"
+    ):
+        return False
+    global_allowed = type_provenance.get("narrowing_allowed") is True
+    if override.get("global_semantic_narrowing_allowed") is not bool(global_allowed):
+        return False
+    expected_subreason = (
+        "completed"
+        if global_allowed
+        else "return_type_provenance_disallows_narrowing"
+    )
+    return override.get("subreason") == expected_subreason
 
 
 def _wide_width_side(target: tuple) -> Any:

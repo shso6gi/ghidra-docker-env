@@ -381,6 +381,13 @@ def solve_query_twostage(
             )
             if bridged_result is not None:
                 return bridged_result
+            pending_evidence = getattr(
+                strategy,
+                "_last_return_width_bridge_pending_evidence",
+                None,
+            )
+            if pending_evidence is not None:
+                result.object_evidence = pending_evidence
         if getattr(strategy, "_active_normalization_stats", None) is not None:
             strategy._active_normalization_stats["unknown_results"] += 1
         _record_return_width_block(strategy, exc)

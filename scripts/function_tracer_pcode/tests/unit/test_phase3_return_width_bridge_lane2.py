@@ -1265,6 +1265,47 @@ def test_return_width_bridge_semantic_narrowing_rejects_source_level_wide_return
     assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
 
 
+def test_return_width_bridge_member_narrow_producer_accepts_source_level_wide_return_member():
+    source_long_hypothesis = {
+        "phase": "P0_SOURCE_DECLARATION",
+        "return_type_override": "long",
+        "evidence": {"declared_return_type": "long", "declared_return_type_width": 64},
+    }
+    strategy, wide, narrow, reason = _semantic_narrowing_analyses(
+        wide_expr=Expression.constant(1, size=4),
+        wide_return_type="long",
+        wide_hypotheses=[source_long_hypothesis],
+    )
+
+    assert not strategy._record_completed_return_width_bridge_semantic_narrowing_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert strategy._record_completed_return_width_bridge_member_narrow_producer_proofs(
+        reason,
+        wide,
+        narrow,
+        narrow_width=32,
+    )
+    assert strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+
+    evidence = next(
+        record
+        for record in wide.completed_recovery_proof_evidence
+        if record.get("discharge_proof_kind") == "return_member_narrow_producer_high_bit_proof"
+    )
+    content = evidence["proof_content"]
+    profile = content["target_member_profile"]
+    override = profile["case_member_narrow_producer_override"]
+    assert profile["return_type_provenance"]["narrowing_allowed"] is False
+    assert override["global_semantic_narrowing_allowed"] is False
+    assert override["subreason"] == "return_type_provenance_disallows_narrowing"
+    assert content["bridge_subreason"] == "completed_member_narrow_producer_high_bit_proof"
+    assert evidence["subreason"] == "completed_member_narrow_producer_high_bit_proof"
+
+
 def test_return_width_bridge_semantic_narrowing_rejects_source_level_unknown_width_return():
     source_unknown_width_hypothesis = {
         "phase": "P0_SOURCE_DECLARATION",
@@ -1390,6 +1431,12 @@ def test_return_width_bridge_semantic_narrowing_rejects_coverage_inconclusive():
         narrow_width=32,
     )
     assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+    evidence = strategy._last_return_width_bridge_pending_evidence
+    assert evidence["reason_id"] == "return_width_bridge_missing"
+    assert evidence["subreason"] == "wide_surface_coverage_gap"
+    assert evidence["object_target_key"] == CheckStrategy._normalize_nested_tuple(
+        reason.object_target_key
+    )
 
 
 def test_return_width_bridge_semantic_narrowing_accepts_guarded_total_coverage():
@@ -1793,11 +1840,25 @@ def test_return_width_bridge_member_narrow_producer_rejects_unknown_member():
         narrow_width=32,
     )
     assert not strategy._return_width_bridge_proof_is_complete(reason, wide, narrow)
+    evidence = strategy._last_return_width_bridge_pending_evidence
+    assert evidence["reason_id"] == "return_width_bridge_missing"
+    assert evidence["subreason"] == "member_producer_has_unresolved_or_wide_effect"
+    assert "unresolved_producer" in evidence["producer_profile_blockers"]
+    assert evidence["object_target_key"] == CheckStrategy._normalize_nested_tuple(
+        reason.object_target_key
+    )
 
 
 @pytest.mark.parametrize(
     "mutation",
-    ["wrong_function_ref", "wrong_return_storage", "wrong_required_member", "wrong_member_profile_id"],
+    [
+        "wrong_function_ref",
+        "wrong_return_storage",
+        "wrong_required_member",
+        "wrong_member_profile_id",
+        "missing_member_local_override",
+        "wrong_member_local_override_scope",
+    ],
 )
 def test_phase3_validation_rejects_member_narrow_producer_profile_not_anchored_to_target(mutation):
     strategy, wide, narrow, reason = _semantic_narrowing_analyses(
@@ -1834,6 +1895,14 @@ def test_phase3_validation_rejects_member_narrow_producer_profile_not_anchored_t
         member_profile = list(profile["member_profile"])
         member_profile[1] = ("member_id", ("return_case_partition_member", "wrong"))
         profile["member_profile"] = tuple(member_profile)
+    elif mutation == "missing_member_local_override":
+        profile.pop("case_member_narrow_producer_override")
+        content["member_high_bit_relation"].pop("case_member_narrow_producer_override")
+    elif mutation == "wrong_member_local_override_scope":
+        override = dict(profile["case_member_narrow_producer_override"])
+        override["scope"] = "function_return_type"
+        profile["case_member_narrow_producer_override"] = override
+        content["member_high_bit_relation"]["case_member_narrow_producer_override"] = override
 
     assert not _member_narrow_producer_proof_content_is_specific(
         content,
@@ -2537,6 +2606,11 @@ def test_pairwise_return_width_bridge_summary_parameter_fallback_rejects_when_na
     ]
     assert analysis1.completed_recovery_proof_evidence == []
     assert analysis2.completed_recovery_proof_evidence == []
+    evidence = strategy._last_return_width_bridge_pending_evidence
+    assert evidence["reason_id"] == "return_width_bridge_missing"
+    assert evidence["subreason"] == "narrow_query_not_unsat"
+    assert evidence["query_stage"] == "return-width-bridge-narrow-ineq"
+    assert evidence["object_target_key"] == CheckStrategy._normalize_nested_tuple(target)
 
 
 def test_phase3_return_width_bridge_lane2_manifest_and_post_fix_gate_ready(tmp_path):
