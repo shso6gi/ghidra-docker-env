@@ -9,8 +9,17 @@ from ..model import FunctionReturnAnalysis, FunctionSignature, SignatureHypothes
 from ..model.signature import get_declared_type_size_bits
 from .phases.handler import PhaseContext, PhaseResult
 from .result import EquivalenceResult
-from .result_factory import create_context_error_result, create_reanalysis_error
+from .result_factory import (
+    create_context_error_result,
+    create_context_unknown_result,
+    create_reanalysis_error,
+)
 from .typing.fixer import TypeFixer
+from ..analysis.failure import (
+    ANALYSIS_STATUS_DECOMPILATION_FAILED,
+    ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
+    ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+)
 
 
 def analyze_and_check_with_analysis(
@@ -35,14 +44,29 @@ def analyze_and_check_with_analysis(
             ctx.function_name1, ctx.decompile_timeout
         )
         if analysis1 is None:
-            error_message = analyzer1.get_last_function_lookup_error() or (
+            failure = analyzer1.get_last_analysis_failure()
+            failure_status = getattr(failure, "status", None)
+            error_message = getattr(failure, "message", None) or analyzer1.get_last_function_lookup_error() or (
                 f"Function '{ctx.function_name1}' not found in {ctx.binary1_name}"
             )
+            if failure_status in {
+                ANALYSIS_STATUS_DECOMPILATION_FAILED,
+                ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+            }:
+                return None, None, create_context_unknown_result(
+                    ctx=ctx,
+                    failure_status=failure_status,
+                    message=error_message,
+                    start_time=start_time,
+                    retry_count=retry_count,
+                )
             return None, None, create_context_error_result(
                 ctx=ctx,
                 error_message=error_message,
                 start_time=start_time,
                 retry_count=retry_count,
+                failure_status=failure_status or ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
+                failure_message=error_message,
             )
     finally:
         analyzer1.dispose()
@@ -59,15 +83,31 @@ def analyze_and_check_with_analysis(
             ctx.function_name2, ctx.decompile_timeout
         )
         if analysis2 is None:
-            error_message = analyzer2.get_last_function_lookup_error() or (
+            failure = analyzer2.get_last_analysis_failure()
+            failure_status = getattr(failure, "status", None)
+            error_message = getattr(failure, "message", None) or analyzer2.get_last_function_lookup_error() or (
                 f"Function '{ctx.function_name2}' not found in {ctx.binary2_name}"
             )
+            if failure_status in {
+                ANALYSIS_STATUS_DECOMPILATION_FAILED,
+                ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+            }:
+                return analysis1, None, create_context_unknown_result(
+                    ctx=ctx,
+                    failure_status=failure_status,
+                    message=error_message,
+                    start_time=start_time,
+                    retry_count=retry_count,
+                    analysis1=analysis1,
+                )
             return analysis1, None, create_context_error_result(
                 ctx=ctx,
                 error_message=error_message,
                 start_time=start_time,
                 retry_count=retry_count,
                 analysis1=analysis1,
+                failure_status=failure_status or ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
+                failure_message=error_message,
             )
     finally:
         analyzer2.dispose()
@@ -202,7 +242,7 @@ def selective_reanalysis_and_check(
         function_name: str,
         binary_name: str,
         cached_analysis: FunctionReturnAnalysis,
-    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str]]:
+    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str], Optional[str]]:
         binary_id = ctx.binary1_id if program is ctx.program1 else ctx.binary2_id if program is ctx.program2 else None
         analyzer = ReturnAnalyzer(
             program,
@@ -219,10 +259,12 @@ def selective_reanalysis_and_check(
                 ctx.decompile_timeout,
             )
             if fresh_analysis is None:
-                error_message = analyzer.get_last_function_lookup_error() or (
+                failure = analyzer.get_last_analysis_failure()
+                failure_status = getattr(failure, "status", None)
+                error_message = getattr(failure, "message", None) or analyzer.get_last_function_lookup_error() or (
                     f"Fresh reanalysis failed for '{function_name}' in {binary_name}"
                 )
-                return None, error_message
+                return None, error_message, failure_status
 
             replayed = fresh_analysis
             for hypothesis_payload in list(getattr(cached_analysis, "signature_hypotheses", []) or []):
@@ -236,12 +278,12 @@ def selective_reanalysis_and_check(
                     replayed,
                     timeout=ctx.decompile_timeout,
                 )
-            return replayed, None
+            return replayed, None, None
         finally:
             analyzer.dispose()
 
     if need_reanalyze1:
-        analysis1, error_message = _reanalyze_with_hypotheses(
+        analysis1, error_message, failure_status = _reanalyze_with_hypotheses(
             program=ctx.program1,
             function_name=ctx.function_name1,
             binary_name=ctx.binary1_name,
@@ -249,10 +291,28 @@ def selective_reanalysis_and_check(
         )
         if analysis1 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary1: {error_message}")
-            return create_reanalysis_error(ctx, str(error_message), retry_count)
+            if failure_status in {
+                ANALYSIS_STATUS_DECOMPILATION_FAILED,
+                ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+            }:
+                return ctx.analysis1, ctx.analysis2, create_context_unknown_result(
+                    ctx=ctx,
+                    failure_status=failure_status,
+                    message=str(error_message),
+                    start_time=time.time(),
+                    retry_count=retry_count,
+                    analysis1=ctx.analysis1,
+                    analysis2=ctx.analysis2,
+                )
+            return create_reanalysis_error(
+                ctx,
+                str(error_message),
+                retry_count,
+                failure_status=failure_status,
+            )
 
     if need_reanalyze2:
-        analysis2, error_message = _reanalyze_with_hypotheses(
+        analysis2, error_message, failure_status = _reanalyze_with_hypotheses(
             program=ctx.program2,
             function_name=ctx.function_name2,
             binary_name=ctx.binary2_name,
@@ -260,7 +320,25 @@ def selective_reanalysis_and_check(
         )
         if analysis2 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary2: {error_message}")
-            return create_reanalysis_error(ctx, str(error_message), retry_count)
+            if failure_status in {
+                ANALYSIS_STATUS_DECOMPILATION_FAILED,
+                ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+            }:
+                return ctx.analysis1, ctx.analysis2, create_context_unknown_result(
+                    ctx=ctx,
+                    failure_status=failure_status,
+                    message=str(error_message),
+                    start_time=time.time(),
+                    retry_count=retry_count,
+                    analysis1=ctx.analysis1,
+                    analysis2=ctx.analysis2,
+                )
+            return create_reanalysis_error(
+                ctx,
+                str(error_message),
+                retry_count,
+                failure_status=failure_status,
+            )
 
     ctx.analysis1 = analysis1
     ctx.analysis2 = analysis2

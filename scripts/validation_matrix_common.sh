@@ -77,22 +77,52 @@ validation_ensure_final_result_line() {
     } >> "$log_file"
 }
 
-validation_classify_log_result() {
+validation_append_pair_process_timeout_payload() {
     local log_file="$1"
 
-    if grep -q "^Result: EQUIVALENT" "$log_file"; then
-        echo "EQ"
-    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
-        echo "NOT_EQ"
-    elif grep -q "^Result: ERROR" "$log_file"; then
-        echo "ERROR"
-    elif grep -q "^Result: TIMEOUT" "$log_file"; then
-        echo "TIMEOUT"
-    elif grep -q "^Result: UNKNOWN" "$log_file"; then
-        echo "UNKNOWN"
-    else
-        echo "INCOMPLETE"
-    fi
+    {
+        echo "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
+        echo '{"is_equivalent": null, "is_timeout": true, "timeout_class": "pair_process_timeout"}'
+        echo "=== EQUIVALENCE_RESULT_JSON_END ==="
+    } >> "$log_file"
+}
+
+validation_classify_log_result() {
+    local log_file="$1"
+    local status
+
+    status="$(awk '
+        /^Result: EQUIVALENT/ { status = "EQ"; status_line = NR }
+        /^Result: NOT EQUIVALENT/ { status = "NOT_EQ"; status_line = NR }
+        /^Result: ERROR/ { status = "ERROR"; status_line = NR }
+        /^Result: TIMEOUT/ { status = "TIMEOUT"; status_line = NR }
+        /^Result: UNKNOWN/ { status = "UNKNOWN"; status_line = NR }
+        /^=== EQUIVALENCE_RESULT_JSON_BEGIN ===$/ {
+            in_json = 1
+            json_has_lookup_miss = 0
+            next
+        }
+        /^=== EQUIVALENCE_RESULT_JSON_END ===$/ && in_json {
+            last_json_end = NR
+            last_json_lookup_miss = json_has_lookup_miss
+            in_json = 0
+            next
+        }
+        in_json && /"failure_status"[[:space:]]*:[[:space:]]*"function_lookup_miss"/ {
+            json_has_lookup_miss = 1
+        }
+        END {
+            if (status == "") {
+                status = "INCOMPLETE"
+            }
+            if (status == "ERROR" && last_json_lookup_miss && last_json_end > status_line) {
+                status = "INCOMPLETE"
+            }
+            print status
+        }
+    ' "$log_file")"
+
+    echo "$status"
 }
 
 validation_classify_log_display() {
@@ -120,5 +150,6 @@ validation_classify_log_display() {
 
 export -f validation_result_log_is_complete
 export -f validation_ensure_final_result_line
+export -f validation_append_pair_process_timeout_payload
 export -f validation_classify_log_result
 export -f validation_classify_log_display

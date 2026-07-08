@@ -42,6 +42,8 @@ class UnknownReasonId(str, Enum):
     SOLVER_PROVEN_REWRITE_NO_CHANGE = "solver_proven_rewrite_no_change"
     SOLVER_PROVEN_REWRITE_PROOF_FAILED = "solver_proven_rewrite_proof_failed"
     SOLVER_UNKNOWN_TIMEOUT = "solver_unknown_timeout"
+    DECOMPILATION_FAILED = "decompilation_failed"
+    HIGH_FUNCTION_MISSING = "high_function_missing"
     EMPTY_RETURN_CASES = "empty_return_cases"
     UNEXPECTED_PAIRWISE_STATE = "unexpected_pairwise_state"
     STRATEGY_EXCEPTION = "strategy_exception"
@@ -548,6 +550,22 @@ def _register_defaults() -> None:
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
             target_regression="solver_unknown_timeout",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.DECOMPILATION_FAILED,
+            UnknownReasonClass.OPERATIONAL_GAP,
+            UnknownDecisionEffect.BLOCKS_DECISION,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            target_regression="decompilation_failed",
+        ),
+        UnknownReasonDefinition.create(
+            UnknownReasonId.HIGH_FUNCTION_MISSING,
+            UnknownReasonClass.OPERATIONAL_GAP,
+            UnknownDecisionEffect.BLOCKS_DECISION,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            target_regression="high_function_missing",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.NORMALIZATION_NO_CHANGE,

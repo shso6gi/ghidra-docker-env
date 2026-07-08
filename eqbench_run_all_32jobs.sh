@@ -155,6 +155,7 @@ run_pair() {
             echo "Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER"
             echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
         } >> "$log_file"
+        validation_append_pair_process_timeout_payload "$log_file"
     fi
 
     validation_ensure_final_result_line "$log_file" "$ec"

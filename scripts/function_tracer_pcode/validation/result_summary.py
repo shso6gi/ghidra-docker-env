@@ -20,6 +20,8 @@ from ..equivalence.unknown_reason import (
     coerce_unknown_reason_records,
 )
 from .unknown_reason_summary import (
+    RESULT_JSON_BEGIN,
+    RESULT_JSON_END,
     compare_validation_unknowns,
     extract_result_payloads_from_text,
     format_validation_unknown_diff,
@@ -145,9 +147,14 @@ class ValidationBaselineComparison:
         )
 
 
-def classify_result_payload(payload: Mapping[str, Any]) -> str:
+def classify_result_payload(payload: Mapping[str, Any], *, matrix_context: bool = False) -> str:
+    failure_status = str(payload.get("failure_status") or "")
+    if matrix_context and failure_status == "function_lookup_miss":
+        return STATUS_INCOMPLETE
     if payload.get("error_message"):
         return STATUS_ERROR
+    if failure_status in {"decompilation_failed", "high_function_missing"}:
+        return STATUS_UNKNOWN
     is_equivalent = payload.get("is_equivalent")
     if is_equivalent is True:
         return STATUS_EQ
@@ -164,22 +171,66 @@ def classify_result_payload(payload: Mapping[str, Any]) -> str:
     return STATUS_UNKNOWN
 
 
-def classify_log_text(text: str) -> str:
-    payloads = extract_result_payloads_from_text(text)
-    if payloads:
-        return classify_result_payload(payloads[-1])
-    for line in text.splitlines():
-        if line.startswith("Result: EQUIVALENT"):
-            return STATUS_EQ
-        if line.startswith("Result: NOT EQUIVALENT"):
-            return STATUS_NOT_EQ
-        if line.startswith("Result: ERROR"):
-            return STATUS_ERROR
-        if line.startswith("Result: TIMEOUT"):
-            return STATUS_TIMEOUT
-        if line.startswith("Result: UNKNOWN"):
-            return STATUS_UNKNOWN
+def classify_log_text(text: str, *, matrix_context: bool = False) -> str:
+    final_events = _extract_final_result_events(text, matrix_context=matrix_context)
+    if final_events:
+        return final_events[-1][1]
     return STATUS_INCOMPLETE
+
+
+def _extract_final_result_events(
+    text: str,
+    *,
+    matrix_context: bool = False,
+) -> Tuple[Tuple[int, str, Optional[Mapping[str, Any]]], ...]:
+    events = []
+    current_lines = []
+    payload_start = -1
+    in_payload = False
+    for index, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if stripped == RESULT_JSON_BEGIN:
+            in_payload = True
+            current_lines = []
+            payload_start = index
+            continue
+        if stripped == RESULT_JSON_END and in_payload:
+            raw_json = "\n".join(current_lines).strip()
+            if raw_json:
+                payload = json.loads(raw_json)
+                if isinstance(payload, Mapping):
+                    events.append(
+                        (
+                            index,
+                            classify_result_payload(payload, matrix_context=matrix_context),
+                            payload,
+                        )
+                    )
+            in_payload = False
+            current_lines = []
+            payload_start = -1
+            continue
+        if in_payload:
+            current_lines.append(line)
+            continue
+        status = _classify_result_line(line)
+        if status is not None:
+            events.append((index, status, None))
+    return tuple(sorted(events, key=lambda event: event[0]))
+
+
+def _classify_result_line(line: str) -> Optional[str]:
+    if line.startswith("Result: EQUIVALENT"):
+        return STATUS_EQ
+    if line.startswith("Result: NOT EQUIVALENT"):
+        return STATUS_NOT_EQ
+    if line.startswith("Result: ERROR"):
+        return STATUS_ERROR
+    if line.startswith("Result: TIMEOUT"):
+        return STATUS_TIMEOUT
+    if line.startswith("Result: UNKNOWN"):
+        return STATUS_UNKNOWN
+    return None
 
 
 def read_validation_log_record(path: Any) -> ValidationLogRecord:
@@ -198,7 +249,7 @@ def read_validation_log_record(path: Any) -> ValidationLogRecord:
         path=str(log_path),
         function_name=function_name,
         pair_label=pair_label,
-        status=classify_log_text(text),
+        status=classify_log_text(text, matrix_context=True),
         payloads=payloads,
     )
 

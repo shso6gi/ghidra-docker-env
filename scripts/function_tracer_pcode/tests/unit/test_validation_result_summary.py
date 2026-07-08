@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     format_overall_results_summary,
     format_run_health_summary,
     format_validation_baseline_comparison,
+    read_validation_log_record,
 )
 from scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight import (
     main as risk_preflight_main,
@@ -79,6 +80,25 @@ def _payload(function_name, is_equivalent, **extra):
     return payload
 
 
+def _bash_validation_classify(path):
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            'source scripts/validation_matrix_common.sh; validation_classify_log_result "$1"',
+            "bash",
+            str(path),
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
 def test_validation_classifier_prefers_typed_payload_over_human_text():
     payload = _payload("fc_read_after_void", None)
 
@@ -92,6 +112,111 @@ def test_validation_classifier_prefers_typed_payload_over_human_text():
     )
 
     assert classify_log_text(text) == STATUS_UNKNOWN
+
+
+def test_validation_classifier_uses_trailing_timeout_result_after_error_json():
+    error_payload = _payload(
+        "fc_read_after_void",
+        None,
+        error_message="Function 'fc_read_after_void' not found",
+        failure_status="function_lookup_miss",
+    )
+    text = "\n".join(
+        [
+            "Result: ERROR",
+            RESULT_JSON_BEGIN,
+            json.dumps(error_payload),
+            RESULT_JSON_END,
+            "Result: TIMEOUT (pair process exceeded wall-clock time limit)",
+        ]
+    )
+
+    assert classify_log_text(text) == STATUS_TIMEOUT
+
+
+def test_validation_classifier_uses_trailing_timeout_payload_after_error_json():
+    error_payload = _payload(
+        "fc_read_after_void",
+        None,
+        error_message="boom",
+    )
+    timeout_payload = {
+        "is_equivalent": None,
+        "is_timeout": True,
+        "timeout_class": "pair_process_timeout",
+    }
+    text = "\n".join(
+        [
+            "Result: ERROR",
+            RESULT_JSON_BEGIN,
+            json.dumps(error_payload),
+            RESULT_JSON_END,
+            "Result: TIMEOUT (pair process exceeded wall-clock time limit)",
+            RESULT_JSON_BEGIN,
+            json.dumps(timeout_payload),
+            RESULT_JSON_END,
+        ]
+    )
+
+    assert classify_log_text(text) == STATUS_TIMEOUT
+
+
+def test_matrix_validation_classifies_function_lookup_miss_as_incomplete(tmp_path):
+    path = _write_log(
+        tmp_path,
+        "fc_missing_B1_B2.log",
+        "Result: ERROR",
+        _payload(
+            "fc_missing",
+            None,
+            error_message="Function 'fc_missing' not found",
+            failure_status="function_lookup_miss",
+        ),
+    )
+
+    assert classify_log_text(path.read_text()) == STATUS_ERROR
+    assert read_validation_log_record(path).status == STATUS_INCOMPLETE
+
+
+def test_bash_validation_classifier_ignores_stale_lookup_miss_json(tmp_path):
+    path = tmp_path / "stale_lookup_then_real_error.log"
+    path.write_text(
+        "\n".join(
+            [
+                "Result: ERROR",
+                RESULT_JSON_BEGIN,
+                json.dumps(
+                    _payload(
+                        "fc_missing",
+                        None,
+                        error_message="Function 'fc_missing' not found",
+                        failure_status="function_lookup_miss",
+                    )
+                ),
+                RESULT_JSON_END,
+                "debug from rerun",
+                "Result: ERROR",
+            ]
+        )
+    )
+
+    assert _bash_validation_classify(path) == STATUS_ERROR
+
+
+def test_bash_validation_classifier_maps_final_lookup_miss_json_to_incomplete(tmp_path):
+    path = _write_log(
+        tmp_path,
+        "final_lookup_miss.log",
+        "Result: ERROR",
+        _payload(
+            "fc_missing",
+            None,
+            error_message="Function 'fc_missing' not found",
+            failure_status="function_lookup_miss",
+        ),
+    )
+
+    assert _bash_validation_classify(path) == STATUS_INCOMPLETE
 
 
 def test_canonical_validation_surface_hash_is_stable_for_sorted_multisets(tmp_path):

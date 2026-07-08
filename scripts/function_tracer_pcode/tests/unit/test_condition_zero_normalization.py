@@ -4,6 +4,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
@@ -13,6 +15,7 @@ from scripts.function_tracer_pcode.analysis.condition.normalizer import (
     ConditionNormalizer,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import (
+    ConditionRecoverableSimplificationError,
     ConditionSimplifier,
 )
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
@@ -400,6 +403,65 @@ def test_condition_normalizer_ignores_stale_id_shaped_expr_key_cache_entry():
         ConditionNormalizer._expr_key_cache.clear()
 
 
+def test_cnf_literal_sort_rejects_process_local_object_fallback():
+    class UnstableAtomTerm:
+        pass
+
+    literal = ((UnstableAtomTerm(), "INT_EQUAL", _const(0).structural_key()), True)
+
+    with pytest.raises(ConditionRecoverableSimplificationError):
+        ConditionSimplifier._literal_sort_key(literal)
+
+
+def test_formula_unsat_recovers_from_cnf_build_failure(monkeypatch):
+    condition = Condition(
+        Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
+    )
+
+    def _raise_recoverable(_condition_list):
+        raise ConditionRecoverableSimplificationError("unstable CNF sort key")
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_should_use_solver_reasoning",
+        classmethod(lambda cls, condition_list: False),
+    )
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_conditions_to_cnf_clauses",
+        classmethod(lambda cls, condition_list: _raise_recoverable(condition_list)),
+    )
+
+    assert ConditionSimplifier._formula_is_unsat([condition]) is None
+    assert ConditionSimplifier.is_contradiction([condition]) is False
+
+
+def test_formula_unsat_recovers_from_cnf_satisfiability_failure(monkeypatch):
+    condition = Condition(
+        Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
+    )
+
+    def _raise_recoverable(_clause_literals, _assignments=None):
+        raise ConditionRecoverableSimplificationError("unstable CNF sort key")
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_should_use_solver_reasoning",
+        classmethod(lambda cls, condition_list: False),
+    )
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_clauses_are_satisfiable",
+        classmethod(lambda cls, clause_literals, assignments=None: _raise_recoverable(
+            clause_literals,
+            assignments,
+        )),
+    )
+
+    assert ConditionSimplifier._formula_is_unsat([condition]) is None
+    assert ConditionSimplifier.is_contradiction([condition]) is False
+
+
 def test_normalize_for_contradiction_skips_full_render_for_large_expression(monkeypatch):
     huge = _param("param_1")
     for _ in range(64):
@@ -539,6 +601,35 @@ def test_condition_simplifier_debug_paths_do_not_require_full_to_string(monkeypa
         ConditionSimplifier._debug_repeat_counts.update(original_counts)
         ConditionSimplifier._debug_message_count = 0
         ConditionSimplifier._debug_suppressed = False
+
+
+def test_cnf_literal_sort_handles_mixed_none_and_int_atom_terms():
+    merged = ConditionSimplifier._merge_clause_literals(
+        [
+            (((None, "left"), "==", 1), True),
+            (((1, "left"), "==", 1), True),
+        ]
+    )
+
+    assert merged is not None
+    assert len(merged) == 2
+
+
+def test_cnf_literal_sort_does_not_turn_unproved_region_into_contradiction(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.analysis.condition.simplifier.ConditionSMTOracle.conjunction_is_unsat",
+        lambda *args, **kwargs: None,
+    )
+
+    merged = ConditionSimplifier._merge_clause_literals(
+        [
+            (((None, "left"), "==", 1), True),
+            (((1, "left"), "==", 1), True),
+        ]
+    )
+
+    assert merged is not None
+    assert ConditionSimplifier._clauses_are_satisfiable([merged]) is True
 
 
 def test_condition_simplifier_debug_budget_suppresses_heavy_summaries(monkeypatch):

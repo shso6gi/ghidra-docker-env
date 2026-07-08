@@ -93,6 +93,8 @@ class EquivalenceResult:
     pairwise_debug_stats: Optional[Dict[str, int]] = None
     unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
     unknown_recovery_actions: List[UnknownRecoveryAction] = field(default_factory=list)
+    failure_status: Optional[str] = None
+    failure_message: Optional[str] = None
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
     debug_trace: Optional[DebugTrace] = None
@@ -172,6 +174,8 @@ class EquivalenceResult:
             "counterexample": self.counterexample.to_dict() if self.counterexample else None,
             "total_time": self.total_time,
             "error_message": self.error_message,
+            "failure_status": self.failure_status,
+            "failure_message": self.failure_message,
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
@@ -331,11 +335,17 @@ class EquivalenceResult:
         if self.error_message:
             lines.append("Result: ERROR")
             lines.append(f"ERROR: {self.error_message}")
+            if self.failure_status:
+                lines.append(f"Failure status: {self.failure_status}")
         elif self.is_equivalent is None:
             if self.is_timeout():
                 lines.append("Result: TIMEOUT (could not determine equivalence within time limit)")
             else:
                 lines.append("Result: UNKNOWN (could not determine equivalence)")
+            if self.failure_status:
+                lines.append(f"Failure status: {self.failure_status}")
+            if self.failure_message:
+                lines.append(f"Failure detail: {self.failure_message}")
         elif self.is_equivalent:
             lines.append("Result: EQUIVALENT ✓")
         else:

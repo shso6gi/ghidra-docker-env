@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Dict, Set, Optional, Tuple
 from ...model import Expression, Condition, ExpressionType, condition_key, key_contains_placeholder
+from ...model.structural import expression_provenance_key
 from ..debug import summarize_expression, summarize_condition
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 from ...model.render_smt import (
@@ -26,6 +27,10 @@ _CONDITION_RECOVERABLE_ERRORS = (
     ValueError,
     RecursionError,
 )
+
+
+class ConditionRecoverableSimplificationError(ValueError):
+    """Raised when condition simplification cannot prove a fact soundly."""
 
 
 @dataclass(frozen=True)
@@ -269,8 +274,96 @@ class ConditionSimplifier:
                 continue
             seen[atom] = polarity
             merged.append((atom, polarity))
-        merged.sort()
+        merged.sort(key=cls._literal_sort_key)
         return tuple(merged)
+
+    @classmethod
+    def _literal_sort_key(cls, literal: BooleanLiteral) -> Tuple[object, ...]:
+        atom, polarity = literal
+        try:
+            left, op, right = atom
+            return (
+                cls._total_sort_key(cls._atom_term_sort_key(left)),
+                str(op),
+                cls._total_sort_key(cls._atom_term_sort_key(right)),
+                bool(polarity),
+            )
+        except _CONDITION_RECOVERABLE_ERRORS as exc:
+            raise ConditionRecoverableSimplificationError(
+                "could not build deterministic CNF literal sort key"
+            ) from exc
+
+    @classmethod
+    def _atom_term_sort_key(cls, term: object) -> Tuple[object, ...]:
+        if isinstance(term, Expression):
+            return ("expr", expression_provenance_key(term, safe_budget=256))
+        if term is None:
+            return ("none",)
+        if isinstance(term, (str, int, bool, float)):
+            return (type(term).__name__, term)
+        if isinstance(term, tuple):
+            return ("tuple", tuple(cls._atom_term_sort_key(item) for item in term))
+        if isinstance(term, list):
+            return ("list", tuple(cls._atom_term_sort_key(item) for item in term))
+        if isinstance(term, dict):
+            entries = [
+                (
+                    cls._atom_term_sort_key(key),
+                    cls._atom_term_sort_key(value),
+                )
+                for key, value in term.items()
+            ]
+            return (
+                "dict",
+                tuple(
+                    sorted(
+                        entries,
+                        key=lambda item: cls._total_sort_key(item),
+                    )
+                ),
+            )
+        structural_key = getattr(term, "structural_key", None)
+        if callable(structural_key):
+            return ("structural", structural_key())
+        stable_key = getattr(term, "stable_key", None)
+        if callable(stable_key):
+            return ("stable", stable_key())
+        raise ConditionRecoverableSimplificationError(
+            f"no stable sort key for {type(term).__module__}.{type(term).__qualname__}"
+        )
+
+    @classmethod
+    def _total_sort_key(cls, value: object) -> Tuple[object, ...]:
+        if value is None:
+            return ("none",)
+        if isinstance(value, bool):
+            return ("bool", value)
+        if isinstance(value, int):
+            return ("int", value)
+        if isinstance(value, float):
+            return ("float", repr(value))
+        if isinstance(value, str):
+            return ("str", value)
+        if isinstance(value, tuple):
+            return ("tuple", tuple(cls._total_sort_key(item) for item in value))
+        if isinstance(value, list):
+            return ("list", tuple(cls._total_sort_key(item) for item in value))
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    sorted(
+                        (
+                            cls._total_sort_key(key),
+                            cls._total_sort_key(item),
+                        )
+                        for key, item in value.items()
+                    )
+                ),
+            )
+        raise ConditionRecoverableSimplificationError(
+            f"non-total CNF sort key component: {type(value).__module__}.{type(value).__qualname__}"
+        )
 
     @classmethod
     def _false_clause(
@@ -469,7 +562,7 @@ class ConditionSimplifier:
                 continue
             if not unresolved:
                 return None
-            unresolved_tuple = tuple(sorted(set(unresolved)))
+            unresolved_tuple = tuple(sorted(set(unresolved), key=cls._literal_sort_key))
             if unresolved_tuple not in simplified:
                 simplified.append(unresolved_tuple)
         return simplified
@@ -540,11 +633,14 @@ class ConditionSimplifier:
                 solver_result = None
             if solver_result is not None:
                 return solver_result
-        clauses = cls._conditions_to_cnf_clauses(condition_list)
-        if clauses is None:
+        try:
+            clauses = cls._conditions_to_cnf_clauses(condition_list)
+            if clauses is None:
+                return None
+            clause_literals = [clause.literals for clause in clauses]
+            return not cls._clauses_are_satisfiable(clause_literals)
+        except _CONDITION_RECOVERABLE_ERRORS:
             return None
-        clause_literals = [clause.literals for clause in clauses]
-        return not cls._clauses_are_satisfiable(clause_literals)
 
     @classmethod
     def _formula_implies(

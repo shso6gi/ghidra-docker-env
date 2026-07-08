@@ -46,6 +46,13 @@ from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalize
 from .condition.bitvector import eval_constant_raw
 from .condition.smt_oracle import ConditionSMTOracle
 from .debug import summarize_expression
+from .failure import (
+    ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
+    ANALYSIS_STATUS_DECOMPILATION_FAILED,
+    ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
+    ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+    AnalysisFailure,
+)
 from .signedness import SignednessDetector
 from .summary_returns import (
     accept_summary_return_candidates,
@@ -195,6 +202,7 @@ class ReturnAnalyzer:
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
         self._last_function_lookup_error: Optional[str] = None
+        self._last_analysis_failure: Optional[AnalysisFailure] = None
         self._current_function_prototype = None
         self._current_function_entry_address_value = None
     
@@ -880,12 +888,24 @@ class ReturnAnalyzer:
         results = decompiler.decompileFunction(function, timeout, None)
         
         if not results.decompileCompleted():
-            self._debug_print("Decompilation failed!")
+            message = "Decompilation failed!"
+            self._last_analysis_failure = AnalysisFailure(
+                status=ANALYSIS_STATUS_DECOMPILATION_FAILED,
+                message=message,
+                function_name=str(function.getName()),
+            )
+            self._debug_print(message)
             return None
         
         high_function = results.getHighFunction()
         if high_function is None:
-            self._debug_print("HighFunction is None!")
+            message = "HighFunction is None!"
+            self._last_analysis_failure = AnalysisFailure(
+                status=ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
+                message=message,
+                function_name=str(function.getName()),
+            )
+            self._debug_print(message)
             return None
         
         # Step 1: tracer / CFG infrastructure を先に構築する。
@@ -13993,12 +14013,27 @@ class ReturnAnalyzer:
     
     def analyze_function_by_name(self, function_name: str, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
         self._last_function_lookup_error = None
+        self._last_analysis_failure = None
         function = self._find_function_by_name(function_name)
         if function is None:
-            self._last_function_lookup_error = f"Function '{function_name}' not found"
+            message = f"Function '{function_name}' not found"
+            self._last_function_lookup_error = message
+            self._last_analysis_failure = AnalysisFailure(
+                status=ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
+                message=message,
+                function_name=function_name,
+            )
             self._debug_print(self._last_function_lookup_error)
             return None
-        return self.analyze_function(function, timeout)
+        try:
+            return self.analyze_function(function, timeout)
+        except Exception as exc:
+            self._last_analysis_failure = AnalysisFailure(
+                status=ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
+                message=str(exc),
+                function_name=function_name,
+            )
+            raise
 
     def refresh_structural_recurrence_summary(
         self,
@@ -14044,6 +14079,13 @@ class ReturnAnalyzer:
 
     def get_last_function_lookup_error(self) -> Optional[str]:
         return self._last_function_lookup_error
+
+    def get_last_analysis_failure(self) -> Optional[AnalysisFailure]:
+        return self._last_analysis_failure
+
+    def get_last_analysis_failure_status(self) -> Optional[str]:
+        failure = self._last_analysis_failure
+        return failure.status if failure is not None else None
 
     def _concretize_readonly_loads(
         self,
