@@ -3,6 +3,7 @@
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
@@ -12,9 +13,11 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    PcodeOpRef,
     ReturnInfo,
     ReturnOutcome,
     UnknownOutcome,
+    UnknownValueRef,
 )
 from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
@@ -94,16 +97,61 @@ def _analysis(
     return analysis
 
 
+class _FakeSeq:
+    def __init__(self, target, time, order):
+        self._target = _FakeAddress("ram", target)
+        self._time = time
+        self._order = order
+
+    def getTarget(self):
+        return self._target
+
+    def getTime(self):
+        return self._time
+
+    def getOrder(self):
+        return self._order
+
+
 class _FakeOp:
-    def __init__(self, mnemonic: str, *, condition_expr=None, writes_guard_state=False, inputs=(), output=None):
+    def __init__(
+        self,
+        mnemonic: str,
+        *,
+        condition_expr=None,
+        writes_guard_state=False,
+        inputs=(),
+        output=None,
+        opcode=None,
+        target=0x3000,
+        time=0,
+        order=0,
+    ):
         self._mnemonic = mnemonic
         self.condition_expr = condition_expr
         self.writes_guard_state = writes_guard_state
         self._inputs = tuple(inputs or ())
         self._output = output
+        self._opcode = opcode
+        self._seq = _FakeSeq(target, time, order)
+        self._parent = None
+        if output is not None:
+            output._def_op = self
 
     def getMnemonic(self):
         return self._mnemonic
+
+    def getOpcode(self):
+        return self._opcode
+
+    def getSeqnum(self):
+        return self._seq
+
+    def getParent(self):
+        return self._parent
+
+    def setParent(self, parent):
+        self._parent = parent
 
     def getNumInputs(self):
         return len(self._inputs)
@@ -148,6 +196,9 @@ class _FakeVarnode:
     def getAddress(self):
         return self._address
 
+    def getOffset(self):
+        return self._address.getOffset()
+
     def getSize(self):
         return self._size
 
@@ -172,6 +223,10 @@ class _FakeIterator:
 class _FakeBlock:
     def __init__(self, ops, *, index=None, start=None):
         self._ops = list(ops)
+        for op in self._ops:
+            setter = getattr(op, "setParent", None)
+            if callable(setter):
+                setter(self)
         self._outs = []
         self._ins = []
         self._edge_conditions = {}
@@ -455,6 +510,209 @@ def _branch_guarded_while_analysis():
             ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
             ReturnInfo(address="0x1008", value=c_param, conditions=[c_positive, t_positive]),
             ReturnInfo(address="0x1008", value=recursive_value, conditions=[c_positive, t_positive]),
+        ],
+    )
+
+
+class _BranchGuardedStructuralFixture:
+    def __init__(self, high_function, acc_phi, trace_map, state_phi=None):
+        self.high_function = high_function
+        self.acc_phi = acc_phi
+        self.state_phi = state_phi
+        self.trace_map = trace_map
+
+
+class _FakeStructuralTracer:
+    def __init__(self, trace_map):
+        self._trace_map = dict(trace_map)
+        self._function_binary_id = None
+        self._function_program_id = None
+        self._function_entry_space = None
+        self._function_entry_offset = None
+
+    def trace_varnode(self, varnode, *args, **kwargs):
+        if varnode in self._trace_map:
+            return self._trace_map[varnode]
+        if getattr(varnode, "isConstant", lambda: False)():
+            return Expression.constant(int(varnode.getOffset()), size=max(1, int(varnode.getSize())))
+        return None
+
+
+def _branch_guarded_structural_phi_fixture(
+    *,
+    acc_increments=True,
+    state_decrements=True,
+    include_nonprogress_edge=True,
+    forbidden_op=None,
+):
+    zero = _FakeVarnode("const", 0, 4, is_constant=True)
+    one = _FakeVarnode("const", 1, 4, is_constant=True)
+    t_input = _FakeVarnode("register", 0x4010, 4)
+    c_input = _FakeVarnode("register", 0x4014, 4)
+    acc_out = _FakeVarnode("unique", 0x5010, 4)
+    state_out = _FakeVarnode("unique", 0x5014, 4)
+    acc_progress = _FakeVarnode("unique", 0x5020, 4)
+    state_progress = _FakeVarnode("unique", 0x5024, 4)
+    acc_add = _FakeOp(
+        "INT_ADD" if acc_increments else "COPY",
+        inputs=(acc_out, one) if acc_increments else (acc_out,),
+        output=acc_progress,
+        opcode=1,
+        target=0x3040,
+        time=40,
+        order=0,
+    )
+    state_op = _FakeOp(
+        "INT_SUB" if state_decrements else "COPY",
+        inputs=(state_out, one) if state_decrements else (state_out,),
+        output=state_progress,
+        opcode=2,
+        target=0x3040,
+        time=41,
+        order=0,
+    )
+    acc_inputs = [zero]
+    state_inputs = [c_input]
+    if include_nonprogress_edge:
+        acc_inputs.append(acc_out)
+        state_inputs.append(state_out)
+    acc_inputs.append(acc_progress)
+    state_inputs.append(state_progress)
+    acc_phi = _FakeOp(
+        "MULTIEQUAL",
+        inputs=tuple(acc_inputs),
+        output=acc_out,
+        opcode=27,
+        target=0x3010,
+        time=10,
+        order=0,
+    )
+    state_phi = _FakeOp(
+        "MULTIEQUAL",
+        inputs=tuple(state_inputs),
+        output=state_out,
+        opcode=27,
+        target=0x3010,
+        time=11,
+        order=0,
+    )
+    c_compare_out = _FakeVarnode("unique", 0x5030, 1)
+    c_compare = _FakeOp(
+        "INT_SLESS",
+        inputs=(zero, state_out),
+        output=c_compare_out,
+        opcode=3,
+        target=0x3010,
+        time=12,
+        order=0,
+    )
+    c_cbranch = _FakeOp(
+        "CBRANCH",
+        condition_expr=_positive2().expression,
+        inputs=(_FakeVarnode("const", 0x3020, 8, is_constant=True), c_compare_out),
+        opcode=4,
+        target=0x3010,
+        time=13,
+        order=0,
+    )
+    t_compare_out = _FakeVarnode("unique", 0x5040, 1)
+    t_compare = _FakeOp(
+        "INT_SLESS",
+        inputs=(zero, t_input),
+        output=t_compare_out,
+        opcode=3,
+        target=0x3020,
+        time=20,
+        order=0,
+    )
+    t_cbranch = _FakeOp(
+        "CBRANCH",
+        condition_expr=_positive().expression,
+        inputs=(_FakeVarnode("const", 0x3030, 8, is_constant=True), t_compare_out),
+        opcode=4,
+        target=0x3020,
+        time=21,
+        order=0,
+    )
+    entry = _FakeBlock([], index=0, start=0x3000)
+    header = _FakeBlock([acc_phi, state_phi, c_compare, c_cbranch], index=1, start=0x3010)
+    branch = _FakeBlock([t_compare, t_cbranch], index=2, start=0x3020)
+    body_ops = [acc_add, state_op]
+    if forbidden_op is not None:
+        body_ops.append(_FakeOp(forbidden_op, opcode=99, target=0x3030, time=30, order=0))
+    body = _FakeBlock(body_ops, index=3, start=0x3030)
+    ret = _FakeBlock([_FakeOp("RETURN", opcode=5, target=0x3050, time=50, order=0)], index=4, start=0x3050)
+    entry.add_out(header)
+    header.add_out(branch, condition=_positive2(), is_true=True)
+    header.add_out(ret, condition=_nonpositive2(), is_true=False)
+    if include_nonprogress_edge:
+        branch.add_out(header, condition=_nonpositive(), is_true=False)
+    branch.add_out(body, condition=_positive(), is_true=True)
+    body.add_out(header)
+    return _BranchGuardedStructuralFixture(
+        _FakeHighFunction([entry, header, branch, body, ret]),
+        acc_phi,
+        {zero: _const(0), one: _const(1), t_input: _param(), c_input: _param2()},
+        state_phi=state_phi,
+    )
+
+
+def _candidate_phi_source_key(analyzer, acc_phi):
+    pcode_ref = PcodeOpRef.from_pcode_op(acc_phi)
+    key = pcode_ref.stable_key()
+    return (
+        "phi_reachability_fallback",
+        ("candidate_phi_origin_keys", (key,)),
+        ("return_phi_origin_keys", (key,)),
+    )
+
+
+def _branch_guarded_phi_free_fallback_analysis(
+    analyzer,
+    acc_phi,
+    *,
+    base_value=1,
+    base_guard_matches=True,
+    implicit_progress_anchor=False,
+):
+    t_param = _param()
+    c_param = _param2()
+    t_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), t_param), False)
+    c_positive = Condition(Expression.binary_op("INT_SLESS", _const(0), c_param), False)
+    c_nonpositive = c_positive.negate()
+    c_minus_one = Expression.binary_op("INT_SUB", c_param, _const(1))
+    if implicit_progress_anchor:
+        t_less_one = Expression.binary_op("INT_SLESS", t_param, _const(1))
+        t_less_one_zext = Expression.unary_op("INT_ZEXT", t_less_one)
+        t_less_one_zext.size = 4
+        delta = Expression.binary_op("INT_SUB", t_less_one_zext, _const(1))
+        delta.size = 4
+        adjusted = Expression.binary_op("INT_ADD", delta, c_param)
+        adjusted.size = 4
+        base_guard = Condition(Expression.binary_op("INT_SLESS", _const(0), adjusted), True)
+        base_conditions = [c_positive, base_guard]
+    else:
+        base_guard = (
+            Condition(Expression.binary_op("INT_SLESSEQUAL", c_minus_one, _const(0)), False)
+            if base_guard_matches
+            else Condition(Expression.binary_op("INT_SLESSEQUAL", c_param, _const(0)), False)
+        )
+        base_conditions = [c_positive, t_positive, base_guard]
+    return _base_analysis(
+        "f",
+        [
+            {"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        [
+            ReturnInfo(address="0x1004", value=_const(0), conditions=[c_nonpositive]),
+            ReturnInfo(
+                address="0x1008",
+                value=_const(base_value),
+                conditions=base_conditions,
+                return_kind="phi_reachability_fallback",
+                summary_candidate_source_key=_candidate_phi_source_key(analyzer, acc_phi),
+            ),
         ],
     )
 
@@ -1521,6 +1779,253 @@ def test_analyzer_rejects_whileif_affine_summary_with_conflicting_same_site_arti
     assert analysis.return_outcomes == ()
     assert analysis.divergence_outcomes == ()
     assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_synthesizes_whileif_partition_from_phi_free_fallback_provenance():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        fixture.high_function,
+        analysis,
+    )
+
+    assert len(analysis.returns) == 2
+    assert analysis.returns[0].value.equals(_const(0))
+    assert analysis.returns[1].value.equals(_param2())
+    assert len(analysis.return_outcomes) == 2
+    assert len(analysis.divergence_outcomes) == 1
+    assert analysis.unknown_outcomes == ()
+    assert (
+        analysis.divergence_outcomes[0].proof["proof_kind"]
+        == "branch_guarded_structural_nonprogress_must_diverge"
+    )
+    assert analysis.returns[1].summary_candidate_source_key is not None
+
+
+def test_analyzer_rejects_phi_free_fallback_with_state_countdown_only_provenance():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(
+        analyzer,
+        fixture.state_phi,
+        implicit_progress_anchor=True,
+    )
+
+    analyzer._apply_outcome_partition_summaries(
+        None,
+        fixture.high_function,
+        analysis,
+    )
+
+    assert all(not ret.value.equals(_param2()) for ret in analysis.returns)
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+
+
+def test_analyzer_ignores_union_fallback_provenance_as_structural_origin():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    pcode_ref = PcodeOpRef.from_pcode_op(fixture.state_phi)
+    ret = ReturnInfo(
+        address="0x1008",
+        value=_const(1),
+        conditions=[_positive2(), _positive()],
+        return_kind="phi_union_reachability_fallback",
+        summary_candidate_source_key=(
+            "phi_union_reachability_fallback",
+            ("candidate_discovery_only_phi_origin_keys", (pcode_ref.stable_key(),)),
+        ),
+    )
+
+    assert analyzer._return_info_candidate_phi_origin_keys(ret) == set()
+
+
+def test_analyzer_accepts_acc_phi_flow_to_return_origin_exit_phi():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    acc_parent = fixture.acc_phi.getParent()
+    cold_pred = _FakeBlock([], index=8, start=0x3080)
+    return_out = _FakeVarnode("register", 0x7000, 4)
+    return_phi = _FakeOp(
+        "MULTIEQUAL",
+        inputs=(_FakeVarnode("const", 0, 4, is_constant=True), fixture.acc_phi.getOutput()),
+        output=return_out,
+        opcode=27,
+        target=0x3090,
+        time=90,
+        order=0,
+    )
+    exit_block = _FakeBlock([return_phi], index=9, start=0x3090)
+    cold_pred.add_out(exit_block)
+    acc_parent.add_out(exit_block)
+    high_function = _FakeHighFunction(fixture.high_function.getBasicBlocks() + [cold_pred, exit_block])
+    summarizer = StructuralRecurrenceSummarizer(_FakeStructuralTracer(fixture.trace_map), debug=False)
+
+    assert analyzer._acc_phi_flows_to_return_origin_phi(
+        fixture.acc_phi,
+        {PcodeOpRef.from_pcode_op(return_phi).stable_key()},
+        summarizer=summarizer,
+        high_function=high_function,
+    )
+
+
+def test_analyzer_rejects_unrelated_acc_phi_not_flowing_to_return_origin():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    acc_parent = fixture.acc_phi.getParent()
+    cold_pred = _FakeBlock([], index=8, start=0x3080)
+    unrelated_out = _FakeVarnode("unique", 0x7100, 4)
+    unrelated_acc = _FakeOp(
+        "MULTIEQUAL",
+        inputs=(_FakeVarnode("const", 0, 4, is_constant=True), unrelated_out),
+        output=unrelated_out,
+        opcode=27,
+        target=0x3010,
+        time=99,
+        order=0,
+    )
+    unrelated_acc.setParent(acc_parent)
+    return_out = _FakeVarnode("register", 0x7000, 4)
+    return_phi = _FakeOp(
+        "MULTIEQUAL",
+        inputs=(_FakeVarnode("const", 0, 4, is_constant=True), fixture.acc_phi.getOutput()),
+        output=return_out,
+        opcode=27,
+        target=0x3090,
+        time=90,
+        order=0,
+    )
+    exit_block = _FakeBlock([return_phi], index=9, start=0x3090)
+    cold_pred.add_out(exit_block)
+    acc_parent.add_out(exit_block)
+    high_function = _FakeHighFunction(fixture.high_function.getBasicBlocks() + [cold_pred, exit_block])
+    summarizer = StructuralRecurrenceSummarizer(_FakeStructuralTracer(fixture.trace_map), debug=False)
+
+    assert not analyzer._acc_phi_flows_to_return_origin_phi(
+        unrelated_acc,
+        {PcodeOpRef.from_pcode_op(return_phi).stable_key()},
+        summarizer=summarizer,
+        high_function=high_function,
+    )
+
+
+def test_outcome_partition_equivalence_covers_phi_free_fallback_partitions():
+    strategy = _strategy()
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    left = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+    right = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, left)
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, right)
+    base_ctx = {
+        "header_lines": [
+            "(declare-fun t1 () (_ BitVec 32))",
+            "(declare-fun c1 () (_ BitVec 32))",
+            "(declare-fun t2 () (_ BitVec 32))",
+            "(declare-fun c2 () (_ BitVec 32))",
+            "(assert (= t1 t2))",
+            "(assert (= c1 c2))",
+        ],
+    }
+
+    assert strategy._outcome_partition_covered_labels(
+        base_ctx,
+        left,
+        right,
+        _replace_params({"param_1": "t1", "param_2": "c1"}),
+        _replace_params({"param_1": "t2", "param_2": "c2"}),
+    ) == {"function1", "function2"}
+
+
+def test_analyzer_rejects_phi_free_fallback_with_stale_origin_key():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    stale_phi = _FakeOp(
+        "MULTIEQUAL",
+        inputs=(),
+        output=_FakeVarnode("unique", 0x7770, 4),
+        opcode=27,
+        target=0x7770,
+        time=77,
+        order=0,
+    )
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, stale_phi)
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_phi_free_fallback_when_base_anchor_value_wrong():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi, base_value=2)
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_phi_free_fallback_when_base_anchor_guard_wrong():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture()
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(
+        analyzer,
+        fixture.acc_phi,
+        base_guard_matches=False,
+    )
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+    assert analysis.unknown_outcomes == ()
+
+
+def test_analyzer_rejects_phi_free_fallback_when_state_decrement_missing():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture(state_decrements=False)
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
+
+
+def test_analyzer_rejects_phi_free_fallback_when_nonprogress_edge_missing():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture(include_nonprogress_edge=False)
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.divergence_outcomes == ()
+
+
+def test_analyzer_rejects_phi_free_fallback_with_forbidden_effect_op():
+    analyzer = ReturnAnalyzer(object())
+    fixture = _branch_guarded_structural_phi_fixture(forbidden_op="STORE")
+    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
+
+    analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
+
+    assert analysis.return_outcomes == ()
+    assert analysis.divergence_outcomes == ()
 
 
 def test_analyzer_does_not_prune_return_edge_from_final_return_partition_only():

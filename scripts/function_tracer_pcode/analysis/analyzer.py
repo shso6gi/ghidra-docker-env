@@ -634,6 +634,13 @@ class ReturnAnalyzer:
                     f"    seq(time={ret_info.pcode_time}, order={ret_info.pcode_order})",
                     1,
                 )
+            if getattr(ret_info, "return_kind", "exact") != "exact":
+                self._debug_print(f"    return_kind: {ret_info.return_kind}", 1)
+            if getattr(ret_info, "summary_candidate_source_key", None) is not None:
+                self._debug_print(
+                    f"    summary_candidate_source_key: {ret_info.summary_candidate_source_key}",
+                    1,
+                )
             
             # 値の文字列表現
             try:
@@ -3166,12 +3173,19 @@ class ReturnAnalyzer:
         if self._high_function_cbranch_count(high_function) < 2:
             self._debug_print("Outcome branch-guarded while summary declined: expected two control guards")
             return False
-        if not any(self._expression_contains_phi_circular(ret.value) for ret in analysis.returns or ()):
-            self._debug_print("Outcome branch-guarded while summary declined: no phi_circular return")
+        if not any(
+            self._expression_contains_phi_circular(ret.value)
+            or self._return_info_candidate_phi_origin_keys(ret)
+            for ret in analysis.returns or ()
+        ):
+            self._debug_print("Outcome branch-guarded while summary declined: no phi_circular return or candidate provenance")
             return False
 
-        t_param = self._parameter_expression(analysis, 0)
-        c_param = self._parameter_expression(analysis, 1)
+        role_params = self._infer_branch_guarded_while_role_parameters(analysis)
+        if role_params is None:
+            self._debug_print("Outcome branch-guarded while summary declined: role parameters unavailable")
+            return False
+        t_param, c_param = role_params
         if t_param is None or c_param is None:
             self._debug_print("Outcome branch-guarded while summary declined: parameter expression unavailable")
             return False
@@ -3225,7 +3239,8 @@ class ReturnAnalyzer:
                     reason="branch_guarded_recurrence_proof_missing",
                     evidence={
                         "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
-                        "state_reference": "initial_parameter_1",
+                        "state_reference": "inferred_state_count_parameter",
+                        "state_parameter": getattr(c_param, "name", None) or getattr(c_param, "value", None),
                         "forbidden_ops_absent": True,
                         "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
                         "has_control_guards": True,
@@ -3236,6 +3251,65 @@ class ReturnAnalyzer:
             if "outcome_partition_unknown_branch_guarded_while" not in analysis.analysis_notes:
                 analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
         return True
+
+    def _infer_branch_guarded_while_role_parameters(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> Optional[Tuple[Expression, Expression]]:
+        params = tuple(getattr(analysis, "parameters", ()) or ())
+        candidate_params = []
+        for index in range(len(params)):
+            param = self._parameter_expression(analysis, index)
+            if param is not None:
+                candidate_params.append(param)
+        if len(candidate_params) < 2:
+            return None
+
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        for c_param in candidate_params:
+            c_positive = self._signed_positive_condition(c_param)
+            c_nonpositive = c_positive.negate()
+            zero_seed = None
+            for ret in returns:
+                if self._constant_int_value(getattr(ret, "value", None)) != 0:
+                    continue
+                conditions = tuple(getattr(ret, "conditions", ()) or ())
+                if self._conditions_equivalent(conditions, [c_nonpositive]) or (
+                    len(conditions) == 1
+                    and self._condition_is_signed_nonpositive_of_param(conditions[0], c_param)
+                ):
+                    zero_seed = ret
+                    break
+            if zero_seed is None:
+                continue
+            for t_param in candidate_params:
+                if self._expressions_same_key(t_param, c_param):
+                    continue
+                t_positive = self._signed_positive_condition(t_param)
+                target_conditions = (c_positive, t_positive)
+                if any(
+                    self._conditions_overlap(tuple(getattr(ret, "conditions", ()) or ()), target_conditions)
+                    and (
+                        self._expression_is_same_parameter_ignoring_subpiece(getattr(ret, "value", None), c_param)
+                        or self._expressions_equal_under_conditions_smt(
+                            getattr(ret, "value", None),
+                            c_param,
+                            tuple(target_conditions) + tuple(getattr(ret, "conditions", ()) or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                        or self._branch_guarded_affine_singleton_base_anchor_matches(
+                            getattr(ret, "value", None),
+                            tuple(getattr(ret, "conditions", ()) or ()),
+                            c_param,
+                            target_conditions,
+                        )
+                        or self._branch_guarded_affine_phi_step(getattr(ret, "value", None)) is not None
+                        or self._return_info_candidate_phi_origin_keys(ret)
+                    )
+                    for ret in returns
+                ):
+                    return t_param, c_param
+        return None
 
     def _prove_branch_guarded_structural_nonprogress_must_diverge(
         self,
@@ -3430,12 +3504,6 @@ class ReturnAnalyzer:
                 state_phi.getInput(index),
                 placeholders={state_output: state_placeholder},
             )
-            if index in nonprogress_backedges:
-                if not self._expressions_same_key(acc_expr, acc_placeholder):
-                    return False
-                if not self._expressions_same_key(state_expr, state_placeholder):
-                    return False
-                continue
             if index in conditional_progress_backedges:
                 acc_guard_key = self._placeholder_plus_unit_condition_guard_key(
                     acc_expr,
@@ -3453,11 +3521,80 @@ class ReturnAnalyzer:
                     return False
                 if expected_conditional_guard_keys.get(index) != acc_guard_key:
                     return False
+                if index in nonprogress_backedges:
+                    if not (
+                        self._expression_is_placeholder_plus_zero_under_conditions(
+                            acc_expr,
+                            acc_placeholder,
+                            invariant_conditions,
+                        )
+                        or self._expressions_equal_under_conditions_smt(
+                            acc_expr,
+                            acc_placeholder,
+                            tuple(invariant_conditions or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                    ):
+                        return False
+                    if not (
+                        self._expression_is_placeholder_plus_zero_under_conditions(
+                            state_expr,
+                            state_placeholder,
+                            invariant_conditions,
+                        )
+                        or self._expressions_equal_under_conditions_smt(
+                            state_expr,
+                            state_placeholder,
+                            tuple(invariant_conditions or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                    ):
+                        return False
+                continue
+            if index in nonprogress_backedges:
+                if not (
+                    self._expressions_same_key(acc_expr, acc_placeholder)
+                    or self._expression_is_placeholder_plus_zero_under_conditions(
+                        acc_expr,
+                        acc_placeholder,
+                        invariant_conditions,
+                    )
+                    or self._expressions_equal_under_conditions_smt(
+                        acc_expr,
+                        acc_placeholder,
+                        tuple(invariant_conditions or ()),
+                        getattr(analysis, "parameters", ()) or (),
+                    )
+                ):
+                    return False
+                if not (
+                    self._expressions_same_key(state_expr, state_placeholder)
+                    or self._expression_is_placeholder_plus_zero_under_conditions(
+                        state_expr,
+                        state_placeholder,
+                        invariant_conditions,
+                    )
+                    or self._expressions_equal_under_conditions_smt(
+                        state_expr,
+                        state_placeholder,
+                        tuple(invariant_conditions or ()),
+                        getattr(analysis, "parameters", ()) or (),
+                    )
+                ):
+                    return False
                 continue
             if index in progress_backedges:
-                if not self._expression_is_placeholder_plus_one(acc_expr, acc_placeholder):
+                if not self._expression_is_placeholder_plus_one_under_conditions(
+                    acc_expr,
+                    acc_placeholder,
+                    target_conditions,
+                ):
                     return False
-                if not self._expression_is_placeholder_minus_one(state_expr, state_placeholder):
+                if not self._expression_is_placeholder_minus_one_under_conditions(
+                    state_expr,
+                    state_placeholder,
+                    target_conditions,
+                ):
                     return False
                 continue
             return False
@@ -3668,17 +3805,40 @@ class ReturnAnalyzer:
                 )
             ignored_artifacts.append(ret)
 
-        if not recursive_returns:
+        candidate_phi_origin_keys = tuple(
+            sorted(
+                {
+                    key
+                    for ret in candidate_returns
+                    for key in self._return_info_candidate_phi_origin_keys(ret)
+                },
+                key=repr,
+            )
+        )
+        return_phi_origin_keys = tuple(
+            sorted(
+                {
+                    key
+                    for ret in candidate_returns
+                    for key in self._return_info_return_phi_origin_keys(ret)
+                },
+                key=repr,
+            )
+        )
+        if not recursive_returns and not candidate_phi_origin_keys:
             self._debug_print("Outcome branch-guarded affine proof declined: recursive phi step missing")
             return None
-        steps = {step for _ret, step in recursive_returns}
-        if len(steps) != 1:
-            self._debug_print(f"Outcome branch-guarded affine proof declined: mixed recursive steps {sorted(steps)}")
-            return None
-        step = next(iter(steps))
-        if step <= 0 or step > 4:
-            self._debug_print(f"Outcome branch-guarded affine proof declined: unsupported recursive step {step}")
-            return None
+        if recursive_returns:
+            steps = {step for _ret, step in recursive_returns}
+            if len(steps) != 1:
+                self._debug_print(f"Outcome branch-guarded affine proof declined: mixed recursive steps {sorted(steps)}")
+                return None
+            step = next(iter(steps))
+            if step <= 0 or step > 4:
+                self._debug_print(f"Outcome branch-guarded affine proof declined: unsupported recursive step {step}")
+                return None
+        else:
+            step = 1
         structural_proof = None
         exact_base_covers_target = bool(exact_base_returns) and self._return_conditions_cover_region(
             target_conditions,
@@ -3691,6 +3851,9 @@ class ReturnAnalyzer:
                 c_param=c_param,
                 target_conditions=target_conditions,
                 recursive_returns=tuple(ret for ret, _step in recursive_returns),
+                candidate_phi_origin_keys=candidate_phi_origin_keys,
+                return_phi_origin_keys=return_phi_origin_keys,
+                nonprogress_conditions=(c_positive, t_positive.negate()),
                 allow_latch_progress_guard=bool(exact_base_returns),
             )
             if structural_proof is None:
@@ -3729,7 +3892,7 @@ class ReturnAnalyzer:
             self._debug_print("Outcome branch-guarded affine proof declined: unshadowed target artifact return")
             return None
 
-        anchor = recursive_returns[0][0]
+        anchor = recursive_returns[0][0] if recursive_returns else exact_base_returns[0]
         source_keys = tuple(
             self._return_info_summary_identity_key(ret)
             for ret in proof_returns
@@ -3749,6 +3912,8 @@ class ReturnAnalyzer:
             summary_candidate_source_key=(
                 "branch_guarded_affine_initial_count",
                 ("step", step),
+                ("candidate_phi_origin_keys", candidate_phi_origin_keys),
+                ("return_phi_origin_keys", return_phi_origin_keys),
                 ("structural_proof", structural_proof),
                 ("sources", source_keys),
             ),
@@ -3811,15 +3976,25 @@ class ReturnAnalyzer:
         c_param: Expression,
         target_conditions: Sequence[Condition],
         recursive_returns: Sequence[ReturnInfo],
-        allow_latch_progress_guard: bool,
+        candidate_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
+        return_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
+        nonprogress_conditions: Sequence[Condition] = (),
+        allow_latch_progress_guard: bool = False,
     ) -> Optional[Tuple[Any, ...]]:
         if high_function is None or self.program is None:
             return None
-        recursive_origin_keys = set()
+        recursive_origin_keys = set(candidate_phi_origin_keys or ())
+        return_origin_keys = set(return_phi_origin_keys or ())
         for ret in recursive_returns or ():
             recursive_origin_keys.update(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+            recursive_origin_keys.update(self._return_info_candidate_phi_origin_keys(ret))
+            return_origin_keys.update(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+            return_origin_keys.update(self._return_info_return_phi_origin_keys(ret))
         if not recursive_origin_keys:
             self._debug_print("Outcome branch-guarded structural proof declined: recursive phi origin unavailable")
+            return None
+        if not return_origin_keys:
+            self._debug_print("Outcome branch-guarded structural proof declined: return phi origin unavailable")
             return None
         try:
             tracer = self._make_tracer(high_function)
@@ -3843,15 +4018,28 @@ class ReturnAnalyzer:
             ]
             if len(phi_ops) < 2:
                 continue
-            acc_candidates = [
-                phi_op for phi_op in phi_ops
-                if self._pcode_op_stable_key(phi_op) in recursive_origin_keys
-            ]
-            if acc_candidates:
+            if any(self._pcode_op_stable_key(phi_op) in recursive_origin_keys for phi_op in phi_ops):
                 saw_acc_candidate = True
-            for acc_phi in acc_candidates:
+            for acc_phi in phi_ops:
+                acc_phi_key = self._pcode_op_stable_key(acc_phi)
+                acc_flows_to_return = self._acc_phi_flows_to_return_origin_phi(
+                    acc_phi,
+                    return_origin_keys,
+                    summarizer=summarizer,
+                    high_function=high_function,
+                )
+                if acc_phi_key not in return_origin_keys and not acc_flows_to_return:
+                    if self.debug:
+                        self._debug_print(
+                            "Outcome branch-guarded structural proof acc candidate skipped: "
+                            f"return provenance missing acc_phi={acc_phi_key}, "
+                            f"return_origins={sorted(return_origin_keys, key=repr)}"
+                        )
+                    continue
                 acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
                 if acc_indices is None:
+                    if self.debug:
+                        self._debug_print("Outcome branch-guarded structural proof acc candidate skipped: loop phi indices unavailable")
                     continue
                 acc_init_index, acc_backedge_indices = acc_indices
                 acc_output = getattr(acc_phi, "getOutput", lambda: None)()
@@ -3866,6 +4054,11 @@ class ReturnAnalyzer:
                     placeholders={acc_output: acc_placeholder},
                 )
                 if self._constant_int_value(acc_init) != 0:
+                    if self.debug:
+                        self._debug_print(
+                            "Outcome branch-guarded structural proof acc candidate skipped: "
+                            f"init={self._debug_expr_summary(acc_init)}"
+                        )
                     continue
                 acc_progress_indices: Set[int] = set()
                 acc_nonprogress_indices: Set[int] = set()
@@ -3888,10 +4081,49 @@ class ReturnAnalyzer:
                     if acc_guard_key is not None:
                         acc_progress_indices.add(backedge_index_int)
                         acc_conditional_progress_keys[backedge_index_int] = acc_guard_key
+                        if (
+                            self._expression_is_placeholder_plus_zero_under_conditions(
+                                acc_backedge_expr,
+                                acc_placeholder,
+                                nonprogress_conditions,
+                            )
+                            or self._expressions_equal_under_conditions_smt(
+                                acc_backedge_expr,
+                                acc_placeholder,
+                                tuple(nonprogress_conditions or ()),
+                                getattr(analysis, "parameters", ()) or (),
+                            )
+                        ):
+                            acc_nonprogress_indices.add(backedge_index_int)
                         continue
-                    if self._expressions_same_key(acc_backedge_expr, acc_placeholder):
+                    if (
+                        self._expressions_same_key(acc_backedge_expr, acc_placeholder)
+                        or self._expression_is_placeholder_plus_zero_under_conditions(
+                            acc_backedge_expr,
+                            acc_placeholder,
+                            nonprogress_conditions,
+                        )
+                        or self._expressions_equal_under_conditions_smt(
+                            acc_backedge_expr,
+                            acc_placeholder,
+                            tuple(nonprogress_conditions or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                    ):
                         acc_nonprogress_indices.add(backedge_index_int)
                         continue
+                    if self._expression_is_placeholder_plus_one_under_conditions(
+                        acc_backedge_expr,
+                        acc_placeholder,
+                        target_conditions,
+                    ):
+                        acc_progress_indices.add(backedge_index_int)
+                        continue
+                    if self.debug:
+                        self._debug_print(
+                            "Outcome branch-guarded structural proof acc transition unrecognized: "
+                            f"index={backedge_index_int}, expr={self._debug_expr_summary(acc_backedge_expr)}"
+                        )
                     acc_unknown_transition = True
                     break
                 if acc_unknown_transition or not acc_progress_indices:
@@ -3899,6 +4131,9 @@ class ReturnAnalyzer:
                 saw_acc_transition = True
                 for state_phi in phi_ops:
                     if state_phi is acc_phi:
+                        continue
+                    state_phi_key = self._pcode_op_stable_key(state_phi)
+                    if acc_phi_key not in recursive_origin_keys and state_phi_key not in recursive_origin_keys:
                         continue
                     state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
                     if state_indices is None:
@@ -3940,10 +4175,49 @@ class ReturnAnalyzer:
                         if state_guard_key is not None:
                             state_progress_indices.add(backedge_index_int)
                             state_conditional_progress_keys[backedge_index_int] = state_guard_key
+                            if (
+                                self._expression_is_placeholder_plus_zero_under_conditions(
+                                    state_backedge_expr,
+                                    state_placeholder,
+                                    nonprogress_conditions,
+                                )
+                                or self._expressions_equal_under_conditions_smt(
+                                    state_backedge_expr,
+                                    state_placeholder,
+                                    tuple(nonprogress_conditions or ()),
+                                    getattr(analysis, "parameters", ()) or (),
+                                )
+                            ):
+                                state_nonprogress_indices.add(backedge_index_int)
                             continue
-                        if self._expressions_same_key(state_backedge_expr, state_placeholder):
+                        if (
+                            self._expressions_same_key(state_backedge_expr, state_placeholder)
+                            or self._expression_is_placeholder_plus_zero_under_conditions(
+                                state_backedge_expr,
+                                state_placeholder,
+                                nonprogress_conditions,
+                            )
+                            or self._expressions_equal_under_conditions_smt(
+                                state_backedge_expr,
+                                state_placeholder,
+                                tuple(nonprogress_conditions or ()),
+                                getattr(analysis, "parameters", ()) or (),
+                            )
+                        ):
                             state_nonprogress_indices.add(backedge_index_int)
                             continue
+                        if self._expression_is_placeholder_minus_one_under_conditions(
+                            state_backedge_expr,
+                            state_placeholder,
+                            target_conditions,
+                        ):
+                            state_progress_indices.add(backedge_index_int)
+                            continue
+                        if self.debug:
+                            self._debug_print(
+                                "Outcome branch-guarded structural proof state transition unrecognized: "
+                                f"index={backedge_index_int}, expr={self._debug_expr_summary(state_backedge_expr)}"
+                            )
                         state_unknown_transition = True
                         break
                     if (
@@ -3953,6 +4227,17 @@ class ReturnAnalyzer:
                         or state_nonprogress_indices != acc_nonprogress_indices
                         or state_conditional_progress_keys != acc_conditional_progress_keys
                     ):
+                        if self.debug:
+                            self._debug_print(
+                                "Outcome branch-guarded structural proof state transition set mismatch: "
+                                f"state_unknown={state_unknown_transition}, "
+                                f"acc_progress={sorted(acc_progress_indices)}, "
+                                f"state_progress={sorted(state_progress_indices)}, "
+                                f"acc_nonprogress={sorted(acc_nonprogress_indices)}, "
+                                f"state_nonprogress={sorted(state_nonprogress_indices)}, "
+                                f"acc_conditional={sorted(acc_conditional_progress_keys)}, "
+                                f"state_conditional={sorted(state_conditional_progress_keys)}"
+                            )
                         continue
                     saw_state_transition = True
                     if not self._state_phi_feeds_positive_loop_guard(
@@ -3989,6 +4274,130 @@ class ReturnAnalyzer:
         )
         return None
 
+    def _acc_phi_flows_to_return_origin_phi(
+        self,
+        acc_phi,
+        return_origin_keys: Set[Tuple[Any, ...]],
+        *,
+        summarizer: StructuralRecurrenceSummarizer,
+        high_function,
+    ) -> bool:
+        if acc_phi is None or not return_origin_keys:
+            return False
+        acc_phi_key = self._pcode_op_stable_key(acc_phi)
+        if not isinstance(acc_phi_key, tuple):
+            return False
+        for block in summarizer._iter_basic_blocks(high_function):
+            for op in summarizer._iter_block_ops(block):
+                if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                    continue
+                op_key = self._pcode_op_stable_key(op)
+                if op_key not in return_origin_keys:
+                    continue
+                if self._pcode_op_input_def_reaches_phi(
+                    op,
+                    acc_phi_key,
+                    max_depth=8,
+                ):
+                    return True
+                if self._return_origin_phi_has_acc_output_input(op, acc_phi):
+                    return True
+        return False
+
+    def _return_origin_phi_has_acc_output_input(self, return_phi, acc_phi) -> bool:
+        acc_output = getattr(acc_phi, "getOutput", lambda: None)()
+        if acc_output is None:
+            return False
+        acc_parent = getattr(acc_phi, "getParent", lambda: None)()
+        return_parent = getattr(return_phi, "getParent", lambda: None)()
+        if acc_parent is None or return_parent is None:
+            return False
+        try:
+            input_count = int(return_phi.getNumInputs())
+        except Exception:
+            input_count = 0
+        for index in range(input_count):
+            try:
+                candidate = return_phi.getInput(index)
+            except Exception:
+                continue
+            if not self._varnodes_same_storage(candidate, acc_output):
+                continue
+            try:
+                predecessor = return_parent.getIn(index)
+            except Exception:
+                predecessor = None
+            if predecessor is None:
+                continue
+            if self._block_debug_key(predecessor) != self._block_debug_key(acc_parent):
+                continue
+            return True
+        return False
+
+    def _varnodes_same_storage(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            left_addr = left.getAddress()
+            right_addr = right.getAddress()
+            left_space = left_addr.getAddressSpace().getName()
+            right_space = right_addr.getAddressSpace().getName()
+            return (
+                left_space == right_space
+                and int(left_addr.getOffset()) == int(right_addr.getOffset())
+                and int(left.getSize()) == int(right.getSize())
+            )
+        except Exception:
+            return False
+
+    def _pcode_op_input_def_reaches_phi(
+        self,
+        op,
+        target_phi_key: Tuple[Any, ...],
+        *,
+        max_depth: int,
+    ) -> bool:
+        seen: Set[int] = set()
+
+        def visit_varnode(varnode, depth: int) -> bool:
+            if varnode is None or depth > int(max_depth):
+                return False
+            marker = id(varnode)
+            if marker in seen:
+                return False
+            seen.add(marker)
+            try:
+                def_op = varnode.getDef()
+            except Exception:
+                def_op = None
+            if def_op is None:
+                return False
+            if self._pcode_op_stable_key(def_op) == target_phi_key:
+                return True
+            try:
+                input_count = int(def_op.getNumInputs())
+            except Exception:
+                input_count = 0
+            for index in range(input_count):
+                try:
+                    if visit_varnode(def_op.getInput(index), depth + 1):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        try:
+            input_count = int(op.getNumInputs())
+        except Exception:
+            input_count = 0
+        for index in range(input_count):
+            try:
+                if visit_varnode(op.getInput(index), 0):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _pcode_op_stable_key(self, op) -> Optional[Tuple[Any, ...]]:
         op_ref = PcodeOpRef.from_pcode_op(
             op,
@@ -4022,6 +4431,66 @@ class ReturnAnalyzer:
                     keys.add(key)
         return keys
 
+    def _return_info_candidate_phi_origin_keys(self, ret: Optional[ReturnInfo]) -> Set[Tuple[Any, ...]]:
+        if ret is None:
+            return set()
+        keys = set(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+        keys.update(
+            self._candidate_phi_origin_keys_from_summary_source_key(
+                getattr(ret, "summary_candidate_source_key", None)
+            )
+        )
+        return keys
+
+    def _return_info_return_phi_origin_keys(self, ret: Optional[ReturnInfo]) -> Set[Tuple[Any, ...]]:
+        if ret is None:
+            return set()
+        keys = set(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+        keys.update(
+            self._return_phi_origin_keys_from_summary_source_key(
+                getattr(ret, "summary_candidate_source_key", None)
+            )
+        )
+        return keys
+
+    def _candidate_phi_origin_keys_from_summary_source_key(self, value) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+        if not isinstance(value, tuple):
+            return keys
+        for item in value:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and item[0] == "candidate_phi_origin_keys"
+            ):
+                raw_keys = item[1]
+                for raw_key in tuple(raw_keys or ()):
+                    if isinstance(raw_key, tuple):
+                        keys.add(raw_key)
+                continue
+            if isinstance(item, tuple):
+                keys.update(self._candidate_phi_origin_keys_from_summary_source_key(item))
+        return keys
+
+    def _return_phi_origin_keys_from_summary_source_key(self, value) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+        if not isinstance(value, tuple):
+            return keys
+        for item in value:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and item[0] == "return_phi_origin_keys"
+            ):
+                raw_keys = item[1]
+                for raw_key in tuple(raw_keys or ()):
+                    if isinstance(raw_key, tuple):
+                        keys.add(raw_key)
+                continue
+            if isinstance(item, tuple):
+                keys.update(self._return_phi_origin_keys_from_summary_source_key(item))
+        return keys
+
     def _expression_is_placeholder_plus_one(
         self,
         expr: Optional[Expression],
@@ -4044,7 +4513,20 @@ class ReturnAnalyzer:
     ) -> bool:
         if self._expression_is_placeholder_plus_one(expr, placeholder):
             return True
-        return self._expression_is_placeholder_plus_unit_condition(expr, placeholder, conditions)
+        if self._expression_is_placeholder_plus_unit_condition(expr, placeholder, conditions):
+            return True
+        expected = Expression.binary_op(
+            "INT_ADD",
+            placeholder,
+            Expression.constant(1, size=max(1, int(getattr(placeholder, "size", 0) or 4))),
+        )
+        expected.size = max(1, int(getattr(placeholder, "size", 0) or 4))
+        return self._expressions_equal_under_conditions_smt(
+            expr,
+            expected,
+            tuple(conditions or ()),
+            getattr(self, "_current_parameters", ()) or (),
+        )
 
     def _expression_is_placeholder_minus_one_under_conditions(
         self,
@@ -4054,7 +4536,80 @@ class ReturnAnalyzer:
     ) -> bool:
         if self._expression_is_placeholder_minus_one(expr, placeholder):
             return True
-        return self._expression_is_placeholder_minus_one_unit_condition(expr, placeholder, conditions)
+        if self._expression_is_placeholder_minus_one_unit_condition(expr, placeholder, conditions):
+            return True
+        expected = Expression.binary_op(
+            "INT_SUB",
+            placeholder,
+            Expression.constant(1, size=max(1, int(getattr(placeholder, "size", 0) or 4))),
+        )
+        expected.size = max(1, int(getattr(placeholder, "size", 0) or 4))
+        return self._expressions_equal_under_conditions_smt(
+            expr,
+            expected,
+            tuple(conditions or ()),
+            getattr(self, "_current_parameters", ()) or (),
+        )
+
+    def _expression_is_placeholder_plus_zero_under_conditions(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        current = self._strip_transparent_unary(expr)
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if getattr(current, "operator", None) not in {"INT_ADD", "INT_SUB"}:
+            return False
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2:
+            return False
+        left, right = operands
+        if self._expressions_same_key(left, placeholder):
+            delta = right
+            if getattr(current, "operator", None) == "INT_ADD":
+                return self._expression_is_zero_under_conditions(delta, conditions)
+            return self._expression_is_zero_under_conditions(delta, conditions)
+        if getattr(current, "operator", None) == "INT_ADD" and self._expressions_same_key(right, placeholder):
+            return self._expression_is_zero_under_conditions(left, conditions)
+        return False
+
+    def _expression_is_zero_under_conditions(
+        self,
+        expr: Optional[Expression],
+        conditions: Sequence[Condition],
+    ) -> bool:
+        if self._constant_int_value(expr) == 0:
+            return True
+        current = self._strip_transparent_unary(expr)
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        as_condition = Condition(current, False)
+        if self._conditions_imply(tuple(conditions or ()), (as_condition.negate(),)):
+            return True
+        operator = getattr(current, "operator", None)
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2:
+            return False
+        if operator == "INT_SLESS":
+            left, right = operands
+            if self._constant_int_value(right) == 1 and getattr(left, "expr_type", None) == ExpressionType.PARAMETER:
+                if any(
+                    self._condition_is_signed_positive_of_param(condition, left)
+                    for condition in conditions or ()
+                ):
+                    return True
+        if operator == "INT_SUB":
+            left, right = operands
+            if self._expression_is_one_under_conditions(left, conditions) and self._constant_int_value(right) == 1:
+                return True
+        return self._expressions_equal_under_conditions_smt(
+            current,
+            Expression.constant(0, size=max(1, int(getattr(current, "size", 0) or 4))),
+            tuple(conditions or ()),
+            getattr(self, "_current_parameters", ()) or (),
+        )
 
     def _expression_is_placeholder_minus_one_unit_condition(
         self,
@@ -4073,6 +4628,16 @@ class ReturnAnalyzer:
         current = self._strip_transparent_unary(expr)
         if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
             return None
+        if getattr(current, "operator", None) == "INT_ADD":
+            operands = tuple(getattr(current, "operands", ()) or ())
+            if len(operands) != 2:
+                return None
+            left, right = operands
+            if self._expressions_same_key(left, placeholder):
+                return self._negated_unit_condition_key_for_expression(right, conditions)
+            if self._expressions_same_key(right, placeholder):
+                return self._negated_unit_condition_key_for_expression(left, conditions)
+            return None
         if getattr(current, "operator", None) != "INT_SUB":
             return None
         operands = tuple(getattr(current, "operands", ()) or ())
@@ -4080,7 +4645,10 @@ class ReturnAnalyzer:
             return None
         if not self._expressions_same_key(operands[0], placeholder):
             return None
-        return self._unit_condition_key_for_expression(operands[1], conditions)
+        return (
+            self._unit_condition_key_for_expression(operands[1], conditions)
+            or self._negated_unit_condition_key_for_expression(operands[1], conditions)
+        )
 
     def _expression_is_placeholder_plus_unit_condition(
         self,
@@ -4123,6 +4691,32 @@ class ReturnAnalyzer:
             if condition is None:
                 continue
             if self._expression_is_one_under_conditions(current, (condition,)):
+                return self._condition_identity_key(condition)
+        return None
+
+    def _negated_unit_condition_key_for_expression(
+        self,
+        expr: Optional[Expression],
+        conditions: Sequence[Condition],
+    ) -> Optional[Tuple[Any, ...]]:
+        current = self._strip_transparent_unary(expr)
+        if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        if getattr(current, "operator", None) != "INT_SUB":
+            return None
+        operands = tuple(getattr(current, "operands", ()) or ())
+        if len(operands) != 2 or self._constant_int_value(operands[1]) != 1:
+            return None
+        flag_expr = self._strip_transparent_unary(operands[0])
+        if flag_expr is None:
+            return None
+        for condition in conditions or ():
+            if condition is None:
+                continue
+            if self._expression_is_zero_under_conditions(flag_expr, (condition,)) and self._expression_is_one_under_conditions(
+                flag_expr,
+                (condition.negate(),),
+            ):
                 return self._condition_identity_key(condition)
         return None
 
@@ -4267,6 +4861,12 @@ class ReturnAnalyzer:
         if len(operands) != 2 or self._constant_int_value(operands[0]) != 0:
             return False
         right = operands[1]
+        if self._expression_is_placeholder_minus_one_under_conditions(
+            right,
+            state_placeholder,
+            conditions,
+        ):
+            return True
         if getattr(right, "expr_type", None) != ExpressionType.BINARY_OP:
             return False
         if getattr(right, "operator", None) != "INT_SUB":
@@ -4373,10 +4973,10 @@ class ReturnAnalyzer:
     ) -> bool:
         if self._constant_int_value(value) != 1:
             return False
-        if not self._conditions_imply(tuple(conditions or ()), target_conditions):
+        if not self._conditions_overlap(tuple(conditions or ()), target_conditions):
             return False
         return any(
-            self._condition_is_param_minus_one_nonpositive(condition, c_param)
+            self._condition_is_param_minus_one_nonpositive(condition, c_param, target_conditions)
             for condition in conditions or ()
         )
 
@@ -4384,6 +4984,7 @@ class ReturnAnalyzer:
         self,
         condition: Condition,
         param: Expression,
+        target_conditions: Sequence[Condition] = (),
     ) -> bool:
         if condition is None:
             return False
@@ -4395,9 +4996,9 @@ class ReturnAnalyzer:
             return False
         operator = getattr(expr, "operator", None)
         if operator == "INT_SLESSEQUAL" and not getattr(condition, "negated", False):
-            return self._branch_guarded_expression_is_param_minus_one(operands[0], param, ()) and self._constant_int_value(operands[1]) == 0
+            return self._branch_guarded_expression_is_param_minus_one(operands[0], param, target_conditions) and self._constant_int_value(operands[1]) == 0
         if operator == "INT_SLESS" and getattr(condition, "negated", False):
-            return self._constant_int_value(operands[0]) == 0 and self._branch_guarded_expression_is_param_minus_one(operands[1], param, ())
+            return self._constant_int_value(operands[0]) == 0 and self._branch_guarded_expression_is_param_minus_one(operands[1], param, target_conditions)
         return False
 
     def _branch_guarded_expression_is_param_minus_one(
@@ -4407,6 +5008,27 @@ class ReturnAnalyzer:
         target_conditions: Sequence[Condition],
     ) -> bool:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if self._expressions_equal_under_conditions_smt(
+            expr,
+            Expression.binary_op(
+                "INT_SUB",
+                param,
+                Expression.constant(1, size=max(1, int(getattr(param, "size", 0) or 4))),
+            ),
+            tuple(target_conditions or ()),
+            getattr(self, "_current_parameters", ()) or (),
+        ):
+            return True
+        if getattr(expr, "operator", None) == "INT_ADD":
+            operands = tuple(getattr(expr, "operands", ()) or ())
+            if len(operands) != 2:
+                return False
+            left, right = operands
+            if self._expression_is_same_parameter_ignoring_subpiece(left, param):
+                return self._expression_is_placeholder_minus_one_under_conditions(expr, left, target_conditions)
+            if self._expression_is_same_parameter_ignoring_subpiece(right, param):
+                return self._expression_is_placeholder_minus_one_under_conditions(expr, right, target_conditions)
             return False
         if getattr(expr, "operator", None) != "INT_SUB":
             return False
@@ -4437,15 +5059,29 @@ class ReturnAnalyzer:
             return False
         if getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
             return False
+        if getattr(current, "operator", None) == "INT_SLESS":
+            operands = tuple(getattr(current, "operands", ()) or ())
+            if (
+                len(operands) == 2
+                and self._constant_int_value(operands[1]) == 1
+                and getattr(operands[0], "expr_type", None) == ExpressionType.PARAMETER
+                and any(
+                    self._condition_is_signed_nonpositive_of_param(condition, operands[0])
+                    for condition in target_conditions or ()
+                )
+            ):
+                return True
         as_condition = Condition(current, False)
-        return any(
+        if any(
             existing is not None
             and (
                 existing.equals(as_condition)
                 or ConditionNormalizer.are_equivalent(existing, as_condition)
             )
             for existing in target_conditions or ()
-        )
+        ):
+            return True
+        return self._conditions_imply(tuple(target_conditions or ()), (as_condition,))
 
     def _return_conditions_cover_region(
         self,
@@ -10722,12 +11358,20 @@ class ReturnAnalyzer:
         
         self._debug_print(f"Expanded to {len(expanded_values)} candidate(s)")
 
+        phi_expansion_candidate_origin_keys: Tuple[Tuple[Any, ...], ...] = ()
+        if has_multiequal:
+            phi_expansion_candidate_origin_keys = self._phi_origin_keys_from_return_varnode_trace(
+                tracer,
+                return_varnode,
+            )
+
         results = self._build_return_infos_from_expansions(
             address,
             expanded_values,
             return_index,
             site_metadata=value_site_metadata,
             return_kind="phi_expansion" if has_multiequal else None,
+            candidate_phi_origin_keys=phi_expansion_candidate_origin_keys,
         )
         if has_multiequal and results:
             results = self._append_smt_lowerable_phi_return_fallback_infos(
@@ -10780,6 +11424,13 @@ class ReturnAnalyzer:
         fallback_value = rewritten_value
         if fallback_value is None or expression_contains_unsupported_smt_ops(fallback_value):
             return return_infos
+        candidate_phi_origin_keys = tuple(
+            sorted(
+                self._phi_circular_origin_stable_keys(fallback_value)
+                | set(self._phi_origin_keys_from_varnode_defs(return_varnode)),
+                key=repr,
+            )
+        )
         fallback_conditions = list(path_condition_sets or ())
         if not fallback_conditions:
             fallback_conditions = [[]]
@@ -10806,7 +11457,14 @@ class ReturnAnalyzer:
                         branch_index=return_index * 100 + 80,
                         site_metadata=site_metadata,
                     )
-                    info = replace(info, return_kind="phi_union_reachability_fallback")
+                    info = replace(
+                        info,
+                        return_kind="phi_union_reachability_fallback",
+                        summary_candidate_source_key=(
+                            "phi_union_reachability_fallback",
+                            ("candidate_discovery_only_phi_origin_keys", candidate_phi_origin_keys),
+                        ) if candidate_phi_origin_keys else getattr(info, "summary_candidate_source_key", None),
+                    )
                     additions.append(info)
         for index, conditions in enumerate(fallback_conditions):
             simplified = ConditionSimplifier.simplify_conditions_object_centric(
@@ -10851,6 +11509,11 @@ class ReturnAnalyzer:
                 info = replace(
                     info,
                     return_kind="phi_reachability_fallback",
+                    summary_candidate_source_key=(
+                        "phi_reachability_fallback",
+                        ("candidate_phi_origin_keys", candidate_phi_origin_keys),
+                        ("return_phi_origin_keys", candidate_phi_origin_keys),
+                    ) if candidate_phi_origin_keys else getattr(info, "summary_candidate_source_key", None),
                 )
                 additions.append(info)
         if not additions:
@@ -10862,6 +11525,59 @@ class ReturnAnalyzer:
         return self._merge_equivalent_return_infos(
             self._prune_less_precise_return_infos(list(return_infos or []) + additions)
         )
+
+    def _phi_origin_keys_from_return_varnode_trace(
+        self,
+        tracer,
+        return_varnode,
+    ) -> Tuple[Tuple[Any, ...], ...]:
+        keys: Set[Tuple[Any, ...]] = set(self._phi_origin_keys_from_varnode_defs(return_varnode))
+        try:
+            fallback_value = tracer.trace_varnode(return_varnode, use_cache=False)
+        except Exception:
+            fallback_value = None
+        if isinstance(fallback_value, Expression):
+            keys.update(self._phi_circular_origin_stable_keys(fallback_value))
+        return tuple(sorted(keys, key=repr))
+
+    def _phi_origin_keys_from_varnode_defs(
+        self,
+        varnode,
+        *,
+        max_depth: int = 8,
+    ) -> Set[Tuple[Any, ...]]:
+        keys: Set[Tuple[Any, ...]] = set()
+        seen: Set[int] = set()
+
+        def visit(current, depth: int) -> None:
+            if current is None or depth > int(max_depth):
+                return
+            marker = id(current)
+            if marker in seen:
+                return
+            seen.add(marker)
+            try:
+                op = current.getDef()
+            except Exception:
+                op = None
+            if op is None:
+                return
+            if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+                key = self._pcode_op_stable_key(op)
+                if isinstance(key, tuple):
+                    keys.add(key)
+            try:
+                input_count = int(op.getNumInputs())
+            except Exception:
+                input_count = 0
+            for index in range(input_count):
+                try:
+                    visit(op.getInput(index), depth + 1)
+                except Exception:
+                    continue
+
+        visit(varnode, 0)
+        return keys
 
     def _path_condition_sets_union_condition(
         self,
@@ -11039,6 +11755,7 @@ class ReturnAnalyzer:
         return_index: int,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
         return_kind: Optional[str] = None,
+        candidate_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
     ) -> List[ReturnInfo]:
         results = []
         for i, ev in enumerate(expanded_values):
@@ -11139,8 +11856,28 @@ class ReturnAnalyzer:
                     ),
                     site_metadata=site_metadata,
                 )
+                split_candidate_phi_origin_keys = tuple(
+                    sorted(
+                        self._phi_circular_origin_stable_keys(split_value)
+                        or self._phi_circular_origin_stable_keys(ev.value)
+                        or set(candidate_phi_origin_keys or ()),
+                        key=repr,
+                    )
+                )
                 if return_kind:
-                    info = replace(info, return_kind=return_kind)
+                    source_key_items: List[Tuple[Any, ...]] = []
+                    if split_candidate_phi_origin_keys:
+                        source_key_items.append(("candidate_phi_origin_keys", split_candidate_phi_origin_keys))
+                        source_key_items.append(("return_phi_origin_keys", split_candidate_phi_origin_keys))
+                    info = replace(
+                        info,
+                        return_kind=return_kind,
+                        summary_candidate_source_key=(
+                            (return_kind, *source_key_items)
+                            if source_key_items
+                            else getattr(info, "summary_candidate_source_key", None)
+                        ),
+                    )
                 results.append(info)
         pruned = self._prune_less_precise_return_infos(results)
         return self._merge_equivalent_return_infos(pruned)
@@ -13113,7 +13850,56 @@ class ReturnAnalyzer:
             value=primary.value,
             conditions=normalized_conditions,
             branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
+            summary_candidate_source_key=self._merge_return_info_summary_candidate_source_keys(
+                primary,
+                secondary,
+            ),
         )
+
+    def _merge_return_info_summary_candidate_source_keys(
+        self,
+        primary: ReturnInfo,
+        secondary: ReturnInfo,
+    ) -> Optional[Tuple[Any, ...]]:
+        primary_key = getattr(primary, "summary_candidate_source_key", None)
+        secondary_key = getattr(secondary, "summary_candidate_source_key", None)
+        if primary_key is None:
+            return secondary_key
+        if secondary_key is None or secondary_key == primary_key:
+            return primary_key
+        candidate_keys = tuple(
+            sorted(
+                self._candidate_phi_origin_keys_from_summary_source_key(primary_key)
+                | self._candidate_phi_origin_keys_from_summary_source_key(secondary_key),
+                key=repr,
+            )
+        )
+        return_keys = tuple(
+            sorted(
+                self._return_phi_origin_keys_from_summary_source_key(primary_key)
+                | self._return_phi_origin_keys_from_summary_source_key(secondary_key),
+                key=repr,
+            )
+        )
+        proof_sources = tuple(
+            key for key in (primary_key, secondary_key)
+            if self._candidate_phi_origin_keys_from_summary_source_key(key)
+            or self._return_phi_origin_keys_from_summary_source_key(key)
+        )
+        discovery_only_sources = tuple(
+            key for key in (primary_key, secondary_key)
+            if key not in proof_sources
+        )
+        items: List[Tuple[Any, ...]] = []
+        if candidate_keys:
+            items.append(("candidate_phi_origin_keys", candidate_keys))
+        if return_keys:
+            items.append(("return_phi_origin_keys", return_keys))
+        if proof_sources:
+            items.append(("proof_candidate_sources", proof_sources))
+        if discovery_only_sources:
+            items.append(("discovery_only_sources", discovery_only_sources))
+        return ("merged_return_info_sources", *items)
 
     def _min_branch_index(
         self,
