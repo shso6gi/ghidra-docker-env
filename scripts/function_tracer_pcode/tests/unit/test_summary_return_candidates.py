@@ -4,6 +4,9 @@ from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.summary_returns import (
     _canonicalize_conditions_for_analysis_parameters,
+    _conditions_unsat,
+    _extract_readonly_reduction_term_descriptor,
+    _reduction_count_parameter_expression,
     _return_info_identity_key,
     _return_is_exact_seed,
     _return_partition_covers_active_precondition,
@@ -21,6 +24,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
     UnknownValueRef,
 )
@@ -89,6 +93,21 @@ class _EmptyTupleKeyResolvedCallRuntimeRef:
 class _UnresolvedCallRuntimeRef:
     def is_unresolved_call(self) -> bool:
         return True
+
+
+class _FakeStorageInfo:
+    def __init__(self, key):
+        self._key = tuple(key)
+
+    def storage_identity_key(self):
+        return self._key
+
+
+class _FakeAccumulatorProof:
+    def __init__(self, *, index=1, storage_key=None, name="count"):
+        self.count_parameter_index = index
+        self.count_parameter_storage_identity_key = storage_key
+        self.count_parameter_name = name
 
 
 _SUMMARY_SOURCE_KEY = (
@@ -706,6 +725,41 @@ def test_return_region_summary_proof_can_supersede_imprecise_exact_return():
     )
 
 
+def test_return_region_summary_superseded_key_proves_overlap_for_non_exact_witness_key():
+    analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
+    n = _n()
+    positive_summary, evidence = _with_return_region_summary_proof(
+        ReturnInfo(
+            address="0x1008",
+            value=_summary_const(2),
+            conditions=[_cond("INT_SLESS", _const(0), n)],
+            pcode_identity="summary:n_positive",
+        ),
+        exact_witnesses_key=(
+            "readonly_reduction_accumulator_witness",
+            ("proof", "unit_test"),
+            ("contract", "unit_test"),
+            (),
+            (),
+        ),
+        superseded_return_keys=(_return_info_identity_key(analysis.returns[1]),),
+    )
+    analysis.completed_recovery_proof_evidence = (evidence,)
+
+    result = accept_summary_return_candidates(
+        analysis,
+        [analysis.returns[0], analysis.returns[1], positive_summary],
+        summary_note="readonly_pointer_reduction_summary",
+    )
+
+    assert result.blockers == ()
+    assert result.coverage_complete is True
+    assert tuple(ret.pcode_identity for ret in result.accepted_returns) == (
+        "return:non_positive",
+        "summary:n_positive",
+    )
+
+
 def test_return_region_summary_supersede_requires_target_content_match():
     analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
     n = _n()
@@ -934,6 +988,84 @@ def test_multiple_summary_candidates_overlap_requires_value_equality_proof():
     assert result.accepted_returns == ()
     assert "summary_return_overlap_unproven:value_equality_not_proved" in result.blockers
     assert len(analysis.returns) == 2
+
+
+def test_direct_negated_fallback_does_not_conflate_width_mismatch():
+    n32 = Expression.parameter("n", index=0, data_type="int", size=4)
+    n64 = Expression.parameter("n", index=0, data_type="long", size=8)
+    narrow_positive = _cond("INT_SLESS", _const(0, size=4), n32)
+    wide_nonpositive = _cond("INT_SLESS", _const(0, size=8), n64).negate()
+
+    assert _conditions_unsat([narrow_positive, wide_nonpositive]) is not True
+
+
+def test_readonly_term_descriptor_rejects_width_changing_cast():
+    pointer = Expression.parameter("p", index=0, data_type="int *", size=8)
+    memory = Expression.memory(pointer, size=4)
+    widening_cast = Expression.unary_op("CAST", memory)
+    widening_cast.size = 8
+    no_op_cast = Expression.unary_op("CAST", memory)
+    no_op_cast.size = 4
+    parameters = [{"name": "p", "index": 0, "size": 8, "data_type": "int *"}]
+    base_ref = LocationBaseRef.parameter("p", index=0)
+
+    assert _extract_readonly_reduction_term_descriptor(widening_cast, parameters, base_ref) is None
+    descriptor = _extract_readonly_reduction_term_descriptor(no_op_cast, parameters, base_ref)
+    assert descriptor is not None
+    assert descriptor.stable_key() == ("readonly_reduction_term", 0, 4)
+
+
+def test_reduction_count_parameter_expression_rejects_index_storage_mismatch():
+    proof_storage = ("register_storage", "a1")
+    other_storage = ("register_storage", "a2")
+    proof = _FakeAccumulatorProof(index=1, storage_key=proof_storage, name="count")
+    parameters = [
+        {
+            "name": "count",
+            "index": 1,
+            "size": 4,
+            "storage_info": _FakeStorageInfo(other_storage),
+        }
+    ]
+
+    assert _reduction_count_parameter_expression(parameters, proof) is None
+
+
+def test_reduction_count_parameter_expression_matches_raw_storage_identity():
+    proof_storage = ("register_storage", "a1")
+    proof = _FakeAccumulatorProof(index=1, storage_key=proof_storage, name="count")
+    parameters = [
+        {
+            "name": "count",
+            "index": 1,
+            "size": 4,
+            "storage_info": _FakeStorageInfo(proof_storage),
+        }
+    ]
+
+    expr = _reduction_count_parameter_expression(parameters, proof)
+
+    assert expr is not None
+    assert expr.name == "count"
+    assert expr.value == 1
+
+
+def test_reduction_count_parameter_expression_unwraps_legacy_storage_identity():
+    proof_storage = ("register_storage", "a1")
+    proof = _FakeAccumulatorProof(index=1, storage_key=proof_storage, name="count")
+    parameters = [
+        {
+            "name": "count",
+            "index": 1,
+            "size": 4,
+            "storage_identity_key": ("parameter_storage", proof_storage),
+        }
+    ]
+
+    expr = _reduction_count_parameter_expression(parameters, proof)
+
+    assert expr is not None
+    assert expr.name == "count"
 
 
 def test_summary_candidate_without_loop_identity_is_rejected():

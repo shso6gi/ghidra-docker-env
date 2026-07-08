@@ -141,6 +141,39 @@ def test_return_region_summary_coverage_uses_active_preconditions():
     assert coverage_key is not None
 
 
+def test_return_region_summary_coverage_accepts_pointer_guard_plus_count_partition():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count_wide = Expression.parameter("param_2", index=1, data_type="long", size=8)
+    count_narrow = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    parameters = [
+        {"name": "param_1", "index": 0, "size": 8, "data_type": "int *", "is_signed": False},
+        {"name": "param_2", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+    ]
+    pointer_nonnull = _cond("INT_NOTEQUAL", pointer, Expression.constant(0, size=8))
+    pointer_null = _cond("INT_EQUAL", pointer, Expression.constant(0, size=8))
+    count_positive_wide = _cond("INT_SLESS", Expression.constant(0, size=8), count_wide)
+    count_nonpositive_narrow = _cond("INT_SLESS", Expression.constant(0, size=4), count_narrow).negate()
+    exact_pointer_null = ReturnInfo(
+        address="0x1000",
+        value=_const(-300),
+        conditions=[pointer_null],
+    )
+    exact_count_nonpositive = ReturnInfo(
+        address="0x1004",
+        value=_const(-300),
+        conditions=[pointer_nonnull, count_nonpositive_narrow],
+    )
+
+    coverage_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=[pointer_nonnull, count_positive_wide],
+        exact_returns=[exact_pointer_null, exact_count_nonpositive],
+        parameters=parameters,
+    )
+
+    assert coverage_key is not None
+
+
 def test_return_region_summary_coverage_rejects_duplicate_name_only_guard_canonicalization():
     summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
     indexed_n = Expression.parameter("n", index=1, data_type="int", size=4)

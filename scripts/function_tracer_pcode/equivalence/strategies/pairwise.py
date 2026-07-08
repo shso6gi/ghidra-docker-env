@@ -5479,8 +5479,32 @@ class PairwiseStrategy(CheckStrategy):
         right_index: Optional[tuple],
     ) -> bool:
         if left_storage is not None and right_storage is not None:
-            return left_storage == right_storage
+            if left_storage == right_storage:
+                return True
+            return (
+                left_index is not None
+                and right_index is not None
+                and left_index == right_index
+                and self._count_storage_low_projection_compatible(left_storage, right_storage)
+            )
         return left_index is not None and right_index is not None and left_index == right_index
+
+    def _count_storage_low_projection_compatible(
+        self,
+        left_storage: tuple,
+        right_storage: tuple,
+    ) -> bool:
+        left_register = self._register_storage_identity_components(left_storage)
+        right_register = self._register_storage_identity_components(right_storage)
+        if left_register is None or right_register is None:
+            return False
+        if left_register[:3] != right_register[:3]:
+            return False
+        left_low, left_size = int(left_register[3]), int(left_register[4])
+        right_low, right_size = int(right_register[3]), int(right_register[4])
+        if left_low != right_low:
+            return False
+        return left_size <= right_size or right_size <= left_size
 
     def _runtime_refs_semantic_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
@@ -5545,6 +5569,11 @@ class PairwiseStrategy(CheckStrategy):
                 getattr(right, "runtime_ref", None),
                 result_size=self._case_pair_readonly_contract_result_size(left_case, right_case),
             )
+            if self.debug and not loop_contract_decision.equivalent:
+                self._debug_print(
+                    "readonly loop contract shortcut declined: "
+                    f"{loop_contract_decision.reason}"
+                )
             if loop_contract_decision.equivalent:
                 if loop_contract_decision.requires_guard_equivalence and (
                     left_case is None
@@ -5578,6 +5607,11 @@ class PairwiseStrategy(CheckStrategy):
                     right_ref,
                     result_size=self._case_pair_readonly_contract_result_size(left_case, right_case),
                 )
+                if self.debug and not decision.equivalent:
+                    self._debug_print(
+                        "runtime refs shortcut declined: "
+                        f"{decision.reason}"
+                    )
                 if not decision.equivalent:
                     return decision.reason
                 if decision.requires_guard_equivalence and (
@@ -8690,6 +8724,24 @@ class PairwiseStrategy(CheckStrategy):
                         accumulator_proof,
                     )
                 if const_value is None:
+                    const_value = self._solve_reduction_count_masked_equality(
+                        left,
+                        self._exact_reduction_count_constant(right),
+                        operator,
+                        not condition_true,
+                        case,
+                        accumulator_proof,
+                    )
+                if const_value is None:
+                    const_value = self._solve_reduction_count_masked_equality(
+                        right,
+                        self._exact_reduction_count_constant(left),
+                        operator,
+                        not condition_true,
+                        case,
+                        accumulator_proof,
+                    )
+                if const_value is None:
                     continue
             if const_value == int(exact_count):
                 return True
@@ -8761,6 +8813,150 @@ class PairwiseStrategy(CheckStrategy):
             (int(left_coeff), int(left_bias)),
             (int(right_coeff), int(right_bias)),
         )
+
+    def _solve_reduction_count_masked_equality(
+        self,
+        expr: Optional[Expression],
+        other_const: Optional[int],
+        operator: Optional[str],
+        negated: bool,
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[int]:
+        if expr is None or other_const is None or operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return None
+        if operator == "INT_EQUAL" and negated:
+            return None
+        if operator == "INT_NOTEQUAL" and not negated:
+            return None
+        affine = self._extract_full_width_masked_reduction_count_affine(
+            expr,
+            case,
+            accumulator_proof,
+        )
+        if affine is None:
+            return None
+        coeff, bias = affine
+        if int(coeff) != 1:
+            return None
+        solved = int(other_const) - int(bias)
+        return int(solved) if solved > 0 else None
+
+    def _extract_full_width_masked_reduction_count_affine(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[tuple[int, int]]:
+        if expr is None:
+            return None
+        masked = self._extract_full_width_masked_reduction_count_view(expr, case, accumulator_proof)
+        if masked is not None:
+            return 1, 0
+        if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+            value = self._exact_reduction_count_constant(expr)
+            return (0, int(value)) if value is not None else None
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or len(getattr(expr, "operands", None) or []) != 2:
+            return None
+        left = self._extract_full_width_masked_reduction_count_affine(expr.operands[0], case, accumulator_proof)
+        right = self._extract_full_width_masked_reduction_count_affine(expr.operands[1], case, accumulator_proof)
+        operator = getattr(expr, "operator", None)
+        if operator == "INT_ADD" and left is not None and right is not None:
+            return int(left[0]) + int(right[0]), int(left[1]) + int(right[1])
+        if operator == "INT_SUB" and left is not None and right is not None:
+            return int(left[0]) - int(right[0]), int(left[1]) - int(right[1])
+        return None
+
+    def _extract_full_width_masked_reduction_count_view(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[Expression]:
+        if (
+            expr is None
+            or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+            or getattr(expr, "operator", None) != "INT_AND"
+            or len(getattr(expr, "operands", None) or []) != 2
+        ):
+            return None
+        left, right = expr.operands
+        candidates = ((left, right), (right, left))
+        for source, mask_expr in candidates:
+            mask = self._exact_reduction_count_constant(mask_expr)
+            if mask is None:
+                continue
+            if not self._expression_is_full_reduction_count_view(source, case, accumulator_proof):
+                if self._expression_is_projected_reduction_count_mask_view(
+                    source,
+                    int(mask),
+                    case,
+                    accumulator_proof,
+                ):
+                    return source
+                continue
+            source_bits = max(1, int(expression_smt_bit_width(source) or 0))
+            expr_bits = max(1, int(expression_smt_bit_width(expr) or source_bits))
+            if expr_bits != source_bits:
+                continue
+            if int(mask) != (1 << int(source_bits)) - 1:
+                if self._expression_is_projected_reduction_count_mask_view(
+                    source,
+                    int(mask),
+                    case,
+                    accumulator_proof,
+                ):
+                    return source
+                continue
+            return source
+        return None
+
+    def _expression_is_projected_reduction_count_mask_view(
+        self,
+        source: Optional[Expression],
+        mask: int,
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> bool:
+        if source is None or getattr(source, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        descriptor = self._reduction_count_parameter_descriptor(
+            getattr(case, "parameters", None) or [],
+            accumulator_proof,
+        )
+        if descriptor is None:
+            return False
+        descriptor_storage = self._parameter_descriptor_storage_identity_key(descriptor)
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        if descriptor_storage is None or proof_storage is None:
+            return False
+        if not self._count_storage_low_projection_compatible(descriptor_storage, proof_storage):
+            return False
+        source_storage = self._parameter_expression_storage_identity_key(source)
+        if source_storage is not None and not self._count_storage_low_projection_compatible(
+            descriptor_storage,
+            source_storage,
+        ):
+            return False
+        descriptor_index = self._parameter_descriptor_index_identity_key(descriptor)
+        source_index = self._parameter_expression_index_identity_key(source)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
+        if descriptor_index is None or source_index is None or proof_index is None:
+            return False
+        if descriptor_index != source_index or descriptor_index != proof_index:
+            return False
+        try:
+            descriptor_bits = int(descriptor.get("size", 0) or 0) * 8
+        except (TypeError, ValueError):
+            descriptor_bits = 0
+        if descriptor_bits <= 0:
+            return False
+        source_bits = max(1, int(expression_smt_bit_width(source) or 0))
+        if source_bits < descriptor_bits:
+            return False
+        if int(mask) != (1 << int(descriptor_bits)) - 1:
+            return False
+        return True
 
     def _solve_affine_equality(
         self,

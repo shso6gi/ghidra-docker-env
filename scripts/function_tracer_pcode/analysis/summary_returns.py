@@ -12,12 +12,16 @@ from ..model import (
     DeferredCallRef,
     Expression,
     FunctionReturnAnalysis,
+    ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
     ReturnInfo,
     SummaryReturnCandidate,
     UnknownValueRef,
 )
 from ..model import ExpressionType
+from ..model.render_smt import expression_smt_bit_width
 from ..model.structural import key_contains_placeholder
+from .effect_summary import canonicalize_location
 from .condition.normalizer import ConditionNormalizer
 from .condition.simplifier import ConditionSimplifier
 from .condition.smt_oracle import ConditionSMTOracle
@@ -120,7 +124,7 @@ def accept_summary_return_candidates(
     effective_exact_returns = tuple(
         ret
         for ret in exact_returns
-        if _return_info_identity_key(ret) not in superseded_exact_keys
+        if not _return_info_is_superseded_by_keys(ret, superseded_exact_keys)
     )
 
     proposed_partition = tuple(effective_exact_returns) + tuple(
@@ -637,10 +641,18 @@ def _check_return_overlap_value_equality(
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     ):
         return ()
+    if _readonly_reduction_exact_overlap_is_proved(
+        left,
+        right,
+        active_preconditions,
+        analysis,
+    ):
+        return ()
+    parameters = getattr(analysis, "parameters", None)
     overlap_conditions = (
-        list(left.conditions or [])
-        + list(right.conditions or [])
-        + list(active_preconditions)
+        list(_canonicalize_conditions_for_analysis_parameters(left.conditions or [], parameters))
+        + list(_canonicalize_conditions_for_analysis_parameters(right.conditions or [], parameters))
+        + list(_canonicalize_conditions_for_analysis_parameters(active_preconditions or [], parameters))
     )
     overlap_unsat = _conditions_unsat(overlap_conditions)
     if overlap_unsat is True:
@@ -682,6 +694,11 @@ def _return_region_summary_overlap_is_proved_by_completed_evidence(
             exact_ret,
             analysis,
         ):
+            return True
+        if not isinstance(proof_ref, tuple) or len(proof_ref) != 3:
+            continue
+        superseded_keys = _return_region_summary_superseded_return_keys_from_target(proof_ref[2])
+        if _return_info_is_superseded_by_keys(exact_ret, set(superseded_keys)):
             return True
     return False
 
@@ -924,12 +941,73 @@ def _conditions_unsat(conditions: Sequence[Condition]) -> Optional[bool]:
         solver_unsat = None
     if solver_unsat is not None:
         return bool(solver_unsat)
+    if _conditions_have_direct_negated_pair(condition_list):
+        return True
     try:
         if ConditionSimplifier.object_centric_is_contradiction(condition_list):
             return True
     except Exception:
         pass
     return None
+
+
+def _conditions_have_direct_negated_pair(conditions: Sequence[Condition]) -> bool:
+    condition_list = list(conditions or ())
+    for left_index, left in enumerate(condition_list):
+        for right in condition_list[left_index + 1:]:
+            try:
+                if left.negate().equals(right) or right.negate().equals(left):
+                    return True
+            except Exception:
+                pass
+            try:
+                if ConditionNormalizer.are_equivalent(left.negate(), right) or ConditionNormalizer.are_equivalent(
+                    right.negate(),
+                    left,
+                ):
+                    return True
+            except Exception:
+                pass
+            if _conditions_are_complementary_comparisons(left, right):
+                return True
+    return False
+
+
+def _conditions_are_complementary_comparisons(left: Condition, right: Condition) -> bool:
+    if bool(getattr(left, "negated", False)) != bool(getattr(right, "negated", False)):
+        try:
+            if _expression_key(getattr(left, "expression", None)) == _expression_key(
+                getattr(right, "expression", None)
+            ):
+                return True
+        except Exception:
+            pass
+    if bool(getattr(left, "negated", False)) or bool(getattr(right, "negated", False)):
+        return False
+    left_expr = getattr(left, "expression", None)
+    right_expr = getattr(right, "expression", None)
+    if (
+        getattr(left_expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or getattr(right_expr, "expr_type", None) != ExpressionType.BINARY_OP
+        or len(getattr(left_expr, "operands", ()) or ()) != 2
+        or len(getattr(right_expr, "operands", ()) or ()) != 2
+    ):
+        return False
+    left_op = getattr(left_expr, "operator", None)
+    right_op = getattr(right_expr, "operator", None)
+    left_operands = tuple(_expression_key(operand) for operand in left_expr.operands)
+    right_operands = tuple(_expression_key(operand) for operand in right_expr.operands)
+    if {left_op, right_op} == {"INT_EQUAL", "INT_NOTEQUAL"}:
+        return left_operands == right_operands or left_operands == tuple(reversed(right_operands))
+    less_complements = {
+        ("INT_SLESS", "INT_SLESSEQUAL"),
+        ("INT_LESS", "INT_LESSEQUAL"),
+    }
+    if (left_op, right_op) in less_complements:
+        return left_operands == tuple(reversed(right_operands))
+    if (right_op, left_op) in less_complements:
+        return right_operands == tuple(reversed(left_operands))
+    return False
 
 
 def _value_inequality_condition(left: ReturnInfo, right: ReturnInfo) -> Optional[Condition]:
@@ -957,6 +1035,354 @@ def _return_merge_compatibility_blockers(left: ReturnInfo, right: ReturnInfo) ->
     return tuple(dict.fromkeys(blockers))
 
 
+def _readonly_reduction_exact_overlap_is_proved(
+    left: ReturnInfo,
+    right: ReturnInfo,
+    active_preconditions: Sequence[Condition],
+    analysis: FunctionReturnAnalysis,
+) -> bool:
+    return (
+        _readonly_reduction_exact_matches_summary(left, right, active_preconditions, analysis)
+        or _readonly_reduction_exact_matches_summary(right, left, active_preconditions, analysis)
+    )
+
+
+def _readonly_reduction_exact_matches_summary(
+    exact_ret: ReturnInfo,
+    summary_ret: ReturnInfo,
+    active_preconditions: Sequence[Condition],
+    analysis: FunctionReturnAnalysis,
+) -> bool:
+    summary_value = getattr(summary_ret, "value", None)
+    summary_ref = getattr(summary_value, "runtime_ref", None)
+    if not isinstance(summary_ref, ReadonlyReductionRef):
+        return False
+    accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
+    if accumulator_proof is None:
+        return False
+    exact_value = getattr(exact_ret, "value", None)
+    exact_bits = int(expression_smt_bit_width(exact_value) or 0)
+    if exact_bits <= 0 or exact_bits % 8 != 0:
+        return False
+    result_size = max(1, exact_bits // 8)
+    proof_result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+    if result_size > proof_result_size:
+        return False
+    if _normalize_constant_bias(int(getattr(summary_ref, "constant_bias", 0) or 0), result_size) != _normalize_constant_bias(
+        int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+        result_size,
+    ):
+        return False
+    extracted = _extract_readonly_reduction_terms_and_bias(
+        exact_value,
+        getattr(analysis, "parameters", None) or (),
+        getattr(accumulator_proof, "pointer_base_ref", None),
+    )
+    if extracted is None:
+        return False
+    exact_terms, exact_bias = extracted
+    if _normalize_constant_bias(exact_bias, result_size) != _normalize_constant_bias(
+        int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+        result_size,
+    ):
+        return False
+    exact_key = tuple(term.stable_key() for term in exact_terms)
+    full_terms_for_count = getattr(accumulator_proof, "full_terms_for_count_value", None)
+    if not callable(full_terms_for_count):
+        return False
+    for count_value in range(1, _readonly_exact_count_search_bound(accumulator_proof, len(exact_terms)) + 1):
+        try:
+            expected_terms = full_terms_for_count(count_value)
+        except (AttributeError, TypeError, ValueError):
+            expected_terms = None
+        if expected_terms is None:
+            continue
+        if exact_key != tuple(term.stable_key() for term in expected_terms):
+            continue
+        if _combined_return_conditions_imply_reduction_count(
+            exact_ret,
+            summary_ret,
+            active_preconditions,
+            summary_value,
+            accumulator_proof,
+            getattr(analysis, "parameters", None) or (),
+            int(count_value),
+        ):
+            return True
+    return False
+
+
+def _readonly_exact_count_search_bound(accumulator_proof: Any, exact_term_count: int) -> int:
+    witness_counts = [
+        int(getattr(witness, "exact_count", 0) or 0)
+        for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ())
+    ] + [
+        int(getattr(witness, "exact_count", 0) or 0)
+        for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
+    ]
+    start_index = max(0, int(getattr(accumulator_proof, "start_index", 0) or 0))
+    index_step = max(1, int(getattr(accumulator_proof, "index_step", 1) or 1))
+    seed_count = max(
+        len(tuple(getattr(accumulator_proof, "seed_terms", ()) or ())),
+        max(0, int(getattr(accumulator_proof, "seed_term_count", 0) or 0)),
+    )
+    term_budget = max(1, int(exact_term_count or 0) + seed_count + 1)
+    return max(1, start_index + term_budget * index_step + 1, *witness_counts)
+
+
+def _combined_return_conditions_imply_reduction_count(
+    exact_ret: ReturnInfo,
+    summary_ret: ReturnInfo,
+    active_preconditions: Sequence[Condition],
+    summary_value: Expression,
+    accumulator_proof: Any,
+    parameters: Sequence[Dict[str, Any]],
+    count_value: int,
+) -> bool:
+    base_conditions = (
+        list(getattr(exact_ret, "conditions", None) or ())
+        + list(getattr(summary_ret, "conditions", None) or ())
+        + list(active_preconditions or ())
+    )
+    for count_expr in _reduction_count_candidate_expressions(summary_value, accumulator_proof, parameters):
+        if _conditions_imply_count_value(base_conditions, count_expr, count_value):
+            return True
+    return False
+
+
+def _reduction_count_candidate_expressions(
+    summary_value: Expression,
+    accumulator_proof: Any,
+    parameters: Sequence[Dict[str, Any]],
+) -> Tuple[Expression, ...]:
+    candidates: List[Expression] = []
+    operands = tuple(getattr(summary_value, "operands", ()) or ())
+    if len(operands) >= 2:
+        candidates.append(operands[1])
+    proof_count = _reduction_count_parameter_expression(parameters, accumulator_proof)
+    if proof_count is not None:
+        candidates.append(proof_count)
+    unique: List[Expression] = []
+    seen: set[Tuple[Any, ...]] = set()
+    for expr in candidates:
+        key = _expression_key(expr)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(expr)
+    return tuple(unique)
+
+
+def _conditions_imply_count_value(
+    conditions: Sequence[Condition],
+    count_expr: Expression,
+    count_value: int,
+) -> bool:
+    count_bits = max(1, int(expression_smt_bit_width(count_expr) or 0))
+    count_size = max(1, (count_bits + 7) // 8)
+    not_equal = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            count_expr,
+            Expression.constant(int(count_value), size=count_size),
+        ),
+        False,
+    )
+    return _conditions_unsat(list(conditions or ()) + [not_equal]) is True
+
+
+def _reduction_count_parameter_expression(
+    parameters: Sequence[Dict[str, Any]],
+    accumulator_proof: Any,
+) -> Optional[Expression]:
+    if accumulator_proof is None:
+        return None
+    proof_index = getattr(accumulator_proof, "count_parameter_index", None)
+    proof_storage = getattr(accumulator_proof, "count_parameter_storage_identity_key", None)
+    proof_name = str(getattr(accumulator_proof, "count_parameter_name", "") or "")
+    matches: List[Dict[str, Any]] = []
+    for parameter in parameters or ():
+        if not isinstance(parameter, dict):
+            continue
+        if _parameter_descriptor_matches_reduction_count(
+            parameter,
+            proof_index=proof_index,
+            proof_storage=proof_storage,
+            proof_name=proof_name,
+        ):
+            matches.append(parameter)
+    if not matches and proof_name and proof_index is None and proof_storage is None:
+        name_matches = [
+            parameter
+            for parameter in parameters or ()
+            if isinstance(parameter, dict) and str(parameter.get("name") or "") == proof_name
+        ]
+        if len(name_matches) == 1:
+            matches = name_matches
+    if len(matches) != 1:
+        return None
+    descriptor = matches[0]
+    try:
+        index = int(descriptor.get("index", -1))
+    except (TypeError, ValueError):
+        index = -1
+    size = max(1, int(descriptor.get("size", 0) or descriptor.get("size_bytes", 0) or 4))
+    return Expression.parameter(
+        str(descriptor.get("name") or proof_name or f"param_{index}"),
+        index=index,
+        data_type=descriptor.get("data_type") or descriptor.get("type_name"),
+        size=size,
+        storage_info=descriptor.get("storage_info"),
+        runtime_ref=descriptor.get("runtime_ref"),
+    )
+
+
+def _parameter_descriptor_matches_reduction_count(
+    parameter: Dict[str, Any],
+    *,
+    proof_index: Any,
+    proof_storage: Optional[Tuple[Any, ...]],
+    proof_name: str,
+) -> bool:
+    descriptor_index = _parameter_descriptor_index(parameter)
+    descriptor_storage = _parameter_descriptor_storage_identity_key(parameter)
+    descriptor_name = str(parameter.get("name") or "")
+    normalized_proof_index = None
+    if proof_index is not None:
+        try:
+            normalized_proof_index = int(proof_index)
+        except (TypeError, ValueError):
+            return False
+        if descriptor_index != normalized_proof_index:
+            return False
+    if proof_storage is not None and descriptor_storage != proof_storage:
+        return False
+    if proof_name and descriptor_name and descriptor_name != proof_name:
+        return False
+    return proof_index is not None or proof_storage is not None
+
+
+def _parameter_descriptor_index(parameter: Dict[str, Any]) -> Optional[int]:
+    try:
+        index = parameter.get("index")
+        if index is not None and int(index) >= 0:
+            return int(index)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _parameter_descriptor_storage_identity_key(parameter: Dict[str, Any]) -> Optional[Tuple[Any, ...]]:
+    storage = parameter.get("storage_info", parameter.get("storage"))
+    storage_key_fn = getattr(storage, "storage_identity_key", None)
+    if callable(storage_key_fn):
+        try:
+            storage_key = storage_key_fn()
+        except (AttributeError, TypeError, ValueError):
+            storage_key = None
+        if storage_key is not None:
+            return _normalize_parameter_storage_identity_key(tuple(storage_key))
+    direct = parameter.get("storage_identity_key")
+    if isinstance(direct, tuple):
+        return _normalize_parameter_storage_identity_key(direct)
+    return None
+
+
+def _normalize_parameter_storage_identity_key(storage_key: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    if (
+        isinstance(storage_key, tuple)
+        and len(storage_key) == 2
+        and storage_key[0] == "parameter_storage"
+        and isinstance(storage_key[1], tuple)
+    ):
+        return tuple(storage_key[1])
+    return tuple(storage_key)
+
+
+def _extract_readonly_reduction_terms_and_bias(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict[str, Any]],
+    pointer_base_ref: Any,
+) -> Optional[Tuple[Tuple[ReadonlyReductionTermRef, ...], int]]:
+    if expr is None or pointer_base_ref is None:
+        return None
+    extracted: List[ReadonlyReductionTermRef] = []
+    constant_bias = 0
+    for sign, term in _flatten_readonly_add_terms(expr):
+        if getattr(term, "expr_type", None) == ExpressionType.CONSTANT:
+            value = _raw_constant_value(term)
+            if value is None:
+                return None
+            constant_bias += int(sign) * int(value)
+            continue
+        if sign != 1:
+            return None
+        descriptor = _extract_readonly_reduction_term_descriptor(term, parameters, pointer_base_ref)
+        if descriptor is None:
+            return None
+        extracted.append(descriptor)
+    if not extracted:
+        return None
+    extracted.sort(key=lambda item: (int(item.byte_offset), int(item.access_size)))
+    return tuple(extracted), int(constant_bias)
+
+
+def _flatten_readonly_add_terms(expr: Expression, sign: int = 1) -> List[Tuple[int, Expression]]:
+    if getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP and len(getattr(expr, "operands", ()) or ()) == 2:
+        if getattr(expr, "operator", None) == "INT_ADD":
+            return _flatten_readonly_add_terms(expr.operands[0], sign) + _flatten_readonly_add_terms(expr.operands[1], sign)
+        if getattr(expr, "operator", None) == "INT_SUB":
+            return _flatten_readonly_add_terms(expr.operands[0], sign) + _flatten_readonly_add_terms(expr.operands[1], -sign)
+    return [(sign, expr)]
+
+
+def _extract_readonly_reduction_term_descriptor(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict[str, Any]],
+    pointer_base_ref: Any,
+) -> Optional[ReadonlyReductionTermRef]:
+    if expr is None:
+        return None
+    if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operands", None):
+        if getattr(expr, "operator", None) == "INT_SEXT":
+            return None
+        if getattr(expr, "operator", None) == "CAST":
+            operand = expr.operands[0]
+            if int(getattr(expr, "size", 0) or 0) != int(getattr(operand, "size", 0) or 0):
+                return None
+            return _extract_readonly_reduction_term_descriptor(operand, parameters, pointer_base_ref)
+        if getattr(expr, "operator", None) in {"INT_ZEXT", "COPY"}:
+            return _extract_readonly_reduction_term_descriptor(expr.operands[0], parameters, pointer_base_ref)
+    if getattr(expr, "expr_type", None) != ExpressionType.MEMORY or not getattr(expr, "operands", None):
+        return None
+    load_size = max(1, int(getattr(expr, "size", 0) or 0))
+    location = canonicalize_location(expr.operands[0], parameters, size=load_size)
+    if location is None:
+        return None
+    base_ref = getattr(location, "base_ref", None)
+    if base_ref is None:
+        return None
+    base_key = getattr(base_ref, "semantic_key", lambda: None)()
+    proof_base_key = getattr(pointer_base_ref, "semantic_key", lambda: None)()
+    if base_key is None or proof_base_key is None or base_key != proof_base_key:
+        return None
+    return ReadonlyReductionTermRef(byte_offset=int(getattr(location, "offset", 0) or 0), access_size=load_size)
+
+
+def _normalize_constant_bias(value: int, result_size: int) -> int:
+    bits = max(1, int(result_size or 0)) * 8
+    return int(value) % (1 << bits)
+
+
+def _raw_constant_value(expr: Optional[Expression]) -> Optional[int]:
+    if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
+        return None
+    try:
+        return int(expr.value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _combine_or(expressions: Sequence[Expression]) -> Expression:
     if not expressions:
         raise ValueError("Cannot OR an empty expression list")
@@ -982,6 +1408,34 @@ def _return_info_identity_key(ret: ReturnInfo) -> Tuple[Any, ...]:
         _stable_key_or_none(getattr(ret, "pcode_op_ref", None)),
         _conditions_key(getattr(ret, "conditions", ()) or ()),
         _expression_key(getattr(ret, "value", None)),
+    )
+
+
+def _return_info_summary_identity_key(ret: ReturnInfo) -> Tuple[Any, ...]:
+    return (
+        "return_info",
+        getattr(ret, "address", None),
+        getattr(ret, "pcode_identity", None),
+        getattr(ret, "pcode_order", None),
+        getattr(ret, "pcode_time", None),
+        _stable_key_or_none(getattr(ret, "pcode_op_ref", None)),
+        _conditions_key(getattr(ret, "conditions", ()) or ()),
+        _expression_key(getattr(ret, "value", None)),
+    )
+
+
+def _return_info_is_superseded_by_keys(
+    ret: ReturnInfo,
+    superseded_keys: set[Tuple[Any, ...]],
+) -> bool:
+    if not superseded_keys:
+        return False
+    return any(
+        key in superseded_keys
+        for key in (
+            _return_info_identity_key(ret),
+            _return_info_summary_identity_key(ret),
+        )
     )
 
 

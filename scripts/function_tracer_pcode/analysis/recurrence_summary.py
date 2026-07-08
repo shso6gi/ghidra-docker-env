@@ -3913,21 +3913,27 @@ class StructuralRecurrenceSummarizer:
             summary_expr.size = 1
         disjuncts.append(summary_expr)
         disjoint_returns: List[ReturnInfo] = []
-        positive_param_key = self._positive_summary_parameter_key(summary_conditions)
+        positive_param_key = self._positive_summary_parameter_key(normalized_summary_conditions)
         for ret in exact_returns or ():
-            if not (
-                self._return_conditions_are_disjoint_from_conditions(ret, summary_conditions)
-                or (
-                    positive_param_key is not None
-                    and self._return_covers_nonpositive_parameter_region(ret, positive_param_key)
-                )
-            ):
-                continue
-            disjoint_returns.append(ret)
             normalized_return_conditions = self._canonicalize_condition_parameters_for_analysis(
                 getattr(ret, "conditions", None) or (),
                 parameters,
             )
+            if not (
+                self._conditions_are_disjoint_from_conditions(
+                    normalized_return_conditions,
+                    normalized_summary_conditions,
+                )
+                or (
+                    positive_param_key is not None
+                    and self._conditions_cover_nonpositive_parameter_region(
+                        normalized_return_conditions,
+                        positive_param_key,
+                    )
+                )
+            ):
+                continue
+            disjoint_returns.append(ret)
             combined = Condition.combine_and(list(normalized_return_conditions or []))
             if combined is None:
                 return None
@@ -4081,12 +4087,39 @@ class StructuralRecurrenceSummarizer:
         ret: ReturnInfo,
         conditions: Sequence[Condition],
     ) -> bool:
+        return self._conditions_are_disjoint_from_conditions(
+            getattr(ret, "conditions", None) or (),
+            conditions,
+        )
+
+    def _conditions_are_disjoint_from_conditions(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
         try:
             return ConditionSMTOracle.conjunction_is_unsat(
-                list(getattr(ret, "conditions", None) or []) + list(conditions or ())
+                list(left or []) + list(right or ())
             ) is True
         except Exception:
-            return False
+            pass
+        for left_condition in left or ():
+            if left_condition is None:
+                continue
+            for right_condition in right or ():
+                if right_condition is None:
+                    continue
+                try:
+                    if (
+                        left_condition.negate().equals(right_condition)
+                        or right_condition.negate().equals(left_condition)
+                        or ConditionNormalizer.are_equivalent(left_condition.negate(), right_condition)
+                        or ConditionNormalizer.are_equivalent(right_condition.negate(), left_condition)
+                    ):
+                        return True
+                except Exception:
+                    continue
+        return False
 
     def _analysis_active_preconditions(self, analysis) -> Tuple[Condition, ...]:
         preconditions = getattr(analysis, "active_function_preconditions", None)
@@ -4098,38 +4131,51 @@ class StructuralRecurrenceSummarizer:
         self,
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        if len(tuple(conditions or ())) != 1:
+        keys: List[Tuple[Any, ...]] = []
+        for condition in conditions or ():
+            if bool(getattr(condition, "negated", False)):
+                continue
+            expr = getattr(condition, "expression", None)
+            if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+                continue
+            if getattr(expr, "operator", None) not in {"INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"}:
+                continue
+            operands = list(getattr(expr, "operands", ()) or ())
+            if len(operands) != 2:
+                continue
+            left, right = operands
+            if getattr(right, "expr_type", None) != ExpressionType.PARAMETER:
+                continue
+            left_value = self._raw_constant_value(left)
+            if left_value is None:
+                continue
+            operator = getattr(expr, "operator", None)
+            if operator in {"INT_SLESS", "INT_LESS"} and int(left_value) != 0:
+                continue
+            if operator in {"INT_SLESSEQUAL", "INT_LESSEQUAL"} and int(left_value) != 1:
+                continue
+            keys.append(_runtime_expression_signature(right))
+        unique_keys = tuple(dict.fromkeys(keys))
+        if len(unique_keys) != 1:
             return None
-        condition = tuple(conditions or ())[0]
-        if bool(getattr(condition, "negated", False)):
-            return None
-        expr = getattr(condition, "expression", None)
-        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
-            return None
-        if getattr(expr, "operator", None) not in {"INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"}:
-            return None
-        operands = list(getattr(expr, "operands", ()) or ())
-        if len(operands) != 2:
-            return None
-        left, right = operands
-        if getattr(right, "expr_type", None) != ExpressionType.PARAMETER:
-            return None
-        left_value = self._raw_constant_value(left)
-        if left_value is None:
-            return None
-        operator = getattr(expr, "operator", None)
-        if operator in {"INT_SLESS", "INT_LESS"} and int(left_value) != 0:
-            return None
-        if operator in {"INT_SLESSEQUAL", "INT_LESSEQUAL"} and int(left_value) != 1:
-            return None
-        return _runtime_expression_signature(right)
+        return unique_keys[0]
 
     def _return_covers_nonpositive_parameter_region(
         self,
         ret: ReturnInfo,
         positive_param_key: Tuple[Any, ...],
     ) -> bool:
-        for condition in getattr(ret, "conditions", None) or ():
+        return self._conditions_cover_nonpositive_parameter_region(
+            getattr(ret, "conditions", None) or (),
+            positive_param_key,
+        )
+
+    def _conditions_cover_nonpositive_parameter_region(
+        self,
+        conditions: Sequence[Condition],
+        positive_param_key: Tuple[Any, ...],
+    ) -> bool:
+        for condition in conditions or ():
             if bool(getattr(condition, "negated", False)):
                 continue
             expr = getattr(condition, "expression", None)

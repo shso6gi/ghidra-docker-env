@@ -146,6 +146,19 @@ def _affine_eq_count(value: int) -> Condition:
     return Condition(Expression.binary_op("INT_NOTEQUAL", expr, _const(0)), negated=True)
 
 
+def _masked_affine_eq_count(value: int, *, mask: int = 0xFFFFFFFF, count_expr: Expression | None = None) -> Condition:
+    count = count_expr if count_expr is not None else _count_param()
+    masked = Expression.binary_op("INT_AND", count, Expression.constant(mask, size=max(1, getattr(count, "size", 4))))
+    masked.size = getattr(count, "size", 4)
+    expr = Expression.binary_op(
+        "INT_SUB",
+        masked,
+        Expression.constant(value, size=max(1, getattr(masked, "size", 4))),
+    )
+    expr.size = getattr(masked, "size", 4)
+    return Condition(Expression.binary_op("INT_NOTEQUAL", expr, _const(0)), negated=True)
+
+
 def _ptradd_guard_eq_count(value: int) -> Condition:
     wide_count = Expression.parameter("count", index=1, data_type="long", size=8)
     count_low = Expression.binary_op(
@@ -2608,6 +2621,386 @@ def test_exact_load_sum_does_not_treat_narrow_count_view_as_full_reduction_count
     strategy = _pairwise_strategy()
 
     assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case) is False
+
+
+def test_exact_load_sum_uses_full_width_masked_count_condition_as_case_proof():
+    count = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x1309",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("masked_count_exact", [exact_info]).parameters,
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is True
+
+
+def test_method_b_covering_proof_accepts_full_width_masked_count_one_exact_load():
+    exact_value = Expression.binary_op("INT_ADD", _load_term_expr(0), _const(0))
+    exact_value.size = 4
+    exact_info = ReturnInfo(
+        address="0x130c",
+        value=exact_value,
+        conditions=[_base_ne_zero(), _count_gt(0), _masked_affine_eq_count(1)],
+    )
+    summary_info = ReturnInfo(
+        address="0x140c",
+        value=_readonly_sum(_readonly_summary(start=0, guard_constraints=(_count_gt(0),))),
+        conditions=[_base_ne_zero(), _count_gt(0)],
+    )
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("masked_count_exact_method_b", [exact_info]).parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=_analysis("masked_count_summary_method_b", [summary_info]).parameters,
+    )
+    strategy = _pairwise_strategy()
+
+    covering = strategy._method_b_covering_case_proof(exact_case, summary_case)
+
+    assert covering is not None
+    assert covering.exact_proof.count_values == (1,)
+    assert strategy._cases_admit_reduction_count_values(
+        covering.exact_case,
+        covering.summary_case,
+        covering.accumulator_proof,
+        covering.exact_proof.count_values,
+    )
+
+
+def test_masked_count_condition_accepts_same_index_low_register_projection():
+    wide_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=8,
+        size_bits=64,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    narrow_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    count = Expression.parameter("count", index=1, data_type="int", size=4, storage_info=narrow_storage)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_storage.storage_identity_key(),
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x130d",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, count_expr=count)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=[
+            {"name": "base", "index": 0, "size": 8, "data_type": "int *"},
+            {"name": "count", "index": 1, "size": 4, "data_type": "int", "storage_info": narrow_storage},
+        ],
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is True
+
+
+def test_masked_count_condition_accepts_wide_source_with_effective_low_projection_descriptor():
+    wide_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=8,
+        size_bits=64,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    narrow_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    wide_count = Expression.parameter("count", index=1, data_type="long", size=8, storage_info=wide_storage)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_storage.storage_identity_key(),
+        limit_expr=wide_count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x130f",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, count_expr=wide_count)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=[
+            {"name": "base", "index": 0, "size": 8, "data_type": "int *"},
+            {"name": "count", "index": 1, "size": 4, "data_type": "int", "storage_info": narrow_storage},
+        ],
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is True
+
+
+def test_masked_count_condition_rejects_same_index_non_low_register_projection():
+    wide_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=8,
+        size_bits=64,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    high_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1_hi",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=32,
+    )
+    count = Expression.parameter("count", index=1, data_type="int", size=4, storage_info=high_storage)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_storage.storage_identity_key(),
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x130e",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, count_expr=count)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=[
+            {"name": "base", "index": 0, "size": 8, "data_type": "int *"},
+            {"name": "count", "index": 1, "size": 4, "data_type": "int", "storage_info": high_storage},
+        ],
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is False
+
+
+def test_masked_count_condition_rejects_high_source_with_low_descriptor_projection():
+    wide_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=8,
+        size_bits=64,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    narrow_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    high_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1_hi",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=32,
+    )
+    high_count = Expression.parameter("count", index=1, data_type="int", size=4, storage_info=high_storage)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=wide_storage.storage_identity_key(),
+        limit_expr=high_count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x1310",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, count_expr=high_count)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=[
+            {"name": "base", "index": 0, "size": 8, "data_type": "int *"},
+            {"name": "count", "index": 1, "size": 4, "data_type": "int", "storage_info": narrow_storage},
+        ],
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is False
+
+
+def test_exact_load_sum_rejects_masked_count_condition_when_mask_is_not_full_width():
+    count = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x130a",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, mask=0xFFFF)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("partial_mask_count_exact", [exact_info]).parameters,
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is False
+
+
+def test_exact_load_sum_rejects_low32_masked_count_condition_for_wide_count_proof():
+    count64 = Expression.parameter("count", index=1, data_type="long", size=8)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count64,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    )
+    exact_info = ReturnInfo(
+        address="0x130b",
+        value=_load_term_expr(0),
+        conditions=[_masked_affine_eq_count(1, count_expr=count64)],
+    )
+    case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("wide_low_mask_count_exact", [exact_info]).parameters,
+    )
+
+    assert _pairwise_strategy()._case_has_direct_reduction_count_equality(case, proof, 1) is False
 
 
 def test_exact_load_sum_does_not_treat_narrow_cast_count_view_as_full_reduction_count():
