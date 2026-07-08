@@ -66,6 +66,7 @@ class UnsupportedCallEffectRef:
     order_key: int
     target_expr: Optional[Expression] = None
     arguments: Tuple[Expression, ...] = ()
+    path_conditions: Tuple[Condition, ...] = ()
 
     @classmethod
     def from_call_op(
@@ -75,6 +76,7 @@ class UnsupportedCallEffectRef:
         target_ref: Optional[CallTargetRef],
         target_expr: Optional[Expression] = None,
         arguments: Sequence[Expression] = (),
+        path_conditions: Sequence[Condition] = (),
         reason: str,
         pcode_op_ref: Optional[PcodeOpRef] = None,
     ) -> "UnsupportedCallEffectRef":
@@ -83,6 +85,7 @@ class UnsupportedCallEffectRef:
             target_ref=target_ref,
             target_expr=target_expr,
             arguments=tuple(arguments or ()),
+            path_conditions=tuple(path_conditions or ()),
             reason=str(reason),
             order_key=_try_get_order_key(op, default=_UNKNOWN_EFFECT_ORDER_KEY),
         )
@@ -103,6 +106,7 @@ class UnsupportedCallEffectRef:
                 )
                 for index, argument in enumerate(self.arguments or ())
             ),
+            tuple(_condition_evidence_key(condition) for condition in self.path_conditions or ()),
             int(self.order_key),
         )
 
@@ -113,6 +117,7 @@ class UnsupportedCallEffectRef:
             "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
             "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
             "arguments": [argument.to_dict() for argument in self.arguments or ()],
+            "path_conditions": [condition.to_dict() for condition in self.path_conditions or ()],
             "reason": self.reason,
             "order_key": int(self.order_key),
         }
@@ -900,6 +905,7 @@ def summarize_store_effects(
         target_ref: Optional[CallTargetRef],
         target_expr: Optional[Expression],
         arguments: Sequence[Expression] = (),
+        path_conditions: Sequence[Condition] = (),
         reason: str,
     ) -> UnsupportedCallEffectRef:
         pcode_op_ref = None
@@ -914,6 +920,7 @@ def summarize_store_effects(
             target_ref=target_ref,
             target_expr=target_expr,
             arguments=arguments,
+            path_conditions=path_conditions,
             reason=reason,
             pcode_op_ref=pcode_op_ref,
         )
@@ -1016,6 +1023,7 @@ def summarize_store_effects(
                             target_ref=None,
                             target_expr=target_expr,
                             arguments=explicit_args,
+                            path_conditions=normalized_path_conditions,
                             reason="target_identity_unavailable",
                         )
                     )
@@ -1043,12 +1051,15 @@ def summarize_store_effects(
                         unsupported_call_sites.append(
                             _unsupported_call_effect_ref(
                                 op,
-                                target_ref=target_ref,
-                                target_expr=target_expr,
-                                arguments=explicit_args,
-                                reason="target_identity_unavailable",
-                            )
+                            target_ref=target_ref,
+                            target_expr=target_expr,
+                            arguments=explicit_args,
+                            path_conditions=ConditionSimplifier.simplify_conditions(
+                                list(normalized_path_conditions) + list(target_conditions or ())
+                            ),
+                            reason="target_identity_unavailable",
                         )
+                    )
                         continue
                     normalized_target_conditions = ConditionSimplifier.simplify_conditions(
                         list(target_conditions or ())
@@ -1149,6 +1160,7 @@ def summarize_store_effects(
                                     target_ref=target_ref,
                                     target_expr=target_expr,
                                     arguments=variant_args,
+                                    path_conditions=active_conditions,
                                     reason="callee_effect_summary_missing",
                                 )
                             )
@@ -1170,6 +1182,7 @@ def summarize_store_effects(
                                     target_ref=target_ref,
                                     target_expr=target_expr,
                                     arguments=variant_args,
+                                    path_conditions=active_conditions,
                                     reason="call_argument_width_unsafe_for_effect_summary",
                                 )
                             )
@@ -1188,6 +1201,7 @@ def summarize_store_effects(
                                     target_ref=target_ref,
                                     target_expr=target_expr,
                                     arguments=variant_args,
+                                    path_conditions=active_conditions,
                                     reason="callee_effect_summary_incomplete",
                                 )
                             )
@@ -1211,6 +1225,7 @@ def summarize_store_effects(
                                             target_ref=target_ref,
                                             target_expr=target_expr,
                                             arguments=variant_args,
+                                            path_conditions=active_conditions,
                                             reason="callee_unsupported_call_may_expose_parameter_memory",
                                         )
                                     )
@@ -1234,6 +1249,7 @@ def summarize_store_effects(
                                     target_ref=target_ref,
                                     target_expr=target_expr,
                                     arguments=variant_args,
+                                    path_conditions=active_conditions,
                                     reason="callee_effect_summary_not_allowed",
                                 )
                             )
@@ -1260,6 +1276,7 @@ def summarize_store_effects(
                                         target_ref=target_ref,
                                         target_expr=target_expr,
                                         arguments=variant_args,
+                                        path_conditions=active_conditions,
                                         reason="substituted_effect_location_unavailable",
                                     )
                                 )
@@ -1320,6 +1337,7 @@ def summarize_store_effects(
                             target_ref=None,
                             target_expr=target_expr,
                             arguments=explicit_args,
+                            path_conditions=normalized_path_conditions,
                             reason="target_identity_unavailable",
                         )
                     )
@@ -2354,6 +2372,22 @@ def _select_aligned_explicit_call_arguments(
     if storage_window_aligned is not None:
         return storage_window_aligned
 
+    if len(callee_parameters or ()) == 1 and _has_ambiguous_storage_windows(
+        call_op,
+        tracer,
+        callee_parameters,
+        explicit,
+    ):
+        return None
+
+    semantic_window_aligned = _select_explicit_call_arguments_by_semantic_window(
+        callee_parameters,
+        explicit,
+        caller_parameters,
+    )
+    if semantic_window_aligned is not None:
+        return semantic_window_aligned
+
     dependency_tail_aligned = _select_explicit_call_arguments_by_dependency_tail(
         call_op,
         tracer,
@@ -2407,6 +2441,107 @@ def _select_aligned_explicit_call_arguments(
         used_indexes.add(matches[0])
         selected.append(explicit[matches[0]])
     return selected
+
+
+def _select_explicit_call_arguments_by_semantic_window(
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+    caller_parameters: Sequence[Dict],
+) -> Optional[List[Expression]]:
+    callee_count = len(callee_parameters or ())
+    explicit = list(explicit_args or ())
+    if callee_count <= 0 or len(explicit) <= callee_count:
+        return None
+
+    matching_windows: List[int] = []
+    for start in range(0, len(explicit) - callee_count + 1):
+        window = explicit[start:start + callee_count]
+        if _explicit_call_argument_window_matches_parameter_identity(
+            window,
+            callee_parameters,
+            caller_parameters,
+        ):
+            matching_windows.append(start)
+
+    if len(matching_windows) != 1:
+        return None
+    start = matching_windows[0]
+    return explicit[start:start + callee_count]
+
+
+def _explicit_call_argument_window_matches_parameter_identity(
+    explicit_args: Sequence[Expression],
+    callee_parameters: Sequence[Dict],
+    caller_parameters: Sequence[Dict],
+) -> bool:
+    if len(explicit_args) != len(callee_parameters):
+        return False
+
+    strong_identity_matches = 0
+    for explicit_arg, callee_param in zip(explicit_args, callee_parameters):
+        if explicit_arg is None:
+            return False
+        if _explicit_argument_matches_callee_parameter_identity(
+            explicit_arg,
+            caller_parameters,
+            callee_param,
+        ):
+            strong_identity_matches += 1
+            continue
+        if _explicit_argument_is_safe_immediate_for_callee_param(
+            explicit_arg,
+            callee_param,
+            caller_parameters,
+        ):
+            continue
+        return False
+    return strong_identity_matches > 0
+
+
+def _explicit_argument_matches_callee_parameter_identity(
+    expr: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    callee_param: Optional[Dict],
+) -> bool:
+    if expr is None or callee_param is None:
+        return False
+    caller_param = _resolve_parameter_descriptor(expr, caller_parameters)
+    if caller_param is None:
+        return False
+    caller_storage = _coerce_storage_info(caller_param.get("storage"))
+    callee_storage = _coerce_storage_info(callee_param.get("storage"))
+    if caller_storage is None or callee_storage is None:
+        return False
+    return _storage_matches_parameter(caller_storage, callee_storage)
+
+
+def _explicit_argument_is_safe_immediate_for_callee_param(
+    expr: Optional[Expression],
+    callee_param: Optional[Dict],
+    caller_parameters: Sequence[Dict],
+) -> bool:
+    if expr is None or callee_param is None:
+        return False
+    if expr.expr_type != ExpressionType.CONSTANT:
+        return False
+    callee_storage = _coerce_storage_info(callee_param.get("storage"))
+    if callee_storage is None:
+        return False
+    for caller_param in caller_parameters or ():
+        caller_storage = _coerce_storage_info(caller_param.get("storage"))
+        if caller_storage is not None and _storage_matches_parameter(caller_storage, callee_storage):
+            return False
+    try:
+        expr_size = int(getattr(expr, "size", 0) or 0)
+    except Exception:
+        expr_size = 0
+    try:
+        param_size = int((callee_param or {}).get("size") or 0)
+    except Exception:
+        param_size = 0
+    if expr_size > 0 and param_size > 0 and expr_size > param_size:
+        return False
+    return True
 
 
 def _select_explicit_call_arguments_by_fixed_prefix(

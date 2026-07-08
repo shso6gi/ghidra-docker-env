@@ -93,6 +93,7 @@ from .effect_summary import (
     resolve_call_targets,
     rewrite_loads_from_effects,
     rewrite_observed_loads_from_effects,
+    _select_explicit_call_arguments_by_semantic_window,
     summarize_store_effects,
     substitute_condition,
     substitute_expression,
@@ -5799,6 +5800,7 @@ class ReturnAnalyzer:
             if current_function is not None
             else CallTargetRef.unknown()
         )
+        caller_parameters = [dict(param) for param in (self._current_parameters or [])]
 
         def record_call(
             target,
@@ -5809,7 +5811,12 @@ class ReturnAnalyzer:
             target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
             sequence = self._deferred_call_counter
             self._deferred_call_counter += 1
-            cloned_args = [self._clone_expression(arg) for arg in args]
+            aligned_args = self._align_deferred_call_arguments_for_recording(
+                target_ref,
+                args,
+                caller_parameters,
+            )
+            cloned_args = [self._clone_expression(arg) for arg in aligned_args]
             cloned_target_expr = (
                 self._clone_expression(call_target_expr)
                 if call_target_expr is not None
@@ -5845,6 +5852,27 @@ class ReturnAnalyzer:
             return info.unknown_ref
 
         return record_call
+
+    def _align_deferred_call_arguments_for_recording(
+        self,
+        target_ref: CallTargetRef,
+        args: Sequence[Expression],
+        caller_parameters: Sequence[Dict],
+    ) -> List[Expression]:
+        raw_args = list(args or [])
+        if target_ref is None or target_ref.is_unknown() or len(raw_args) <= 1:
+            return raw_args
+        callee_parameters = list(self._get_freshest_callee_parameters(target_ref) or [])
+        if not callee_parameters or len(raw_args) <= len(callee_parameters):
+            return raw_args
+        aligned = _select_explicit_call_arguments_by_semantic_window(
+            callee_parameters,
+            raw_args,
+            caller_parameters,
+        )
+        if aligned is None:
+            return raw_args
+        return list(aligned)
 
     def _apply_bounded_call_refinement(
         self,

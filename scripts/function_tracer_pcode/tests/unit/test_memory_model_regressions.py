@@ -6609,6 +6609,157 @@ def test_recover_call_argument_expressions_refuses_right_aligned_hidden_prefix_w
     assert recovered == []
 
 
+def test_recover_call_argument_expressions_selects_semantic_window_with_parameter_identity_and_immediate():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeCallOp:
+        def __init__(self):
+            self._seqnum = FakeSeqnum(0x3000, 10)
+
+        def getSeqnum(self):
+            return self._seqnum
+
+        def getOutput(self):
+            return None
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 0
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, _varnode, use_cache=False, depth=0):
+            return Expression.variable("opaque", size=4)
+
+    recovered = _recover_call_argument_expressions(
+        FakeCallOp(),
+        FakeTracer(),
+        [
+            _param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
+            _param("loop_index", size=4, is_signed=False, index=1, storage=_reg_storage("a2", size_bytes=4)),
+        ],
+        [
+            _param("x", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
+            _param("b", size=4, is_signed=False, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        [
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.parameter("loop_index", 1, size=4),
+                Expression.constant(0xFFFFFFF8, 4),
+            ),
+            Expression.parameter("param_1", 0, size=4),
+            Expression.constant(1, 4),
+        ],
+    )
+
+    assert len(recovered) == 2
+    assert recovered[0].to_string() == "param_1"
+    assert recovered[1].to_string() == "1"
+
+
+def test_recover_call_argument_expressions_rejects_semantic_window_without_strong_identity():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeCallOp:
+        def __init__(self):
+            self._seqnum = FakeSeqnum(0x3000, 10)
+
+        def getSeqnum(self):
+            return self._seqnum
+
+        def getOutput(self):
+            return None
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 0
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, _varnode, use_cache=False, depth=0):
+            return Expression.variable("opaque", size=4)
+
+    recovered = _recover_call_argument_expressions(
+        FakeCallOp(),
+        FakeTracer(),
+        [
+            _param("param_3", size=4, is_signed=False, index=2, storage=_reg_storage("a2", size_bytes=4)),
+        ],
+        [
+            _param("x", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
+            _param("b", size=4, is_signed=False, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        [
+            Expression.variable("hidden", size=4),
+            Expression.parameter("param_3", 2, size=4),
+            Expression.constant(1, 4),
+        ],
+    )
+
+    assert recovered == []
+
+
 def test_recover_call_argument_expressions_uses_path_sensitive_multiequal_input_for_hidden_arg():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):

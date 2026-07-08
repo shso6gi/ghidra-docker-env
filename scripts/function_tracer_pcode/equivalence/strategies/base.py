@@ -124,6 +124,7 @@ class CheckStrategy(ABC):
         "reason_signature_match",
         "target_expression_match",
         "argument_keys_match",
+        "path_guard_match",
         "callee_identity_category_match",
         "callee_identity_reachable",
         "unsupported_fact_evidence_complete",
@@ -1736,6 +1737,16 @@ class CheckStrategy(ABC):
         argument_keys = self._cross_binary_call_effect_component_key(
             self._unsupported_call_effect_argument_keys(object_target_key)
         )
+        effect_fingerprint = self._matched_unknown_indirect_call_effect_fingerprint(
+            object_target_key,
+            peer_object_target_key,
+            analysis,
+            peer_analysis,
+            effect_summary,
+            peer_summary,
+        )
+        if effect_fingerprint is None:
+            return reject("call-effect surface fingerprint incomplete")
         return {
             "object_derived": True,
             "status": "complete",
@@ -1761,6 +1772,7 @@ class CheckStrategy(ABC):
                 "matching_local_unsupported_call_site_count": len(local_matches),
                 "matching_peer_unsupported_call_site_count": len(matches),
             },
+            "call_effect_surface": effect_fingerprint,
             "runtime_ref": {
                 "status": "complete",
                 "runtime_ref": object_target_key[3],
@@ -2100,6 +2112,221 @@ class CheckStrategy(ABC):
         policy = self._unsupported_call_effect_compatibility_policy_evidence(left, right)
         return self._unsupported_call_effect_compatibility_policy_is_complete(policy)
 
+    def _matched_unknown_indirect_call_effect_fingerprint(
+        self,
+        object_target_key: Tuple[Any, ...],
+        peer_object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        peer_analysis: FunctionReturnAnalysis,
+        effect_summary: Any,
+        peer_summary: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if not (
+            self._unsupported_call_effect_has_no_observed_writes(effect_summary)
+            and self._unsupported_call_effect_has_no_observed_writes(peer_summary)
+        ):
+            return None
+        local_guard_key = self._unsupported_call_effect_path_condition_key(object_target_key)
+        peer_guard_key = self._unsupported_call_effect_path_condition_key(peer_object_target_key)
+        if local_guard_key is None or peer_guard_key is None:
+            return None
+        if (
+            self._cross_binary_call_effect_component_key(local_guard_key)
+            != self._cross_binary_call_effect_component_key(peer_guard_key)
+        ):
+            return None
+        local_output_use = self._unsupported_call_output_use_fingerprint(
+            analysis,
+            effect_summary,
+            object_target_key,
+        )
+        peer_output_use = self._unsupported_call_output_use_fingerprint(
+            peer_analysis,
+            peer_summary,
+            peer_object_target_key,
+        )
+        if local_output_use is None or peer_output_use is None:
+            return None
+        local_occurrence = self._unsupported_call_effect_occurrence_fingerprint(
+            object_target_key,
+            analysis,
+            effect_summary,
+        )
+        peer_occurrence = self._unsupported_call_effect_occurrence_fingerprint(
+            peer_object_target_key,
+            peer_analysis,
+            peer_summary,
+        )
+        if local_occurrence is None or peer_occurrence is None:
+            return None
+        if local_occurrence.get("occurrence_index") != peer_occurrence.get("occurrence_index"):
+            return None
+        return {
+            "status": "complete",
+            "guard_equivalence_mode": "path_guard_equivalence",
+            "local_callsite_path_guard_key": local_guard_key,
+            "peer_callsite_path_guard_key": peer_guard_key,
+            "call_occurrence": local_occurrence,
+            "peer_call_occurrence": peer_occurrence,
+            "caller_observed_memory_write": {
+                "status": "complete",
+                "scope": "whole_function_effect_summary",
+                "local_store_effect_count": 0,
+                "peer_store_effect_count": 0,
+                "local_incomplete_reason_count": 0,
+                "peer_incomplete_reason_count": 0,
+            },
+            "call_output_use": local_output_use,
+            "peer_call_output_use": peer_output_use,
+        }
+
+    @classmethod
+    def _unsupported_call_effect_has_no_observed_writes(cls, effect_summary: Any) -> bool:
+        if effect_summary is None:
+            return False
+        return not (
+            tuple(getattr(effect_summary, "effects", ()) or ())
+            or tuple(getattr(effect_summary, "incomplete_reasons", ()) or ())
+        )
+
+    def _unsupported_call_effect_occurrence_fingerprint(
+        self,
+        object_target_key: Tuple[Any, ...],
+        analysis: FunctionReturnAnalysis,
+        effect_summary: Any,
+    ) -> Optional[Dict[str, Any]]:
+        sites = tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
+        if not sites:
+            return None
+        side_label = object_target_key[1] if len(object_target_key) >= 2 else None
+        analysis_key = object_target_key[2] if len(object_target_key) >= 3 else None
+        site_keys = tuple(
+            self._normalize_nested_tuple(
+                self._unsupported_call_effect_object_key(
+                    site,
+                    analysis=analysis,
+                    side_label=side_label,
+                )
+            )
+            for site in sites
+        )
+        target_runtime = object_target_key[3] if len(object_target_key) >= 4 else None
+        target_storage = object_target_key[4] if len(object_target_key) >= 5 else None
+        target_ordinal = object_target_key[5] if len(object_target_key) >= 6 else None
+        matching_indices = tuple(
+            index
+            for index, key in enumerate(site_keys)
+            if (
+                isinstance(key, tuple)
+                and len(key) >= 6
+                and key[3] == target_runtime
+                and key[4] == target_storage
+                and key[5] == target_ordinal
+            )
+        )
+        if len(matching_indices) != 1:
+            return None
+        return {
+            "status": "complete",
+            "analysis_key": analysis_key,
+            "effect_ordinal": target_ordinal,
+            "occurrence_index": matching_indices[0],
+            "unsupported_call_site_count": len(site_keys),
+            "call_order_key_sequence": tuple(
+                key[5] for key in site_keys if isinstance(key, tuple) and len(key) >= 6
+            ),
+        }
+
+    def _unsupported_call_output_use_fingerprint(
+        self,
+        analysis: FunctionReturnAnalysis,
+        effect_summary: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Dict[str, Any]]:
+        pcode_ref = self._unsupported_call_effect_pcode_ref_key(object_target_key)
+        if pcode_ref is None:
+            return None
+        exposed_refs = []
+        for return_index, return_info in enumerate(getattr(analysis, "returns", ()) or ()):
+            if self._expression_contains_runtime_ref(getattr(return_info, "value", None), pcode_ref):
+                exposed_refs.append(("return_value", return_index))
+            for condition_index, condition in enumerate(getattr(return_info, "conditions", ()) or ()):
+                if self._expression_contains_runtime_ref(
+                    getattr(condition, "expression", None),
+                    pcode_ref,
+                ):
+                    exposed_refs.append(("return_guard", return_index, condition_index))
+        for site_index, site in enumerate(getattr(effect_summary, "unsupported_call_sites", ()) or ()):
+            if self._expression_contains_runtime_ref(getattr(site, "target_expr", None), pcode_ref):
+                exposed_refs.append(("unsupported_call_target", site_index))
+            for argument_index, argument in enumerate(getattr(site, "arguments", ()) or ()):
+                if self._expression_contains_runtime_ref(argument, pcode_ref):
+                    exposed_refs.append(("unsupported_call_argument", site_index, argument_index))
+        for evidence_index, evidence in enumerate(getattr(effect_summary, "call_target_resolution_evidence", ()) or ()):
+            if self._expression_contains_runtime_ref(getattr(evidence, "target_expr", None), pcode_ref):
+                exposed_refs.append(("call_target_resolution_target", evidence_index))
+        if exposed_refs:
+            return None
+        return {
+            "status": "complete",
+            "classification": "not_exposed_to_return_or_call_effect_surface",
+            "pcode_op_ref": pcode_ref,
+            "checked_surface": "return_values_return_guards_and_call_effect_inputs",
+        }
+
+    @classmethod
+    def _unsupported_call_effect_pcode_ref_key(cls, object_target_key: Any) -> Optional[Tuple[Any, ...]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5:
+            return None
+        for section in (target[3], target[4]):
+            if not isinstance(section, tuple):
+                continue
+            for item in section:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "pcode_op_ref":
+                    pcode_ref = cls._normalize_nested_tuple(item[1])
+                    return pcode_ref if isinstance(pcode_ref, tuple) else None
+        return None
+
+    @classmethod
+    def _unsupported_call_effect_path_condition_key(cls, object_target_key: Any) -> Optional[Tuple[Any, ...]]:
+        target = cls._normalize_nested_tuple(object_target_key)
+        if not isinstance(target, tuple) or len(target) < 5:
+            return None
+        for section in (target[3], target[4]):
+            if not isinstance(section, tuple):
+                continue
+            for item in section:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "path_conditions":
+                    value = cls._normalize_nested_tuple(item[1])
+                    return ("callsite_path_conditions", value if isinstance(value, tuple) else ())
+        return ("callsite_path_conditions", ())
+
+    @classmethod
+    def _expression_contains_runtime_ref(cls, expr: Any, needle: Tuple[Any, ...]) -> bool:
+        if expr is None:
+            return False
+        stack = [expr]
+        seen: Set[int] = set()
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            runtime_ref = cls._stable_key_or_none(getattr(current, "runtime_ref", None))
+            if runtime_ref == needle or cls._normalize_nested_tuple(runtime_ref) == needle:
+                return True
+            for operand in getattr(current, "operands", ()) or ():
+                stack.append(operand)
+            if getattr(current, "expr_type", None) == ExpressionType.PHI:
+                for condition, value in getattr(current, "value", ()) or ():
+                    stack.append(getattr(condition, "expression", None))
+                    stack.append(value)
+        return False
+
     @classmethod
     def _unsupported_call_effect_requires_exact_target_expression_match(
         cls,
@@ -2175,6 +2402,12 @@ class CheckStrategy(ABC):
         right_arguments = cls._cross_binary_call_effect_component_key(
             cls._unsupported_call_effect_argument_keys(right)
         )
+        left_path_guard = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_path_condition_key(left)
+        )
+        right_path_guard = cls._cross_binary_call_effect_component_key(
+            cls._unsupported_call_effect_path_condition_key(right)
+        )
         left_callee_category = cls._unsupported_call_effect_callee_identity_category(left)
         right_callee_category = cls._unsupported_call_effect_callee_identity_category(right)
         reason_signature_match = cls._unsupported_call_effect_reason_is_compatible(left[-1], right[-1])
@@ -2187,6 +2420,11 @@ class CheckStrategy(ABC):
             cls._unsupported_call_effect_argument_evidence_is_complete(left_arguments)
             and cls._unsupported_call_effect_argument_evidence_is_complete(right_arguments)
             and left_arguments == right_arguments
+        )
+        path_guard_match = (
+            left_path_guard is not None
+            and right_path_guard is not None
+            and left_path_guard == right_path_guard
         )
         callee_identity_category_match = (
             left_callee_category is not None
@@ -2208,6 +2446,7 @@ class CheckStrategy(ABC):
             "reason_signature_match": reason_signature_match,
             "target_expression_match": target_expression_match,
             "argument_keys_match": argument_keys_match,
+            "path_guard_match": path_guard_match,
             "callee_identity_category_match": callee_identity_category_match,
             "callee_identity_reachable": callee_identity_reachable,
             "unsupported_fact_evidence_complete": unsupported_fact_evidence_complete,
@@ -2222,6 +2461,8 @@ class CheckStrategy(ABC):
             "right_target_expression_key": right_target,
             "left_argument_keys": left_arguments,
             "right_argument_keys": right_arguments,
+            "left_path_guard_key": left_path_guard,
+            "right_path_guard_key": right_path_guard,
             **flags,
         }
 
@@ -4217,6 +4458,14 @@ class CheckStrategy(ABC):
                 return False
             if call_effect_summary.get("matching_peer_unsupported_call_site_count") != 1:
                 return False
+            if proof_rule == "matched_unknown_indirect_no_store_call_effect":
+                surface = proof_content.get("call_effect_surface")
+                if not cls._matched_unknown_indirect_call_effect_surface_is_complete(
+                    surface,
+                    object_target_key,
+                    peer_object_target_key,
+                ):
+                    return False
 
             runtime_ref = proof_content.get("runtime_ref")
             callsite_storage = proof_content.get("callsite_storage")
@@ -4275,6 +4524,8 @@ class CheckStrategy(ABC):
                 "right_target_expression_key",
                 "left_argument_keys",
                 "right_argument_keys",
+                "left_path_guard_key",
+                "right_path_guard_key",
             ):
                 if cls._normalize_nested_tuple(provided_policy.get(key)) != cls._normalize_nested_tuple(
                     expected_policy.get(key)
@@ -4287,6 +4538,86 @@ class CheckStrategy(ABC):
                 return False
             return True
         return False
+
+    @classmethod
+    def _matched_unknown_indirect_call_effect_surface_is_complete(
+        cls,
+        surface: Any,
+        object_target_key: Tuple[Any, ...],
+        peer_object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(surface, Mapping):
+            return False
+        if cls._evidence_text(surface, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._evidence_text(surface, "guard_equivalence_mode") != "path_guard_equivalence":
+            return False
+        local_guard = cls._normalize_nested_tuple(surface.get("local_callsite_path_guard_key"))
+        peer_guard = cls._normalize_nested_tuple(surface.get("peer_callsite_path_guard_key"))
+        if not isinstance(local_guard, tuple) or not isinstance(peer_guard, tuple):
+            return False
+        if local_guard != cls._unsupported_call_effect_path_condition_key(object_target_key):
+            return False
+        if peer_guard != cls._unsupported_call_effect_path_condition_key(peer_object_target_key):
+            return False
+        if cls._cross_binary_call_effect_component_key(local_guard) != cls._cross_binary_call_effect_component_key(peer_guard):
+            return False
+        occurrence = surface.get("call_occurrence")
+        peer_occurrence = surface.get("peer_call_occurrence")
+        if not isinstance(occurrence, Mapping) or not isinstance(peer_occurrence, Mapping):
+            return False
+        if cls._evidence_text(occurrence, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._evidence_text(peer_occurrence, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._normalize_nested_tuple(occurrence.get("effect_ordinal")) != cls._normalize_nested_tuple(object_target_key[5]):
+            return False
+        if cls._normalize_nested_tuple(peer_occurrence.get("effect_ordinal")) != cls._normalize_nested_tuple(peer_object_target_key[5]):
+            return False
+        if occurrence.get("occurrence_index") != peer_occurrence.get("occurrence_index"):
+            return False
+        write = surface.get("caller_observed_memory_write")
+        if not isinstance(write, Mapping):
+            return False
+        if cls._evidence_text(write, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._evidence_text(write, "scope") != "whole_function_effect_summary":
+            return False
+        for key in (
+            "local_store_effect_count",
+            "peer_store_effect_count",
+            "local_incomplete_reason_count",
+            "peer_incomplete_reason_count",
+        ):
+            if write.get(key) != 0:
+                return False
+        local_output = surface.get("call_output_use")
+        peer_output = surface.get("peer_call_output_use")
+        if not cls._call_output_use_surface_is_complete(local_output, object_target_key):
+            return False
+        if not cls._call_output_use_surface_is_complete(peer_output, peer_object_target_key):
+            return False
+        return True
+
+    @classmethod
+    def _call_output_use_surface_is_complete(
+        cls,
+        section: Any,
+        object_target_key: Tuple[Any, ...],
+    ) -> bool:
+        if not isinstance(section, Mapping):
+            return False
+        if cls._evidence_text(section, "status") not in {"complete", "completed", "proven"}:
+            return False
+        if cls._evidence_text(section, "classification") != "not_exposed_to_return_or_call_effect_surface":
+            return False
+        if cls._evidence_text(section, "checked_surface") != "return_values_return_guards_and_call_effect_inputs":
+            return False
+        expected_pcode_ref = cls._unsupported_call_effect_pcode_ref_key(object_target_key)
+        return (
+            expected_pcode_ref is not None
+            and cls._normalize_nested_tuple(section.get("pcode_op_ref")) == expected_pcode_ref
+        )
 
     @classmethod
     def _deferred_call_proof_content_is_complete(
@@ -9213,6 +9544,10 @@ class CheckStrategy(ABC):
             )
             for index, argument in enumerate(getattr(site, "arguments", ()) or ())
         )
+        path_condition_keys = tuple(
+            self._return_condition_object_key(condition)
+            for condition in (getattr(site, "path_conditions", ()) or ())
+        )
         callee_identity_key = self._call_effect_callee_identity_key(
             target_key,
             target_expr_key,
@@ -9230,6 +9565,7 @@ class CheckStrategy(ABC):
                 ("callee_identity", callee_identity_key),
                 ("typed_target_expression", target_expr_key),
                 ("argument_keys", argument_keys),
+                ("path_conditions", path_condition_keys),
             ),
             (
                 "callsite_storage",
@@ -9237,6 +9573,7 @@ class CheckStrategy(ABC):
                 ("callee_identity", callee_identity_key),
                 ("target_expression", target_expr_key),
                 ("argument_keys", argument_keys),
+                ("path_conditions", path_condition_keys),
             ),
             ("effect_ordinal", effect_ordinal),
             getattr(site, "reason", None),
