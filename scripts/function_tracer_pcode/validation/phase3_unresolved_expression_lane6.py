@@ -1468,6 +1468,13 @@ def _invalid_unresolved_expression_completed_actions(
 
 
 def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]:
+    cause = _unresolved_expression_target_cause(target)
+    if cause in {
+        "mixed_float_call_read_recurrence",
+        "multiple_or_nested_unresolved",
+        "readonly_memory_read",
+    }:
+        return UNRESOLVED_GENERIC_PROOF_STAGES
     if _target_contains_originated_phi_circular(target):
         return UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
     if _target_contains_deferred_call_unknown(target):
@@ -1475,6 +1482,40 @@ def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]
     if _target_contains_void_opaque_unknown(target):
         return UNRESOLVED_OPAQUE_VOID_PROOF_STAGES
     return UNRESOLVED_GENERIC_PROOF_STAGES
+
+
+def _unresolved_expression_target_cause(target: Any) -> Optional[str]:
+    causes: list[str] = []
+
+    def visit(value: Any) -> None:
+        normalized = _normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if (
+                len(normalized) == 2
+                and normalized[0] == "unresolved_cause"
+                and isinstance(normalized[1], str)
+            ):
+                causes.append(normalized[1])
+                return
+            for item in normalized:
+                visit(item)
+        elif isinstance(normalized, list):
+            for item in normalized:
+                visit(item)
+        elif isinstance(normalized, Mapping):
+            for key, item in normalized.items():
+                visit(key)
+                visit(item)
+
+    visit(target)
+    unique_causes = tuple(sorted(set(causes)))
+    if not unique_causes:
+        return None
+    if "mixed_float_call_read_recurrence" in unique_causes:
+        return "mixed_float_call_read_recurrence"
+    if len(unique_causes) > 1:
+        return "multiple_or_nested_unresolved"
+    return unique_causes[0]
 
 
 def _target_contains_void_opaque_unknown(value: Any) -> bool:
@@ -1621,7 +1662,11 @@ def _strip_diagnostic_target_evidence(value: Any) -> Any:
         if (
             value
             and isinstance(value[0], str)
-            and value[0] in {"typed_lowering_evidence", "pair_lowering_diagnostic"}
+            and value[0] in {
+                "typed_lowering_evidence",
+                "pair_lowering_diagnostic",
+                "unresolved_classification",
+            }
         ):
             return None
         stripped = []
@@ -1634,7 +1679,11 @@ def _strip_diagnostic_target_evidence(value: Any) -> Any:
         if (
             value
             and isinstance(value[0], str)
-            and value[0] in {"typed_lowering_evidence", "pair_lowering_diagnostic"}
+            and value[0] in {
+                "typed_lowering_evidence",
+                "pair_lowering_diagnostic",
+                "unresolved_classification",
+            }
         ):
             return None
         stripped = []
@@ -1704,6 +1753,15 @@ def _required_completion_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str,
 def _pending_action_object_evidence_status(action: Mapping[str, Any]) -> str:
     stage = str(action.get("proof_stage") or MISSING_SENTINEL)
     target = action.get("object_target_key")
+    if stage in UNRESOLVED_GENERIC_PROOF_STAGES:
+        if _unresolved_expression_generic_pending_action_evidence_is_specific(
+            action,
+            stage=stage,
+            target=target,
+        ):
+            return "object_evidence_collected"
+        if action.get("object_evidence") is not None:
+            return "object_evidence_invalid"
     if stage in UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES:
         if _unresolved_expression_pending_action_evidence_is_specific(
             action,
@@ -1732,6 +1790,135 @@ def _pending_action_object_evidence_status(action: Mapping[str, Any]) -> str:
         if action.get("object_evidence") is not None:
             return "object_evidence_invalid"
     return "pending_evidence"
+
+
+def _unresolved_expression_generic_pending_action_evidence_is_specific(
+    action: Mapping[str, Any],
+    *,
+    stage: str,
+    target: Any,
+) -> bool:
+    if stage not in UNRESOLVED_GENERIC_PROOF_STAGES:
+        return False
+    evidence = _normalize_nested_tuple(action.get("object_evidence"))
+    if not isinstance(evidence, tuple) or len(evidence) != 9:
+        return False
+    if evidence[0] != "unresolved_expression_diagnostic_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("object_derived") is not True:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    evidence_target = fields.get("object_target_key")
+    if not _object_target_key_is_specific_unresolved_expression(evidence_target):
+        return False
+    if _unresolved_expression_target_identity_key(evidence_target) != _unresolved_expression_target_identity_key(target):
+        return False
+    cause = _unresolved_expression_target_cause(evidence_target)
+    if cause not in {
+        "mixed_float_call_read_recurrence",
+        "multiple_or_nested_unresolved",
+        "readonly_memory_read",
+        "opaque_unknown",
+    }:
+        return False
+    if fields.get("diagnostic_rule") != f"{cause}_pending_census":
+        return False
+    if fields.get("unresolved_cause") != cause:
+        return False
+    pending_stages = fields.get("pending_stages")
+    if pending_stages != UNRESOLVED_GENERIC_PROOF_STAGES or stage not in pending_stages:
+        return False
+    if not _target_has_unresolved_location_cause(evidence_target):
+        return False
+    stage_evidence = fields.get("stage_evidence")
+    if not isinstance(stage_evidence, tuple):
+        return False
+    matching = [
+        item
+        for item in stage_evidence
+        if _generic_unresolved_expression_stage_evidence_matches(
+            item,
+            stage=stage,
+            target=target,
+            cause=cause,
+        )
+    ]
+    if len(matching) != 1:
+        return False
+    return True
+
+
+def _generic_unresolved_expression_stage_evidence_matches(
+    value: Any,
+    *,
+    stage: str,
+    target: Any,
+    cause: str,
+) -> bool:
+    evidence = _normalize_nested_tuple(value)
+    if not isinstance(evidence, tuple) or evidence[0] != "unresolved_expression_stage_evidence":
+        return False
+    fields = _tuple_fields(evidence)
+    if fields.get("proof_stage") != stage:
+        return False
+    if fields.get("status") != "object_evidence_collected":
+        return False
+    if _unresolved_expression_target_identity_key(fields.get("object_target_key")) != _unresolved_expression_target_identity_key(target):
+        return False
+    if fields.get("unresolved_cause") != cause:
+        return False
+    if fields.get("semantic_proof_status") != "pending_semantic_proof":
+        return False
+    if fields.get("completed_proof_allowed") is not False:
+        return False
+    required = fields.get("required_semantic_proof")
+    if not isinstance(required, tuple) or not required:
+        return False
+    if stage == "typed_expression_lowering":
+        return {
+            "typed_expression_key",
+            "unresolved_location",
+            "unresolved_cause",
+        }.issubset(set(required))
+    if stage == "type_normalization":
+        return {
+            "normalization_policy",
+            "return_width_policy",
+        }.issubset(set(required))
+    return False
+
+
+def _target_has_unresolved_location_cause(target: Any) -> bool:
+    normalized = _normalize_nested_tuple(target)
+    if isinstance(normalized, tuple):
+        has_location = any(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "unresolved_location"
+            and isinstance(item[1], str)
+            for item in normalized
+        )
+        has_cause = any(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "unresolved_cause"
+            and isinstance(item[1], str)
+            for item in normalized
+        )
+        if has_location and has_cause:
+            return True
+        return any(_target_has_unresolved_location_cause(item) for item in normalized)
+    if isinstance(normalized, list):
+        return any(_target_has_unresolved_location_cause(item) for item in normalized)
+    if isinstance(normalized, Mapping):
+        return any(
+            _target_has_unresolved_location_cause(key)
+            or _target_has_unresolved_location_cause(item)
+            for key, item in normalized.items()
+        )
+    return False
 
 
 def _unresolved_expression_deferred_call_pending_action_evidence_is_specific(
@@ -3272,16 +3459,61 @@ def _unresolved_location_classification_is_specific(value: Any, expected_scope: 
     classification = _normalize_nested_tuple(value)
     if (
         not isinstance(classification, tuple)
-        or len(classification) != 5
+        or len(classification) not in {5, 8}
         or classification[0] != "unresolved_classification"
     ):
         return False
     if _nested_contains_diagnostic_reason(classification) or _nested_contains_missing_sentinel(classification):
         return False
     scope = classification[1]
-    kinds = classification[2]
-    unknown_refs = classification[3]
-    unsupported_ops = classification[4]
+    if len(classification) == 8:
+        location = classification[2]
+        cause = classification[3]
+        substage = classification[4]
+        kinds = classification[5]
+        unknown_refs = classification[6]
+        unsupported_ops = classification[7]
+        expected_location = {
+            "return_value": "return_value_unresolved",
+            "guard_condition": "return_guard_unresolved",
+            "path_guard": "path_guard_unresolved",
+            "call_argument": "call_argument_unresolved",
+            "memory_address": "memory_address_unresolved",
+            "effect_surface": "effect_surface_unresolved",
+        }.get(expected_scope)
+        if not (
+            isinstance(location, tuple)
+            and len(location) >= 2
+            and location[0] == "unresolved_location"
+            and _text_identity_is_specific(location[1])
+            and (expected_location is None or location[1] == expected_location)
+        ):
+            return False
+        if not (
+            isinstance(cause, tuple)
+            and len(cause) == 2
+            and cause[0] == "unresolved_cause"
+            and cause[1] in {
+                "phi_circular_integer",
+                "deferred_call_return",
+                "readonly_memory_read",
+                "opaque_unknown",
+                "mixed_float_call_read_recurrence",
+                "multiple_or_nested_unresolved",
+            }
+        ):
+            return False
+        if not (
+            isinstance(substage, tuple)
+            and len(substage) == 2
+            and substage[0] == "unresolved_substage"
+            and _text_identity_is_specific(substage[1])
+        ):
+            return False
+    else:
+        kinds = classification[2]
+        unknown_refs = classification[3]
+        unsupported_ops = classification[4]
     if (
         not isinstance(scope, tuple)
         or len(scope) != 2

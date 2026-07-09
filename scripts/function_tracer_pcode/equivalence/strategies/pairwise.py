@@ -636,6 +636,14 @@ class PairwiseStrategy(CheckStrategy):
                                 case2=case2,
                                 pair_id=pair_id,
                             )
+                        if self._unresolved_expression_target_uses_generic_pending_census(
+                            object_target_key
+                        ):
+                            completed_proof_evidence = (
+                                self._unresolved_expression_generic_diagnostic_evidence(
+                                    object_target_key
+                                )
+                            )
                         if completed_proof_evidence is None:
                             completed_proof_evidence = (
                                 self._unresolved_expression_phi_circular_full_shape_diagnostic_evidence(
@@ -651,6 +659,12 @@ class PairwiseStrategy(CheckStrategy):
                         if completed_proof_evidence is None:
                             completed_proof_evidence = (
                                 self._unresolved_expression_opaque_unknown_diagnostic_evidence(
+                                    object_target_key
+                                )
+                            )
+                        if completed_proof_evidence is None:
+                            completed_proof_evidence = (
+                                self._unresolved_expression_generic_diagnostic_evidence(
                                     object_target_key
                                 )
                             )
@@ -4244,6 +4258,94 @@ class PairwiseStrategy(CheckStrategy):
             ("stage_evidence", stage_evidence),
         )
 
+    def _unresolved_expression_generic_diagnostic_evidence(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[Any, ...]]:
+        cause = self._unresolved_expression_target_cause(object_target_key)
+        if cause not in {
+            "mixed_float_call_read_recurrence",
+            "multiple_or_nested_unresolved",
+            "readonly_memory_read",
+            "opaque_unknown",
+        }:
+            return None
+        stage_evidence = self._generic_unresolved_expression_stage_evidence(
+            object_target_key=object_target_key,
+            cause=cause,
+        )
+        return (
+            "unresolved_expression_diagnostic_evidence",
+            ("object_derived", True),
+            ("status", "object_evidence_collected"),
+            ("diagnostic_rule", f"{cause}_pending_census"),
+            ("unresolved_cause", cause),
+            ("pending_stages", ("typed_expression_lowering", "type_normalization")),
+            (
+                "required_semantic_proof",
+                (
+                    "typed_expression_key",
+                    "normalization_policy",
+                    "return_width_policy",
+                ),
+            ),
+            ("object_target_key", object_target_key),
+            ("stage_evidence", stage_evidence),
+        )
+
+    @classmethod
+    def _unresolved_expression_target_uses_generic_pending_census(
+        cls,
+        object_target_key: Any,
+    ) -> bool:
+        return cls._unresolved_expression_target_cause(object_target_key) in {
+            "mixed_float_call_read_recurrence",
+            "multiple_or_nested_unresolved",
+            "readonly_memory_read",
+        }
+
+    def _generic_unresolved_expression_stage_evidence(
+        self,
+        *,
+        object_target_key: Tuple[Any, ...],
+        cause: str,
+    ) -> Tuple[Any, ...]:
+        return (
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "typed_expression_lowering"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("unresolved_cause", cause),
+                ("semantic_proof_status", "pending_semantic_proof"),
+                ("completed_proof_allowed", False),
+                (
+                    "required_semantic_proof",
+                    (
+                        "typed_expression_key",
+                        "unresolved_location",
+                        "unresolved_cause",
+                    ),
+                ),
+            ),
+            (
+                "unresolved_expression_stage_evidence",
+                ("proof_stage", "type_normalization"),
+                ("status", "object_evidence_collected"),
+                ("object_target_key", object_target_key),
+                ("unresolved_cause", cause),
+                ("semantic_proof_status", "pending_semantic_proof"),
+                ("completed_proof_allowed", False),
+                (
+                    "required_semantic_proof",
+                    (
+                        "normalization_policy",
+                        "return_width_policy",
+                    ),
+                ),
+            ),
+        )
+
     def _opaque_unknown_unresolved_expression_stage_evidence(
         self,
         *,
@@ -5117,13 +5219,188 @@ class PairwiseStrategy(CheckStrategy):
             unknown_refs=unknown_refs,
             unsupported_ops=unsupported_ops,
         )
+        location = self._unresolved_expression_location_taxonomy(location_scope)
+        cause = self._unresolved_expression_cause_taxonomy(
+            expr,
+            unresolved_kinds=kinds,
+            unknown_refs=unknown_refs,
+            unsupported_ops=unsupported_ops,
+        )
         return (
             "unresolved_classification",
             ("location_scope", str(location_scope)),
+            ("unresolved_location", location),
+            ("unresolved_cause", cause),
+            ("unresolved_substage", self._unresolved_expression_substage(location, cause)),
             ("unresolved_kinds", tuple(sorted(kinds, key=repr))),
             ("unknown_refs", tuple(sorted(unknown_refs, key=repr))),
             ("unsupported_ops", tuple(sorted(unsupported_ops, key=repr))),
         )
+
+    @staticmethod
+    def _unresolved_expression_location_taxonomy(location_scope: str) -> str:
+        if location_scope == "return_value":
+            return "return_value_unresolved"
+        if location_scope == "guard_condition":
+            return "return_guard_unresolved"
+        if location_scope == "path_guard":
+            return "path_guard_unresolved"
+        if location_scope == "call_argument":
+            return "call_argument_unresolved"
+        if location_scope == "memory_address":
+            return "memory_address_unresolved"
+        if location_scope == "effect_surface":
+            return "effect_surface_unresolved"
+        return f"{location_scope or 'unknown'}_unresolved"
+
+    def _unresolved_expression_cause_taxonomy(
+        self,
+        expr: Any,
+        *,
+        unresolved_kinds: set[Any],
+        unknown_refs: set[Any],
+        unsupported_ops: set[Any],
+    ) -> str:
+        has_phi = any(self._value_contains_originated_phi_circular(ref) for ref in unknown_refs)
+        has_deferred_call = (
+            "deferred_call_unknown" in unresolved_kinds
+            or any(self._value_contains_deferred_call_ref(ref) for ref in unknown_refs)
+        )
+        has_readonly = any(self._value_contains_readonly_ref(ref) for ref in unknown_refs)
+        has_float = self._expression_uses_float_or_float_op(expr)
+        has_memory_or_effect = self._unsupported_ops_include_memory_or_effect(unsupported_ops)
+        unresolved_count = len(unknown_refs)
+
+        if (
+            has_float
+            and (has_phi or has_deferred_call or has_readonly or has_memory_or_effect or unresolved_count > 1)
+        ):
+            return "mixed_float_call_read_recurrence"
+        if unresolved_count > 1 or ("phi_unresolved" in unresolved_kinds and not has_phi):
+            return "multiple_or_nested_unresolved"
+        if has_phi:
+            if has_float or has_deferred_call or has_readonly or has_memory_or_effect:
+                return "multiple_or_nested_unresolved"
+            return "phi_circular_integer"
+        if has_deferred_call:
+            return "deferred_call_return"
+        if has_readonly:
+            return "readonly_memory_read"
+        if "unsupported_smt_op" in unresolved_kinds:
+            return "opaque_unknown"
+        return "opaque_unknown"
+
+    @staticmethod
+    def _unresolved_expression_substage(location: str, cause: str) -> str:
+        if cause == "phi_circular_integer" and location in {
+            "return_guard_unresolved",
+            "path_guard_unresolved",
+        }:
+            return "integer_phi_circular_guard_pending"
+        if cause == "phi_circular_integer" and location == "return_value_unresolved":
+            return "integer_phi_circular_value_pending"
+        if cause == "deferred_call_return" and location == "return_value_unresolved":
+            return "deferred_call_return_value_pending"
+        if cause == "readonly_memory_read":
+            return "readonly_memory_read_subnode_pending"
+        if cause == "mixed_float_call_read_recurrence":
+            return "mixed_float_call_read_recurrence_deferred"
+        if cause == "multiple_or_nested_unresolved":
+            return "multiple_or_nested_unresolved_deferred"
+        return "typed_lowering_pending"
+
+    @classmethod
+    def _value_contains_originated_phi_circular(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if cls._tuple_is_originated_phi_circular_runtime_ref(normalized):
+                return True
+            return any(cls._value_contains_originated_phi_circular(item) for item in normalized)
+        if isinstance(normalized, list):
+            return any(cls._value_contains_originated_phi_circular(item) for item in normalized)
+        if isinstance(normalized, dict):
+            return any(
+                cls._value_contains_originated_phi_circular(key)
+                or cls._value_contains_originated_phi_circular(item)
+                for key, item in normalized.items()
+            )
+        return False
+
+    @classmethod
+    def _value_contains_deferred_call_ref(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if normalized and normalized[0] == "deferred_call":
+                return True
+            return any(cls._value_contains_deferred_call_ref(item) for item in normalized)
+        if isinstance(normalized, list):
+            return any(cls._value_contains_deferred_call_ref(item) for item in normalized)
+        if isinstance(normalized, dict):
+            return any(
+                cls._value_contains_deferred_call_ref(key)
+                or cls._value_contains_deferred_call_ref(item)
+                for key, item in normalized.items()
+            )
+        return False
+
+    @classmethod
+    def _value_contains_readonly_ref(cls, value: Any) -> bool:
+        normalized = cls._normalize_nested_tuple(value)
+        if isinstance(normalized, tuple):
+            if normalized and isinstance(normalized[0], str) and normalized[0].startswith("readonly"):
+                return True
+            if "observed_memory_read" in normalized:
+                return True
+            return any(cls._value_contains_readonly_ref(item) for item in normalized)
+        if isinstance(normalized, list):
+            return any(cls._value_contains_readonly_ref(item) for item in normalized)
+        if isinstance(normalized, dict):
+            return any(
+                cls._value_contains_readonly_ref(key)
+                or cls._value_contains_readonly_ref(item)
+                for key, item in normalized.items()
+            )
+        return False
+
+    @staticmethod
+    def _unsupported_ops_include_memory_or_effect(unsupported_ops: set[Any]) -> bool:
+        for op in unsupported_ops:
+            if not isinstance(op, tuple):
+                continue
+            rendered = repr(op)
+            if any(marker in rendered for marker in ("LOAD", "STORE", "CALL", "INDIRECT", "MULTIEQUAL")):
+                return True
+        return False
+
+    @staticmethod
+    def _expression_uses_float_or_float_op(expr: Any) -> bool:
+        if expr is None:
+            return False
+        try:
+            if expression_uses_smt_float_theory(expr):
+                return True
+        except (AttributeError, TypeError, RecursionError):
+            pass
+        expr_type = getattr(expr, "expr_type", None)
+        type_name = str(getattr(expr_type, "name", "") or "")
+        operator = str(getattr(expr, "operator", "") or "")
+        name = str(getattr(expr, "name", "") or "")
+        if any(token in type_name.upper() for token in ("FLOAT", "F")):
+            return True
+        if any(token in operator.upper() for token in ("FLOAT", "FADD", "FSUB", "FMUL", "FDIV")):
+            return True
+        if name.lower() in {"log", "exp", "sqrt", "sin", "cos", "pow"}:
+            return True
+        for operand in getattr(expr, "operands", []) or ():
+            if PairwiseStrategy._expression_uses_float_or_float_op(operand):
+                return True
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+            for condition, value in expr.value:
+                if condition is not None and PairwiseStrategy._expression_uses_float_or_float_op(condition.expression):
+                    return True
+                if PairwiseStrategy._expression_uses_float_or_float_op(value):
+                    return True
+        return False
 
     def _collect_unresolved_expression_classification(
         self,
@@ -5236,6 +5513,13 @@ class PairwiseStrategy(CheckStrategy):
         self,
         object_target_key: Tuple[Any, ...],
     ) -> Optional[Tuple[UnknownRecoveryProofObligation, ...]]:
+        target_cause = self._unresolved_expression_target_cause(object_target_key)
+        if target_cause in {
+            "mixed_float_call_read_recurrence",
+            "multiple_or_nested_unresolved",
+            "readonly_memory_read",
+        }:
+            return self._generic_unresolved_expression_proof_obligations(target_cause)
         if self._object_target_contains_originated_phi_circular(object_target_key):
             return (
                 UnknownRecoveryProofObligation.create(
@@ -5335,6 +5619,74 @@ class PairwiseStrategy(CheckStrategy):
                 ),
             )
         return None
+
+    def _generic_unresolved_expression_proof_obligations(
+        self,
+        cause: str,
+    ) -> Tuple[UnknownRecoveryProofObligation, ...]:
+        return (
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                "typed_expression_lowering",
+                required_evidence=(
+                    "object_target_key",
+                    "unresolved_location",
+                    "unresolved_cause",
+                    "typed_expression_key",
+                ),
+                description=(
+                    "Classify and lower the unresolved expression before retrying SMT."
+                ),
+            ),
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                "type_normalization",
+                required_evidence=(
+                    "object_target_key",
+                    "unresolved_cause",
+                    "return_width_policy",
+                    "normalization_policy",
+                ),
+                description=(
+                    f"Normalize the {cause} expression only after its semantic "
+                    "dependencies have been proven."
+                ),
+            ),
+        )
+
+    @classmethod
+    def _unresolved_expression_target_cause(cls, object_target_key: Any) -> Optional[str]:
+        causes: List[str] = []
+
+        def visit(value: Any) -> None:
+            normalized = cls._normalize_nested_tuple(value)
+            if isinstance(normalized, tuple):
+                if (
+                    len(normalized) == 2
+                    and normalized[0] == "unresolved_cause"
+                    and isinstance(normalized[1], str)
+                ):
+                    causes.append(normalized[1])
+                    return
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, list):
+                for item in normalized:
+                    visit(item)
+            elif isinstance(normalized, dict):
+                for key, item in normalized.items():
+                    visit(key)
+                    visit(item)
+
+        visit(object_target_key)
+        unique_causes = tuple(sorted(set(causes)))
+        if not unique_causes:
+            return None
+        if "mixed_float_call_read_recurrence" in unique_causes:
+            return "mixed_float_call_read_recurrence"
+        if len(unique_causes) > 1:
+            return "multiple_or_nested_unresolved"
+        return unique_causes[0]
 
     def _unresolved_expression_action_status(
         self,

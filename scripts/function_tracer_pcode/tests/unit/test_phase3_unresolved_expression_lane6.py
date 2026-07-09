@@ -35,6 +35,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     _timeout_transition_readiness,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
+    _pending_action_object_evidence_status,
     _pending_proof_obligations,
     _post_fix_checks,
     _post_fix_status,
@@ -565,6 +566,65 @@ def test_unresolved_expression_target_is_object_specific():
     assert _nested_contains(target, "typed_lowering_evidence")
     assert _nested_contains(target, "blocked_unknown_expression")
     assert not _nested_contains(target, ("reason", "unresolved_expression"))
+
+
+def _replace_nested(value, needle, replacement):
+    if value == needle:
+        return replacement
+    if isinstance(value, tuple):
+        return tuple(_replace_nested(item, needle, replacement) for item in value)
+    if isinstance(value, list):
+        return [_replace_nested(item, needle, replacement) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_nested(item, needle, replacement)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _generic_pending_action(target, evidence, stage="typed_expression_lowering"):
+    return {
+        "reason_id": "unresolved_expression",
+        "proof_kind": UNRESOLVED_PROOF_KIND,
+        "proof_stage": stage,
+        "object_target_key": target,
+        "object_evidence": evidence,
+    }
+
+
+def test_generic_unresolved_expression_pending_evidence_requires_matching_census_rule():
+    target = _unresolved_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    evidence = strategy._unresolved_expression_generic_diagnostic_evidence(target)
+
+    action = _generic_pending_action(target, evidence)
+
+    assert _pending_action_object_evidence_status(action) == "object_evidence_collected"
+
+    tampered = _replace_nested(
+        evidence,
+        ("diagnostic_rule", "opaque_unknown_pending_census"),
+        ("diagnostic_rule", "deferred_call_object_proof_content"),
+    )
+    action["object_evidence"] = tampered
+
+    assert _pending_action_object_evidence_status(action) == "object_evidence_invalid"
+
+
+def test_generic_unresolved_expression_pending_evidence_rejects_completed_stage_flag():
+    target = _unresolved_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    evidence = strategy._unresolved_expression_generic_diagnostic_evidence(target)
+    tampered = _replace_nested(
+        evidence,
+        ("completed_proof_allowed", False),
+        ("completed_proof_allowed", True),
+    )
+
+    action = _generic_pending_action(target, tampered)
+
+    assert _pending_action_object_evidence_status(action) == "object_evidence_invalid"
 
 
 def test_semantic_recurrence_query_hash_uses_stable_object_keys():

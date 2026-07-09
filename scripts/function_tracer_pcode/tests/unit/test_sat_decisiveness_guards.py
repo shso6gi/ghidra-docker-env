@@ -5414,6 +5414,9 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     reason = result.unknown_reasons[0]
     assert reason.object_evidence is not None
     assert reason.object_evidence[0] == "unresolved_expression_diagnostic_evidence"
+    assert _nested_contains(reason.object_target_key, ("unresolved_location", "return_guard_unresolved"))
+    assert _nested_contains(reason.object_target_key, ("unresolved_cause", "phi_circular_integer"))
+    assert _nested_contains(reason.object_target_key, ("unresolved_substage", "integer_phi_circular_guard_pending"))
     assert any(
         isinstance(item, tuple) and item and item[0] == "stage_evidence"
         for item in reason.object_evidence
@@ -5436,6 +5439,117 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     } == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
     strategy._solve_query_twostage.assert_not_called()
     strategy._solve_query_internal.assert_not_called()
+
+
+def test_pairwise_mixed_float_phi_unresolved_uses_generic_pending_lane():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    target = (
+        "unresolved_expression",
+        ("pair", "case0"),
+        (
+            "unresolved_expression_side",
+            "left",
+            ("function", "left"),
+            ("return_storage", "reg", "v0"),
+            ("return_case", 0),
+            (
+                "unresolved_locations",
+                (
+                    (
+                        "unresolved_location",
+                        "return_value",
+                        (
+                            "unresolved_classification",
+                            ("location_scope", "return_value"),
+                            ("unresolved_location", "return_value_unresolved"),
+                            ("unresolved_cause", "mixed_float_call_read_recurrence"),
+                            ("unresolved_substage", "mixed_float_call_read_recurrence_deferred"),
+                            (
+                                "unknown_refs",
+                                (
+                                    (
+                                        "opaque_unknown",
+                                        "phi_circular",
+                                        "expr",
+                                        "runtime",
+                                        "multiequal_pcode_op",
+                                        ("pcode_op", "B1"),
+                                    ),
+                                    (
+                                        "unknown_runtime_ref",
+                                        (
+                                            "deferred_call",
+                                            "call_out_of_scope",
+                                            ("callee", "unknown"),
+                                            ("callsite", "left"),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "unresolved_expression_side",
+            "right",
+            ("function", "right"),
+            ("return_storage", "reg", "v0"),
+            ("return_case", 0),
+            (
+                "unresolved_locations",
+                (
+                    (
+                        "unresolved_location",
+                        "return_value",
+                        (
+                            "unresolved_classification",
+                            ("location_scope", "return_value"),
+                            ("unresolved_location", "return_value_unresolved"),
+                            ("unresolved_cause", "mixed_float_call_read_recurrence"),
+                            ("unresolved_substage", "mixed_float_call_read_recurrence_deferred"),
+                            (
+                                "unknown_refs",
+                                (
+                                    (
+                                        "opaque_unknown",
+                                        "phi_circular",
+                                        "expr",
+                                        "runtime",
+                                        "multiequal_pcode_op",
+                                        ("pcode_op", "B2"),
+                                    ),
+                                    (
+                                        "unknown_runtime_ref",
+                                        (
+                                            "deferred_call",
+                                            "call_out_of_scope",
+                                            ("callee", "unknown"),
+                                            ("callsite", "right"),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    obligations = strategy._unresolved_expression_recovery_proof_obligations(target)
+
+    assert strategy._unresolved_expression_target_uses_generic_pending_census(target)
+    assert obligations is not None
+    assert {obligation.proof_stage for obligation in obligations} == {
+        "typed_expression_lowering",
+        "type_normalization",
+    }
+    evidence = strategy._unresolved_expression_generic_diagnostic_evidence(target)
+    assert evidence is not None
+    assert _nested_contains(evidence, ("diagnostic_rule", "mixed_float_call_read_recurrence_pending_census"))
+    assert _nested_contains(evidence, ("completed_proof_allowed", False))
 
 
 def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed_unknown_equality(monkeypatch):
