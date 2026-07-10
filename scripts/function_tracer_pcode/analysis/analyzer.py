@@ -25,6 +25,7 @@ from ..model.analysis import (
 from ..model.runtime_refs import (
     AddressValueRef,
     DeferredCallRef,
+    PcodeBlockRef,
     PcodeOpRef,
     PostStateValueRef,
     ReadonlyReductionRef,
@@ -1737,6 +1738,7 @@ class ReturnAnalyzer:
         )
         adjacency: Dict[int, Tuple[int, ...]] = {}
         block_keys_by_index: Dict[int, Tuple[object, ...]] = {}
+        block_refs_by_index: Dict[int, PcodeBlockRef] = {}
         terminal_return_indices: Set[int] = set()
         pcode_complete = bool(blocks_complete)
         edges_complete = bool(blocks_complete)
@@ -1764,6 +1766,20 @@ class ReturnAnalyzer:
         region_live_out_keys: Set[Tuple[object, ...]] = set()
         region_identity_complete = bool(blocks_complete and function_identity_key is not None)
         unsupported: Set[str] = set()
+        function_entry_address = None
+        if function is not None:
+            try:
+                function_entry_address = function.getEntryPoint()
+            except Exception:
+                function_entry_address = None
+        if function_entry_address is None:
+            function_entry_address = self._current_function_entry_address()
+        try:
+            function_entry_space = function_entry_address.getAddressSpace().getName()
+            function_entry_offset = int(function_entry_address.getOffset())
+        except Exception:
+            function_entry_space = None
+            function_entry_offset = None
 
         for ordinal, block in enumerate(blocks):
             try:
@@ -1786,6 +1802,13 @@ class ReturnAnalyzer:
                 block_index,
                 start_space,
                 start_offset,
+            )
+            block_refs_by_index[block_index] = PcodeBlockRef(
+                block_index=block_index,
+                start_address_offset=start_offset,
+                binary_id=self._binary_id,
+                function_entry_space=function_entry_space,
+                function_entry_offset=function_entry_offset,
             )
             successors: List[int] = []
             try:
@@ -1963,6 +1986,15 @@ class ReturnAnalyzer:
         recursive_scc_proven, recursive_scc_identity, recursive_scc_members = (
             self._recursive_scc_certificate(function_identity_key)
         )
+        region_cfg_edge_keys = tuple(
+            (
+                block_refs_by_index[source].stable_key(),
+                block_refs_by_index[target].stable_key(),
+            )
+            for source in sorted(adjacency)
+            for target in sorted(adjacency[source])
+            if source in block_refs_by_index and target in block_refs_by_index
+        )
 
         return FunctionControlEffectProfile(
             block_count=len(blocks),
@@ -1997,6 +2029,7 @@ class ReturnAnalyzer:
             region_block_keys=tuple(
                 block_keys_by_index[index] for index in sorted(block_keys_by_index)
             ),
+            region_cfg_edge_keys=region_cfg_edge_keys,
             region_pcode_op_keys=tuple(region_pcode_op_keys),
             region_live_in_keys=tuple(sorted(region_live_in_keys, key=repr)),
             region_live_out_keys=tuple(sorted(region_live_out_keys, key=repr)),

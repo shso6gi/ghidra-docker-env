@@ -154,6 +154,14 @@ class _RenderedStage:
     renderer_token: Any = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class _MemoryWriteEvent:
+    event_key: Tuple[Any, ...]
+    location_key: Tuple[Any, ...]
+    effects: Tuple[StoreEffect, ...]
+    provenance: Any
+
+
 def _evidence_pcode_key(evidence: Any) -> Optional[Tuple[Any, ...]]:
     ref = getattr(evidence, "pcode_op_ref", None)
     stable_key = getattr(ref, "stable_key", None)
@@ -192,6 +200,24 @@ def _find_call_effect_evidence(
         and _evidence_pcode_key(evidence) == pcode_key
     )
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _effect_store_census_count(effects: Sequence[StoreEffect]) -> int:
+    producer_keys = set()
+    for effect in tuple(effects or ()):
+        provenance = getattr(effect, "provenance", None)
+        producer_ref = getattr(provenance, "producer_pcode_op_ref", None)
+        if producer_ref is not None:
+            producer_keys.add(("pcode", tuple(producer_ref.stable_key())))
+        else:
+            producer_keys.add(
+                (
+                    "summary_order",
+                    int(effect.order_key),
+                    _memory_location_semantic_key(effect.location),
+                )
+            )
+    return len(producer_keys)
 
 
 def _fact_by_id(manifest: Mapping[str, Any], side: str) -> Dict[str, Mapping[str, Any]]:
@@ -314,7 +340,8 @@ def _build_inputs(
                 and bool(region_profile.cfg_acyclic)
                 and bool(region_profile.terminal_return_coverage_complete)
                 and int(region_profile.load_count) == 0
-                and int(region_profile.store_count) == len(region_effects)
+                and int(region_profile.store_count)
+                == _effect_store_census_count(region_effects)
                 and all(
                     int(getattr(region_profile, name, 0) or 0) == 0
                     for name in (
@@ -335,9 +362,6 @@ def _build_inputs(
                 continue
             if len(call_effect.memory_effects) != int(call_effect.memory_effect_count):
                 failures.append(f"{obligation_id}:call_region_memory_effect_coverage_incomplete")
-                continue
-            if len(call_effect.memory_effects) != len(region_effects):
-                failures.append(f"{obligation_id}:call_region_memory_effect_count_relation_missing")
                 continue
             if bool(getattr(region_summary, "has_unsupported_call", False)):
                 failures.append(f"{obligation_id}:inline_region_unsupported_call_present")
@@ -1281,6 +1305,476 @@ def _memory_location_semantic_key(location: Any) -> Tuple[Any, ...]:
     )
 
 
+def _memory_event_key(effect: StoreEffect) -> Tuple[Any, ...]:
+    provenance = getattr(effect, "provenance", None)
+    producer_ref = getattr(provenance, "producer_pcode_op_ref", None)
+    if producer_ref is not None:
+        return (
+            "provenance",
+            getattr(provenance, "source_kind", None),
+            tuple(producer_ref.stable_key()),
+            getattr(provenance, "callee_effect_index", None),
+        )
+    return (
+        "summary_order_location",
+        int(effect.order_key),
+        _memory_location_semantic_key(effect.location),
+    )
+
+
+def _call_derived_effects_for_evidence(
+    caller_effects: Sequence[StoreEffect],
+    evidence: CallSiteEffectSummaryEvidence,
+) -> Tuple[StoreEffect, ...]:
+    pcode_key = _evidence_pcode_key(evidence)
+    if pcode_key is None:
+        raise ValueError("memory_effect_callsite_identity_missing")
+    selected: List[StoreEffect] = []
+    indexes = set()
+    for effect in tuple(caller_effects or ()):
+        provenance = getattr(effect, "provenance", None)
+        producer_ref = getattr(provenance, "producer_pcode_op_ref", None)
+        if (
+            provenance is None
+            or getattr(provenance, "source_kind", None) != "call_derived"
+            or producer_ref is None
+            or tuple(producer_ref.stable_key()) != pcode_key
+        ):
+            continue
+        if getattr(provenance, "call_target_ref", None) != evidence.target_ref:
+            raise ValueError("memory_effect_call_target_relation_missing")
+        index = getattr(provenance, "callee_effect_index", None)
+        if index is None:
+            raise ValueError("memory_effect_substitution_provenance_incomplete")
+        indexes.add(int(index))
+        selected.append(effect)
+    expected_indexes = set(range(int(evidence.memory_effect_count)))
+    if indexes != expected_indexes:
+        raise ValueError("memory_effect_substitution_coverage_missing")
+    return tuple(selected)
+
+
+def _memory_write_events(
+    effects: Sequence[StoreEffect],
+    *,
+    failure_prefix: str,
+) -> Tuple[_MemoryWriteEvent, ...]:
+    grouped: Dict[Tuple[Any, ...], List[StoreEffect]] = {}
+    for effect in tuple(effects or ()):
+        grouped.setdefault(_memory_event_key(effect), []).append(effect)
+    events: List[_MemoryWriteEvent] = []
+    for event_key, variants in grouped.items():
+        locations = {
+            _memory_location_semantic_key(effect.location) for effect in variants
+        }
+        orders = {int(effect.order_key) for effect in variants}
+        if len(locations) != 1:
+            raise ValueError(f"{failure_prefix}_event_location_relation_missing")
+        if len(orders) != 1:
+            raise ValueError(f"{failure_prefix}_event_order_relation_missing")
+        provenance = getattr(variants[0], "provenance", None)
+        if provenance is None or not provenance.is_complete():
+            raise ValueError(f"{failure_prefix}_execution_provenance_incomplete")
+        events.append(
+            _MemoryWriteEvent(
+                event_key=event_key,
+                location_key=next(iter(locations)),
+                effects=tuple(variants),
+                provenance=provenance,
+            )
+        )
+    return tuple(sorted(events, key=lambda item: repr(item.event_key)))
+
+
+def _concrete_storage_range(location_key: Tuple[Any, ...]) -> Optional[Tuple[Any, ...]]:
+    base_key, steps, offset, size = location_key
+    if steps or not isinstance(base_key, tuple) or not base_key:
+        return None
+    if base_key[0] != "storage" or len(base_key) != 5:
+        return None
+    try:
+        return (
+            base_key[1],
+            base_key[2],
+            int(base_key[3]) + int(offset),
+            int(size),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _memory_alias_relation(
+    left_key: Tuple[Any, ...],
+    right_key: Tuple[Any, ...],
+) -> str:
+    if left_key == right_key:
+        return "exact"
+    left_base, left_steps, left_offset, left_size = left_key
+    right_base, right_steps, right_offset, right_size = right_key
+    if left_base == right_base:
+        if left_steps != right_steps:
+            return "unknown"
+        left_end = int(left_offset) + int(left_size)
+        right_end = int(right_offset) + int(right_size)
+        if left_end <= int(right_offset) or right_end <= int(left_offset):
+            return "disjoint"
+        return "partial_overlap"
+    left_storage = _concrete_storage_range(left_key)
+    right_storage = _concrete_storage_range(right_key)
+    if left_storage is not None and right_storage is not None:
+        if left_storage[:2] != right_storage[:2]:
+            return "disjoint"
+        left_end = int(left_storage[2]) + int(left_storage[3])
+        right_end = int(right_storage[2]) + int(right_storage[3])
+        if left_end <= int(right_storage[2]) or right_end <= int(left_storage[2]):
+            return "disjoint"
+        return "partial_overlap"
+    if (
+        isinstance(left_base, tuple)
+        and isinstance(right_base, tuple)
+        and left_base
+        and right_base
+        and left_base[0] == "stack_frame"
+        and right_base[0] == "storage"
+    ) or (
+        isinstance(left_base, tuple)
+        and isinstance(right_base, tuple)
+        and left_base
+        and right_base
+        and left_base[0] == "storage"
+        and right_base[0] == "stack_frame"
+    ):
+        return "disjoint"
+    return "unknown"
+
+
+def _pcode_sequence_key(ref: Any) -> Optional[Tuple[int, int, int]]:
+    if ref is None:
+        return None
+    try:
+        if ref.seq_time is None or ref.seq_order is None:
+            return None
+        return (
+            int(ref.seq_time),
+            int(ref.seq_order),
+            int(ref.local_op_ordinal or 0),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _cfg_reachable(
+    source: Tuple[Any, ...],
+    target: Tuple[Any, ...],
+    edges: Sequence[Tuple[Tuple[Any, ...], Tuple[Any, ...]]],
+) -> bool:
+    adjacency: Dict[Tuple[Any, ...], set[Tuple[Any, ...]]] = {}
+    for edge_source, edge_target in tuple(edges or ()):
+        adjacency.setdefault(tuple(edge_source), set()).add(tuple(edge_target))
+    pending = list(adjacency.get(tuple(source), ()))
+    visited = set()
+    while pending:
+        current = tuple(pending.pop())
+        if current == tuple(target):
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(adjacency.get(current, ()))
+    return False
+
+
+def _call_effect_for_provenance(
+    provenance: Any,
+    call_effects: Sequence[CallSiteEffectSummaryEvidence],
+) -> Optional[CallSiteEffectSummaryEvidence]:
+    producer_ref = getattr(provenance, "producer_pcode_op_ref", None)
+    if producer_ref is None:
+        return None
+    producer_key = tuple(producer_ref.stable_key())
+    candidates = tuple(
+        evidence
+        for evidence in tuple(call_effects or ())
+        if _evidence_pcode_key(evidence) == producer_key
+        and evidence.target_ref == getattr(provenance, "call_target_ref", None)
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _event_order_relation(
+    left_event: _MemoryWriteEvent,
+    right_event: _MemoryWriteEvent,
+    profile: Any,
+    call_effects: Sequence[CallSiteEffectSummaryEvidence],
+) -> str:
+    left_provenance = left_event.provenance
+    right_provenance = right_event.provenance
+    left_outer_ref = left_provenance.producer_pcode_op_ref
+    right_outer_ref = right_provenance.producer_pcode_op_ref
+    same_callsite = bool(
+        left_provenance.source_kind == "call_derived"
+        and right_provenance.source_kind == "call_derived"
+        and tuple(left_outer_ref.stable_key()) == tuple(right_outer_ref.stable_key())
+        and left_provenance.call_target_ref == right_provenance.call_target_ref
+    )
+    if same_callsite:
+        left_nested = left_provenance.nested_effect_provenance
+        right_nested = right_provenance.nested_effect_provenance
+        evidence = _call_effect_for_provenance(left_provenance, call_effects)
+        if left_nested is None or right_nested is None or evidence is None:
+            return "unproven"
+        left_ref = left_nested.producer_pcode_op_ref
+        right_ref = right_nested.producer_pcode_op_ref
+        left_block = left_nested.producer_block_ref
+        right_block = right_nested.producer_block_ref
+        edges = tuple(evidence.callee_cfg_edge_keys or ())
+        cfg_complete = bool(evidence.callee_ordered_scalar_store_candidate)
+    else:
+        left_ref = left_outer_ref
+        right_ref = right_outer_ref
+        left_block = left_provenance.producer_block_ref
+        right_block = right_provenance.producer_block_ref
+        edges = tuple(getattr(profile, "region_cfg_edge_keys", ()) or ())
+        cfg_complete = bool(
+            profile is not None
+            and getattr(profile, "cfg_edges_complete", False)
+            and getattr(profile, "cfg_acyclic", False)
+        )
+    if left_block is None or right_block is None:
+        return "unproven"
+    left_block_key = tuple(left_block.stable_key())
+    right_block_key = tuple(right_block.stable_key())
+    if left_block_key == right_block_key:
+        left_sequence = _pcode_sequence_key(left_ref)
+        right_sequence = _pcode_sequence_key(right_ref)
+        if left_sequence is None or right_sequence is None or left_sequence == right_sequence:
+            return "unproven"
+        return "before" if left_sequence < right_sequence else "after"
+    if not cfg_complete:
+        return "unproven"
+    left_reaches_right = _cfg_reachable(left_block_key, right_block_key, edges)
+    right_reaches_left = _cfg_reachable(right_block_key, left_block_key, edges)
+    if left_reaches_right == right_reaches_left:
+        return "exclusive_candidate" if not left_reaches_right else "unproven"
+    return "before" if left_reaches_right else "after"
+
+
+def _memory_partial_order_certificate(
+    events: Sequence[_MemoryWriteEvent],
+    profile: Any,
+    call_effects: Sequence[CallSiteEffectSummaryEvidence],
+    *,
+    side: str,
+    failure_prefix: str,
+) -> Dict[str, Any]:
+    edges: List[Tuple[int, int, str]] = []
+    disjoint_pairs: List[Tuple[int, int]] = []
+    guard_exclusivity_pairs: List[Tuple[int, int]] = []
+    for left_index, left_event in enumerate(events):
+        for right_index in range(left_index + 1, len(events)):
+            right_event = events[right_index]
+            relation = _memory_alias_relation(
+                left_event.location_key,
+                right_event.location_key,
+            )
+            if relation == "unknown":
+                raise ValueError(f"{failure_prefix}_alias_relation_missing")
+            if relation == "partial_overlap":
+                raise ValueError(f"{failure_prefix}_partial_overlap_unsupported")
+            if relation == "disjoint":
+                disjoint_pairs.append((left_index, right_index))
+                continue
+            order_relation = _event_order_relation(
+                left_event,
+                right_event,
+                profile,
+                call_effects,
+            )
+            if order_relation == "unproven":
+                raise ValueError(f"{failure_prefix}_order_relation_missing")
+            if order_relation == "exclusive_candidate":
+                guard_exclusivity_pairs.append((left_index, right_index))
+            elif order_relation == "before":
+                edges.append((left_index, right_index, "must_happen_before"))
+            else:
+                edges.append((right_index, left_index, "must_happen_before"))
+    return {
+        "side": side,
+        "status": "complete",
+        "event_count": len(events),
+        "events": tuple(
+            {
+                "event_index": index,
+                "event_key": event.event_key,
+                "location_key": event.location_key,
+                "variant_count": len(event.effects),
+                "producer_block_key": event.provenance.producer_block_ref.stable_key(),
+                "producer_sequence_key": _pcode_sequence_key(
+                    event.provenance.producer_pcode_op_ref
+                ),
+            }
+            for index, event in enumerate(events)
+        ),
+        "dependency_edges": tuple(edges),
+        "proven_disjoint_pairs": tuple(disjoint_pairs),
+        "guard_exclusivity_proof_pairs": tuple(guard_exclusivity_pairs),
+    }
+
+
+def _final_memory_cases(
+    events: Sequence[_MemoryWriteEvent],
+    dependency_edges: Sequence[Tuple[int, int, str]],
+    mapping: Mapping[str, str],
+    reach: str,
+    *,
+    failure_prefix: str,
+) -> Dict[Tuple[Any, ...], Tuple[Tuple[str, str], ...]]:
+    by_location: Dict[Tuple[Any, ...], List[Tuple[str, str]]] = {}
+    must_happen_before = {
+        (int(source), int(target))
+        for source, target, relation in tuple(dependency_edges or ())
+        if relation == "must_happen_before"
+    }
+    for event_index, event in enumerate(events):
+        later_guards: List[str] = []
+        for later_index, later_event in enumerate(events):
+            if (event_index, later_index) not in must_happen_before:
+                continue
+            if later_event.location_key != event.location_key:
+                continue
+            later_guards.extend(
+                _and(
+                    reach,
+                    _render_condition_group(effect.conditions, mapping),
+                )
+                for effect in later_event.effects
+            )
+        later_active = _or(tuple(later_guards))
+        expected_bits = int(event.location_key[3]) * 8
+        for effect in event.effects:
+            if not _pure_scalar_expression_supported(effect.value):
+                raise ValueError(f"{failure_prefix}_value_relation_unsupported")
+            bits = int(expression_smt_bit_width(effect.value) or 0)
+            if bits <= 0 or bits != expected_bits:
+                raise ValueError(f"{failure_prefix}_value_width_relation_missing")
+            guard = _and(
+                reach,
+                _render_condition_group(effect.conditions, mapping),
+            )
+            if later_guards:
+                guard = _and(guard, f"(not {later_active})")
+            value = effect.value.to_smt(
+                symbol_name_mapping=mapping,
+                float_mode="fp",
+            )
+            by_location.setdefault(event.location_key, []).append((guard, value))
+    return {key: tuple(value) for key, value in by_location.items()}
+
+
+def _render_final_post_state_relation(
+    left_effects: Sequence[StoreEffect],
+    right_effects: Sequence[StoreEffect],
+    left_mapping: Mapping[str, str],
+    right_mapping: Mapping[str, str],
+    left_reach: str,
+    right_reach: str,
+    left_profile: Any,
+    right_profile: Any,
+    left_call_effects: Sequence[CallSiteEffectSummaryEvidence],
+    right_call_effects: Sequence[CallSiteEffectSummaryEvidence],
+    *,
+    failure_prefix: str,
+) -> Tuple[List[str], Dict[str, Any], Dict[str, Any]]:
+    left_events = _memory_write_events(left_effects, failure_prefix=failure_prefix)
+    right_events = _memory_write_events(right_effects, failure_prefix=failure_prefix)
+    if not left_events or not right_events:
+        raise ValueError(f"{failure_prefix}_count_relation_missing")
+    left_certificate = _memory_partial_order_certificate(
+        left_events,
+        left_profile,
+        left_call_effects,
+        side="left",
+        failure_prefix=failure_prefix,
+    )
+    right_certificate = _memory_partial_order_certificate(
+        right_events,
+        right_profile,
+        right_call_effects,
+        side="right",
+        failure_prefix=failure_prefix,
+    )
+    left_final = _final_memory_cases(
+        left_events,
+        left_certificate["dependency_edges"],
+        left_mapping,
+        left_reach,
+        failure_prefix=failure_prefix,
+    )
+    right_final = _final_memory_cases(
+        right_events,
+        right_certificate["dependency_edges"],
+        right_mapping,
+        right_reach,
+        failure_prefix=failure_prefix,
+    )
+    if set(left_final) != set(right_final):
+        raise ValueError(f"{failure_prefix}_location_relation_missing")
+
+    violations: List[str] = []
+    for events, mapping, reach, certificate in (
+        (left_events, left_mapping, left_reach, left_certificate),
+        (right_events, right_mapping, right_reach, right_certificate),
+    ):
+        for left_index, right_index in certificate[
+            "guard_exclusivity_proof_pairs"
+        ]:
+            left_active = _or(
+                tuple(
+                    _and(
+                        reach,
+                        _render_condition_group(effect.conditions, mapping),
+                    )
+                    for effect in events[left_index].effects
+                )
+            )
+            right_active = _or(
+                tuple(
+                    _and(
+                        reach,
+                        _render_condition_group(effect.conditions, mapping),
+                    )
+                    for effect in events[right_index].effects
+                )
+            )
+            violations.append(_and(left_active, right_active))
+    for location_key in sorted(left_final, key=repr):
+        left_cases = left_final[location_key]
+        right_cases = right_final[location_key]
+        left_active = _or(tuple(guard for guard, _ in left_cases))
+        right_active = _or(tuple(guard for guard, _ in right_cases))
+        violations.append(f"(xor {left_active} {right_active})")
+        for left_guard, left_value in left_cases:
+            for right_guard, right_value in right_cases:
+                violations.append(
+                    _and(
+                        left_guard,
+                        right_guard,
+                        f"(not (= {left_value} {right_value}))",
+                    )
+                )
+        for cases in (left_cases, right_cases):
+            for index, (first_guard, first_value) in enumerate(cases):
+                for second_guard, second_value in cases[index + 1 :]:
+                    violations.append(
+                        _and(
+                            first_guard,
+                            second_guard,
+                            f"(not (= {first_value} {second_value}))",
+                        )
+                    )
+    return violations, left_certificate, right_certificate
+
+
 def _render_memory_stage(
     proof_input: PureDirectCallProofInput,
     dependency_ids: Tuple[str, ...],
@@ -1288,63 +1782,26 @@ def _render_memory_stage(
     lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
     left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
     right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
-
-    def ordered_effects(effect_evidence: CallSiteEffectSummaryEvidence):
-        effects = tuple(effect_evidence.memory_effects or ())
-        order_keys = tuple(int(item.order_key) for item in effects)
-        if len(set(order_keys)) != len(order_keys):
-            raise ValueError("memory_effect_order_relation_missing")
-        return tuple(sorted(effects, key=lambda item: int(item.order_key)))
-
-    left_effects = ordered_effects(proof_input.left_effect)
-    right_effects = ordered_effects(proof_input.right_effect)
-    if not left_effects or len(left_effects) != len(right_effects):
-        raise ValueError("memory_effect_count_relation_missing")
-
-    violations: List[str] = [f"(xor {left_reach} {right_reach})"]
-    for left_effect, right_effect in zip(left_effects, right_effects):
-        if _memory_location_semantic_key(left_effect.location) != _memory_location_semantic_key(
-            right_effect.location
-        ):
-            raise ValueError("memory_effect_location_relation_missing")
-        left_guard = _and(
-            left_reach,
-            _render_condition_group(left_effect.conditions, left_mapping),
-        )
-        right_guard = _and(
-            right_reach,
-            _render_condition_group(right_effect.conditions, right_mapping),
-        )
-        violations.append(f"(xor {left_guard} {right_guard})")
-        if not _pure_scalar_expression_supported(
-            left_effect.value
-        ) or not _pure_scalar_expression_supported(right_effect.value):
-            raise ValueError("memory_effect_value_relation_unsupported")
-        left_bits = int(expression_smt_bit_width(left_effect.value) or 0)
-        right_bits = int(expression_smt_bit_width(right_effect.value) or 0)
-        expected_bits = int(getattr(left_effect.location, "size", 0) or 0) * 8
-        if (
-            left_bits <= 0
-            or left_bits != right_bits
-            or left_bits != expected_bits
-            or int(getattr(right_effect.location, "size", 0) or 0) * 8
-            != expected_bits
-        ):
-            raise ValueError("memory_effect_value_width_relation_missing")
-        left_value = left_effect.value.to_smt(
-            symbol_name_mapping=left_mapping, float_mode="fp"
-        )
-        right_value = right_effect.value.to_smt(
-            symbol_name_mapping=right_mapping, float_mode="fp"
-        )
-        violations.append(
-            _and(
-                left_guard,
-                right_guard,
-                f"(not (= {left_value} {right_value}))",
-            )
-        )
-    violation = _or(tuple(violations))
+    violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
+        _call_derived_effects_for_evidence(
+            proof_input.left_caller_effects,
+            proof_input.left_effect,
+        ),
+        _call_derived_effects_for_evidence(
+            proof_input.right_caller_effects,
+            proof_input.right_effect,
+        ),
+        left_mapping,
+        right_mapping,
+        left_reach,
+        right_reach,
+        proof_input.left_caller_profile,
+        proof_input.right_caller_profile,
+        proof_input.left_caller_call_effects,
+        proof_input.right_caller_call_effects,
+        failure_prefix="memory_effect",
+    )
+    violation = _or(tuple((f"(xor {left_reach} {right_reach})", *violations)))
     lines.extend((f"(assert {violation})", "(check-sat)"))
     return _RenderedStage(
         stage="memory_relation",
@@ -1354,7 +1811,9 @@ def _render_memory_stage(
         precondition_payload={
             "structural_certificate_id": proof_input.structural_certificate_id,
             "dependency_proof_ids": dependency_ids,
-            "memory_observation_policy": "ordered_parameter_relative_stores",
+            "memory_observation_policy": "alias_aware_final_post_state",
+            "left_partial_order_certificate": left_partial_order,
+            "right_partial_order_certificate": right_partial_order,
         },
         renderer_token=_TYPED_RENDERER_TOKEN,
     )
@@ -1368,55 +1827,35 @@ def _render_call_region_memory_stage(
     call_mapping = left_mapping if proof_input.call_on_left else right_mapping
     region_mapping = right_mapping if proof_input.call_on_left else left_mapping
     reach = _render_reachability(proof_input.call_arguments, call_mapping)
-
-    def ordered(effects: Sequence[StoreEffect]) -> Tuple[StoreEffect, ...]:
-        values = tuple(effects or ())
-        order_keys = tuple(int(item.order_key) for item in values)
-        if len(set(order_keys)) != len(order_keys):
-            raise ValueError("memory_effect_order_relation_missing")
-        return tuple(sorted(values, key=lambda item: int(item.order_key)))
-
-    call_effects = ordered(proof_input.call_effect.memory_effects)
-    region_effects = ordered(proof_input.region_effects)
-    if not call_effects or len(call_effects) != len(region_effects):
-        raise ValueError("memory_effect_count_relation_missing")
-    violations: List[str] = []
-    for call_effect, region_effect in zip(call_effects, region_effects):
-        if _memory_location_semantic_key(call_effect.location) != _memory_location_semantic_key(
-            region_effect.location
-        ):
-            raise ValueError("memory_effect_location_relation_missing")
-        call_guard = _and(
-            reach,
-            _render_condition_group(call_effect.conditions, call_mapping),
+    if proof_input.call_on_left:
+        left_effects, right_effects = (
+            _call_derived_effects_for_evidence(
+                proof_input.left_caller_effects,
+                proof_input.call_effect,
+            ),
+            proof_input.region_effects,
         )
-        region_guard = _and(
-            reach,
-            _render_condition_group(region_effect.conditions, region_mapping),
+    else:
+        left_effects, right_effects = (
+            proof_input.region_effects,
+            _call_derived_effects_for_evidence(
+                proof_input.right_caller_effects,
+                proof_input.call_effect,
+            ),
         )
-        violations.append(f"(xor {call_guard} {region_guard})")
-        if not _pure_scalar_expression_supported(
-            call_effect.value
-        ) or not _pure_scalar_expression_supported(region_effect.value):
-            raise ValueError("memory_effect_value_relation_unsupported")
-        call_bits = int(expression_smt_bit_width(call_effect.value) or 0)
-        region_bits = int(expression_smt_bit_width(region_effect.value) or 0)
-        location_bits = int(getattr(call_effect.location, "size", 0) or 0) * 8
-        if call_bits <= 0 or call_bits != region_bits or call_bits != location_bits:
-            raise ValueError("memory_effect_value_width_relation_missing")
-        call_value = call_effect.value.to_smt(
-            symbol_name_mapping=call_mapping, float_mode="fp"
-        )
-        region_value = region_effect.value.to_smt(
-            symbol_name_mapping=region_mapping, float_mode="fp"
-        )
-        violations.append(
-            _and(
-                call_guard,
-                region_guard,
-                f"(not (= {call_value} {region_value}))",
-            )
-        )
+    violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
+        left_effects,
+        right_effects,
+        left_mapping,
+        right_mapping,
+        reach,
+        reach,
+        proof_input.left_caller_profile,
+        proof_input.right_caller_profile,
+        proof_input.left_caller_call_effects,
+        proof_input.right_caller_call_effects,
+        failure_prefix="memory_effect",
+    )
     violation = _or(tuple(violations))
     lines.extend((f"(assert {violation})", "(check-sat)"))
     return _RenderedStage(
@@ -1427,7 +1866,9 @@ def _render_call_region_memory_stage(
         precondition_payload={
             "structural_certificate_id": proof_input.structural_certificate_id,
             "dependency_proof_ids": dependency_ids,
-            "memory_observation_policy": "ordered_parameter_relative_stores",
+            "memory_observation_policy": "alias_aware_final_post_state",
+            "left_partial_order_certificate": left_partial_order,
+            "right_partial_order_certificate": right_partial_order,
         },
         renderer_token=_TYPED_RENDERER_TOKEN,
     )
@@ -1522,37 +1963,6 @@ def _caller_effect_coverage_payload(
     }
 
 
-def _caller_write_slots(
-    effects: Sequence[StoreEffect],
-    *,
-    side: str,
-) -> Tuple[Tuple[StoreEffect, ...], ...]:
-    grouped: Dict[Tuple[Any, ...], List[StoreEffect]] = {}
-    slot_order: Dict[Tuple[Any, ...], Tuple[int, int]] = {}
-    for effect in tuple(effects or ()):
-        provenance = effect.provenance
-        if provenance is None or provenance.producer_pcode_op_ref is None:
-            raise ValueError(f"{side}_caller_store_provenance_incomplete")
-        producer_key = tuple(provenance.producer_pcode_op_ref.stable_key())
-        slot_key = (
-            provenance.source_kind,
-            producer_key,
-            provenance.callee_effect_index,
-        )
-        grouped.setdefault(slot_key, []).append(effect)
-        slot_order[slot_key] = (
-            int(effect.order_key),
-            int(provenance.callee_effect_index or 0),
-        )
-    orders = tuple(slot_order.values())
-    if len(set(orders)) != len(orders):
-        raise ValueError(f"{side}_caller_store_order_relation_missing")
-    return tuple(
-        tuple(grouped[key])
-        for key in sorted(grouped, key=lambda item: slot_order[item])
-    )
-
-
 def _render_caller_memory_stage(
     proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
     dependency_ids: Tuple[str, ...],
@@ -1570,66 +1980,19 @@ def _render_caller_memory_stage(
         proof_input.right_caller_call_effects,
         side="right",
     )
-    left_slots = _caller_write_slots(proof_input.left_caller_effects, side="left")
-    right_slots = _caller_write_slots(proof_input.right_caller_effects, side="right")
-    if not left_slots or len(left_slots) != len(right_slots):
-        raise ValueError("caller_memory_effect_count_relation_missing")
-
-    violations: List[str] = []
-    for left_slot, right_slot in zip(left_slots, right_slots):
-        left_locations = {
-            _memory_location_semantic_key(effect.location) for effect in left_slot
-        }
-        right_locations = {
-            _memory_location_semantic_key(effect.location) for effect in right_slot
-        }
-        if len(left_locations) != 1 or left_locations != right_locations:
-            raise ValueError("caller_memory_effect_location_relation_missing")
-        expected_bits = next(iter(left_locations))[3] * 8
-        left_cases = []
-        right_cases = []
-        for effects, mapping, cases in (
-            (left_slot, left_mapping, left_cases),
-            (right_slot, right_mapping, right_cases),
-        ):
-            for effect in effects:
-                if not _pure_scalar_expression_supported(effect.value):
-                    raise ValueError("caller_memory_effect_value_relation_unsupported")
-                bits = int(expression_smt_bit_width(effect.value) or 0)
-                if bits <= 0 or bits != expected_bits:
-                    raise ValueError("caller_memory_effect_value_width_relation_missing")
-                cases.append(
-                    (
-                        _render_condition_group(effect.conditions, mapping),
-                        effect.value.to_smt(
-                            symbol_name_mapping=mapping,
-                            float_mode="fp",
-                        ),
-                    )
-                )
-        left_active = _or(tuple(guard for guard, _ in left_cases))
-        right_active = _or(tuple(guard for guard, _ in right_cases))
-        violations.append(f"(xor {left_active} {right_active})")
-        for left_guard, left_value in left_cases:
-            for right_guard, right_value in right_cases:
-                violations.append(
-                    _and(
-                        left_guard,
-                        right_guard,
-                        f"(not (= {left_value} {right_value}))",
-                    )
-                )
-        for cases in (left_cases, right_cases):
-            for index, (first_guard, first_value) in enumerate(cases):
-                for second_guard, second_value in cases[index + 1 :]:
-                    violations.append(
-                        _and(
-                            first_guard,
-                            second_guard,
-                            f"(not (= {first_value} {second_value}))",
-                        )
-                    )
-
+    violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
+        proof_input.left_caller_effects,
+        proof_input.right_caller_effects,
+        left_mapping,
+        right_mapping,
+        "true",
+        "true",
+        proof_input.left_caller_profile,
+        proof_input.right_caller_profile,
+        proof_input.left_caller_call_effects,
+        proof_input.right_caller_call_effects,
+        failure_prefix="caller_memory_effect",
+    )
     violation = _or(tuple(violations))
     lines.extend((f"(assert {violation})", "(check-sat)"))
     return _RenderedStage(
@@ -1640,9 +2003,11 @@ def _render_caller_memory_stage(
         precondition_payload={
             "structural_certificate_id": proof_input.structural_certificate_id,
             "dependency_proof_ids": dependency_ids,
-            "memory_observation_policy": "complete_ordered_whole_caller_write_set",
+            "memory_observation_policy": "complete_alias_aware_final_post_state",
             "left_coverage_certificate": left_coverage,
             "right_coverage_certificate": right_coverage,
+            "left_partial_order_certificate": left_partial_order,
+            "right_partial_order_certificate": right_partial_order,
         },
         renderer_token=_TYPED_RENDERER_TOKEN,
     )

@@ -47,6 +47,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     FunctionReturnAnalysis,
     LocationBaseRef,
+    PcodeBlockRef,
     PcodeOpRef,
     ReturnInfo,
     expression_provenance_key,
@@ -54,12 +55,21 @@ from scripts.function_tracer_pcode.model import (
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 
-def _pcode_ref(binary_id: str, function_entry: int, address: int, mnemonic: str = "CALL") -> PcodeOpRef:
+def _pcode_ref(
+    binary_id: str,
+    function_entry: int,
+    address: int,
+    mnemonic: str = "CALL",
+    *,
+    block_index: int = 0,
+    seq_time: int = 0,
+    seq_order: int = 0,
+) -> PcodeOpRef:
     return PcodeOpRef(
         address_offset=address,
-        seq_time=0,
-        seq_order=0,
-        block_index=0,
+        seq_time=seq_time,
+        seq_order=seq_order,
+        block_index=block_index,
         mnemonic=mnemonic,
         input_sizes=(8, 4),
         output_size=4,
@@ -70,6 +80,51 @@ def _pcode_ref(binary_id: str, function_entry: int, address: int, mnemonic: str 
         target_offset=address,
         opcode=1,
         local_op_ordinal=0,
+    )
+
+
+def _block_ref_for_pcode(ref: PcodeOpRef) -> PcodeBlockRef:
+    return PcodeBlockRef(
+        block_index=ref.block_index,
+        start_address_offset=int(ref.function_entry_offset or 0)
+        + int(ref.block_index or 0) * 0x100,
+        binary_id=ref.binary_id,
+        function_entry_space=ref.function_entry_space,
+        function_entry_offset=ref.function_entry_offset,
+    )
+
+
+def _local_store_provenance(ref: PcodeOpRef) -> StoreEffectProvenance:
+    return StoreEffectProvenance(
+        source_kind="local_store",
+        producer_pcode_op_ref=ref,
+        producer_block_ref=_block_ref_for_pcode(ref),
+    )
+
+
+def _call_derived_store_provenance(
+    call_ref: PcodeOpRef,
+    target_ref: CallTargetRef,
+    effect_index: int,
+    *,
+    nested_block_index: int = 0,
+    nested_seq_time: int | None = None,
+) -> StoreEffectProvenance:
+    nested_ref = _pcode_ref(
+        str(call_ref.binary_id),
+        int(target_ref.entry_offset or 0),
+        int(target_ref.entry_offset or 0) + 4 * (effect_index + 1),
+        mnemonic="STORE",
+        block_index=nested_block_index,
+        seq_time=effect_index if nested_seq_time is None else nested_seq_time,
+    )
+    return StoreEffectProvenance(
+        source_kind="call_derived",
+        producer_pcode_op_ref=call_ref,
+        producer_block_ref=_block_ref_for_pcode(call_ref),
+        call_target_ref=target_ref,
+        callee_effect_index=effect_index,
+        nested_effect_provenance=_local_store_provenance(nested_ref),
     )
 
 
@@ -914,6 +969,74 @@ def test_function_control_profile_requires_acyclic_complete_return_cfg():
     assert cyclic.phase2_memory_free_scalar_candidate is False
 
 
+def test_function_control_profile_cfg_edges_use_profiled_function_entry():
+    class Space:
+        def getName(self):
+            return "ram"
+
+    class Address:
+        def __init__(self, offset):
+            self.offset = offset
+
+        def getAddressSpace(self):
+            return Space()
+
+        def getOffset(self):
+            return self.offset
+
+    class Op:
+        def __init__(self, mnemonic):
+            self.mnemonic = mnemonic
+
+        def getMnemonic(self):
+            return self.mnemonic
+
+    class Block:
+        def __init__(self, index, start, mnemonic):
+            self.index = index
+            self.start = Address(start)
+            self.ops = [Op(mnemonic)]
+            self.out = []
+
+        def getIndex(self):
+            return self.index
+
+        def getStart(self):
+            return self.start
+
+        def getIterator(self):
+            return list(self.ops)
+
+        def getOutSize(self):
+            return len(self.out)
+
+        def getOut(self, index):
+            return self.out[index]
+
+    class Function:
+        def getName(self):
+            return "callee"
+
+        def getEntryPoint(self):
+            return Address(0x2000)
+
+    entry = Block(0, 0x2000, "BRANCH")
+    terminal = Block(1, 0x2010, "RETURN")
+    entry.out = [terminal]
+
+    analyzer = ReturnAnalyzer(program=None)
+    analyzer._binary_id = "B1"
+    analyzer._current_function_entry_address_value = Address(0x1000)
+    profile = analyzer._build_function_control_effect_profile(
+        type("HighFunction", (), {"getBasicBlocks": lambda self: [entry, terminal]})(),
+        Function(),
+    )
+
+    source, target = profile.region_cfg_edge_keys[0]
+    assert source[2] == ("function_entry", "ram", 0x2000)
+    assert target[2] == ("function_entry", "ram", 0x2000)
+
+
 def test_function_control_profile_rejects_unimplemented_and_ops_after_return():
     class Op:
         def __init__(self, mnemonic):
@@ -1295,11 +1418,10 @@ def _attach_scalar_store_callee_effect(
             value=effect.value,
             conditions=list(effect.conditions),
             order_key=10,
-            provenance=StoreEffectProvenance(
-                source_kind="call_derived",
-                producer_pcode_op_ref=evidence.pcode_op_ref,
-                call_target_ref=evidence.target_ref,
-                callee_effect_index=0,
+            provenance=_call_derived_store_provenance(
+                evidence.pcode_op_ref,
+                evidence.target_ref,
+                0,
             ),
         )
     ]
@@ -1341,9 +1463,8 @@ def _call_to_region_memory_proof_inputs(*, region_value_delta: int = 0):
         region_value,
         [],
         1,
-        provenance=StoreEffectProvenance(
-            source_kind="local_store",
-            producer_pcode_op_ref=_pcode_ref(
+        provenance=_local_store_provenance(
+            _pcode_ref(
                 "right",
                 0x3000,
                 0x3018,
@@ -1371,11 +1492,10 @@ def _call_to_region_memory_proof_inputs(*, region_value_delta: int = 0):
             call_value,
             [],
             1,
-            provenance=StoreEffectProvenance(
-                source_kind="call_derived",
-                producer_pcode_op_ref=evidence.pcode_op_ref,
-                call_target_ref=evidence.target_ref,
-                callee_effect_index=0,
+            provenance=_call_derived_store_provenance(
+                evidence.pcode_op_ref,
+                evidence.target_ref,
+                0,
             ),
         )
     ]
@@ -1422,6 +1542,77 @@ def test_typed_call_to_region_proves_ordered_scalar_store_relation():
         timeout_seconds=5,
     )
 
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+    assert all(item.record.status == "proven" for item in production.artifacts)
+
+
+def test_typed_call_to_region_compares_final_post_state_after_overwrite():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("x", index=0),
+        offset=0,
+        size=4,
+    )
+    evidence = left.effect_summary.call_site_effect_summary_evidence[0]
+    call_effects = (
+        StoreEffect(location, Expression.constant(1, size=4), [], 1),
+        StoreEffect(location, Expression.constant(2, size=4), [], 2),
+    )
+    object.__setattr__(evidence, "memory_effect_count", 2)
+    object.__setattr__(evidence, "memory_effects", call_effects)
+    left.effect_summary.effects = [
+        StoreEffect(
+            effect.location,
+            effect.value,
+            list(effect.conditions),
+            1,
+            provenance=_call_derived_store_provenance(
+                evidence.pcode_op_ref,
+                evidence.target_ref,
+                index,
+            ),
+        )
+        for index, effect in enumerate(call_effects)
+    ]
+    region_store_ref = _pcode_ref(
+        "right",
+        0x3000,
+        0x3018,
+        mnemonic="STORE",
+    )
+    right.effect_summary.effects = [
+        StoreEffect(
+            location,
+            Expression.constant(2, size=4),
+            [],
+            1,
+            provenance=_local_store_provenance(region_store_ref),
+        )
+    ]
+    object.__setattr__(
+        right.effect_summary.function_control_effect_profile,
+        "store_count",
+        1,
+    )
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert production.failure_causes == ()
     assert [item.record.proof_stage for item in production.artifacts] == [
         "guard_relation",
         "argument_relation",
@@ -1742,6 +1933,224 @@ def test_typed_scalar_store_call_effects_can_promote_equivalence():
     ]
 
 
+def test_typed_call_memory_relation_allows_disjoint_write_reordering():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, specs in (
+        (left, [(0, 1, 1), (4, 2, 2)]),
+        (right, [(4, 2, 1), (0, 1, 2)]),
+    ):
+        evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        memory_effects = tuple(
+            StoreEffect(
+                CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("a", index=0),
+                    offset=offset,
+                    size=4,
+                ),
+                Expression.constant(value, size=4),
+                [],
+                order_key,
+            )
+            for offset, value, order_key in specs
+        )
+        object.__setattr__(evidence, "memory_effect_count", len(memory_effects))
+        object.__setattr__(evidence, "memory_effects", memory_effects)
+        analysis.effect_summary.effects = [
+            StoreEffect(
+                effect.location,
+                effect.value,
+                list(effect.conditions),
+                10,
+                provenance=_call_derived_store_provenance(
+                    evidence.pcode_op_ref,
+                    evidence.target_ref,
+                    index,
+                ),
+            )
+            for index, effect in enumerate(memory_effects)
+        ]
+
+    checker = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    )
+    result = checker.check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    records = result.call_effect_shadow_manifest["solver_proof_records"]
+    assert [record["proof_stage"] for record in records] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+    memory_artifact = checker._last_internal_call_effect_artifacts[-2]
+    assert memory_artifact.precondition_payload["memory_observation_policy"] == (
+        "alias_aware_final_post_state"
+    )
+    assert memory_artifact.precondition_payload["left_partial_order_certificate"][
+        "proven_disjoint_pairs"
+    ] == ((0, 1),)
+
+
+def test_typed_call_memory_relation_compares_final_post_state_after_overwrite():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, specs in (
+        (left, [(1, 1), (2, 2)]),
+        (right, [(2, 1)]),
+    ):
+        evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        location = CanonicalLocation(
+            base_ref=LocationBaseRef.parameter("a", index=0),
+            offset=0,
+            size=4,
+        )
+        memory_effects = tuple(
+            StoreEffect(
+                location,
+                Expression.constant(value, size=4),
+                [],
+                order_key,
+            )
+            for value, order_key in specs
+        )
+        object.__setattr__(evidence, "memory_effect_count", len(memory_effects))
+        object.__setattr__(evidence, "memory_effects", memory_effects)
+        analysis.effect_summary.effects = [
+            StoreEffect(
+                effect.location,
+                effect.value,
+                list(effect.conditions),
+                10,
+                provenance=_call_derived_store_provenance(
+                    evidence.pcode_op_ref,
+                    evidence.target_ref,
+                    index,
+                ),
+            )
+            for index, effect in enumerate(memory_effects)
+        ]
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert [
+        record["proof_stage"]
+        for record in result.call_effect_shadow_manifest["solver_proof_records"]
+    ] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+
+
+def test_typed_call_memory_relation_uses_callee_cfg_not_address_layout():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, specs, cfg_edges in (
+        (
+            left,
+            [(1, 0x2200, 0x2204, 1), (2, 0x2100, 0x2104, 2)],
+            [(1, 2)],
+        ),
+        (right, [(1, 0x4200, 0x4204, 1)], []),
+    ):
+        evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        target_entry = int(evidence.target_ref.entry_offset)
+        block_refs = {
+            block_index: PcodeBlockRef(
+                block_index=block_index,
+                start_address_offset=block_start,
+                binary_id=analysis.binary_id,
+                function_entry_space="ram",
+                function_entry_offset=target_entry,
+            )
+            for block_index, block_start, _, _ in specs
+        }
+        location = CanonicalLocation(
+            base_ref=LocationBaseRef.parameter("a", index=0),
+            offset=0,
+            size=4,
+        )
+        callee_effects = []
+        caller_effects = []
+        for effect_index, (block_index, _, op_address, value) in enumerate(specs):
+            nested_ref = _pcode_ref(
+                analysis.binary_id,
+                target_entry,
+                op_address,
+                mnemonic="STORE",
+                block_index=block_index,
+                seq_time=0,
+            )
+            callee_effects.append(
+                StoreEffect(
+                    location,
+                    Expression.constant(value, size=4),
+                    [],
+                    op_address << 8,
+                )
+            )
+            caller_effects.append(
+                StoreEffect(
+                    location,
+                    Expression.constant(value, size=4),
+                    [],
+                    op_address << 8,
+                    provenance=StoreEffectProvenance(
+                        source_kind="call_derived",
+                        producer_pcode_op_ref=evidence.pcode_op_ref,
+                        producer_block_ref=_block_ref_for_pcode(
+                            evidence.pcode_op_ref
+                        ),
+                        call_target_ref=evidence.target_ref,
+                        callee_effect_index=effect_index,
+                        nested_effect_provenance=StoreEffectProvenance(
+                            source_kind="local_store",
+                            producer_pcode_op_ref=nested_ref,
+                            producer_block_ref=block_refs[block_index],
+                        ),
+                    ),
+                )
+            )
+        object.__setattr__(evidence, "memory_effect_count", len(callee_effects))
+        object.__setattr__(evidence, "memory_effects", tuple(callee_effects))
+        object.__setattr__(
+            evidence,
+            "callee_cfg_edge_keys",
+            tuple(
+                (block_refs[source].stable_key(), block_refs[target].stable_key())
+                for source, target in cfg_edges
+            ),
+        )
+        analysis.effect_summary.effects = caller_effects
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    memory_record = result.call_effect_shadow_manifest["solver_proof_records"][3]
+    assert memory_record["proof_stage"] == "memory_relation"
+    assert memory_record["status"] == "refuted"
+    assert memory_record["solver_result"] == "sat"
+
+
 def test_whole_caller_memory_relation_covers_call_derived_store_provenance():
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)
@@ -1756,11 +2165,10 @@ def test_whole_caller_memory_relation_covers_call_derived_store_provenance():
                 value=callee_effect.value,
                 conditions=list(callee_effect.conditions),
                 order_key=10,
-                provenance=StoreEffectProvenance(
-                    source_kind="call_derived",
-                    producer_pcode_op_ref=evidence.pcode_op_ref,
-                    call_target_ref=evidence.target_ref,
-                    callee_effect_index=0,
+                provenance=_call_derived_store_provenance(
+                    evidence.pcode_op_ref,
+                    evidence.target_ref,
+                    0,
                 ),
             )
         ]
@@ -1803,13 +2211,14 @@ def test_whole_caller_memory_relation_rejects_missing_call_derived_store():
     assert result.is_equivalent is None
     assert manifest["proof_readiness"][0]["decision_eligible"] is False
     assert manifest["proof_readiness"][0]["missing_stages"] == [
-        "caller_memory_relation"
+        "memory_relation",
+        "caller_memory_relation",
     ]
     assert manifest["phase2_discharge_gate"]["failure_cause"] == (
         "caller_memory_relation_not_proven"
     )
     assert any(
-        "caller_derived_store_census_mismatch" in cause
+        "memory_effect_substitution_coverage_missing" in cause
         for cause in manifest["stage_specific_producer"]["failure_causes"]
     )
 
@@ -2171,10 +2580,7 @@ def test_whole_caller_memory_relation_proves_or_refutes_complete_local_stores(
                 Expression.constant(value, size=4),
                 [],
                 10,
-                provenance=StoreEffectProvenance(
-                    source_kind="local_store",
-                    producer_pcode_op_ref=store_ref,
-                ),
+                provenance=_local_store_provenance(store_ref),
             )
         ]
 
@@ -2207,6 +2613,325 @@ def test_whole_caller_memory_relation_proves_or_refutes_complete_local_stores(
             "caller_memory_relation_not_proven"
         )
         assert result.is_equivalent is None
+
+
+def _set_complete_local_caller_stores(analysis, specs):
+    profile = analysis.effect_summary.function_control_effect_profile
+    object.__setattr__(profile, "store_count", len(specs))
+    entry = int(analysis.entry_point, 16)
+    effects = []
+    for ordinal, (parameter_index, offset, size, value, order_key) in enumerate(specs):
+        effects.append(
+            StoreEffect(
+                CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter(
+                        "a" if parameter_index == 0 else "b",
+                        index=parameter_index,
+                    ),
+                    offset=offset,
+                    size=size,
+                ),
+                Expression.constant(value, size=size),
+                [],
+                order_key,
+                provenance=_local_store_provenance(
+                    _pcode_ref(
+                        analysis.binary_id,
+                        entry,
+                        entry + 0x30 + ordinal * 4,
+                        mnemonic="STORE",
+                        seq_time=ordinal,
+                    ),
+                ),
+            )
+        )
+    analysis.effect_summary.effects = effects
+
+
+def _set_cfg_local_caller_stores(analysis, specs, cfg_edges):
+    profile = analysis.effect_summary.function_control_effect_profile
+    object.__setattr__(profile, "store_count", len(specs))
+    entry = int(analysis.entry_point, 16)
+    block_refs = {
+        block_index: PcodeBlockRef(
+            block_index=block_index,
+            start_address_offset=block_start,
+            binary_id=analysis.binary_id,
+            function_entry_space="ram",
+            function_entry_offset=entry,
+        )
+        for block_index, block_start, _, _, _ in specs
+    }
+    object.__setattr__(
+        profile,
+        "region_cfg_edge_keys",
+        tuple(
+            (
+                block_refs[source].stable_key(),
+                block_refs[target].stable_key(),
+            )
+            for source, target in cfg_edges
+        ),
+    )
+    effects = []
+    for ordinal, (block_index, block_start, op_address, value, conditions) in enumerate(
+        specs
+    ):
+        op_ref = _pcode_ref(
+            analysis.binary_id,
+            entry,
+            op_address,
+            mnemonic="STORE",
+            block_index=block_index,
+            seq_time=ordinal,
+        )
+        effects.append(
+            StoreEffect(
+                CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("a", index=0),
+                    offset=0,
+                    size=4,
+                ),
+                Expression.constant(value, size=4),
+                list(conditions),
+                op_address << 8,
+                provenance=StoreEffectProvenance(
+                    source_kind="local_store",
+                    producer_pcode_op_ref=op_ref,
+                    producer_block_ref=block_refs[block_index],
+                ),
+            )
+        )
+    analysis.effect_summary.effects = effects
+
+
+def test_whole_caller_final_post_state_allows_disjoint_write_reordering():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _set_complete_local_caller_stores(
+        left,
+        [(0, 0, 4, 1, 10), (0, 4, 4, 2, 20)],
+    )
+    _set_complete_local_caller_stores(
+        right,
+        [(0, 4, 4, 2, 10), (0, 0, 4, 1, 20)],
+    )
+
+    checker = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    )
+    result = checker.check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    caller_artifact = checker._last_internal_call_effect_artifacts[-1]
+    assert caller_artifact.record.proof_stage == "caller_memory_relation"
+    assert caller_artifact.record.solver_result == "unsat"
+    assert caller_artifact.precondition_payload["memory_observation_policy"] == (
+        "complete_alias_aware_final_post_state"
+    )
+    assert caller_artifact.precondition_payload["left_partial_order_certificate"][
+        "proven_disjoint_pairs"
+    ] == ((0, 1),)
+
+
+def test_whole_caller_cfg_order_overrides_reverse_address_layout():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _set_cfg_local_caller_stores(
+        left,
+        [
+            (1, 0x1200, 0x1204, 1, ()),
+            (2, 0x1100, 0x1104, 2, ()),
+        ],
+        [(1, 2)],
+    )
+    _set_cfg_local_caller_stores(
+        right,
+        [(1, 0x3200, 0x3204, 1, ())],
+        [],
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    caller_record = result.call_effect_shadow_manifest["solver_proof_records"][-1]
+    assert caller_record["proof_stage"] == "caller_memory_relation"
+    assert caller_record["status"] == "refuted"
+    assert caller_record["solver_result"] == "sat"
+
+
+def test_whole_caller_unordered_same_location_requires_guard_exclusivity_proof():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, base in ((left, 0x1000), (right, 0x3000)):
+        parameter = Expression.parameter("a", 0, data_type="int", size=4)
+        zero = Expression.constant(0, size=4)
+        equal = Condition(Expression.binary_op("INT_EQUAL", parameter, zero))
+        not_equal = Condition(Expression.binary_op("INT_NOTEQUAL", parameter, zero))
+        _set_cfg_local_caller_stores(
+            analysis,
+            [
+                (1, base + 0x100, base + 0x104, 1, (equal,)),
+                (2, base + 0x200, base + 0x204, 2, (not_equal,)),
+                (0, base, base + 4, 3, (Condition(Expression.constant(0, 1)),)),
+            ],
+            [(0, 1), (0, 2)],
+        )
+        # The synthetic entry write is unreachable and exists only to carry both
+        # outgoing CFG edges without introducing a third active final-state case.
+        analysis.effect_summary.effects = analysis.effect_summary.effects[:2]
+        object.__setattr__(
+            analysis.effect_summary.function_control_effect_profile,
+            "store_count",
+            2,
+        )
+
+    checker = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    )
+    result = checker.check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    artifact = checker._last_internal_call_effect_artifacts[-1]
+    assert artifact.precondition_payload["left_partial_order_certificate"][
+        "guard_exclusivity_proof_pairs"
+    ] == ((0, 1),)
+
+
+def test_whole_caller_unordered_nonexclusive_writes_remain_unknown():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, base in ((left, 0x1000), (right, 0x3000)):
+        _set_cfg_local_caller_stores(
+            analysis,
+            [
+                (1, base + 0x100, base + 0x104, 1, ()),
+                (2, base + 0x200, base + 0x204, 2, ()),
+                (0, base, base + 4, 3, ()),
+            ],
+            [(0, 1), (0, 2)],
+        )
+        analysis.effect_summary.effects = analysis.effect_summary.effects[:2]
+        object.__setattr__(
+            analysis.effect_summary.function_control_effect_profile,
+            "store_count",
+            2,
+        )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    caller_record = result.call_effect_shadow_manifest["solver_proof_records"][-1]
+    assert caller_record["proof_stage"] == "caller_memory_relation"
+    assert caller_record["status"] == "refuted"
+    assert caller_record["solver_result"] == "sat"
+
+
+def test_whole_caller_final_post_state_eliminates_overwritten_write():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _set_complete_local_caller_stores(
+        left,
+        [(0, 0, 4, 1, 10), (0, 0, 4, 2, 20)],
+    )
+    _set_complete_local_caller_stores(
+        right,
+        [(0, 0, 4, 2, 10)],
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert result.call_effect_shadow_manifest["phase2_discharge_gate"]["status"] == (
+        "proven"
+    )
+
+
+def test_whole_caller_final_post_state_refutes_different_last_write():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _set_complete_local_caller_stores(
+        left,
+        [(0, 0, 4, 1, 10), (0, 0, 4, 2, 20)],
+    )
+    _set_complete_local_caller_stores(
+        right,
+        [(0, 0, 4, 2, 10), (0, 0, 4, 1, 20)],
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    caller_record = result.call_effect_shadow_manifest["solver_proof_records"][-1]
+    assert caller_record["proof_stage"] == "caller_memory_relation"
+    assert caller_record["status"] == "refuted"
+    assert caller_record["solver_result"] == "sat"
+
+
+@pytest.mark.parametrize(
+    ("specs", "failure_fragment"),
+    [
+        (
+            [(0, 0, 4, 1, 10), (1, 0, 4, 2, 20)],
+            "caller_memory_effect_alias_relation_missing",
+        ),
+        (
+            [(0, 0, 4, 1, 10), (0, 2, 4, 2, 20)],
+            "caller_memory_effect_partial_overlap_unsupported",
+        ),
+    ],
+)
+def test_whole_caller_final_post_state_keeps_unproven_aliases_unknown(
+    specs,
+    failure_fragment,
+):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _set_complete_local_caller_stores(left, specs)
+    _set_complete_local_caller_stores(right, specs)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["phase2_discharge_gate"]["failure_cause"] == (
+        "caller_memory_relation_not_proven"
+    )
+    assert any(
+        failure_fragment in cause
+        for cause in manifest["stage_specific_producer"]["failure_causes"]
+    )
 
 
 def test_external_thunk_target_is_not_a_phase2_internal_call_candidate():

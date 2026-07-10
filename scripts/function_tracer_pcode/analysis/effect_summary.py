@@ -23,6 +23,7 @@ from ..model import (
     PostStateValueRef,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
+    PcodeBlockRef,
     PcodeOpRef,
     StorageInfo,
     coerce_call_target_ref,
@@ -54,13 +55,17 @@ class StoreEffectProvenance:
 
     source_kind: str
     producer_pcode_op_ref: Optional[PcodeOpRef]
+    producer_block_ref: Optional[PcodeBlockRef] = None
     call_target_ref: Optional[CallTargetRef] = None
     callee_effect_index: Optional[int] = None
+    nested_effect_provenance: Optional["StoreEffectProvenance"] = None
 
     def is_complete(self) -> bool:
         if self.source_kind not in {"local_store", "call_derived"}:
             return False
         if self.producer_pcode_op_ref is None:
+            return False
+        if self.producer_block_ref is None:
             return False
         if any(
             getattr(self.producer_pcode_op_ref, attribute, None) is None
@@ -82,8 +87,14 @@ class StoreEffectProvenance:
                 and not self.call_target_ref.is_unknown()
                 and self.callee_effect_index is not None
                 and int(self.callee_effect_index) >= 0
+                and self.nested_effect_provenance is not None
+                and self.nested_effect_provenance.is_complete()
             )
-        return self.call_target_ref is None and self.callee_effect_index is None
+        return (
+            self.call_target_ref is None
+            and self.callee_effect_index is None
+            and self.nested_effect_provenance is None
+        )
 
     def stable_key(self) -> Tuple[object, ...]:
         return (
@@ -95,11 +106,21 @@ class StoreEffectProvenance:
                 else None
             ),
             (
+                self.producer_block_ref.stable_key()
+                if self.producer_block_ref is not None
+                else None
+            ),
+            (
                 self.call_target_ref.stable_key()
                 if self.call_target_ref is not None
                 else None
             ),
             self.callee_effect_index,
+            (
+                self.nested_effect_provenance.stable_key()
+                if self.nested_effect_provenance is not None
+                else None
+            ),
         )
 
     def to_dict(self) -> Dict[str, object]:
@@ -110,12 +131,22 @@ class StoreEffectProvenance:
                 if self.producer_pcode_op_ref is not None
                 else None
             ),
+            "producer_block_ref": (
+                self.producer_block_ref.to_dict()
+                if self.producer_block_ref is not None
+                else None
+            ),
             "call_target_ref": (
                 self.call_target_ref.to_dict()
                 if self.call_target_ref is not None
                 else None
             ),
             "callee_effect_index": self.callee_effect_index,
+            "nested_effect_provenance": (
+                self.nested_effect_provenance.to_dict()
+                if self.nested_effect_provenance is not None
+                else None
+            ),
             "complete": self.is_complete(),
         }
 
@@ -295,6 +326,9 @@ class CallSiteEffectSummaryEvidence:
     incomplete_reasons: Tuple[str, ...] = ()
     callee_control_profile_key: Optional[Tuple[object, ...]] = None
     callee_ordered_scalar_store_candidate: bool = False
+    callee_cfg_edge_keys: Tuple[
+        Tuple[Tuple[object, ...], Tuple[object, ...]], ...
+    ] = ()
     callee_recursive_scc_proven: bool = False
     callee_recursive_scc_identity: Optional[str] = None
     callee_recursive_scc_member_keys: Tuple[Tuple[object, ...], ...] = ()
@@ -328,6 +362,7 @@ class CallSiteEffectSummaryEvidence:
             self.incomplete_reasons,
             self.callee_control_profile_key,
             self.callee_ordered_scalar_store_candidate,
+            self.callee_cfg_edge_keys,
             self.callee_recursive_scc_proven,
             self.callee_recursive_scc_identity,
             self.callee_recursive_scc_member_keys,
@@ -363,6 +398,7 @@ class CallSiteEffectSummaryEvidence:
             "callee_ordered_scalar_store_candidate": bool(
                 self.callee_ordered_scalar_store_candidate
             ),
+            "callee_cfg_edge_keys": self.callee_cfg_edge_keys,
             "callee_recursive_scc_proven": bool(self.callee_recursive_scc_proven),
             "callee_recursive_scc_identity": self.callee_recursive_scc_identity,
             "callee_recursive_scc_member_keys": self.callee_recursive_scc_member_keys,
@@ -421,6 +457,9 @@ class FunctionControlEffectProfile:
     region_entry_block_key: Optional[Tuple[object, ...]] = None
     region_exit_block_keys: Tuple[Tuple[object, ...], ...] = ()
     region_block_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_cfg_edge_keys: Tuple[
+        Tuple[Tuple[object, ...], Tuple[object, ...]], ...
+    ] = ()
     region_pcode_op_keys: Tuple[Tuple[object, ...], ...] = ()
     region_live_in_keys: Tuple[Tuple[object, ...], ...] = ()
     region_live_out_keys: Tuple[Tuple[object, ...], ...] = ()
@@ -502,6 +541,7 @@ class FunctionControlEffectProfile:
             self.region_entry_block_key,
             self.region_exit_block_keys,
             self.region_block_keys,
+            self.region_cfg_edge_keys,
             self.region_pcode_op_keys,
             self.region_live_in_keys,
             self.region_live_out_keys,
@@ -543,6 +583,7 @@ class FunctionControlEffectProfile:
             "region_entry_block_key": self.region_entry_block_key,
             "region_exit_block_keys": self.region_exit_block_keys,
             "region_block_keys": self.region_block_keys,
+            "region_cfg_edge_keys": self.region_cfg_edge_keys,
             "region_pcode_op_keys": self.region_pcode_op_keys,
             "region_live_in_keys": self.region_live_in_keys,
             "region_live_out_keys": self.region_live_out_keys,
@@ -1271,6 +1312,29 @@ def summarize_store_effects(
                 return None
         return PcodeOpRef.from_pcode_op(op)
 
+    def _pcode_block_ref_for_block_info(block_info) -> Optional[PcodeBlockRef]:
+        block = getattr(block_info, "block", None)
+        if block is None:
+            return None
+        try:
+            block_index = int(block.getIndex())
+        except Exception:
+            block_index = None
+        try:
+            start = block.getStart()
+            start_offset = int(start.getOffset()) if start is not None else None
+        except Exception:
+            start_offset = None
+        if block_index is None and start_offset is None:
+            return None
+        return PcodeBlockRef(
+            block_index=block_index,
+            start_address_offset=start_offset,
+            binary_id=getattr(tracer, "_function_binary_id", None),
+            function_entry_space=getattr(tracer, "_function_entry_space", None),
+            function_entry_offset=getattr(tracer, "_function_entry_offset", None),
+        )
+
     def _record_call_effect_summary_evidence(
         op,
         *,
@@ -1338,6 +1402,9 @@ def summarize_store_effects(
                     callee_profile is not None
                     and callee_profile.phase3_ordered_scalar_store_candidate
                 ),
+                callee_cfg_edge_keys=tuple(
+                    getattr(callee_profile, "region_cfg_edge_keys", ()) or ()
+                ),
                 callee_recursive_scc_proven=bool(
                     callee_profile is not None
                     and callee_profile.recursive_scc_proven
@@ -1396,6 +1463,7 @@ def summarize_store_effects(
         )
 
     for block_info in block_infos:
+        producer_block_ref = _pcode_block_ref_for_block_info(block_info)
         coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
         if coverage_status == "complete_unreachable":
             continue
@@ -1459,6 +1527,7 @@ def summarize_store_effects(
                                 provenance=StoreEffectProvenance(
                                     source_kind="local_store",
                                     producer_pcode_op_ref=_pcode_ref_for_op(op),
+                                    producer_block_ref=producer_block_ref,
                                 ),
                             )
                         )
@@ -1834,8 +1903,10 @@ def summarize_store_effects(
                                     provenance=StoreEffectProvenance(
                                         source_kind="call_derived",
                                         producer_pcode_op_ref=_pcode_ref_for_op(op),
+                                        producer_block_ref=producer_block_ref,
                                         call_target_ref=target_ref,
                                         callee_effect_index=callee_effect_index,
+                                        nested_effect_provenance=effect.provenance,
                                     ),
                                 )
                             )

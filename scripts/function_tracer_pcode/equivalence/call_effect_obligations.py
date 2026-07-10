@@ -1492,13 +1492,11 @@ def _phase2_direct_call_eligibility(
             or region.ordered_scalar_store_candidate is not True
         ):
             blockers.append("inline_region_not_total_trap_free_scalar")
-        if call_memory_count != region_memory_count:
-            blockers.append("call_to_region_memory_effect_count_relation_missing")
         if not region.output_relation_key:
             blockers.append("inline_region_return_partition_missing")
         required_stages = (
             _PHASE3_MEMORY_REQUIRED_SOLVER_STAGES
-            if call_memory_count > 0 and region_memory_count > 0
+            if call_memory_count > 0 or region_memory_count > 0
             else _PHASE2_REQUIRED_SOLVER_STAGES
         )
         return Phase2DirectCallEligibility(
@@ -1573,15 +1571,11 @@ def _phase2_direct_call_eligibility(
     memory_relation_required = bool(
         isinstance(left, CallSiteFact)
         and isinstance(right, CallSiteFact)
-        and left.callee_memory_effect_counts != (0,)
-        and right.callee_memory_effect_counts != (0,)
+        and (
+            left.callee_memory_effect_counts != (0,)
+            or right.callee_memory_effect_counts != (0,)
+        )
     )
-    if (
-        isinstance(left, CallSiteFact)
-        and isinstance(right, CallSiteFact)
-        and left.callee_memory_effect_counts != right.callee_memory_effect_counts
-    ):
-        blockers.append("callee_memory_effect_count_relation_missing")
     required_stages = (
         _PHASE3_MEMORY_REQUIRED_SOLVER_STAGES
         if memory_relation_required
