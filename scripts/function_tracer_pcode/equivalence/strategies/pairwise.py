@@ -2945,13 +2945,30 @@ class PairwiseStrategy(CheckStrategy):
         right_storage = self._readonly_count_storage_identity_key(right_ref)
         left_index = self._readonly_count_index_identity_key(left_ref)
         right_index = self._readonly_count_index_identity_key(right_ref)
+        if (
+            left_storage is None
+            or right_storage is None
+            or left_index is None
+            or right_index is None
+            or left_index != right_index
+        ):
+            return False
+        left_register = self._register_storage_identity_components(left_storage)
+        right_register = self._register_storage_identity_components(right_storage)
+        if left_register is None or right_register is None:
+            return False
+        if left_register[:3] != right_register[:3]:
+            return False
+        left_low, left_size = int(left_register[3]), int(left_register[4])
+        right_low, right_size = int(right_register[3]), int(right_register[4])
+        if left_size == right_size:
+            return False
+        left_high = left_low + left_size
+        right_high = right_low + right_size
         return (
-            left_storage is not None
-            and right_storage is not None
-            and left_index is not None
-            and right_index is not None
-            and left_index == right_index
-            and self._count_storage_low_projection_compatible(left_storage, right_storage)
+            left_low <= right_low and right_high <= left_high
+        ) or (
+            right_low <= left_low and left_high <= right_high
         )
 
     def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
@@ -3226,25 +3243,17 @@ class PairwiseStrategy(CheckStrategy):
         shared_index = self._readonly_shared_parameter_index(left_ref, right_ref)
         if shared_index is None:
             return None
-        wide_hint = infer_parameter_semantics(wide_analysis).get(shared_index)
-        signedness = None
-        source = None
-        if (
-            wide_hint is not None
-            and wide_hint.narrow_bits == narrow_bits
-            and wide_hint.signedness in {"signed", "unsigned"}
-            and wide_hint.signedness_source == "explicit"
-        ):
-            signedness = wide_hint.signedness
-            source = "param_semantic_hint"
-        if signedness is None:
-            signedness = self._readonly_declared_narrow_parameter_signedness(
-                wide_analysis,
-                shared_index,
-                narrow_bits,
-                wide_bits,
-            )
-            source = "declared_parameter_narrow_type_on_wide_storage" if signedness is not None else None
+        signedness = self._readonly_declared_narrow_parameter_signedness(
+            wide_analysis,
+            shared_index,
+            narrow_bits,
+            wide_bits,
+        )
+        source = (
+            "declared_parameter_narrow_type_on_wide_storage"
+            if signedness is not None
+            else None
+        )
         if signedness is None:
             return None
         if self._readonly_declared_parameter_bits(narrow_analysis, shared_index) != narrow_bits:
@@ -8997,6 +9006,22 @@ class PairwiseStrategy(CheckStrategy):
                 self._parameter_descriptor_index_identity_key(parameter),
             ):
                 return parameter
+        projected_candidates = []
+        if proof_storage is not None and proof_index is not None:
+            for parameter in parameters or []:
+                parameter_index = self._parameter_descriptor_index_identity_key(parameter)
+                parameter_storage = self._parameter_descriptor_storage_identity_key(parameter)
+                if (
+                    parameter_index == proof_index
+                    and parameter_storage is not None
+                    and self._count_storage_low_projection_compatible(
+                        proof_storage,
+                        parameter_storage,
+                    )
+                ):
+                    projected_candidates.append(parameter)
+        if len(projected_candidates) == 1:
+            return projected_candidates[0]
         return None
 
     def _parameters_have_conflicting_reduction_count_storage(

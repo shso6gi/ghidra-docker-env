@@ -5195,7 +5195,7 @@ class CheckStrategy(ABC):
         if cls._proof_target_contains_missing_or_diagnostic(normalized):
             return False
         root = normalized[0]
-        if root in {"parameter", "loop_limit_parameter"}:
+        if root in {"parameter", "parameter_index", "loop_limit_parameter"}:
             return len(normalized) == 2 and cls._proof_nonnegative_int_like(normalized[1])
         if root == "parameter_storage":
             return len(normalized) == 2 and cls._readonly_component_key_is_specific(normalized[1])
