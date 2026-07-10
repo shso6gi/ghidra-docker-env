@@ -16,14 +16,17 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ..analysis.effect_summary import (
     CallArgumentEvidence,
     CallSiteEffectSummaryEvidence,
+    StoreEffect,
 )
 from ..model import (
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    ReturnInfo,
     expression_provenance_key,
 )
+from ..model.signature import get_declared_type_signedness
 from ..model.render_smt import expression_smt_bit_width
 from ..smt import SolverStatus
 from .call_effect_obligations import (
@@ -42,7 +45,13 @@ from .formula.params import (
 
 
 _PRODUCER_KIND = "internal_typed_pure_direct_call_stage_producer"
-_STAGES = ("guard_relation", "argument_relation", "return_relation")
+_STAGES = (
+    "guard_relation",
+    "argument_relation",
+    "return_relation",
+    "memory_relation",
+    "caller_memory_relation",
+)
 _TYPED_RENDERER_TOKEN = object()
 _TOTAL_BINARY_OPERATORS = frozenset(
     {
@@ -94,6 +103,39 @@ class PureDirectCallProofInput:
     right_parameters: Tuple[Mapping[str, Any], ...]
     left_caller_observation_bit_width: Optional[int]
     right_caller_observation_bit_width: Optional[int]
+    left_caller_effects: Tuple[StoreEffect, ...]
+    right_caller_effects: Tuple[StoreEffect, ...]
+    left_caller_profile: Any
+    right_caller_profile: Any
+    left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
+    right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
+
+
+@dataclass(frozen=True)
+class PureCallRegionProofInput:
+    obligation_id: str
+    observation_contract_id: str
+    left_fact_id: str
+    right_fact_id: str
+    structural_certificate_id: str
+    left_fact_payload: Mapping[str, Any]
+    right_fact_payload: Mapping[str, Any]
+    call_on_left: bool
+    call_arguments: CallArgumentEvidence
+    call_effect: CallSiteEffectSummaryEvidence
+    region_returns: Tuple[ReturnInfo, ...]
+    region_effects: Tuple[StoreEffect, ...]
+    left_parameters: Tuple[Mapping[str, Any], ...]
+    right_parameters: Tuple[Mapping[str, Any], ...]
+    left_caller_observation_bit_width: Optional[int]
+    right_caller_observation_bit_width: Optional[int]
+    region_return_signed: Optional[bool]
+    left_caller_effects: Tuple[StoreEffect, ...]
+    right_caller_effects: Tuple[StoreEffect, ...]
+    left_caller_profile: Any
+    right_caller_profile: Any
+    left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
+    right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
 
 
 @dataclass(frozen=True)
@@ -155,7 +197,8 @@ def _find_call_effect_evidence(
 def _fact_by_id(manifest: Mapping[str, Any], side: str) -> Dict[str, Mapping[str, Any]]:
     return {
         str(item.get("fact_id")): item
-        for item in manifest.get(f"{side}_facts", ()) or ()
+        for item in tuple(manifest.get(f"{side}_facts", ()) or ())
+        + tuple(manifest.get(f"{side}_regions", ()) or ())
         if isinstance(item, Mapping) and item.get("fact_id")
     }
 
@@ -173,7 +216,10 @@ def _build_inputs(
     manifest: Mapping[str, Any],
     analysis1: FunctionReturnAnalysis,
     analysis2: FunctionReturnAnalysis,
-) -> Tuple[Tuple[PureDirectCallProofInput, ...], Tuple[str, ...]]:
+) -> Tuple[
+    Tuple[PureDirectCallProofInput | PureCallRegionProofInput, ...],
+    Tuple[str, ...],
+]:
     certificate = manifest.get("structural_coverage_certificate")
     if not isinstance(certificate, Mapping):
         return (), ("structural_coverage_certificate_missing",)
@@ -190,7 +236,7 @@ def _build_inputs(
         for item in manifest.get("phase2_direct_call_eligibility", ()) or ()
         if isinstance(item, Mapping)
     }
-    inputs: List[PureDirectCallProofInput] = []
+    inputs: List[PureDirectCallProofInput | PureCallRegionProofInput] = []
     failures: List[str] = []
 
     def caller_observation_width(analysis: FunctionReturnAnalysis) -> Optional[int]:
@@ -200,12 +246,23 @@ def _build_inputs(
             return None
         return width if width > 0 else None
 
+    def analysis_return_signed(analysis: FunctionReturnAnalysis) -> Optional[bool]:
+        try:
+            value = get_declared_type_signedness(
+                analysis.get_comparison_type_obj(),
+                analysis.get_comparison_type_name(),
+            )
+            return value if isinstance(value, bool) else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     for obligation in manifest.get("relational_obligations", ()) or ():
         if not isinstance(obligation, Mapping):
             continue
         obligation_id = str(obligation.get("obligation_id") or "")
         eligibility = eligibility_by_id.get(obligation_id, {})
-        if obligation.get("relation_kind") != "call_to_call" or eligibility.get("status") != "candidate":
+        relation_kind = str(obligation.get("relation_kind") or "")
+        if eligibility.get("status") != "candidate":
             continue
         left_fact_id = str(obligation.get("left_fact_id") or "")
         right_fact_id = str(obligation.get("right_fact_id") or "")
@@ -213,6 +270,148 @@ def _build_inputs(
         right_fact = right_by_id.get(right_fact_id)
         if left_fact is None or right_fact is None:
             failures.append(f"{obligation_id}:typed_fact_missing")
+            continue
+        if relation_kind in {"call_to_region", "region_to_call"}:
+            call_on_left = relation_kind == "call_to_region"
+            call_fact = left_fact if call_on_left else right_fact
+            region_fact = right_fact if call_on_left else left_fact
+            call_analysis = analysis1 if call_on_left else analysis2
+            region_analysis = analysis2 if call_on_left else analysis1
+            if call_fact.get("fact_kind") != "call_site" or region_fact.get("fact_kind") != "region":
+                failures.append(f"{obligation_id}:call_region_endpoint_kind_mismatch")
+                continue
+            call_key = _tuple_key(
+                (call_fact.get("identity") or {}).get("pcode_op_key")
+                if isinstance(call_fact.get("identity"), Mapping)
+                else None
+            )
+            if call_key is None:
+                failures.append(f"{obligation_id}:call_region_pcode_identity_missing")
+                continue
+            call_arguments = _find_call_argument_evidence(call_analysis, call_key)
+            call_effect = _find_call_effect_evidence(call_analysis, call_key)
+            if call_arguments is None or not call_arguments.is_usable():
+                failures.append(f"{obligation_id}:call_region_argument_evidence_incomplete")
+                continue
+            if call_effect is None or (
+                call_effect.summary_status != "complete"
+                or call_effect.has_unsupported_nested_call
+                or call_effect.return_summary_status != "complete"
+                or not call_effect.return_partitions
+            ):
+                failures.append(f"{obligation_id}:call_region_callee_summary_incomplete")
+                continue
+            region_summary = getattr(region_analysis, "effect_summary", None)
+            region_profile = getattr(region_summary, "function_control_effect_profile", None)
+            region_returns = tuple(region_analysis.returns or ())
+            region_effects = tuple(getattr(region_summary, "effects", ()) or ())
+            if region_profile is None:
+                failures.append(f"{obligation_id}:inline_region_control_profile_missing")
+                continue
+            if not (
+                bool(region_profile.pcode_enumeration_complete)
+                and bool(region_profile.cfg_edges_complete)
+                and bool(region_profile.cfg_acyclic)
+                and bool(region_profile.terminal_return_coverage_complete)
+                and int(region_profile.load_count) == 0
+                and int(region_profile.store_count) == len(region_effects)
+                and all(
+                    int(getattr(region_profile, name, 0) or 0) == 0
+                    for name in (
+                        "call_count",
+                        "callind_count",
+                        "callother_count",
+                        "branchind_count",
+                        "float_op_count",
+                        "pcode_after_return_count",
+                        "abnormal_terminal_block_count",
+                    )
+                )
+                and bool(region_profile.call_like_identity_complete)
+                and not tuple(region_profile.phase2_unsafe_mnemonics or ())
+                and not tuple(region_profile.unsupported_mnemonics or ())
+            ):
+                failures.append(f"{obligation_id}:inline_region_not_total_trap_free_scalar")
+                continue
+            if len(call_effect.memory_effects) != int(call_effect.memory_effect_count):
+                failures.append(f"{obligation_id}:call_region_memory_effect_coverage_incomplete")
+                continue
+            if len(call_effect.memory_effects) != len(region_effects):
+                failures.append(f"{obligation_id}:call_region_memory_effect_count_relation_missing")
+                continue
+            if bool(getattr(region_summary, "has_unsupported_call", False)):
+                failures.append(f"{obligation_id}:inline_region_unsupported_call_present")
+                continue
+            if bool(getattr(region_summary, "incomplete_reasons", ()) or ()):
+                failures.append(f"{obligation_id}:inline_region_effect_summary_incomplete")
+                continue
+            if not region_returns:
+                failures.append(f"{obligation_id}:inline_region_return_partition_missing")
+                continue
+            if any(
+                item.return_kind not in {"exact", "phi_expansion"}
+                for item in region_returns
+            ):
+                failures.append(f"{obligation_id}:inline_region_nonexact_return_present")
+                continue
+            if any(bool(item.validation_blockers) for item in region_returns):
+                failures.append(f"{obligation_id}:inline_region_return_validation_blocked")
+                continue
+            inputs.append(
+                PureCallRegionProofInput(
+                    obligation_id=obligation_id,
+                    observation_contract_id=str(obligation.get("observation_contract_id") or ""),
+                    left_fact_id=left_fact_id,
+                    right_fact_id=right_fact_id,
+                    structural_certificate_id=certificate_id,
+                    left_fact_payload=left_fact,
+                    right_fact_payload=right_fact,
+                    call_on_left=call_on_left,
+                    call_arguments=call_arguments,
+                    call_effect=call_effect,
+                    region_returns=region_returns,
+                    region_effects=region_effects,
+                    left_parameters=tuple(analysis1.parameters or ()),
+                    right_parameters=tuple(analysis2.parameters or ()),
+                    left_caller_observation_bit_width=caller_observation_width(analysis1),
+                    right_caller_observation_bit_width=caller_observation_width(analysis2),
+                    region_return_signed=analysis_return_signed(region_analysis),
+                    left_caller_effects=tuple(
+                        getattr(getattr(analysis1, "effect_summary", None), "effects", ()) or ()
+                    ),
+                    right_caller_effects=tuple(
+                        getattr(getattr(analysis2, "effect_summary", None), "effects", ()) or ()
+                    ),
+                    left_caller_profile=getattr(
+                        getattr(analysis1, "effect_summary", None),
+                        "function_control_effect_profile",
+                        None,
+                    ),
+                    right_caller_profile=getattr(
+                        getattr(analysis2, "effect_summary", None),
+                        "function_control_effect_profile",
+                        None,
+                    ),
+                    left_caller_call_effects=tuple(
+                        getattr(
+                            getattr(analysis1, "effect_summary", None),
+                            "call_site_effect_summary_evidence",
+                            (),
+                        )
+                        or ()
+                    ),
+                    right_caller_call_effects=tuple(
+                        getattr(
+                            getattr(analysis2, "effect_summary", None),
+                            "call_site_effect_summary_evidence",
+                            (),
+                        )
+                        or ()
+                    ),
+                )
+            )
+            continue
+        if relation_kind != "call_to_call":
             continue
         if (
             left_fact.get("operation_kind") not in {"direct_call", "indirect_call"}
@@ -249,12 +448,16 @@ def _build_inputs(
         if (
             left_effect.summary_status != "complete"
             or right_effect.summary_status != "complete"
-            or int(left_effect.memory_effect_count) != 0
-            or int(right_effect.memory_effect_count) != 0
             or left_effect.has_unsupported_nested_call
             or right_effect.has_unsupported_nested_call
         ):
             failures.append(f"{obligation_id}:pure_effect_summary_incomplete")
+            continue
+        if (
+            len(left_effect.memory_effects) != int(left_effect.memory_effect_count)
+            or len(right_effect.memory_effects) != int(right_effect.memory_effect_count)
+        ):
+            failures.append(f"{obligation_id}:typed_memory_effect_coverage_incomplete")
             continue
         if left_effect.return_summary_status != "complete" or right_effect.return_summary_status != "complete":
             failures.append(f"{obligation_id}:complete_return_partition_missing")
@@ -285,6 +488,38 @@ def _build_inputs(
                 right_parameters=tuple(analysis2.parameters or ()),
                 left_caller_observation_bit_width=caller_observation_width(analysis1),
                 right_caller_observation_bit_width=caller_observation_width(analysis2),
+                left_caller_effects=tuple(
+                    getattr(getattr(analysis1, "effect_summary", None), "effects", ()) or ()
+                ),
+                right_caller_effects=tuple(
+                    getattr(getattr(analysis2, "effect_summary", None), "effects", ()) or ()
+                ),
+                left_caller_profile=getattr(
+                    getattr(analysis1, "effect_summary", None),
+                    "function_control_effect_profile",
+                    None,
+                ),
+                right_caller_profile=getattr(
+                    getattr(analysis2, "effect_summary", None),
+                    "function_control_effect_profile",
+                    None,
+                ),
+                left_caller_call_effects=tuple(
+                    getattr(
+                        getattr(analysis1, "effect_summary", None),
+                        "call_site_effect_summary_evidence",
+                        (),
+                    )
+                    or ()
+                ),
+                right_caller_call_effects=tuple(
+                    getattr(
+                        getattr(analysis2, "effect_summary", None),
+                        "call_site_effect_summary_evidence",
+                        (),
+                    )
+                    or ()
+                ),
             )
         )
     return tuple(inputs), tuple(failures)
@@ -359,7 +594,9 @@ def _render_reachability(
     )
 
 
-def _parameter_prelude(proof_input: PureDirectCallProofInput):
+def _parameter_prelude(
+    proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
+):
     left_infos = collect_param_info(list(proof_input.left_parameters), "_1")
     right_infos = collect_param_info(list(proof_input.right_parameters), "_2")
     if len({item.original_name for item in left_infos}) != len(left_infos):
@@ -387,7 +624,69 @@ def _parameter_prelude(proof_input: PureDirectCallProofInput):
     )
 
 
-def _stage_payload(proof_input: PureDirectCallProofInput, stage: str) -> Dict[str, Any]:
+def _call_region_parameter_prelude(proof_input: PureCallRegionProofInput):
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    region_mapping = dict(right_mapping if proof_input.call_on_left else left_mapping)
+    region_parameters = (
+        proof_input.right_parameters
+        if proof_input.call_on_left
+        else proof_input.left_parameters
+    )
+    observed_widths: Dict[str, set[int]] = {}
+
+    def collect(expression: Expression) -> None:
+        if expression.expr_type == ExpressionType.PARAMETER:
+            bits = int(expression_smt_bit_width(expression) or 0)
+            if expression.name and bits > 0:
+                observed_widths.setdefault(str(expression.name), set()).add(bits)
+        for operand in tuple(expression.operands or ()):
+            collect(operand)
+
+    for item in proof_input.region_returns:
+        collect(item.value)
+        for condition in item.conditions:
+            collect(condition.expression)
+    parameters_by_name = {
+        str(item.get("name") or f"param_{item.get('index', 0)}"): item
+        for item in region_parameters
+    }
+    for name, widths in observed_widths.items():
+        if len(widths) != 1 or name not in parameters_by_name or name not in region_mapping:
+            raise ValueError("inline_region_parameter_width_relation_ambiguous")
+        observed_bits = next(iter(widths))
+        parameter = parameters_by_name[name]
+        declared_bits = int(parameter.get("size", 0) or 0) * 8
+        if declared_bits <= 0:
+            raise ValueError("inline_region_parameter_width_missing")
+        if observed_bits == declared_bits:
+            continue
+        base_symbol = region_mapping[name]
+        auxiliary = f"{base_symbol}_region_{observed_bits}"
+        lines.append(f"(declare-const {auxiliary} (_ BitVec {observed_bits}))")
+        if observed_bits < declared_bits:
+            relation = (
+                f"(= {auxiliary} "
+                f"((_ extract {observed_bits - 1} 0) {base_symbol}))"
+            )
+        else:
+            if "is_signed" not in parameter:
+                raise ValueError("inline_region_parameter_signedness_missing")
+            extension = "sign_extend" if bool(parameter.get("is_signed")) else "zero_extend"
+            relation = (
+                f"(= {auxiliary} "
+                f"((_ {extension} {observed_bits - declared_bits}) {base_symbol}))"
+            )
+        lines.append(f"(assert {relation})")
+        region_mapping[name] = auxiliary
+    if proof_input.call_on_left:
+        return lines, left_mapping, region_mapping
+    return lines, region_mapping, right_mapping
+
+
+def _stage_payload(
+    proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
+    stage: str,
+) -> Dict[str, Any]:
     def condition_key(condition: Condition) -> Tuple[Any, ...]:
         structural_key = getattr(condition, "structural_key", None)
         value = structural_key() if callable(structural_key) else None
@@ -426,9 +725,26 @@ def _stage_payload(proof_input: PureDirectCallProofInput, stage: str) -> Dict[st
                 )
                 for conditions, value in evidence.return_partitions or ()
             ),
+            "memory_effects": tuple(
+                {
+                    "location": effect.location.stable_key(),
+                    "value": expression_provenance_key(effect.value),
+                    "conditions": tuple(
+                        condition_key(condition)
+                        for condition in effect.conditions or ()
+                    ),
+                    "order_key": int(effect.order_key),
+                    "provenance": (
+                        effect.provenance.stable_key()
+                        if effect.provenance is not None
+                        else None
+                    ),
+                }
+                for effect in evidence.memory_effects or ()
+            ),
         }
 
-    return {
+    common = {
         "producer_contract": "typed_pure_direct_call_v1",
         "stage": stage,
         "obligation_id": proof_input.obligation_id,
@@ -438,11 +754,329 @@ def _stage_payload(proof_input: PureDirectCallProofInput, stage: str) -> Dict[st
             proof_input.left_caller_observation_bit_width,
             proof_input.right_caller_observation_bit_width,
         ),
-        "left_argument_evidence": argument_payload(proof_input.left_arguments),
-        "right_argument_evidence": argument_payload(proof_input.right_arguments),
-        "left_effect_evidence": effect_payload(proof_input.left_effect),
-        "right_effect_evidence": effect_payload(proof_input.right_effect),
+        "left_parameters": proof_input.left_parameters,
+        "right_parameters": proof_input.right_parameters,
+        "left_caller_effects": tuple(
+            {
+                "location": effect.location.stable_key(),
+                "value": expression_provenance_key(effect.value),
+                "conditions": tuple(
+                    condition_key(condition) for condition in effect.conditions or ()
+                ),
+                "order_key": int(effect.order_key),
+                "provenance": (
+                    effect.provenance.stable_key()
+                    if effect.provenance is not None
+                    else None
+                ),
+            }
+            for effect in proof_input.left_caller_effects
+        ),
+        "right_caller_effects": tuple(
+            {
+                "location": effect.location.stable_key(),
+                "value": expression_provenance_key(effect.value),
+                "conditions": tuple(
+                    condition_key(condition) for condition in effect.conditions or ()
+                ),
+                "order_key": int(effect.order_key),
+                "provenance": (
+                    effect.provenance.stable_key()
+                    if effect.provenance is not None
+                    else None
+                ),
+            }
+            for effect in proof_input.right_caller_effects
+        ),
     }
+    if isinstance(proof_input, PureDirectCallProofInput):
+        common.update(
+            {
+                "left_argument_evidence": argument_payload(proof_input.left_arguments),
+                "right_argument_evidence": argument_payload(proof_input.right_arguments),
+                "left_effect_evidence": effect_payload(proof_input.left_effect),
+                "right_effect_evidence": effect_payload(proof_input.right_effect),
+            }
+        )
+        return common
+    common.update(
+        {
+            "producer_contract": "typed_pure_call_region_v1",
+            "call_on_left": proof_input.call_on_left,
+            "call_argument_evidence": argument_payload(proof_input.call_arguments),
+            "call_effect_evidence": effect_payload(proof_input.call_effect),
+            "region_return_signed": proof_input.region_return_signed,
+            "region_returns": tuple(
+                {
+                    "address": item.address,
+                    "conditions": tuple(condition_key(c) for c in item.conditions),
+                    "value": expression_provenance_key(item.value),
+                    "return_kind": item.return_kind,
+                    "acceptance_status": item.acceptance_status,
+                    "validation_blockers": tuple(item.validation_blockers or ()),
+                }
+                for item in proof_input.region_returns
+            ),
+            "region_effects": tuple(
+                {
+                    "location": item.location.stable_key(),
+                    "value": expression_provenance_key(item.value),
+                    "conditions": tuple(
+                        condition_key(condition)
+                        for condition in item.conditions or ()
+                    ),
+                    "order_key": int(item.order_key),
+                }
+                for item in proof_input.region_effects
+            ),
+        }
+    )
+    return common
+
+
+def _render_call_region_guard_stage(
+    proof_input: PureCallRegionProofInput,
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _call_region_parameter_prelude(proof_input)
+    call_mapping = left_mapping if proof_input.call_on_left else right_mapping
+    region_mapping = right_mapping if proof_input.call_on_left else left_mapping
+    reach = _render_reachability(proof_input.call_arguments, call_mapping)
+    callee_guards = tuple(
+        _and(reach, _render_condition_group(conditions, call_mapping))
+        for conditions, _ in proof_input.call_effect.return_partitions
+    )
+    region_guards = tuple(
+        _and(reach, _render_condition_group(item.conditions, region_mapping))
+        for item in proof_input.region_returns
+    )
+    if not callee_guards or not region_guards:
+        raise ValueError("call_region_return_partition_missing")
+    violation = _or(
+        (
+            _and(reach, f"(not {_or(callee_guards)})"),
+            _and(reach, f"(not {_or(region_guards)})"),
+        )
+    )
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="guard_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "guard_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _region_parameter_expressions(
+    parameters: Sequence[Mapping[str, Any]],
+) -> Tuple[Expression, ...]:
+    ordered = sorted(parameters, key=lambda item: int(item.get("index", 0)))
+    result: List[Expression] = []
+    for parameter in ordered:
+        size = int(parameter.get("size", 0) or 0)
+        if size <= 0:
+            raise ValueError("call_region_parameter_width_missing")
+        result.append(
+            Expression.parameter(
+                str(parameter.get("name") or f"param_{parameter.get('index', 0)}"),
+                int(parameter.get("index", 0)),
+                size=size,
+            )
+        )
+    return tuple(result)
+
+
+def _render_call_region_argument_stage(
+    proof_input: PureCallRegionProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    # This stage relates the call argument to the effective caller ABI input.
+    # Region-expression widening is introduced only where those expressions
+    # are rendered (guard/return stages).
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    call_mapping = left_mapping if proof_input.call_on_left else right_mapping
+    region_mapping = right_mapping if proof_input.call_on_left else left_mapping
+    region_parameters = (
+        proof_input.right_parameters
+        if proof_input.call_on_left
+        else proof_input.left_parameters
+    )
+    reach = _render_reachability(proof_input.call_arguments, call_mapping)
+    arguments = tuple(proof_input.call_arguments.arguments or ())
+    region_inputs = _region_parameter_expressions(region_parameters)
+    if len(arguments) != len(region_inputs):
+        raise ValueError("call_region_argument_arity_relation_missing")
+    mismatches: List[str] = []
+    for argument, region_input in zip(arguments, region_inputs):
+        if not _pure_scalar_expression_supported(argument):
+            raise ValueError("unsupported_call_region_argument_expression")
+        argument_bits = int(expression_smt_bit_width(argument) or 0)
+        region_bits = int(expression_smt_bit_width(region_input) or 0)
+        if argument_bits <= 0 or region_bits <= 0 or argument_bits > region_bits:
+            raise ValueError("call_region_argument_abi_width_relation_missing")
+        argument_smt = argument.to_smt(
+            symbol_name_mapping=call_mapping, float_mode="fp"
+        )
+        region_smt = region_input.to_smt(
+            symbol_name_mapping=region_mapping, float_mode="fp"
+        )
+        if argument_bits < region_bits:
+            region_smt = f"((_ extract {argument_bits - 1} 0) {region_smt})"
+        mismatches.append(f"(not (= {argument_smt} {region_smt}))")
+    violation = _and(reach, _or(mismatches))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="argument_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "argument_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _render_call_region_return_stage(
+    proof_input: PureCallRegionProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _call_region_parameter_prelude(proof_input)
+    call_mapping = left_mapping if proof_input.call_on_left else right_mapping
+    region_mapping = right_mapping if proof_input.call_on_left else left_mapping
+    reach = _render_reachability(proof_input.call_arguments, call_mapping)
+    left_observed = proof_input.left_caller_observation_bit_width
+    right_observed = proof_input.right_caller_observation_bit_width
+    if (
+        left_observed is None
+        or right_observed is None
+        or int(left_observed) <= 0
+        or int(right_observed) <= 0
+    ):
+        raise ValueError("caller_return_observation_width_relation_missing")
+    call_observed = int(left_observed if proof_input.call_on_left else right_observed)
+    region_observed = int(right_observed if proof_input.call_on_left else left_observed)
+    if call_observed > region_observed:
+        raise ValueError("call_region_return_width_bridge_direction_unsupported")
+    observation_bits = call_observed
+    width_bridge = None
+    if call_observed != region_observed:
+        if proof_input.region_return_signed is None:
+            raise ValueError("call_region_return_width_bridge_signedness_missing")
+        semantic_bits = proof_input.call_effect.return_semantic_bit_width
+        if semantic_bits is None or int(semantic_bits) < call_observed:
+            raise ValueError("call_region_return_width_bridge_semantic_width_missing")
+        width_bridge = {
+            "narrow_bits": call_observed,
+            "wide_bits": region_observed,
+            "wide_side": "right" if proof_input.call_on_left else "left",
+            "extension": (
+                "sign_extend" if proof_input.region_return_signed else "zero_extend"
+            ),
+            "proof_basis": "typed_region_return_producer_and_declared_signedness",
+        }
+
+    def render_value(
+        value: Expression,
+        mapping: Mapping[str, str],
+        signed: Optional[bool],
+        active_guard: str,
+    ) -> Tuple[str, int, str]:
+        if not _pure_scalar_expression_supported(value):
+            raise ValueError("unsupported_call_region_return_expression")
+        value_bits = int(expression_smt_bit_width(value) or 0)
+        if value_bits <= 0:
+            raise ValueError("call_region_return_width_missing")
+        value_smt = value.to_smt(symbol_name_mapping=mapping, float_mode="fp")
+        extension_violation = "false"
+        if value_bits > observation_bits:
+            if signed is None:
+                raise ValueError("call_region_return_signedness_missing")
+            extension = "sign_extend" if signed else "zero_extend"
+            canonical = (
+                f"((_ {extension} {value_bits - observation_bits}) "
+                f"((_ extract {observation_bits - 1} 0) {value_smt}))"
+            )
+            extension_violation = _and(
+                active_guard, f"(not (= {value_smt} {canonical}))"
+            )
+            value_smt = (
+                f"((_ extract {observation_bits - 1} 0) {value_smt})"
+            )
+        elif value_bits < observation_bits:
+            if signed is None:
+                raise ValueError("call_region_return_signedness_missing")
+            extension = "sign_extend" if signed else "zero_extend"
+            value_smt = (
+                f"((_ {extension} {observation_bits - value_bits}) {value_smt})"
+            )
+        return value_smt, observation_bits, extension_violation
+
+    call_cases = []
+    for conditions, value in proof_input.call_effect.return_partitions:
+        guard = _and(reach, _render_condition_group(conditions, call_mapping))
+        rendered_value, bits, extension_violation = render_value(
+            value,
+            call_mapping,
+            proof_input.call_effect.return_signed,
+            guard,
+        )
+        call_cases.append((guard, rendered_value, bits, extension_violation))
+    region_cases = []
+    for item in proof_input.region_returns:
+        guard = _and(reach, _render_condition_group(item.conditions, region_mapping))
+        rendered_value, bits, extension_violation = render_value(
+            item.value,
+            region_mapping,
+            proof_input.region_return_signed,
+            guard,
+        )
+        region_cases.append((guard, rendered_value, bits, extension_violation))
+    if not call_cases or not region_cases:
+        raise ValueError("call_region_return_partition_missing")
+
+    violations: List[str] = [
+        _and(reach, f"(not {_or(tuple(item[0] for item in call_cases))})"),
+        _and(reach, f"(not {_or(tuple(item[0] for item in region_cases))})"),
+    ]
+    violations.extend(item[3] for item in call_cases + region_cases)
+    for call_guard, call_value, _, _ in call_cases:
+        for region_guard, region_value, _, _ in region_cases:
+            violations.append(
+                _and(
+                    call_guard,
+                    region_guard,
+                    f"(not (= {call_value} {region_value}))",
+                )
+            )
+    for cases in (call_cases, region_cases):
+        for index, (first_guard, first_value, _, _) in enumerate(cases):
+            for second_guard, second_value, _, _ in cases[index + 1 :]:
+                violations.append(
+                    _and(
+                        first_guard,
+                        second_guard,
+                        f"(not (= {first_value} {second_value}))",
+                    )
+                )
+    violation = _or(tuple(violations))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="return_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "return_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+            "return_width_bridge": width_bridge,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
 
 
 def _render_guard_stage(proof_input: PureDirectCallProofInput) -> _RenderedStage:
@@ -627,6 +1261,393 @@ def _render_return_stage(
     )
 
 
+def _memory_location_semantic_key(location: Any) -> Tuple[Any, ...]:
+    base_ref = getattr(location, "base_ref", None)
+    semantic_key = getattr(base_ref, "semantic_key", None)
+    base_key = semantic_key() if callable(semantic_key) else None
+    if base_key is None:
+        raise ValueError("memory_effect_location_relation_missing")
+    steps = tuple(
+        step.stable_key() for step in tuple(getattr(location, "steps", ()) or ())
+    )
+    size = int(getattr(location, "size", 0) or 0)
+    if size <= 0:
+        raise ValueError("memory_effect_width_missing")
+    return (
+        tuple(base_key),
+        steps,
+        int(getattr(location, "offset", 0) or 0),
+        size,
+    )
+
+
+def _render_memory_stage(
+    proof_input: PureDirectCallProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
+    right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
+
+    def ordered_effects(effect_evidence: CallSiteEffectSummaryEvidence):
+        effects = tuple(effect_evidence.memory_effects or ())
+        order_keys = tuple(int(item.order_key) for item in effects)
+        if len(set(order_keys)) != len(order_keys):
+            raise ValueError("memory_effect_order_relation_missing")
+        return tuple(sorted(effects, key=lambda item: int(item.order_key)))
+
+    left_effects = ordered_effects(proof_input.left_effect)
+    right_effects = ordered_effects(proof_input.right_effect)
+    if not left_effects or len(left_effects) != len(right_effects):
+        raise ValueError("memory_effect_count_relation_missing")
+
+    violations: List[str] = [f"(xor {left_reach} {right_reach})"]
+    for left_effect, right_effect in zip(left_effects, right_effects):
+        if _memory_location_semantic_key(left_effect.location) != _memory_location_semantic_key(
+            right_effect.location
+        ):
+            raise ValueError("memory_effect_location_relation_missing")
+        left_guard = _and(
+            left_reach,
+            _render_condition_group(left_effect.conditions, left_mapping),
+        )
+        right_guard = _and(
+            right_reach,
+            _render_condition_group(right_effect.conditions, right_mapping),
+        )
+        violations.append(f"(xor {left_guard} {right_guard})")
+        if not _pure_scalar_expression_supported(
+            left_effect.value
+        ) or not _pure_scalar_expression_supported(right_effect.value):
+            raise ValueError("memory_effect_value_relation_unsupported")
+        left_bits = int(expression_smt_bit_width(left_effect.value) or 0)
+        right_bits = int(expression_smt_bit_width(right_effect.value) or 0)
+        expected_bits = int(getattr(left_effect.location, "size", 0) or 0) * 8
+        if (
+            left_bits <= 0
+            or left_bits != right_bits
+            or left_bits != expected_bits
+            or int(getattr(right_effect.location, "size", 0) or 0) * 8
+            != expected_bits
+        ):
+            raise ValueError("memory_effect_value_width_relation_missing")
+        left_value = left_effect.value.to_smt(
+            symbol_name_mapping=left_mapping, float_mode="fp"
+        )
+        right_value = right_effect.value.to_smt(
+            symbol_name_mapping=right_mapping, float_mode="fp"
+        )
+        violations.append(
+            _and(
+                left_guard,
+                right_guard,
+                f"(not (= {left_value} {right_value}))",
+            )
+        )
+    violation = _or(tuple(violations))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="memory_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "memory_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+            "memory_observation_policy": "ordered_parameter_relative_stores",
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _render_call_region_memory_stage(
+    proof_input: PureCallRegionProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _call_region_parameter_prelude(proof_input)
+    call_mapping = left_mapping if proof_input.call_on_left else right_mapping
+    region_mapping = right_mapping if proof_input.call_on_left else left_mapping
+    reach = _render_reachability(proof_input.call_arguments, call_mapping)
+
+    def ordered(effects: Sequence[StoreEffect]) -> Tuple[StoreEffect, ...]:
+        values = tuple(effects or ())
+        order_keys = tuple(int(item.order_key) for item in values)
+        if len(set(order_keys)) != len(order_keys):
+            raise ValueError("memory_effect_order_relation_missing")
+        return tuple(sorted(values, key=lambda item: int(item.order_key)))
+
+    call_effects = ordered(proof_input.call_effect.memory_effects)
+    region_effects = ordered(proof_input.region_effects)
+    if not call_effects or len(call_effects) != len(region_effects):
+        raise ValueError("memory_effect_count_relation_missing")
+    violations: List[str] = []
+    for call_effect, region_effect in zip(call_effects, region_effects):
+        if _memory_location_semantic_key(call_effect.location) != _memory_location_semantic_key(
+            region_effect.location
+        ):
+            raise ValueError("memory_effect_location_relation_missing")
+        call_guard = _and(
+            reach,
+            _render_condition_group(call_effect.conditions, call_mapping),
+        )
+        region_guard = _and(
+            reach,
+            _render_condition_group(region_effect.conditions, region_mapping),
+        )
+        violations.append(f"(xor {call_guard} {region_guard})")
+        if not _pure_scalar_expression_supported(
+            call_effect.value
+        ) or not _pure_scalar_expression_supported(region_effect.value):
+            raise ValueError("memory_effect_value_relation_unsupported")
+        call_bits = int(expression_smt_bit_width(call_effect.value) or 0)
+        region_bits = int(expression_smt_bit_width(region_effect.value) or 0)
+        location_bits = int(getattr(call_effect.location, "size", 0) or 0) * 8
+        if call_bits <= 0 or call_bits != region_bits or call_bits != location_bits:
+            raise ValueError("memory_effect_value_width_relation_missing")
+        call_value = call_effect.value.to_smt(
+            symbol_name_mapping=call_mapping, float_mode="fp"
+        )
+        region_value = region_effect.value.to_smt(
+            symbol_name_mapping=region_mapping, float_mode="fp"
+        )
+        violations.append(
+            _and(
+                call_guard,
+                region_guard,
+                f"(not (= {call_value} {region_value}))",
+            )
+        )
+    violation = _or(tuple(violations))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="memory_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "memory_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+            "memory_observation_policy": "ordered_parameter_relative_stores",
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _caller_effect_coverage_payload(
+    effects: Sequence[StoreEffect],
+    profile: Any,
+    call_effects: Sequence[CallSiteEffectSummaryEvidence],
+    *,
+    side: str,
+) -> Dict[str, Any]:
+    """Certify that the full caller write set has explicit object provenance."""
+
+    if profile is None:
+        raise ValueError(f"{side}_caller_effect_profile_missing")
+    if not all(
+        bool(getattr(profile, attribute, False))
+        for attribute in (
+            "pcode_enumeration_complete",
+            "cfg_edges_complete",
+            "terminal_return_coverage_complete",
+            "call_like_identity_complete",
+        )
+    ):
+        raise ValueError(f"{side}_caller_effect_census_incomplete")
+    if not bool(getattr(profile, "cfg_acyclic", False)):
+        raise ValueError(f"{side}_caller_effect_order_not_acyclic")
+
+    call_keys = tuple(
+        tuple(key)
+        for key in tuple(getattr(profile, "call_like_pcode_op_keys", ()) or ())
+    )
+    evidence_by_key: Dict[Tuple[Any, ...], CallSiteEffectSummaryEvidence] = {}
+    for evidence in tuple(call_effects or ()):
+        key = _evidence_pcode_key(evidence)
+        if key is None or key in evidence_by_key:
+            raise ValueError(f"{side}_caller_call_effect_identity_incomplete")
+        evidence_by_key[key] = evidence
+        if (
+            evidence.summary_status != "complete"
+            or evidence.has_unsupported_nested_call
+            or tuple(evidence.incomplete_reasons or ())
+            or len(tuple(evidence.memory_effects or ()))
+            != int(evidence.memory_effect_count)
+        ):
+            raise ValueError(f"{side}_caller_call_effect_summary_incomplete")
+    if len(set(call_keys)) != len(call_keys) or set(call_keys) != set(evidence_by_key):
+        raise ValueError(f"{side}_caller_call_effect_census_mismatch")
+
+    local_refs = set()
+    derived_indexes: Dict[Tuple[Any, ...], set[int]] = {}
+    for effect in tuple(effects or ()):
+        provenance = effect.provenance
+        if provenance is None or not provenance.is_complete():
+            raise ValueError(f"{side}_caller_store_provenance_incomplete")
+        producer_ref = provenance.producer_pcode_op_ref
+        producer_key = tuple(producer_ref.stable_key())
+        mnemonic = str(getattr(producer_ref, "mnemonic", "") or "").upper()
+        if provenance.source_kind == "local_store":
+            if mnemonic != "STORE":
+                raise ValueError(f"{side}_caller_local_store_identity_mismatch")
+            local_refs.add(producer_key)
+            continue
+        if mnemonic not in {"CALL", "CALLIND"} or producer_key not in evidence_by_key:
+            raise ValueError(f"{side}_caller_derived_store_identity_mismatch")
+        evidence = evidence_by_key[producer_key]
+        if provenance.call_target_ref != evidence.target_ref:
+            raise ValueError(f"{side}_caller_derived_store_target_mismatch")
+        derived_indexes.setdefault(producer_key, set()).add(
+            int(provenance.callee_effect_index)
+        )
+
+    if len(local_refs) != int(getattr(profile, "store_count", -1)):
+        raise ValueError(f"{side}_caller_local_store_census_mismatch")
+    for key, evidence in evidence_by_key.items():
+        expected = set(range(int(evidence.memory_effect_count)))
+        if derived_indexes.get(key, set()) != expected:
+            raise ValueError(f"{side}_caller_derived_store_census_mismatch")
+
+    return {
+        "side": side,
+        "status": "complete",
+        "profile_key": profile.stable_key(),
+        "local_store_pcode_keys": tuple(sorted(local_refs, key=repr)),
+        "call_pcode_keys": tuple(sorted(call_keys, key=repr)),
+        "call_derived_effect_indexes": tuple(
+            (key, tuple(sorted(indexes)))
+            for key, indexes in sorted(derived_indexes.items(), key=lambda item: repr(item[0]))
+        ),
+        "effect_count": len(tuple(effects or ())),
+    }
+
+
+def _caller_write_slots(
+    effects: Sequence[StoreEffect],
+    *,
+    side: str,
+) -> Tuple[Tuple[StoreEffect, ...], ...]:
+    grouped: Dict[Tuple[Any, ...], List[StoreEffect]] = {}
+    slot_order: Dict[Tuple[Any, ...], Tuple[int, int]] = {}
+    for effect in tuple(effects or ()):
+        provenance = effect.provenance
+        if provenance is None or provenance.producer_pcode_op_ref is None:
+            raise ValueError(f"{side}_caller_store_provenance_incomplete")
+        producer_key = tuple(provenance.producer_pcode_op_ref.stable_key())
+        slot_key = (
+            provenance.source_kind,
+            producer_key,
+            provenance.callee_effect_index,
+        )
+        grouped.setdefault(slot_key, []).append(effect)
+        slot_order[slot_key] = (
+            int(effect.order_key),
+            int(provenance.callee_effect_index or 0),
+        )
+    orders = tuple(slot_order.values())
+    if len(set(orders)) != len(orders):
+        raise ValueError(f"{side}_caller_store_order_relation_missing")
+    return tuple(
+        tuple(grouped[key])
+        for key in sorted(grouped, key=lambda item: slot_order[item])
+    )
+
+
+def _render_caller_memory_stage(
+    proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    left_coverage = _caller_effect_coverage_payload(
+        proof_input.left_caller_effects,
+        proof_input.left_caller_profile,
+        proof_input.left_caller_call_effects,
+        side="left",
+    )
+    right_coverage = _caller_effect_coverage_payload(
+        proof_input.right_caller_effects,
+        proof_input.right_caller_profile,
+        proof_input.right_caller_call_effects,
+        side="right",
+    )
+    left_slots = _caller_write_slots(proof_input.left_caller_effects, side="left")
+    right_slots = _caller_write_slots(proof_input.right_caller_effects, side="right")
+    if not left_slots or len(left_slots) != len(right_slots):
+        raise ValueError("caller_memory_effect_count_relation_missing")
+
+    violations: List[str] = []
+    for left_slot, right_slot in zip(left_slots, right_slots):
+        left_locations = {
+            _memory_location_semantic_key(effect.location) for effect in left_slot
+        }
+        right_locations = {
+            _memory_location_semantic_key(effect.location) for effect in right_slot
+        }
+        if len(left_locations) != 1 or left_locations != right_locations:
+            raise ValueError("caller_memory_effect_location_relation_missing")
+        expected_bits = next(iter(left_locations))[3] * 8
+        left_cases = []
+        right_cases = []
+        for effects, mapping, cases in (
+            (left_slot, left_mapping, left_cases),
+            (right_slot, right_mapping, right_cases),
+        ):
+            for effect in effects:
+                if not _pure_scalar_expression_supported(effect.value):
+                    raise ValueError("caller_memory_effect_value_relation_unsupported")
+                bits = int(expression_smt_bit_width(effect.value) or 0)
+                if bits <= 0 or bits != expected_bits:
+                    raise ValueError("caller_memory_effect_value_width_relation_missing")
+                cases.append(
+                    (
+                        _render_condition_group(effect.conditions, mapping),
+                        effect.value.to_smt(
+                            symbol_name_mapping=mapping,
+                            float_mode="fp",
+                        ),
+                    )
+                )
+        left_active = _or(tuple(guard for guard, _ in left_cases))
+        right_active = _or(tuple(guard for guard, _ in right_cases))
+        violations.append(f"(xor {left_active} {right_active})")
+        for left_guard, left_value in left_cases:
+            for right_guard, right_value in right_cases:
+                violations.append(
+                    _and(
+                        left_guard,
+                        right_guard,
+                        f"(not (= {left_value} {right_value}))",
+                    )
+                )
+        for cases in (left_cases, right_cases):
+            for index, (first_guard, first_value) in enumerate(cases):
+                for second_guard, second_value in cases[index + 1 :]:
+                    violations.append(
+                        _and(
+                            first_guard,
+                            second_guard,
+                            f"(not (= {first_value} {second_value}))",
+                        )
+                    )
+
+    violation = _or(tuple(violations))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="caller_memory_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "caller_memory_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+            "memory_observation_policy": "complete_ordered_whole_caller_write_set",
+            "left_coverage_certificate": left_coverage,
+            "right_coverage_certificate": right_coverage,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
 def _solver_version(solver_name: str) -> str:
     if solver_name.lower() == "z3":
         try:
@@ -640,7 +1661,7 @@ def _solver_version(solver_name: str) -> str:
 
 def _execute_rendered_stage(
     rendered: _RenderedStage,
-    proof_input: PureDirectCallProofInput,
+    proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
     solver_runner: Any,
     timeout_seconds: int,
     dependency_ids: Tuple[str, ...],
@@ -745,7 +1766,7 @@ def produce_pure_direct_call_proofs(
     solver_runner: Any,
     timeout_seconds: int,
 ) -> PureDirectCallProofProduction:
-    """Produce the three fixed semantic stages for eligible pure call pairs."""
+    """Produce fixed semantic stages for eligible pure call relations."""
 
     proof_inputs, failures = _build_inputs(manifest, analysis1, analysis2)
     artifacts: List[InternalSolverProofArtifact] = []
@@ -753,13 +1774,12 @@ def produce_pure_direct_call_proofs(
     for proof_input in proof_inputs:
         dependencies: Tuple[str, ...] = ()
         try:
-            rendered_stages = (
-                _render_guard_stage(proof_input),
-                None,
-                None,
-            )
+            if isinstance(proof_input, PureCallRegionProofInput):
+                first_rendered = _render_call_region_guard_stage(proof_input)
+            else:
+                first_rendered = _render_guard_stage(proof_input)
             first = _execute_rendered_stage(
-                rendered_stages[0],
+                first_rendered,
                 proof_input,
                 solver_runner,
                 timeout_seconds,
@@ -773,7 +1793,12 @@ def produce_pure_direct_call_proofs(
                 continue
             dependencies = (first.record.proof_id,)
 
-            second_rendered = _render_argument_stage(proof_input, dependencies)
+            if isinstance(proof_input, PureCallRegionProofInput):
+                second_rendered = _render_call_region_argument_stage(
+                    proof_input, dependencies
+                )
+            else:
+                second_rendered = _render_argument_stage(proof_input, dependencies)
             second = _execute_rendered_stage(
                 second_rendered,
                 proof_input,
@@ -789,7 +1814,12 @@ def produce_pure_direct_call_proofs(
                 continue
             dependencies = (second.record.proof_id,)
 
-            third_rendered = _render_return_stage(proof_input, dependencies)
+            if isinstance(proof_input, PureCallRegionProofInput):
+                third_rendered = _render_call_region_return_stage(
+                    proof_input, dependencies
+                )
+            else:
+                third_rendered = _render_return_stage(proof_input, dependencies)
             third = _execute_rendered_stage(
                 third_rendered,
                 proof_input,
@@ -798,6 +1828,71 @@ def produce_pure_direct_call_proofs(
                 dependencies,
             )
             artifacts.append(third)
+            if third.record.status != "proven":
+                failure_list.append(
+                    f"{proof_input.obligation_id}:return_relation_{third.record.solver_result}"
+                )
+                continue
+            dependencies = (third.record.proof_id,)
+            memory_stage_required = (
+                bool(proof_input.region_effects or proof_input.call_effect.memory_effects)
+                if isinstance(proof_input, PureCallRegionProofInput)
+                else bool(
+                    proof_input.left_effect.memory_effects
+                    or proof_input.right_effect.memory_effects
+                )
+            )
+            if memory_stage_required:
+                fourth_rendered = (
+                    _render_call_region_memory_stage(proof_input, dependencies)
+                    if isinstance(proof_input, PureCallRegionProofInput)
+                    else _render_memory_stage(proof_input, dependencies)
+                )
+                fourth = _execute_rendered_stage(
+                    fourth_rendered,
+                    proof_input,
+                    solver_runner,
+                    timeout_seconds,
+                    dependencies,
+                )
+                artifacts.append(fourth)
+                if fourth.record.status != "proven":
+                    failure_list.append(
+                        f"{proof_input.obligation_id}:memory_relation_{fourth.record.solver_result}"
+                    )
+                    continue
+                dependencies = (fourth.record.proof_id,)
+            caller_memory_stage_required = bool(
+                proof_input.left_caller_effects
+                or proof_input.right_caller_effects
+                or int(getattr(proof_input.left_caller_profile, "store_count", 0) or 0)
+                or int(getattr(proof_input.right_caller_profile, "store_count", 0) or 0)
+                or any(
+                    int(getattr(evidence, "memory_effect_count", 0) or 0) > 0
+                    for evidence in (
+                        *proof_input.left_caller_call_effects,
+                        *proof_input.right_caller_call_effects,
+                    )
+                )
+            )
+            if caller_memory_stage_required:
+                caller_memory_rendered = _render_caller_memory_stage(
+                    proof_input,
+                    dependencies,
+                )
+                caller_memory = _execute_rendered_stage(
+                    caller_memory_rendered,
+                    proof_input,
+                    solver_runner,
+                    timeout_seconds,
+                    dependencies,
+                )
+                artifacts.append(caller_memory)
+                if caller_memory.record.status != "proven":
+                    failure_list.append(
+                        f"{proof_input.obligation_id}:caller_memory_relation_"
+                        f"{caller_memory.record.solver_result}"
+                    )
         except (TypeError, ValueError) as exc:
             failure_list.append(f"{proof_input.obligation_id}:{exc}")
     return PureDirectCallProofProduction(

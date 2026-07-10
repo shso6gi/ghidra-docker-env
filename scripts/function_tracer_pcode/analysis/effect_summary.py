@@ -48,12 +48,85 @@ class EffectOrderUnavailable(RuntimeError):
     """Raised when a real P-code op cannot provide a conservative order key."""
 
 
+@dataclass(frozen=True)
+class StoreEffectProvenance:
+    """Object-derived producer identity for one summarized STORE effect."""
+
+    source_kind: str
+    producer_pcode_op_ref: Optional[PcodeOpRef]
+    call_target_ref: Optional[CallTargetRef] = None
+    callee_effect_index: Optional[int] = None
+
+    def is_complete(self) -> bool:
+        if self.source_kind not in {"local_store", "call_derived"}:
+            return False
+        if self.producer_pcode_op_ref is None:
+            return False
+        if any(
+            getattr(self.producer_pcode_op_ref, attribute, None) is None
+            for attribute in (
+                "binary_id",
+                "function_entry_space",
+                "function_entry_offset",
+                "target_space",
+                "target_offset",
+                "seq_time",
+                "seq_order",
+                "opcode",
+            )
+        ):
+            return False
+        if self.source_kind == "call_derived":
+            return (
+                self.call_target_ref is not None
+                and not self.call_target_ref.is_unknown()
+                and self.callee_effect_index is not None
+                and int(self.callee_effect_index) >= 0
+            )
+        return self.call_target_ref is None and self.callee_effect_index is None
+
+    def stable_key(self) -> Tuple[object, ...]:
+        return (
+            "store_effect_provenance",
+            self.source_kind,
+            (
+                self.producer_pcode_op_ref.stable_key()
+                if self.producer_pcode_op_ref is not None
+                else None
+            ),
+            (
+                self.call_target_ref.stable_key()
+                if self.call_target_ref is not None
+                else None
+            ),
+            self.callee_effect_index,
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "source_kind": self.source_kind,
+            "producer_pcode_op_ref": (
+                self.producer_pcode_op_ref.to_dict()
+                if self.producer_pcode_op_ref is not None
+                else None
+            ),
+            "call_target_ref": (
+                self.call_target_ref.to_dict()
+                if self.call_target_ref is not None
+                else None
+            ),
+            "callee_effect_index": self.callee_effect_index,
+            "complete": self.is_complete(),
+        }
+
+
 @dataclass
 class StoreEffect:
     location: CanonicalLocation
     value: Expression
     conditions: List[Condition]
     order_key: int
+    provenance: Optional[StoreEffectProvenance] = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +294,7 @@ class CallSiteEffectSummaryEvidence:
     has_unsupported_nested_call: bool = False
     incomplete_reasons: Tuple[str, ...] = ()
     callee_control_profile_key: Optional[Tuple[object, ...]] = None
+    callee_ordered_scalar_store_candidate: bool = False
     callee_recursive_scc_proven: bool = False
     callee_recursive_scc_identity: Optional[str] = None
     callee_recursive_scc_member_keys: Tuple[Tuple[object, ...], ...] = ()
@@ -230,6 +304,11 @@ class CallSiteEffectSummaryEvidence:
     return_value_keys: Tuple[Tuple[object, ...], ...] = ()
     return_guard_keys: Tuple[Tuple[object, ...], ...] = ()
     return_partitions: Tuple[Tuple[Tuple[Condition, ...], Expression], ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+    memory_effects: Tuple[StoreEffect, ...] = field(
         default=(),
         repr=False,
         compare=False,
@@ -248,6 +327,7 @@ class CallSiteEffectSummaryEvidence:
             bool(self.has_unsupported_nested_call),
             self.incomplete_reasons,
             self.callee_control_profile_key,
+            self.callee_ordered_scalar_store_candidate,
             self.callee_recursive_scc_proven,
             self.callee_recursive_scc_identity,
             self.callee_recursive_scc_member_keys,
@@ -256,6 +336,15 @@ class CallSiteEffectSummaryEvidence:
             self.return_signed,
             self.return_value_keys,
             self.return_guard_keys,
+            tuple(
+                (
+                    effect.location.stable_key(),
+                    expression_provenance_key(effect.value),
+                    tuple(_condition_evidence_key(item) for item in effect.conditions),
+                    int(effect.order_key),
+                )
+                for effect in self.memory_effects
+            ),
             self.source,
         )
 
@@ -271,6 +360,9 @@ class CallSiteEffectSummaryEvidence:
             "has_unsupported_nested_call": bool(self.has_unsupported_nested_call),
             "incomplete_reasons": self.incomplete_reasons,
             "callee_control_profile_key": self.callee_control_profile_key,
+            "callee_ordered_scalar_store_candidate": bool(
+                self.callee_ordered_scalar_store_candidate
+            ),
             "callee_recursive_scc_proven": bool(self.callee_recursive_scc_proven),
             "callee_recursive_scc_identity": self.callee_recursive_scc_identity,
             "callee_recursive_scc_member_keys": self.callee_recursive_scc_member_keys,
@@ -279,6 +371,20 @@ class CallSiteEffectSummaryEvidence:
             "return_signed": self.return_signed,
             "return_value_keys": self.return_value_keys,
             "return_guard_keys": self.return_guard_keys,
+            "memory_effects": [
+                {
+                    "location": effect.location.to_dict(),
+                    "value": effect.value.to_dict(),
+                    "conditions": [item.to_dict() for item in effect.conditions],
+                    "order_key": int(effect.order_key),
+                    "provenance": (
+                        effect.provenance.to_dict()
+                        if effect.provenance is not None
+                        else None
+                    ),
+                }
+                for effect in self.memory_effects
+            ],
             "source": self.source,
         }
 
@@ -333,6 +439,26 @@ class FunctionControlEffectProfile:
             and self.terminal_return_coverage_complete
             and self.load_count == 0
             and self.store_count == 0
+            and self.call_count == 0
+            and self.callind_count == 0
+            and self.callother_count == 0
+            and self.branchind_count == 0
+            and self.float_op_count == 0
+            and self.pcode_after_return_count == 0
+            and self.abnormal_terminal_block_count == 0
+            and self.call_like_identity_complete
+            and not self.phase2_unsafe_mnemonics
+            and not self.unsupported_mnemonics
+        )
+
+    @property
+    def phase3_ordered_scalar_store_candidate(self) -> bool:
+        return (
+            self.pcode_enumeration_complete
+            and self.cfg_edges_complete
+            and self.cfg_acyclic
+            and self.terminal_return_coverage_complete
+            and self.load_count == 0
             and self.call_count == 0
             and self.callind_count == 0
             and self.callother_count == 0
@@ -428,6 +554,9 @@ class FunctionControlEffectProfile:
             "phase2_memory_free_scalar_candidate": bool(
                 self.phase2_memory_free_scalar_candidate
             ),
+            "phase3_ordered_scalar_store_candidate": bool(
+                self.phase3_ordered_scalar_store_candidate
+            ),
         }
 
 
@@ -466,6 +595,7 @@ class EffectSummary:
                     value=effect.value,
                     conditions=list(effect.conditions or []),
                     order_key=effect.order_key,
+                    provenance=effect.provenance,
                 )
                 for effect in (self.effects or [])
             ]
@@ -476,6 +606,7 @@ class EffectSummary:
                     value=effect.value,
                     conditions=list(effect.conditions or []),
                     order_key=effect.order_key,
+                    provenance=effect.provenance,
                 )
                 for effect in (self.effects or [])
             ]
@@ -1203,6 +1334,10 @@ def summarize_store_effects(
                     if callee_profile is not None
                     else None
                 ),
+                callee_ordered_scalar_store_candidate=bool(
+                    callee_profile is not None
+                    and callee_profile.phase3_ordered_scalar_store_candidate
+                ),
                 callee_recursive_scc_proven=bool(
                     callee_profile is not None
                     and callee_profile.recursive_scc_proven
@@ -1236,6 +1371,7 @@ def summarize_store_effects(
                 return_value_keys=tuple(expansion_values),
                 return_guard_keys=tuple(expansion_guards),
                 return_partitions=tuple(expansion_partitions),
+                memory_effects=tuple(getattr(callee_summary, "effects", ()) or ()),
             )
         )
 
@@ -1320,6 +1456,10 @@ def summarize_store_effects(
                                 value=value_expr,
                                 conditions=simplified,
                                 order_key=op_order_key,
+                                provenance=StoreEffectProvenance(
+                                    source_kind="local_store",
+                                    producer_pcode_op_ref=_pcode_ref_for_op(op),
+                                ),
                             )
                         )
                 continue
@@ -1619,7 +1759,7 @@ def summarize_store_effects(
                             )
                             continue
 
-                        for effect in callee_summary.effects:
+                        for callee_effect_index, effect in enumerate(callee_summary.effects):
                             substitution_args = _choose_effect_substitution_args(
                                 effect.location,
                                 callee_summary.parameter_refs,
@@ -1691,6 +1831,12 @@ def summarize_store_effects(
                                     value=substituted_value,
                                     conditions=merged_conditions,
                                     order_key=op_order_key,
+                                    provenance=StoreEffectProvenance(
+                                        source_kind="call_derived",
+                                        producer_pcode_op_ref=_pcode_ref_for_op(op),
+                                        call_target_ref=target_ref,
+                                        callee_effect_index=callee_effect_index,
+                                    ),
                                 )
                             )
                 if not processed_target_for_path:
@@ -2718,6 +2864,16 @@ def _select_aligned_explicit_call_arguments(
     explicit = list(explicit_args)
     if len(explicit) <= len(callee_parameters):
         return explicit
+
+    if len(callee_parameters) == 1 and explicit:
+        explicit_keys = tuple(
+            expression_provenance_key(item) for item in explicit
+        )
+        if (
+            len(set(explicit_keys)) == 1
+            and _expression_maps_to_parameter(explicit[0], caller_parameters)
+        ):
+            return [explicit[0]]
 
     storage_aligned = _select_explicit_call_arguments_by_input_storage(
         call_op,
@@ -5412,6 +5568,7 @@ def _normalize_effect_locations_for_parameters(
             value=effect.value,
             conditions=list(effect.conditions or []),
             order_key=effect.order_key,
+            provenance=effect.provenance,
         )
         for effect in (effects or [])
     ]
@@ -6509,6 +6666,7 @@ def resolve_definite_post_state_read_for_location(
             value=effect.value,
             conditions=list(effect.conditions or []),
             order_key=effect.order_key,
+            provenance=effect.provenance,
         )
         for effect in _collect_definite_active_effects(normalized_return_conditions, effects)
     ]
@@ -8342,6 +8500,7 @@ def _collect_definite_active_effects(
                 value=effect.value,
                 conditions=normalized_effect_conditions,
                 order_key=effect.order_key,
+                provenance=effect.provenance,
             )
         )
     return active_effects

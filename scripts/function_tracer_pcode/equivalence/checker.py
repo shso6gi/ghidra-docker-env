@@ -1125,8 +1125,55 @@ class EquivalenceChecker:
         if not obligations or len(readiness) != len(obligations):
             gate["failure_cause"] = "call_effect_obligation_coverage_incomplete"
             return
-        if any(item.get("relation_kind") != "call_to_call" for item in obligations):
+        supported_relation_kinds = {
+            "call_to_call",
+            "call_to_region",
+            "region_to_call",
+        }
+        if any(
+            item.get("relation_kind") not in supported_relation_kinds
+            for item in obligations
+        ):
             gate["failure_cause"] = "unsupported_relational_call_effect_lane"
+            return
+        caller_memory_effect_counts = []
+        for side, analysis in (("function1", analysis1), ("function2", analysis2)):
+            effect_summary = getattr(analysis, "effect_summary", None)
+            effect_count = len(tuple(getattr(effect_summary, "effects", ()) or ()))
+            profile = getattr(
+                effect_summary,
+                "function_control_effect_profile",
+                None,
+            )
+            explicit_store_count = int(getattr(profile, "store_count", 0) or 0)
+            call_derived_store_count = sum(
+                int(getattr(evidence, "memory_effect_count", 0) or 0)
+                for evidence in tuple(
+                    getattr(
+                        effect_summary,
+                        "call_site_effect_summary_evidence",
+                        (),
+                    )
+                    or ()
+                )
+            )
+            if effect_count or explicit_store_count or call_derived_store_count:
+                caller_memory_effect_counts.append(
+                    {
+                        "side": side,
+                        "effect_count": effect_count,
+                        "explicit_store_count": explicit_store_count,
+                        "call_derived_store_count": call_derived_store_count,
+                    }
+                )
+        caller_memory_proven = bool(readiness) and all(
+            "caller_memory_relation"
+            in tuple(item.get("completed_stages", ()) or ())
+            for item in readiness
+        )
+        if caller_memory_effect_counts and not caller_memory_proven:
+            gate["failure_cause"] = "caller_memory_relation_not_proven"
+            gate["caller_memory_effects"] = caller_memory_effect_counts
             return
         if not all(item.get("decision_eligible") is True for item in readiness):
             gate["failure_cause"] = "call_effect_stage_proofs_incomplete"
@@ -1151,6 +1198,12 @@ class EquivalenceChecker:
                     "effect_summary_path_coverage_incomplete"
                 ]
                 return
+        replacement_readiness = manifest.get("legacy_replacement_readiness")
+        if not isinstance(replacement_readiness, Mapping) or (
+            replacement_readiness.get("status") != "ready"
+        ):
+            gate["failure_cause"] = "legacy_blocker_replacement_not_ready"
+            return
         raw_reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
         if not raw_reasons or any(
             str(getattr(reason, "reason_id", "")) != "equivalence_blocking_unsafety"

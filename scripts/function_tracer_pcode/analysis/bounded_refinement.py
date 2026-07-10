@@ -714,6 +714,7 @@ class BoundedCallRefiner:
                         for cond in (effect.conditions or [])
                     ],
                     order_key=effect.order_key,
+                    provenance=effect.provenance,
                 )
             )
         return substituted

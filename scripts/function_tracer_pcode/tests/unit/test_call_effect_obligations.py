@@ -12,6 +12,8 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CallSiteEffectSummaryEvidence,
     EffectSummary,
     FunctionControlEffectProfile,
+    StoreEffect,
+    StoreEffectProvenance,
     UnsupportedCallEffectRef,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -38,10 +40,13 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     _cross_binary_expression_shape,
 )
 from scripts.function_tracer_pcode.model import (
+    CanonicalLocation,
     CallTargetRef,
+    ComparisonSurface,
     Condition,
     Expression,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     PcodeOpRef,
     ReturnInfo,
     expression_provenance_key,
@@ -137,6 +142,7 @@ def _analysis_with_call(
                     memory_effect_count=0,
                     has_unsupported_nested_call=False,
                     callee_control_profile_key=control_profile.stable_key(),
+                    callee_ordered_scalar_store_candidate=True,
                     return_summary_status="complete",
                     return_semantic_bit_width=32,
                     return_signed=True,
@@ -230,6 +236,10 @@ def test_shadow_manifest_pairs_only_mutually_unique_object_shapes():
         "empty_state_transformer_and_frame": "complete",
     }
     assert manifest["solver_proof_records"] == []
+    assert manifest["legacy_replacement_readiness"]["status"] == "blocked"
+    assert "semantic_obligation_proofs_incomplete" in manifest[
+        "legacy_replacement_readiness"
+    ]["failure_causes"]
 
 
 def test_resolved_internal_call_and_callind_share_candidate_class():
@@ -593,9 +603,13 @@ def test_unique_unmatched_call_builds_call_to_inline_region_obligation():
     assert len(manifest["right_regions"]) == 1
     obligation = manifest["relational_obligations"][0]
     assert obligation["relation_kind"] == "call_to_region"
-    assert manifest["proof_stage_backlog"][0]["primary_proof_stage"] == (
-        "inline_region_guard_partition_missing"
-    )
+    eligibility = manifest["phase2_direct_call_eligibility"][0]
+    assert eligibility["status"] == "candidate"
+    assert eligibility["required_solver_stages"] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+    ]
 
 
 def test_call_to_region_reports_call_argument_failure_before_region_guard():
@@ -1098,6 +1112,7 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                     memory_effect_count=0,
                     has_unsupported_nested_call=False,
                     callee_control_profile_key=callee_profile.stable_key(),
+                    callee_ordered_scalar_store_candidate=True,
                     return_summary_status="complete",
                     return_semantic_bit_width=32,
                     return_signed=True,
@@ -1171,6 +1186,7 @@ def test_typed_pure_direct_call_proofs_can_promote_equivalence():
     assert manifest["proof_readiness"][0]["decision_eligible"] is True
     assert manifest["phase2_discharge_gate"]["status"] == "proven"
     assert manifest["summary"]["semantic_proof_status"] == "proven"
+    assert manifest["legacy_replacement_readiness"]["status"] == "ready"
 
 
 def test_non_call_effect_summary_incompleteness_cannot_be_cleared_by_call_proof():
@@ -1235,6 +1251,373 @@ def _phase2_manifest_with_certificate(left, right):
     )
     EquivalenceChecker._attach_structural_coverage_certificate(manifest)
     return manifest
+
+
+def _attach_scalar_store_callee_effect(
+    analysis: FunctionReturnAnalysis,
+    *,
+    value_delta: int = 0,
+    location_offset: int = 0,
+) -> None:
+    evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+    value = Expression.parameter("b", 1, data_type="int", size=4)
+    if value_delta:
+        value = Expression.binary_op(
+            "INT_ADD", value, Expression.constant(value_delta, size=4)
+        )
+    effect = StoreEffect(
+        location=CanonicalLocation(
+            base_ref=LocationBaseRef.parameter("a", index=0),
+            offset=location_offset,
+            size=4,
+        ),
+        value=value,
+        conditions=[],
+        order_key=1,
+    )
+    profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=4,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        store_count=1,
+        call_like_identity_complete=True,
+    )
+    object.__setattr__(evidence, "memory_effect_count", 1)
+    object.__setattr__(evidence, "memory_effects", (effect,))
+    object.__setattr__(evidence, "callee_control_profile_key", profile.stable_key())
+    analysis.effect_summary.effects = [
+        StoreEffect(
+            location=effect.location,
+            value=effect.value,
+            conditions=list(effect.conditions),
+            order_key=10,
+            provenance=StoreEffectProvenance(
+                source_kind="call_derived",
+                producer_pcode_op_ref=evidence.pcode_op_ref,
+                call_target_ref=evidence.target_ref,
+                callee_effect_index=0,
+            ),
+        )
+    ]
+
+
+def _call_to_region_proof_inputs():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    left.returns = [
+        ReturnInfo(
+            address="0x1020",
+            conditions=[],
+            value=Expression.parameter("x", 0, size=4),
+        )
+    ]
+    left.return_type = "int"
+    right = _analysis_with_inline_region("right", 0x3000)
+    return left, right, _phase2_manifest_with_certificate(left, right)
+
+
+def _call_to_region_memory_proof_inputs(*, region_value_delta: int = 0):
+    left, right, _ = _call_to_region_proof_inputs()
+    location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("x", index=0),
+        offset=0,
+        size=4,
+    )
+    call_value = Expression.parameter("x", 0, size=4)
+    region_value = Expression.parameter("x", 0, size=4)
+    if region_value_delta:
+        region_value = Expression.binary_op(
+            "INT_ADD",
+            region_value,
+            Expression.constant(region_value_delta, size=4),
+        )
+    evidence = left.effect_summary.call_site_effect_summary_evidence[0]
+    call_effect = StoreEffect(location, call_value, [], 1)
+    region_effect = StoreEffect(
+        location,
+        region_value,
+        [],
+        1,
+        provenance=StoreEffectProvenance(
+            source_kind="local_store",
+            producer_pcode_op_ref=_pcode_ref(
+                "right",
+                0x3000,
+                0x3018,
+                mnemonic="STORE",
+            ),
+        ),
+    )
+    callee_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=3,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        store_count=1,
+        call_like_identity_complete=True,
+    )
+    object.__setattr__(evidence, "memory_effect_count", 1)
+    object.__setattr__(evidence, "memory_effects", (call_effect,))
+    object.__setattr__(evidence, "callee_control_profile_key", callee_profile.stable_key())
+    left.effect_summary.effects = [
+        StoreEffect(
+            location,
+            call_value,
+            [],
+            1,
+            provenance=StoreEffectProvenance(
+                source_kind="call_derived",
+                producer_pcode_op_ref=evidence.pcode_op_ref,
+                call_target_ref=evidence.target_ref,
+                callee_effect_index=0,
+            ),
+        )
+    ]
+    right.effect_summary.effects = [region_effect]
+    object.__setattr__(
+        right.effect_summary.function_control_effect_profile,
+        "store_count",
+        1,
+    )
+    return left, right, _phase2_manifest_with_certificate(left, right)
+
+
+def test_typed_call_to_region_proves_guard_input_and_output_relations():
+    pytest.importorskip("z3")
+    left, right, manifest = _call_to_region_proof_inputs()
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+    ]
+    assert all(item.record.status == "proven" for item in production.artifacts)
+
+
+def test_typed_call_to_region_proves_ordered_scalar_store_relation():
+    pytest.importorskip("z3")
+    left, right, manifest = _call_to_region_memory_proof_inputs()
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+    assert all(item.record.status == "proven" for item in production.artifacts)
+
+
+def test_typed_call_to_region_refutes_different_scalar_store_value():
+    pytest.importorskip("z3")
+    left, right, manifest = _call_to_region_memory_proof_inputs(
+        region_value_delta=1
+    )
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert production.artifacts[-1].record.proof_stage == "memory_relation"
+    assert production.artifacts[-1].record.status == "refuted"
+
+
+def test_typed_call_to_region_refutes_different_inline_result():
+    pytest.importorskip("z3")
+    left, right, manifest = _call_to_region_proof_inputs()
+    right.returns[0].value = Expression.binary_op(
+        "INT_ADD",
+        Expression.parameter("x", 0, size=4),
+        Expression.constant(1, size=4),
+    )
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.status for item in production.artifacts] == [
+        "proven",
+        "proven",
+        "refuted",
+    ]
+
+
+def test_typed_call_to_region_proves_explicit_signed_abi_width_bridge():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    right.parameters[0]["is_signed"] = True
+    wide_parameter = Expression.parameter("x", 0, size=8)
+    condition = Condition(
+        Expression.binary_op(
+            "INT_SLESS", wide_parameter, Expression.constant(0, size=8)
+        )
+    )
+    low_word = Expression.binary_op(
+        "SUBPIECE", wide_parameter, Expression.constant(0, size=4)
+    )
+    low_word.size = 4
+    right.returns[0].conditions = [condition]
+    right.returns[0].value = low_word
+    right.returns.append(
+        ReturnInfo(
+            address="0x3008",
+            conditions=[condition.negate()],
+            value=low_word,
+        )
+    )
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.status for item in production.artifacts] == [
+        "proven",
+        "proven",
+        "proven",
+    ]
+
+
+def test_typed_call_to_region_proves_signed_return_observation_width_bridge():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    right.return_type = "long"
+    right.comparison_surface = ComparisonSurface(
+        kind="return_value",
+        explicit_bit_width=64,
+        type_name="long",
+    )
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.status for item in production.artifacts] == [
+        "proven",
+        "proven",
+        "proven",
+    ]
+    payload = production.artifacts[-1].precondition_payload["return_width_bridge"]
+    assert payload == {
+        "narrow_bits": 32,
+        "wide_bits": 64,
+        "wide_side": "right",
+        "extension": "sign_extend",
+        "proof_basis": "typed_region_return_producer_and_declared_signedness",
+    }
+
+
+def test_typed_call_to_region_rejects_potentially_trapping_inline_result():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    parameter = Expression.parameter("x", 0, size=4)
+    right.returns[0].value = Expression.binary_op(
+        "INT_DIV", parameter, parameter
+    )
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+    ]
+    assert any(
+        "unsupported_call_region_return_expression" in cause
+        for cause in production.failure_causes
+    )
+
+
+def test_typed_call_to_region_proofs_can_promote_equivalence():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["relational_obligations"][0]["relation_kind"] == "call_to_region"
+    assert [
+        item["proof_stage"] for item in manifest["solver_proof_records"]
+    ] == ["guard_relation", "argument_relation", "return_relation"]
+    assert manifest["phase2_discharge_gate"]["status"] == "proven"
+
+
+def test_call_to_region_proof_cannot_clear_non_call_unsafety():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    right.effect_summary.incomplete_reasons = (
+        "effect_summary_path_coverage_incomplete",
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["solver_proof_records"] == []
+    assert manifest["phase2_discharge_gate"]["status"] == "blocked"
 
 
 def test_typed_argument_stage_refutes_one_off_argument_relation():
@@ -1331,6 +1714,157 @@ def test_typed_return_stage_refutes_different_pure_callee_result():
         "refuted",
     ]
     assert production.artifacts[-1].record.solver_result == "sat"
+
+
+def test_typed_scalar_store_call_effects_can_promote_equivalence():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _attach_scalar_store_callee_effect(left)
+    _attach_scalar_store_callee_effect(right)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert [
+        item["proof_stage"]
+        for item in result.call_effect_shadow_manifest["solver_proof_records"]
+    ] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+
+
+def test_whole_caller_memory_relation_covers_call_derived_store_provenance():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis in (left, right):
+        _attach_scalar_store_callee_effect(analysis)
+        evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        callee_effect = evidence.memory_effects[0]
+        analysis.effect_summary.effects = [
+            StoreEffect(
+                location=callee_effect.location,
+                value=callee_effect.value,
+                conditions=list(callee_effect.conditions),
+                order_key=10,
+                provenance=StoreEffectProvenance(
+                    source_kind="call_derived",
+                    producer_pcode_op_ref=evidence.pcode_op_ref,
+                    call_target_ref=evidence.target_ref,
+                    callee_effect_index=0,
+                ),
+            )
+        ]
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    manifest = result.call_effect_shadow_manifest
+    assert result.is_equivalent is True
+    assert [item["proof_stage"] for item in manifest["solver_proof_records"]] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "memory_relation",
+        "caller_memory_relation",
+    ]
+    caller_proof = manifest["solver_proof_records"][-1]
+    assert caller_proof["status"] == "proven"
+    assert caller_proof["solver_result"] == "unsat"
+
+
+def test_whole_caller_memory_relation_rejects_missing_call_derived_store():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis in (left, right):
+        _attach_scalar_store_callee_effect(analysis)
+        analysis.effect_summary.effects = []
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    manifest = result.call_effect_shadow_manifest
+    assert result.is_equivalent is None
+    assert manifest["proof_readiness"][0]["decision_eligible"] is False
+    assert manifest["proof_readiness"][0]["missing_stages"] == [
+        "caller_memory_relation"
+    ]
+    assert manifest["phase2_discharge_gate"]["failure_cause"] == (
+        "caller_memory_relation_not_proven"
+    )
+    assert any(
+        "caller_derived_store_census_mismatch" in cause
+        for cause in manifest["stage_specific_producer"]["failure_causes"]
+    )
+
+
+def test_typed_scalar_store_stage_refutes_different_write_value():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _attach_scalar_store_callee_effect(left)
+    _attach_scalar_store_callee_effect(right, value_delta=1)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.status for item in production.artifacts] == [
+        "proven",
+        "proven",
+        "proven",
+        "refuted",
+    ]
+
+
+def test_typed_scalar_store_stage_rejects_different_write_location():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _attach_scalar_store_callee_effect(left)
+    _attach_scalar_store_callee_effect(right, location_offset=4)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+    ]
+    assert any(
+        "memory_effect_location_relation_missing" in cause
+        for cause in production.failure_causes
+    )
 
 
 def test_typed_return_stage_refutes_noncanonical_wide_high_bits():
@@ -1556,26 +2090,123 @@ def test_phase2_relational_discharge_rejects_caller_memory_effect():
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    left.effect_summary.function_control_effect_profile = FunctionControlEffectProfile(
-        block_count=1,
-        pcode_op_count=3,
-        return_block_count=1,
-        pcode_enumeration_complete=True,
-        cfg_edges_complete=True,
-        cfg_acyclic=True,
-        terminal_return_coverage_complete=True,
-        call_count=1,
-        store_count=1,
+    location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("a", index=0),
+        offset=0,
+        size=4,
     )
+    left.effect_summary.effects = [
+        StoreEffect(location, Expression.constant(1, size=4), [], 10)
+    ]
+    right.effect_summary.effects = [
+        StoreEffect(location, Expression.constant(2, size=4), [], 10)
+    ]
 
     result = EquivalenceChecker(
         timeout=5,
         enable_rewrite=False,
-        enable_completed_recovery_proofs=False,
+        enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
     assert result.is_equivalent is None
-    assert result.call_effect_shadow_manifest["mode"] == "shadow_no_decision_effect"
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["mode"] == "typed_relational_call_effect_proof"
+    assert manifest["proof_readiness"][0]["decision_eligible"] is False
+    assert manifest["proof_readiness"][0]["missing_stages"] == [
+        "caller_memory_relation"
+    ]
+    assert [item["proof_stage"] for item in manifest["solver_proof_records"]] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+    ]
+    assert manifest["phase2_discharge_gate"] == {
+        "status": "blocked",
+        "decision_effect": "blocks_equivalence",
+        "failure_cause": "caller_memory_relation_not_proven",
+        "caller_memory_effects": [
+            {
+                "side": "function1",
+                "effect_count": 1,
+                "explicit_store_count": 0,
+                "call_derived_store_count": 0,
+            },
+            {
+                "side": "function2",
+                "effect_count": 1,
+                "explicit_store_count": 0,
+                "call_derived_store_count": 0,
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize("right_value", [1, 2])
+def test_whole_caller_memory_relation_proves_or_refutes_complete_local_stores(
+    right_value,
+):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("a", index=0),
+        offset=0,
+        size=4,
+    )
+    for analysis, value, address in (
+        (left, 1, 0x1018),
+        (right, right_value, 0x3018),
+    ):
+        profile = analysis.effect_summary.function_control_effect_profile
+        object.__setattr__(profile, "store_count", 1)
+        store_ref = _pcode_ref(
+            analysis.binary_id,
+            int(analysis.entry_point, 16),
+            address,
+            mnemonic="STORE",
+        )
+        analysis.effect_summary.effects = [
+            StoreEffect(
+                location,
+                Expression.constant(value, size=4),
+                [],
+                10,
+                provenance=StoreEffectProvenance(
+                    source_kind="local_store",
+                    producer_pcode_op_ref=store_ref,
+                ),
+            )
+        ]
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    manifest = result.call_effect_shadow_manifest
+    records = manifest["solver_proof_records"]
+    assert [item["proof_stage"] for item in records] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+        "caller_memory_relation",
+    ]
+    caller_record = records[-1]
+    if right_value == 1:
+        assert caller_record["status"] == "proven"
+        assert caller_record["solver_result"] == "unsat"
+        assert manifest["proof_readiness"][0]["decision_eligible"] is True
+        assert manifest["phase2_discharge_gate"]["status"] == "proven"
+        assert result.is_equivalent is True
+    else:
+        assert caller_record["status"] == "refuted"
+        assert caller_record["solver_result"] == "sat"
+        assert manifest["proof_readiness"][0]["decision_eligible"] is False
+        assert manifest["phase2_discharge_gate"]["failure_cause"] == (
+            "caller_memory_relation_not_proven"
+        )
+        assert result.is_equivalent is None
 
 
 def test_external_thunk_target_is_not_a_phase2_internal_call_candidate():

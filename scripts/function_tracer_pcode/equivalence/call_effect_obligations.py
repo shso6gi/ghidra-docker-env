@@ -13,7 +13,7 @@ serializable identities and semantic keys are retained.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -227,6 +227,7 @@ class CallSiteFact:
     callee_memory_effect_counts: Tuple[int, ...] = ()
     callee_has_unsupported_nested_call: bool = False
     callee_control_profile_keys: Tuple[Tuple[Any, ...], ...] = ()
+    callee_ordered_scalar_store_candidates: Tuple[bool, ...] = ()
     callee_recursive_scc_proven: bool = False
     callee_recursive_scc_identities: Tuple[str, ...] = ()
     callee_recursive_scc_member_keys: Tuple[Tuple[Any, ...], ...] = ()
@@ -283,6 +284,9 @@ class CallSiteFact:
             "callee_memory_effect_counts": list(self.callee_memory_effect_counts),
             "callee_has_unsupported_nested_call": self.callee_has_unsupported_nested_call,
             "callee_control_profile_keys": _jsonable(self.callee_control_profile_keys),
+            "callee_ordered_scalar_store_candidates": list(
+                self.callee_ordered_scalar_store_candidates
+            ),
             "callee_recursive_scc_proven": self.callee_recursive_scc_proven,
             "callee_recursive_scc_identities": list(self.callee_recursive_scc_identities),
             "callee_recursive_scc_member_keys": _jsonable(self.callee_recursive_scc_member_keys),
@@ -377,6 +381,8 @@ class RegionFact:
     state_transformer_key: Optional[Tuple[Any, ...]] = None
     termination_outcome_key: Optional[Tuple[Any, ...]] = None
     trap_outcome_key: Optional[Tuple[Any, ...]] = None
+    control_profile_key: Optional[Tuple[Any, ...]] = None
+    ordered_scalar_store_candidate: bool = False
 
     @property
     def fact_kind(self) -> str:
@@ -395,6 +401,8 @@ class RegionFact:
             "state_transformer_key": _jsonable(self.state_transformer_key),
             "termination_outcome_key": _jsonable(self.termination_outcome_key),
             "trap_outcome_key": _jsonable(self.trap_outcome_key),
+            "control_profile_key": _jsonable(self.control_profile_key),
+            "ordered_scalar_store_candidate": self.ordered_scalar_store_candidate,
         }
 
 
@@ -776,6 +784,7 @@ def _extract_side_facts(
                 "callee_memory_effect_counts": [],
                 "callee_has_unsupported_nested_call": False,
                 "callee_control_profile_keys": [],
+                "callee_ordered_scalar_store_candidates": [],
                 "callee_recursive_scc_proven": [],
                 "callee_recursive_scc_identities": [],
                 "callee_recursive_scc_member_keys": [],
@@ -889,6 +898,15 @@ def _extract_side_facts(
             profile_key = getattr(evidence, "callee_control_profile_key", None)
             if isinstance(profile_key, (tuple, list)):
                 bucket["callee_control_profile_keys"].append(tuple(profile_key))
+            bucket["callee_ordered_scalar_store_candidates"].append(
+                bool(
+                    getattr(
+                        evidence,
+                        "callee_ordered_scalar_store_candidate",
+                        False,
+                    )
+                )
+            )
             bucket["callee_recursive_scc_proven"].append(
                 bool(getattr(evidence, "callee_recursive_scc_proven", False))
             )
@@ -1073,6 +1091,9 @@ def _extract_side_facts(
                 callee_control_profile_keys=_dedupe(
                     bucket["callee_control_profile_keys"]
                 ),
+                callee_ordered_scalar_store_candidates=tuple(
+                    sorted(set(bucket["callee_ordered_scalar_store_candidates"]))
+                ),
                 callee_recursive_scc_proven=(
                     bool(bucket["callee_recursive_scc_proven"])
                     and all(bucket["callee_recursive_scc_proven"])
@@ -1159,23 +1180,54 @@ def _extract_whole_function_region_fact(
             boundary.pcode_op_keys,
         )
     )
+    region_effects = tuple(
+        getattr(getattr(analysis, "effect_summary", None), "effects", ()) or ()
+    )
+    state_transformer_key = (
+        (
+            "memory_free_candidate",
+        )
+        if not region_effects
+        and int(getattr(profile, "load_count", 0) or 0) == 0
+        and int(getattr(profile, "store_count", 0) or 0) == 0
+        else (
+            "ordered_store_effects_candidate",
+            tuple(
+                (
+                    effect.location.stable_key(),
+                    _expression_key(effect.value),
+                    tuple(
+                        key
+                        for condition in effect.conditions or ()
+                        for key in [_condition_key(condition)]
+                        if key is not None
+                    ),
+                    int(effect.order_key),
+                )
+                for effect in region_effects
+            ),
+        )
+        if region_effects
+        and int(getattr(profile, "load_count", 0) or 0) == 0
+        and int(getattr(profile, "store_count", 0) or 0) == len(region_effects)
+        else ("state_transformer_unavailable",)
+    )
     return RegionFact(
         fact_id=fact_id,
         function_identity=function_identity,
         boundary=boundary,
         input_relation_key=("live_in_storage", boundary.live_in_keys),
         output_relation_key=("return_partition_candidate", tuple(return_cases)),
-        state_transformer_key=(
-            "memory_free_candidate"
-            if int(getattr(profile, "load_count", 0) or 0) == 0
-            and int(getattr(profile, "store_count", 0) or 0) == 0
-            else "state_transformer_unavailable"
-        ,),
+        state_transformer_key=state_transformer_key,
         termination_outcome_key=(
             "termination_coverage_candidate",
             bool(getattr(profile, "terminal_return_coverage_complete", False)),
         ),
         trap_outcome_key=("trap_relation_unproven",),
+        control_profile_key=tuple(profile.stable_key()),
+        ordered_scalar_store_candidate=bool(
+            getattr(profile, "phase3_ordered_scalar_store_candidate", False)
+        ),
     )
 
 
@@ -1206,6 +1258,14 @@ _PHASE2_REQUIRED_SOLVER_STAGES = (
     "argument_relation",
     "return_relation",
 )
+
+_PHASE3_MEMORY_REQUIRED_SOLVER_STAGES = (
+    *_PHASE2_REQUIRED_SOLVER_STAGES,
+    "memory_relation",
+)
+
+_WHOLE_CALLER_MEMORY_STAGE = "caller_memory_relation"
+
 
 _PHASE2_STRUCTURAL_PRECONDITION_STAGES = (
     "target_callee_relation",
@@ -1394,29 +1454,60 @@ def _phase2_direct_call_eligibility(
             )
         if call.callee_has_unsupported_nested_call:
             blockers.append("call_dependency_closure_missing")
+        if len(call.callee_memory_effect_counts) != 1:
+            blockers.append("call_callee_memory_effect_summary_ambiguous")
+        call_memory_count = (
+            call.callee_memory_effect_counts[0]
+            if len(call.callee_memory_effect_counts) == 1
+            else -1
+        )
+        if (
+            len(call.callee_control_profile_keys) != 1
+            or call.callee_ordered_scalar_store_candidates != (True,)
+        ):
+            blockers.append("call_callee_not_total_trap_free_scalar")
+        if call.callee_return_summary_statuses != ("complete",):
+            blockers.append("call_callee_return_summary_missing")
+        if not call.callee_return_shape_keys:
+            blockers.append("call_callee_return_shape_missing")
         if not region.boundary.single_entry:
             blockers.append("inline_region_single_entry_unproven")
         if not region.boundary.all_exits_enumerated:
             blockers.append("inline_region_exit_coverage_missing")
         if not region.boundary.cross_edges_enumerated:
             blockers.append("inline_region_cross_edge_coverage_missing")
-        if not region.boundary.guard_partition_complete:
-            blockers.append("inline_region_guard_partition_missing")
         if region.state_transformer_key in {None, ("state_transformer_unavailable",)}:
             blockers.append("inline_region_state_transformer_missing")
-        blockers.extend(
-            (
-                "call_to_region_input_relation_proof_missing",
-                "call_to_region_output_relation_proof_missing",
-                "call_to_region_termination_relation_proof_missing",
-                "call_to_region_trap_relation_proof_missing",
-            )
+        region_memory_count = (
+            len(region.state_transformer_key[1])
+            if region.state_transformer_key
+            and region.state_transformer_key[0] == "ordered_store_effects_candidate"
+            and len(region.state_transformer_key) == 2
+            else 0
+            if region.state_transformer_key == ("memory_free_candidate",)
+            else -1
+        )
+        if (
+            not region.control_profile_key
+            or region.ordered_scalar_store_candidate is not True
+        ):
+            blockers.append("inline_region_not_total_trap_free_scalar")
+        if call_memory_count != region_memory_count:
+            blockers.append("call_to_region_memory_effect_count_relation_missing")
+        if not region.output_relation_key:
+            blockers.append("inline_region_return_partition_missing")
+        required_stages = (
+            _PHASE3_MEMORY_REQUIRED_SOLVER_STAGES
+            if call_memory_count > 0 and region_memory_count > 0
+            else _PHASE2_REQUIRED_SOLVER_STAGES
         )
         return Phase2DirectCallEligibility(
             obligation_id=obligation.obligation_id,
-            status="ineligible",
+            status="candidate" if not blockers else "ineligible",
             blockers=tuple(blockers),
-            required_solver_stages=(),
+            required_solver_stages=(
+                required_stages if not blockers else ()
+            ),
         )
     if not isinstance(left, CallSiteFact) or not isinstance(right, CallSiteFact):
         blockers.append("phase2_requires_paired_call_sites")
@@ -1458,20 +1549,18 @@ def _phase2_direct_call_eligibility(
                     if fact.callee_recursive_scc_proven
                     else f"{side}_callee_dependency_closure_missing"
                 )
-            if fact.callee_memory_effect_counts != (0,):
-                blockers.append(f"{side}_callee_not_memory_free")
+            if len(fact.callee_memory_effect_counts) != 1:
+                blockers.append(f"{side}_callee_memory_effect_summary_ambiguous")
             if fact.callee_has_unsupported_nested_call:
                 blockers.append(f"{side}_callee_nested_call_incomplete")
             if len(fact.callee_control_profile_keys) != 1:
                 blockers.append(f"{side}_callee_control_profile_missing")
             else:
-                profile_key = fact.callee_control_profile_keys[0]
-                if (
-                    not profile_key
-                    or str(profile_key[0]) != "function_control_effect_profile"
-                    or profile_key[-1] is not True
-                ):
-                    blockers.append(f"{side}_callee_not_acyclic_memory_free_scalar")
+                profile_is_safe = (
+                    fact.callee_ordered_scalar_store_candidates == (True,)
+                )
+                if not profile_is_safe:
+                    blockers.append(f"{side}_callee_not_total_trap_free_scalar_effect")
             if fact.callee_return_summary_statuses != ("complete",):
                 blockers.append(f"{side}_callee_return_summary_missing")
             if not fact.callee_return_shape_keys:
@@ -1481,11 +1570,28 @@ def _phase2_direct_call_eligibility(
         if not left.argument_keys and (left.callee_parameter_keys or right.callee_parameter_keys):
             blockers.append("argument_relation_missing")
 
+    memory_relation_required = bool(
+        isinstance(left, CallSiteFact)
+        and isinstance(right, CallSiteFact)
+        and left.callee_memory_effect_counts != (0,)
+        and right.callee_memory_effect_counts != (0,)
+    )
+    if (
+        isinstance(left, CallSiteFact)
+        and isinstance(right, CallSiteFact)
+        and left.callee_memory_effect_counts != right.callee_memory_effect_counts
+    ):
+        blockers.append("callee_memory_effect_count_relation_missing")
+    required_stages = (
+        _PHASE3_MEMORY_REQUIRED_SOLVER_STAGES
+        if memory_relation_required
+        else _PHASE2_REQUIRED_SOLVER_STAGES
+    )
     return Phase2DirectCallEligibility(
         obligation_id=obligation.obligation_id,
         status="candidate" if not blockers else "ineligible",
         blockers=tuple(blockers),
-        required_solver_stages=_PHASE2_REQUIRED_SOLVER_STAGES if not blockers else (),
+        required_solver_stages=required_stages if not blockers else (),
     )
 
 
@@ -1544,6 +1650,43 @@ def _primary_proof_stage(eligibility: Phase2DirectCallEligibility) -> str:
     if blockers:
         return "relational_call_effect_input_incomplete"
     return "relational_call_effect_stage_proofs_missing"
+
+
+def _legacy_replacement_readiness_payload(
+    *,
+    coupling: Mapping[str, Any],
+    blocker_mapping: Sequence[Mapping[str, Any]],
+    orphan_blockers: Sequence[str],
+    proof_readiness: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    failures: List[str] = []
+    if coupling.get("structural_coverage_complete") is not True:
+        failures.append("structural_coverage_incomplete")
+    if orphan_blockers:
+        failures.append("orphan_legacy_blockers_present")
+    for item in blocker_mapping:
+        obligation_ids = tuple(item.get("obligation_ids", ()) or ())
+        if (
+            item.get("mapping_basis") != "callsite_pcode_ref"
+            or item.get("mapping_status") != "mapped"
+            or len(obligation_ids) != 1
+        ):
+            failures.append("legacy_blocker_not_exactly_mapped")
+            break
+    if not proof_readiness or not all(
+        item.get("decision_eligible") is True for item in proof_readiness
+    ):
+        failures.append("semantic_obligation_proofs_incomplete")
+    return {
+        "status": "ready" if not failures else "blocked",
+        "replacement_scope": "exact_callsite_mapped_blockers_only",
+        "failure_causes": list(dict.fromkeys(failures)),
+        "legacy_blocker_count": len(blocker_mapping),
+        "completed_obligation_count": sum(
+            1 for item in proof_readiness if item.get("decision_eligible") is True
+        ),
+        "required_obligation_count": len(proof_readiness),
+    }
 
 
 def _fact_ids_for_pcode_key(
@@ -1848,6 +1991,38 @@ def build_call_effect_shadow_manifest(
         _phase2_direct_call_eligibility(item, left_by_id, right_by_id)
         for item in obligations
     )
+    def caller_memory_relation_required_for(analysis: FunctionReturnAnalysis) -> bool:
+        summary = getattr(analysis, "effect_summary", None)
+        profile = getattr(summary, "function_control_effect_profile", None)
+        return bool(
+            tuple(getattr(summary, "effects", ()) or ())
+            or int(getattr(profile, "store_count", 0) or 0) > 0
+            or any(
+                int(getattr(evidence, "memory_effect_count", 0) or 0) > 0
+                for evidence in tuple(
+                    getattr(summary, "call_site_effect_summary_evidence", ()) or ()
+                )
+            )
+        )
+
+    caller_memory_relation_required = bool(
+        caller_memory_relation_required_for(analysis1)
+        or caller_memory_relation_required_for(analysis2)
+    )
+    if caller_memory_relation_required:
+        phase2_eligibility = tuple(
+            replace(
+                item,
+                required_solver_stages=(
+                    *item.required_solver_stages,
+                    _WHOLE_CALLER_MEMORY_STAGE,
+                ),
+            )
+            if item.status == "candidate"
+            and _WHOLE_CALLER_MEMORY_STAGE not in item.required_solver_stages
+            else item
+            for item in phase2_eligibility
+        )
     solver_proof_artifacts: Tuple[InternalSolverProofArtifact, ...] = ()
     proof_readiness = tuple(
         evaluate_obligation_proof_readiness(
@@ -1956,6 +2131,12 @@ def build_call_effect_shadow_manifest(
         ],
         "legacy_blocker_mapping": blocker_mapping,
         "orphan_legacy_blockers": orphan_blockers,
+        "legacy_replacement_readiness": _legacy_replacement_readiness_payload(
+            coupling=coupling.to_dict(),
+            blocker_mapping=blocker_mapping,
+            orphan_blockers=orphan_blockers,
+            proof_readiness=[item.to_dict() for item in proof_readiness],
+        ),
         "summary": {
             "left_fact_count": len(left_facts),
             "right_fact_count": len(right_facts),
@@ -2032,6 +2213,20 @@ def apply_solver_proof_artifacts_to_manifest(
         artifact.record.to_dict() for artifact in proof_artifacts
     ]
     manifest["proof_readiness"] = [item.to_dict() for item in readiness]
+    manifest["legacy_replacement_readiness"] = _legacy_replacement_readiness_payload(
+        coupling=(
+            manifest.get("coupling")
+            if isinstance(manifest.get("coupling"), Mapping)
+            else {}
+        ),
+        blocker_mapping=tuple(
+            item
+            for item in manifest.get("legacy_blocker_mapping", ()) or ()
+            if isinstance(item, Mapping)
+        ),
+        orphan_blockers=tuple(manifest.get("orphan_legacy_blockers", ()) or ()),
+        proof_readiness=[item.to_dict() for item in readiness],
+    )
     summary = manifest.get("summary")
     if isinstance(summary, dict):
         summary["decision_eligible_obligation_count"] = sum(

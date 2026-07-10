@@ -4907,6 +4907,61 @@ def test_recover_call_argument_expressions_refuses_unresolved_positional_argumen
     assert recovered == []
 
 
+def test_recover_call_argument_expressions_collapses_identical_duplicate_inputs():
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+    parameter = Expression.parameter("param_1", 0, size=4)
+    recovered = _recover_call_argument_expressions(
+        call_op=object(),
+        tracer=FakeTracer(),
+        caller_parameters=[
+            _param("param_1", size=4, is_signed=True, index=0),
+        ],
+        callee_parameters=[
+            {"name": "callee_x", "size": 4},
+        ],
+        explicit_args=[parameter, parameter],
+    )
+
+    assert recovered == [parameter]
+
+
+def test_recover_call_argument_expressions_keeps_distinct_duplicate_slots_ambiguous():
+    class FakeCallOp:
+        def getNumInputs(self):
+            return 0
+
+        def getOutput(self):
+            return None
+
+        def getMnemonic(self):
+            return "CALL"
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+    recovered = _recover_call_argument_expressions(
+        call_op=FakeCallOp(),
+        tracer=FakeTracer(),
+        caller_parameters=[
+            _param("param_1", size=4, is_signed=True, index=0),
+            _param("param_2", size=4, is_signed=True, index=1),
+        ],
+        callee_parameters=[
+            {"name": "callee_x", "size": 4},
+        ],
+        explicit_args=[
+            Expression.parameter("param_1", 0, size=4),
+            Expression.parameter("param_2", 1, size=4),
+        ],
+    )
+
+    assert recovered == []
+
+
 def test_recover_call_argument_expressions_preserves_explicit_phi_function_pointer():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):
