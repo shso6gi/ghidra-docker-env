@@ -1,0 +1,1279 @@
+# -*- coding: utf-8 -*-
+"""Tests for the decision-neutral relational call/effect shadow model."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CallArgumentEvidence,
+    CallSiteEffectSummaryEvidence,
+    EffectSummary,
+    FunctionControlEffectProfile,
+    UnsupportedCallEffectRef,
+)
+from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
+    ArtifactObjectIdentity,
+    EquivalenceObservationContract,
+    InternalSolverProofArtifact,
+    Phase2DirectCallEligibility,
+    RegionBoundaryCertificate,
+    RegionFact,
+    RelationalCallEffectObligation,
+    SolverProofRecord,
+    build_call_effect_shadow_manifest,
+    build_structural_coverage_certificate,
+    evaluate_obligation_proof_readiness,
+)
+from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
+    _cross_binary_expression_shape,
+)
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    Expression,
+    FunctionReturnAnalysis,
+    PcodeOpRef,
+    ReturnInfo,
+    expression_provenance_key,
+)
+
+
+def _pcode_ref(binary_id: str, function_entry: int, address: int, mnemonic: str = "CALL") -> PcodeOpRef:
+    return PcodeOpRef(
+        address_offset=address,
+        seq_time=0,
+        seq_order=0,
+        block_index=0,
+        mnemonic=mnemonic,
+        input_sizes=(8, 4),
+        output_size=4,
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=function_entry,
+        target_space="ram",
+        target_offset=address,
+        opcode=1,
+        local_op_ordinal=0,
+    )
+
+
+def _analysis_with_call(
+    binary_id: str,
+    caller_entry: int,
+    call_address: int,
+    callee_entry: int,
+) -> FunctionReturnAnalysis:
+    pcode_ref = _pcode_ref(binary_id, caller_entry, call_address)
+    target = CallTargetRef.from_name(
+        "callee",
+        program_id=1 if binary_id == "left" else 2,
+        entry_offset=callee_entry,
+    )
+    argument = Expression.parameter("x", 0, size=4)
+    evidence = CallArgumentEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=target,
+        callee_param_identities=(("parameter_storage", "register", 0, 4),),
+        arguments=(argument,),
+        sources=("pcode_input",),
+        coverage_complete=True,
+        recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    control_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=2,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_like_identity_complete=True,
+    )
+    caller_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=2,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_count=1,
+        call_like_pcode_op_keys=(pcode_ref.stable_key(),),
+        call_like_identity_complete=True,
+    )
+    return FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point=hex(caller_entry),
+        function_ref=CallTargetRef.from_name(
+            "caller",
+            program_id=1 if binary_id == "left" else 2,
+            entry_offset=caller_entry,
+        ),
+        binary_id=binary_id,
+        parameters=[{"name": "x", "index": 0, "size": 4}],
+        returns=[],
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            call_argument_evidence={pcode_ref.stable_key(): evidence},
+            call_site_effect_summary_evidence=(
+                CallSiteEffectSummaryEvidence(
+                    pcode_op_ref=pcode_ref,
+                    target_ref=target,
+                    argument_keys=(expression_provenance_key(argument),),
+                    path_condition_keys=(),
+                    summary_status="complete",
+                    memory_effect_count=0,
+                    has_unsupported_nested_call=False,
+                    callee_control_profile_key=control_profile.stable_key(),
+                    return_summary_status="candidate",
+                    return_value_keys=(expression_provenance_key(argument),),
+                ),
+            ),
+            function_control_effect_profile=caller_profile,
+        ),
+    )
+
+
+def test_observation_contract_digest_covers_observation_policy():
+    default = EquivalenceObservationContract()
+    no_termination = EquivalenceObservationContract(observe_termination=False)
+
+    assert default.contract_id != no_termination.contract_id
+    assert default.to_dict()["contract_id"] == default.contract_id
+
+
+def test_solver_proof_record_rejects_naked_completion_claims():
+    with pytest.raises(ValueError, match="requires solver_result='unsat'"):
+        SolverProofRecord(
+            proof_id="proof",
+            obligation_id="obligation",
+            proof_stage="return_relation",
+            observation_contract_id="contract",
+            left_object_id="left",
+            right_object_id="right",
+            status="proven",
+        )
+
+    record = SolverProofRecord(
+        proof_id="proof",
+        obligation_id="obligation",
+        proof_stage="return_relation",
+        observation_contract_id="contract",
+        left_object_id="left",
+        right_object_id="right",
+        status="proven",
+        solver_result="unsat",
+        query_digest="a" * 64,
+        normalized_assertion_digest="b" * 64,
+        stage_input_digest="c" * 64,
+        precondition_digest="d" * 64,
+        solver_name="z3",
+        solver_version="test",
+        timeout_ms=1000,
+        producer_kind="internal_parallel_solver_runner",
+    )
+    assert record.to_dict()["solver_result"] == "unsat"
+
+
+def test_shadow_manifest_pairs_only_mutually_unique_object_shapes():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["mode"] == "shadow_no_decision_effect"
+    assert manifest["summary"]["left_fact_count"] == 1
+    assert manifest["summary"]["right_fact_count"] == 1
+    assert manifest["summary"]["paired_obligation_count"] == 1
+    assert manifest["summary"]["structural_coverage_complete"] is True
+    assert manifest["summary"]["semantic_proof_status"] == "pending"
+    obligation = manifest["relational_obligations"][0]
+    assert obligation["relation_kind"] == "call_to_call"
+    assert obligation["status"] == "pending"
+    assert obligation["correspondence_basis"] == "mutually_unique_object_shape_candidate"
+    assert manifest["summary"]["phase2_candidate_count"] == 1
+    eligibility = manifest["phase2_direct_call_eligibility"][0]
+    assert eligibility["status"] == "candidate"
+    assert eligibility["candidate_only"] is True
+    assert "decision_eligible" not in eligibility
+    assert "return_relation" in eligibility["required_solver_stages"]
+    assert eligibility["stage_proof_status"]["target_relation"] == "pending"
+    assert manifest["solver_proof_records"] == []
+
+
+def test_resolved_internal_call_and_callind_share_candidate_class():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    right_evidence = next(iter(right.effect_summary.call_argument_evidence.values()))
+    callind_ref = _pcode_ref("right", 0x3000, 0x3010, "CALLIND")
+    object.__setattr__(right_evidence, "pcode_op_ref", callind_ref)
+    right.effect_summary.call_argument_evidence = {
+        callind_ref.stable_key(): right_evidence
+    }
+    right_effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(right_effect, "pcode_op_ref", callind_ref)
+    right_profile = right.effect_summary.function_control_effect_profile
+    object.__setattr__(right_profile, "call_count", 0)
+    object.__setattr__(right_profile, "callind_count", 1)
+    object.__setattr__(right_profile, "call_like_pcode_op_keys", (callind_ref.stable_key(),))
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["paired_obligation_count"] == 1
+    assert manifest["left_facts"][0]["correspondence_operation_class"] == (
+        "resolved_internal_call_candidate"
+    )
+    assert manifest["right_facts"][0]["correspondence_operation_class"] == (
+        "resolved_internal_call_candidate"
+    )
+
+
+def test_ambiguous_correspondence_does_not_reuse_peer_fact():
+    left1 = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    left2 = _analysis_with_call("left", 0x1000, 0x1020, 0x2000)
+    left1.effect_summary.call_argument_evidence.update(
+        left2.effect_summary.call_argument_evidence
+    )
+    left1.effect_summary.call_site_effect_summary_evidence += (
+        left2.effect_summary.call_site_effect_summary_evidence
+    )
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left1,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["paired_obligation_count"] == 0
+    assert manifest["summary"]["unmatched_left_count"] == 2
+    assert manifest["summary"]["unmatched_right_count"] == 1
+    assert manifest["coupling"]["duplicate_left_fact_ids"] == []
+    assert manifest["coupling"]["duplicate_right_fact_ids"] == []
+
+
+def test_unmatched_call_obligations_cover_both_sides_without_regions():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    right_argument = Expression.constant(7, 4)
+    right_evidence = next(iter(right.effect_summary.call_argument_evidence.values()))
+    object.__setattr__(right_evidence, "arguments", (right_argument,))
+    object.__setattr__(
+        right.effect_summary.call_site_effect_summary_evidence[0],
+        "argument_keys",
+        (expression_provenance_key(right_argument),),
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert {
+        item["relation_kind"] for item in manifest["relational_obligations"]
+    } == {"unmatched_left", "unmatched_right"}
+    assert manifest["summary"]["structural_coverage_complete"] is True
+
+
+def test_structural_coverage_requires_exact_pcode_call_census_identity():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    missing_ref = _pcode_ref("left", 0x1000, 0x1020)
+    profile = left.effect_summary.function_control_effect_profile
+    object.__setattr__(profile, "call_count", 2)
+    object.__setattr__(
+        profile,
+        "call_like_pcode_op_keys",
+        profile.call_like_pcode_op_keys + (missing_ref.stable_key(),),
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    coverage = manifest["pcode_call_census_coverage"]["left"]
+    assert coverage["status"] == "incomplete"
+    assert len(coverage["missing_fact_pcode_op_keys"]) == 1
+    assert manifest["summary"]["structural_coverage_complete"] is False
+
+
+def test_nested_callee_evidence_is_not_counted_as_a_caller_callsite():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    nested = _analysis_with_call("left", 0x2000, 0x2010, 0x2000)
+    left.effect_summary.call_argument_evidence.update(
+        nested.effect_summary.call_argument_evidence
+    )
+    left.effect_summary.call_site_effect_summary_evidence += (
+        nested.effect_summary.call_site_effect_summary_evidence
+    )
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["left_fact_count"] == 1
+    assert manifest["pcode_call_census_coverage"]["left"]["status"] == "complete"
+
+
+def test_unmatched_recursive_callee_reports_scc_proof_stage():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    recursive_profile = FunctionControlEffectProfile(
+        block_count=2,
+        pcode_op_count=4,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=False,
+        terminal_return_coverage_complete=True,
+        call_count=1,
+        call_like_identity_complete=True,
+    )
+    left_effect = left.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(left_effect, "summary_status", "incomplete")
+    object.__setattr__(left_effect, "callee_control_profile_key", recursive_profile.stable_key())
+    object.__setattr__(left_effect, "callee_recursive_scc_proven", True)
+    object.__setattr__(left_effect, "callee_recursive_scc_identity", "scc-proof")
+    object.__setattr__(
+        left_effect,
+        "callee_recursive_scc_member_keys",
+        (("function", 1, 0x2000),),
+    )
+    right_effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(
+        right_effect,
+        "return_value_keys",
+        (expression_provenance_key(Expression.constant(7, 4)),),
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert any(
+        item["primary_proof_stage"] == "recursive_call_scc_unproven"
+        for item in manifest["proof_stage_backlog"]
+    )
+
+
+def test_nonrecursive_nested_call_reports_dependency_closure_missing():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    nested_profile = FunctionControlEffectProfile(
+        block_count=2,
+        pcode_op_count=4,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_count=1,
+        call_like_identity_complete=True,
+        recursive_scc_proven=False,
+    )
+    left_effect = left.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(left_effect, "summary_status", "incomplete")
+    object.__setattr__(left_effect, "callee_control_profile_key", nested_profile.stable_key())
+    right_effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(
+        right_effect,
+        "return_value_keys",
+        (expression_provenance_key(Expression.constant(9, 4)),),
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    left_backlog = next(
+        item
+        for item in manifest["proof_stage_backlog"]
+        if "left_callee_dependency_closure_missing" in item["blocking_stages"]
+    )
+    assert left_backlog["primary_proof_stage"] == "callee_dependency_closure_missing"
+
+
+def test_recursive_scc_certificate_requires_a_complete_call_graph_cycle():
+    analyzer = ReturnAnalyzer(program=None)
+    first = ("function", 1, 0x1000)
+    second = ("function", 1, 0x2000)
+    leaf = ("function", 1, 0x3000)
+    analyzer._direct_call_graph = {
+        first: {second},
+        second: {first},
+        leaf: set(),
+    }
+    analyzer._direct_call_graph_complete_nodes = {first, second, leaf}
+
+    proven, identity, members = analyzer._recursive_scc_certificate(first)
+    assert proven is True
+    assert identity
+    assert set(members) == {first, second}
+
+    leaf_proven, _, _ = analyzer._recursive_scc_certificate(leaf)
+    assert leaf_proven is False
+
+    analyzer._direct_call_graph_complete_nodes.remove(second)
+    incomplete, _, _ = analyzer._recursive_scc_certificate(first)
+    assert incomplete is False
+
+
+def test_callother_is_a_typed_userop_fact_not_a_callsite():
+    analysis = FunctionReturnAnalysis(
+        function_name="intrinsic_user",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("intrinsic_user", program_id=1, entry_offset=0x1000),
+        binary_id="left",
+        parameters=[],
+        returns=[],
+        effect_summary=EffectSummary(
+            parameter_names=[],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(
+                UnsupportedCallEffectRef(
+                    pcode_op_ref=_pcode_ref("left", 0x1000, 0x1010, "CALLOTHER"),
+                    target_ref=None,
+                    reason="unsupported_intrinsic",
+                    order_key=1,
+                    target_expr=Expression.constant(17, 4),
+                    arguments=(Expression.constant(1, 4),),
+                ),
+            ),
+        ),
+    )
+    empty = FunctionReturnAnalysis(
+        function_name="empty",
+        entry_point="0x3000",
+        binary_id="right",
+        parameters=[],
+        returns=[],
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        empty,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["left_facts"][0]["fact_kind"] == "userop"
+    assert manifest["left_facts"][0]["unsupported_reason"] == "unsupported_intrinsic"
+    assert manifest["relational_obligations"][0]["relation_kind"] == "unmatched_left"
+
+
+def test_region_fact_exposes_boundary_completeness_instead_of_assuming_it():
+    boundary = RegionBoundaryCertificate(
+        entry_block_key=("block", 1),
+        exit_block_keys=(("block", 2),),
+        block_keys=(("block", 1), ("block", 2)),
+        pcode_op_keys=(("pcode", 1),),
+        single_entry=True,
+        all_exits_enumerated=True,
+        cross_edges_enumerated=False,
+        guard_partition_complete=True,
+    )
+    region = RegionFact(
+        fact_id="region",
+        function_identity=ArtifactObjectIdentity(
+            binary_id="left",
+            function_key=("function", 1, 0x1000),
+        ),
+        boundary=boundary,
+    )
+
+    assert region.to_dict()["boundary"]["is_complete"] is False
+
+
+def _analysis_with_inline_region(binary_id: str, entry: int) -> FunctionReturnAnalysis:
+    value = Expression.parameter("x", 0, size=4)
+    profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=2,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_like_identity_complete=True,
+        region_entry_block_key=("pcode_block", binary_id, entry, 0),
+        region_exit_block_keys=(("pcode_block", binary_id, entry, 0),),
+        region_block_keys=(("pcode_block", binary_id, entry, 0),),
+        region_pcode_op_keys=(("pcode_op", binary_id, entry, 0),),
+        region_live_in_keys=(("register", 0, 4),),
+        region_live_out_keys=(("register", 0, 4),),
+        region_identity_complete=True,
+        region_single_entry=True,
+        region_all_exits_enumerated=True,
+        region_cross_edges_enumerated=True,
+    )
+    return FunctionReturnAnalysis(
+        function_name="inlined",
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name(
+            "inlined", program_id=2, entry_offset=entry
+        ),
+        binary_id=binary_id,
+        parameters=[{"name": "x", "index": 0, "size": 4}],
+        returns=[ReturnInfo(address=hex(entry + 4), conditions=[], value=value)],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            function_control_effect_profile=profile,
+        ),
+    )
+
+
+def test_unique_unmatched_call_builds_call_to_inline_region_obligation():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_inline_region("right", 0x3000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["call_to_region_obligation_count"] == 1
+    assert manifest["summary"]["unmatched_left_count"] == 0
+    assert len(manifest["right_regions"]) == 1
+    obligation = manifest["relational_obligations"][0]
+    assert obligation["relation_kind"] == "call_to_region"
+    assert manifest["proof_stage_backlog"][0]["primary_proof_stage"] == (
+        "inline_region_guard_partition_missing"
+    )
+
+
+def test_call_to_region_reports_call_argument_failure_before_region_guard():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    evidence = next(iter(left.effect_summary.call_argument_evidence.values()))
+    object.__setattr__(evidence, "coverage_complete", False)
+    right = _analysis_with_inline_region("right", 0x3000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    backlog = manifest["proof_stage_backlog"][0]
+    assert "call_extraction_argument_coverage_incomplete" in backlog["blocking_stages"]
+    assert backlog["primary_proof_stage"] == "callsite_argument_evidence_incomplete"
+
+
+def test_multiple_unmatched_calls_do_not_reuse_one_inline_region():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    second = _analysis_with_call("left", 0x1000, 0x1020, 0x2100)
+    left.effect_summary.call_argument_evidence.update(
+        second.effect_summary.call_argument_evidence
+    )
+    left.effect_summary.call_site_effect_summary_evidence += (
+        second.effect_summary.call_site_effect_summary_evidence
+    )
+    profile = left.effect_summary.function_control_effect_profile
+    second_ref = next(iter(second.effect_summary.call_argument_evidence.values())).pcode_op_ref
+    object.__setattr__(profile, "call_count", 2)
+    object.__setattr__(
+        profile,
+        "call_like_pcode_op_keys",
+        profile.call_like_pcode_op_keys + (second_ref.stable_key(),),
+    )
+    right = _analysis_with_inline_region("right", 0x3000)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["call_to_region_obligation_count"] == 0
+    assert manifest["summary"]["unmatched_left_count"] == 2
+
+
+def test_region_live_in_excludes_call_target_and_classifies_parameter_register():
+    class Space:
+        def __init__(self, name):
+            self.name = name
+
+        def getName(self):
+            return self.name
+
+    class Address:
+        def __init__(self, space, offset):
+            self.space = Space(space)
+            self.offset = offset
+
+        def getAddressSpace(self):
+            return self.space
+
+        def getOffset(self):
+            return self.offset
+
+    class Varnode:
+        def __init__(self, space, offset, size):
+            self.address = Address(space, offset)
+            self.size = size
+
+        def isConstant(self):
+            return False
+
+        def getDef(self):
+            return None
+
+        def getAddress(self):
+            return self.address
+
+        def getSize(self):
+            return self.size
+
+    analyzer = ReturnAnalyzer(program=None)
+    register = Varnode("register", 16, 4)
+    parameters = (
+        {"index": 0, "storage": {"space_name": "register", "offset": 16, "size": 4}},
+    )
+
+    target_key, target_status = analyzer._region_live_in_key(
+        register,
+        mnemonic="CALL",
+        input_index=0,
+        parameters=parameters,
+    )
+    assert target_key is None
+    assert target_status == "excluded_nondata_operand"
+
+    argument_key, argument_status = analyzer._region_live_in_key(
+        register,
+        mnemonic="CALL",
+        input_index=1,
+        parameters=parameters,
+    )
+    assert argument_status == "included"
+    assert argument_key[0] == "parameter_input"
+
+    class FunctionManager:
+        def getFunctionContaining(self, address):
+            return object()
+
+    class Program:
+        def getFunctionManager(self):
+            return FunctionManager()
+
+        def getListing(self):
+            raise RuntimeError("unused")
+
+        def getMemory(self):
+            raise RuntimeError("unused")
+
+    code_analyzer = ReturnAnalyzer(program=Program())
+    code_key, code_status = code_analyzer._region_live_in_key(
+        Varnode("ram", 0x4000, 8),
+        mnemonic="COPY",
+        input_index=0,
+        parameters=(),
+    )
+    assert code_key is None
+    assert code_status == "excluded_artifact_code_address"
+
+
+def test_untrusted_assert_false_artifacts_cannot_complete_any_proof_stage():
+    obligation = RelationalCallEffectObligation(
+        obligation_id="obligation",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="left",
+        right_fact_id="right",
+    )
+    stages = (
+        "target_relation",
+        "argument_relation",
+        "abi_relation",
+        "return_relation",
+        "termination_relation",
+        "trap_relation",
+        "empty_state_transformer_and_frame",
+    )
+    eligibility = Phase2DirectCallEligibility(
+        obligation_id="obligation",
+        status="candidate",
+        blockers=(),
+        required_solver_stages=stages,
+    )
+    artifacts = []
+    for index, stage in enumerate(stages):
+        record = SolverProofRecord(
+            proof_id=f"fake-proof-{index}",
+            obligation_id="obligation",
+            proof_stage=stage,
+            observation_contract_id="contract",
+            left_object_id="left",
+            right_object_id="right",
+            status="proven",
+            solver_result="unsat",
+            query_digest="a" * 64,
+            normalized_assertion_digest="b" * 64,
+            stage_input_digest="c" * 64,
+            precondition_digest="d" * 64,
+            solver_name="z3",
+            solver_version="test",
+            timeout_ms=1000,
+            producer_kind="internal_parallel_solver_runner",
+        )
+        artifact = InternalSolverProofArtifact(
+            record=record,
+            query_text=f"(assert false) ; {stage}",
+            normalized_assertion_text="(assert false)",
+            stage_input_payload={"stage": stage, "index": index},
+            precondition_payload={"contract": "contract"},
+        )
+        artifacts.append(artifact)
+
+    readiness = evaluate_obligation_proof_readiness(obligation, eligibility, artifacts)
+    assert readiness.decision_eligible is False
+    assert readiness.completed_stages == ()
+    assert readiness.missing_stages == stages
+    assert "proof_artifact_verification_failed" in readiness.blockers
+
+    wrong_eligibility = Phase2DirectCallEligibility(
+        obligation_id="different-obligation",
+        status="candidate",
+        blockers=(),
+        required_solver_stages=stages,
+    )
+    mismatched = evaluate_obligation_proof_readiness(
+        obligation,
+        wrong_eligibility,
+        artifacts,
+    )
+    assert mismatched.decision_eligible is False
+    assert "eligibility_obligation_id_mismatch" in mismatched.blockers
+
+def test_deferred_call_result_shape_drops_artifact_local_caller_identity():
+    left = (
+        "runtime_ref",
+        (
+            "deferred_call",
+            "call_out_of_scope",
+            ("function", 11, 0x2000),
+            ("deferred_call_site", 11, 0x1000, ("pcode_op", "B1"), ("function", 11, 0x2000), 1),
+            None,
+            None,
+        ),
+    )
+    right = (
+        "runtime_ref",
+        (
+            "deferred_call",
+            "call_out_of_scope",
+            ("function", 22, 0x4000),
+            ("deferred_call_site", 22, 0x3000, ("pcode_op", "B5"), ("function", 22, 0x4000), 9),
+            None,
+            None,
+        ),
+    )
+
+    assert _cross_binary_expression_shape(left) == _cross_binary_expression_shape(right)
+
+
+def test_function_control_profile_requires_acyclic_complete_return_cfg():
+    class Op:
+        def __init__(self, mnemonic):
+            self.mnemonic = mnemonic
+
+        def getMnemonic(self):
+            return self.mnemonic
+
+    class Block:
+        def __init__(self, index, mnemonics):
+            self.index = index
+            self.ops = [Op(name) for name in mnemonics]
+            self.out = []
+
+        def getIndex(self):
+            return self.index
+
+        def getIterator(self):
+            return list(self.ops)
+
+        def getOutSize(self):
+            return len(self.out)
+
+        def getOut(self, index):
+            return self.out[index]
+
+    class HighFunction:
+        def __init__(self, blocks):
+            self.blocks = blocks
+
+        def getBasicBlocks(self):
+            return list(self.blocks)
+
+    entry = Block(0, ["INT_ADD", "BRANCH"])
+    terminal = Block(1, ["RETURN"])
+    entry.out = [terminal]
+    analyzer = ReturnAnalyzer(program=None)
+
+    profile = analyzer._build_function_control_effect_profile(
+        HighFunction([entry, terminal])
+    )
+    assert profile.phase2_memory_free_scalar_candidate is True
+
+    terminal.out = [entry]
+    cyclic = analyzer._build_function_control_effect_profile(
+        HighFunction([entry, terminal])
+    )
+    assert cyclic.cfg_acyclic is False
+    assert cyclic.phase2_memory_free_scalar_candidate is False
+
+
+def test_function_control_profile_rejects_unimplemented_and_ops_after_return():
+    class Op:
+        def __init__(self, mnemonic):
+            self.mnemonic = mnemonic
+
+        def getMnemonic(self):
+            return self.mnemonic
+
+    class Block:
+        def __init__(self, mnemonics):
+            self.ops = [Op(name) for name in mnemonics]
+
+        def getIndex(self):
+            return 0
+
+        def getIterator(self):
+            return list(self.ops)
+
+        def getOutSize(self):
+            return 0
+
+    class HighFunction:
+        def __init__(self, mnemonics):
+            self.block = Block(mnemonics)
+
+        def getBasicBlocks(self):
+            return [self.block]
+
+    analyzer = ReturnAnalyzer(program=None)
+    unsupported = analyzer._build_function_control_effect_profile(
+        HighFunction(["UNIMPLEMENTED", "RETURN"])
+    )
+    assert "UNIMPLEMENTED" in unsupported.unsupported_mnemonics
+    assert unsupported.phase2_memory_free_scalar_candidate is False
+
+    after_return = analyzer._build_function_control_effect_profile(
+        HighFunction(["RETURN", "INT_ADD"])
+    )
+    assert after_return.pcode_after_return_count == 1
+    assert after_return.phase2_memory_free_scalar_candidate is False
+
+    allocation = analyzer._build_function_control_effect_profile(
+        HighFunction(["NEW", "RETURN"])
+    )
+    assert allocation.unsupported_mnemonics == ()
+    assert "NEW" in allocation.phase2_unsafe_mnemonics
+    assert allocation.phase2_memory_free_scalar_candidate is False
+
+
+def test_argument_extraction_failure_is_not_labeled_as_guard_coverage():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    right = _analysis_with_call("right", 0x3000, 0x3010, 0x4000)
+    for analysis in (left, right):
+        evidence = next(iter(analysis.effect_summary.call_argument_evidence.values()))
+        object.__setattr__(evidence, "coverage_complete", False)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    fact = manifest["left_facts"][0]
+    assert "argument_coverage_incomplete" in fact["extraction_failure_causes"]
+    assert manifest["proof_stage_backlog"][0]["primary_proof_stage"] == (
+        "callsite_argument_evidence_incomplete"
+    )
+
+
+def test_unmatched_call_preserves_its_argument_extraction_failure():
+    left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    evidence = next(iter(left.effect_summary.call_argument_evidence.values()))
+    object.__setattr__(evidence, "coverage_complete", False)
+    right = FunctionReturnAnalysis(
+        function_name="inlined",
+        entry_point="0x3000",
+        binary_id="right",
+        parameters=[],
+        returns=[],
+        effect_summary=EffectSummary(
+            parameter_names=[],
+            effects=[],
+            function_control_effect_profile=FunctionControlEffectProfile(
+                block_count=1,
+                pcode_op_count=1,
+                return_block_count=1,
+                pcode_enumeration_complete=True,
+                cfg_edges_complete=True,
+                cfg_acyclic=True,
+                terminal_return_coverage_complete=True,
+                call_like_identity_complete=True,
+            ),
+        ),
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    backlog = manifest["proof_stage_backlog"][0]
+    assert "left_extraction_argument_coverage_incomplete" in backlog["blocking_stages"]
+    assert backlog["primary_proof_stage"] == "callsite_argument_evidence_incomplete"
+
+
+def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> FunctionReturnAnalysis:
+    pcode_ref = _pcode_ref(binary_id, entry, entry + 0x10)
+    target = CallTargetRef.from_name(
+        "leaf_add",
+        program_id=program_id,
+        entry_offset=entry + 0x100,
+    )
+    left = Expression.parameter("a", 0, data_type="int", size=4)
+    right = Expression.parameter("b", 1, data_type="int", size=4)
+    call_evidence = CallArgumentEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=target,
+        callee_param_identities=(
+            (("parameter", 0), ("register_storage", 0, 1, 64, 0, 32)),
+            (("parameter", 1), ("register_storage", 0, 2, 64, 0, 32)),
+        ),
+        arguments=(left, right),
+        sources=("live_in_unmodified", "live_in_unmodified"),
+        coverage_complete=True,
+        recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    callee_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=3,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_like_identity_complete=True,
+    )
+    caller_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=2,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_count=1,
+        call_like_pcode_op_keys=(pcode_ref.stable_key(),),
+        call_like_identity_complete=True,
+    )
+    return FunctionReturnAnalysis(
+        function_name="wrapper",
+        entry_point=hex(entry),
+        function_ref=CallTargetRef.from_name(
+            "wrapper",
+            program_id=program_id,
+            entry_offset=entry,
+        ),
+        binary_id=binary_id,
+        parameters=[
+            {"name": "a", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "b", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address=hex(entry + 0x20),
+                conditions=[],
+                value=Expression.binary_op("INT_ADD", left, right),
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[],
+            call_argument_evidence={pcode_ref.stable_key(): call_evidence},
+            call_site_effect_summary_evidence=(
+                CallSiteEffectSummaryEvidence(
+                    pcode_op_ref=pcode_ref,
+                    target_ref=target,
+                    argument_keys=(
+                        expression_provenance_key(left),
+                        expression_provenance_key(right),
+                    ),
+                    path_condition_keys=(),
+                    summary_status="complete",
+                    memory_effect_count=0,
+                    has_unsupported_nested_call=False,
+                    callee_control_profile_key=callee_profile.stable_key(),
+                    return_summary_status="candidate",
+                    return_value_keys=(
+                        expression_provenance_key(
+                            Expression.binary_op("INT_ADD", left, right)
+                        ),
+                    ),
+                ),
+            ),
+            function_control_effect_profile=caller_profile,
+        ),
+    )
+
+
+def test_return_only_unsat_cannot_discharge_call_effect_obligations():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=False,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["mode"] == "shadow_no_decision_effect"
+    assert manifest["summary"]["semantic_proof_status"] == "pending"
+    assert manifest["solver_proof_records"] == []
+    assert manifest["structural_coverage_certificate"]["status"] == "complete"
+    assert manifest["structural_coverage_certificate"]["decision_effect"] == (
+        "diagnostic_precondition_only"
+    )
+    readiness = manifest["proof_readiness"][0]
+    assert readiness["completed_stages"] == []
+    assert readiness["decision_eligible"] is False
+    assert result.unknown_reasons
+    assert {
+        reason.proof_stage for reason in result.unknown_reasons
+    } == {"relational_call_effect_stage_proofs_missing"}
+
+
+def test_phase2_compatibility_hook_is_decision_neutral():
+    checker = EquivalenceChecker(enable_rewrite=False)
+    strategy_result = SimpleNamespace(is_equivalent=None, unknown_reasons=["keep"])
+    manifest = {}
+
+    checker._apply_phase2_relational_call_discharge(
+        strategy_result,
+        _phase2_caller_analysis("B1", 1, 0x1000),
+        _phase2_caller_analysis("B2", 2, 0x3000),
+        manifest,
+    )
+
+    assert strategy_result.is_equivalent is None
+    assert strategy_result.unknown_reasons == ["keep"]
+    assert manifest["phase2_discharge_gate"]["status"] == "disabled"
+    assert manifest["phase2_discharge_gate"]["decision_effect"] == "diagnostic_only"
+
+
+def test_phase2_discharge_cannot_promote_even_with_fabricated_manifest_proofs():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    checker = EquivalenceChecker(timeout=1, enable_rewrite=False)
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+    manifest["solver_proof_records"] = [
+        {
+            "proof_stage": stage,
+            "status": "proven",
+            "solver_result": "unsat",
+            "query_text": "(assert false)",
+        }
+        for stage in manifest["phase2_direct_call_eligibility"][0][
+            "required_solver_stages"
+        ]
+    ]
+    manifest["proof_readiness"][0]["decision_eligible"] = True
+    strategy_result = SimpleNamespace(
+        is_equivalent=None,
+        unknown_reasons=["keep"],
+        total_pairs=1,
+        unsat_pairs=1,
+        sat_pairs=0,
+        unknown_pairs=0,
+        error_pairs=0,
+    )
+
+    checker._apply_phase2_relational_call_discharge(
+        strategy_result,
+        left,
+        right,
+        manifest,
+    )
+
+    assert strategy_result.is_equivalent is None
+    assert strategy_result.unknown_reasons == ["keep"]
+    assert manifest["phase2_discharge_gate"]["status"] == "disabled"
+
+
+def test_structural_coverage_certificate_is_exact_and_decision_neutral():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+    complete = build_structural_coverage_certificate(manifest)
+    assert complete.status == "complete"
+    assert complete.verification_failure() is None
+    assert complete.to_dict()["decision_effect"] == "diagnostic_precondition_only"
+    assert complete.exact_coverage_payload["left_fact_ids"] == manifest["coupling"][
+        "left_fact_ids"
+    ]
+
+    complete.exact_coverage_payload["structural_coverage_complete"] = False
+    assert complete.verification_failure() == "certificate_payload_status_mismatch"
+
+    incomplete_manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+    incomplete_manifest["coupling"]["structural_coverage_complete"] = False
+    incomplete = build_structural_coverage_certificate(incomplete_manifest)
+    assert incomplete.status == "incomplete"
+    assert "structural_endpoint_coverage_incomplete" in incomplete.failure_causes
+
+    mismatched_manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+    mismatched_manifest["pcode_call_census_coverage"]["left"][
+        "fact_pcode_op_keys"
+    ] = []
+    mismatched = build_structural_coverage_certificate(mismatched_manifest)
+    assert mismatched.status == "incomplete"
+    assert "left_pcode_census_fact_key_mismatch" in mismatched.failure_causes
+
+
+def test_different_internal_callees_cannot_be_promoted_from_shape_candidate():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    right_evidence = next(iter(right.effect_summary.call_argument_evidence.values()))
+    different = CallTargetRef.from_name(
+        "different_leaf",
+        program_id=2,
+        entry_offset=0x9000,
+    )
+    object.__setattr__(right_evidence, "target_ref", different)
+    object.__setattr__(right.effect_summary.call_site_effect_summary_evidence[0], "target_ref", different)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=False,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["mode"] == "shadow_no_decision_effect"
+    assert manifest["relational_obligations"][0]["status"] == "pending"
+
+
+def test_phase2_relational_discharge_rejects_caller_memory_effect():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    left.effect_summary.function_control_effect_profile = FunctionControlEffectProfile(
+        block_count=1,
+        pcode_op_count=3,
+        return_block_count=1,
+        pcode_enumeration_complete=True,
+        cfg_edges_complete=True,
+        cfg_acyclic=True,
+        terminal_return_coverage_complete=True,
+        call_count=1,
+        store_count=1,
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=False,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    assert result.call_effect_shadow_manifest["mode"] == "shadow_no_decision_effect"
+
+
+def test_external_thunk_target_is_not_a_phase2_internal_call_candidate():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis in (left, right):
+        summary = analysis.effect_summary
+        argument_evidence = next(iter(summary.call_argument_evidence.values()))
+        external = CallTargetRef.from_name(
+            "printf",
+            program_id=argument_evidence.target_ref.program_id,
+            entry_offset=argument_evidence.target_ref.entry_offset,
+            is_thunk=True,
+            thunked_is_external=True,
+            thunked_library_name="libc",
+        )
+        object.__setattr__(argument_evidence, "target_ref", external)
+        effect_evidence = summary.call_site_effect_summary_evidence[0]
+        object.__setattr__(effect_evidence, "target_ref", external)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["summary"]["phase2_candidate_count"] == 0
+    blockers = manifest["phase2_direct_call_eligibility"][0]["blockers"]
+    assert "left_noninternal_call_target" in blockers
+    assert "right_noninternal_call_target" in blockers

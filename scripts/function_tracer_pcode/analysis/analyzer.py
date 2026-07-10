@@ -2,6 +2,7 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
+import hashlib
 from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from functools import cmp_to_key
@@ -62,6 +63,7 @@ from .effect_summary import (
     CanonicalLocation,
     EffectSummary,
     CallArgumentEvidence,
+    FunctionControlEffectProfile,
     _build_parameter_replacements,
     _call_argument_evidence_storage_key,
     _expression_location_ref,
@@ -141,6 +143,51 @@ _PCODE_VALUE_PASSTHROUGH_OPCODES = {
     _PCODE_OPCODE_BY_MNEMONIC["SUBPIECE"],
 }
 
+# Ghidra's documented core P-code operations accepted by the control/effect
+# census.  This is deliberately an allowlist: new/architecture-specific
+# operations remain unsupported until their termination, trap, and state
+# semantics are classified explicitly.
+_FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS = frozenset(
+    {
+        "COPY", "LOAD", "STORE", "BRANCH", "CBRANCH", "BRANCHIND",
+        "CALL", "CALLIND", "CALLOTHER", "RETURN",
+        "INT_EQUAL", "INT_NOTEQUAL", "INT_SLESS", "INT_SLESSEQUAL",
+        "INT_LESS", "INT_LESSEQUAL", "INT_ZEXT", "INT_SEXT",
+        "INT_ADD", "INT_SUB", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
+        "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR",
+        "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT", "INT_DIV",
+        "INT_SDIV", "INT_REM", "INT_SREM", "BOOL_NEGATE", "BOOL_XOR",
+        "BOOL_AND", "BOOL_OR", "FLOAT_EQUAL", "FLOAT_NOTEQUAL",
+        "FLOAT_LESS", "FLOAT_LESSEQUAL", "FLOAT_NAN", "FLOAT_ADD",
+        "FLOAT_DIV", "FLOAT_MULT", "FLOAT_SUB", "FLOAT_NEG",
+        "FLOAT_ABS", "FLOAT_SQRT", "INT2FLOAT", "FLOAT2FLOAT",
+        "FLOAT_INT2FLOAT", "FLOAT_FLOAT2FLOAT", "FLOAT_TRUNC",
+        "FLOAT_CEIL", "FLOAT_FLOOR", "FLOAT_ROUND",
+        "TRUNC", "CEIL", "FLOOR", "ROUND", "MULTIEQUAL", "INDIRECT",
+        "PIECE", "SUBPIECE", "CAST", "PTRADD", "PTRSUB", "SEGMENTOP",
+        "CPOOLREF", "NEW", "INSERT", "EXTRACT", "POPCOUNT", "LZCOUNT",
+    }
+)
+
+# Narrow lane semantics.  Recognition above only means that Ghidra assigned a
+# known opcode; it does not make the operation safe for a memory-free scalar
+# proof.  Allocation, constant-pool/segment access, indirect effects, memory,
+# calls, userops, indirect control flow, and floating point stay outside this
+# set until dedicated relational semantics exist.
+_PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS = frozenset(
+    {
+        "COPY", "BRANCH", "CBRANCH", "RETURN",
+        "INT_EQUAL", "INT_NOTEQUAL", "INT_SLESS", "INT_SLESSEQUAL",
+        "INT_LESS", "INT_LESSEQUAL", "INT_ZEXT", "INT_SEXT",
+        "INT_ADD", "INT_SUB", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
+        "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR",
+        "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT", "INT_DIV",
+        "INT_SDIV", "INT_REM", "INT_SREM", "BOOL_NEGATE", "BOOL_XOR",
+        "BOOL_AND", "BOOL_OR", "MULTIEQUAL", "PIECE", "SUBPIECE", "CAST",
+        "POPCOUNT", "LZCOUNT", "INSERT", "EXTRACT",
+    }
+)
+
 _UNSIGNED_COMPARE_TO_SIGNED = {
     "INT_LESS": "INT_SLESS",
     "INT_LESSEQUAL": "INT_SLESSEQUAL",
@@ -206,6 +253,8 @@ class ReturnAnalyzer:
         self._last_analysis_failure: Optional[AnalysisFailure] = None
         self._current_function_prototype = None
         self._current_function_entry_address_value = None
+        self._direct_call_graph: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = {}
+        self._direct_call_graph_complete_nodes: Set[Tuple[Any, ...]] = set()
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -1549,6 +1598,493 @@ class ReturnAnalyzer:
                 if self._phase1_pure_return_forbids_mnemonic(mnemonic):
                     return True
         return not saw_op
+
+    @staticmethod
+    def _region_input_is_nondata_operand(mnemonic: str, input_index: int) -> bool:
+        control_inputs = {
+            "BRANCH": {0},
+            "CBRANCH": {0},
+            "BRANCHIND": {0},
+            "CALL": {0},
+            "CALLIND": {0},
+            "CALLOTHER": {0},
+            "RETURN": {0},
+            "LOAD": {0},
+            "STORE": {0},
+        }
+        return int(input_index) in control_inputs.get(str(mnemonic), set())
+
+    def _region_address_is_code(self, address) -> bool:
+        if address is None or self.program is None:
+            return False
+        try:
+            manager = self.program.getFunctionManager()
+            if manager.getFunctionContaining(address) is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            listing = self.program.getListing()
+            if listing.getInstructionContaining(address) is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            block = self.program.getMemory().getBlock(address)
+            if block is not None and bool(block.isExecute()):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _region_parameter_index_for_location(
+        location_key: Tuple[str, int, int],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[int]:
+        space_name, offset, size = location_key
+        for ordinal, parameter in enumerate(parameters or ()):
+            storage = parameter.get("storage") if isinstance(parameter, Mapping) else None
+            if storage is None:
+                continue
+            storage_space = (
+                storage.get("space_name")
+                if isinstance(storage, Mapping)
+                else getattr(storage, "space_name", None)
+            )
+            storage_offset = (
+                storage.get("offset")
+                if isinstance(storage, Mapping)
+                else getattr(storage, "offset", None)
+            )
+            storage_size = (
+                storage.get("size")
+                if isinstance(storage, Mapping)
+                else getattr(storage, "size", None)
+            )
+            try:
+                if (
+                    str(storage_space) == str(space_name)
+                    and int(storage_offset) == int(offset)
+                    and int(storage_size) == int(size)
+                ):
+                    return int(parameter.get("index", ordinal))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _region_live_in_key(
+        self,
+        varnode,
+        *,
+        mnemonic: str,
+        input_index: int,
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Tuple[Optional[Tuple[object, ...]], str]:
+        if self._region_input_is_nondata_operand(mnemonic, input_index):
+            return None, "excluded_nondata_operand"
+        try:
+            if bool(varnode.isConstant()) or varnode.getDef() is not None:
+                return None, "excluded_not_live_in"
+            address = varnode.getAddress()
+        except Exception:
+            return None, "incomplete"
+        location_key = self._varnode_location_key(varnode)
+        if location_key is None:
+            return None, "incomplete"
+        space_name = str(location_key[0]).lower()
+        if space_name == "ram" and self._region_address_is_code(address):
+            return None, "excluded_artifact_code_address"
+        parameter_index = self._region_parameter_index_for_location(
+            location_key,
+            parameters,
+        )
+        if parameter_index is not None:
+            return (
+                "parameter_input",
+                parameter_index,
+                tuple(location_key),
+            ), "included"
+        if space_name == "register":
+            category = "register_input"
+        elif space_name in {"stack", "ram"}:
+            category = "memory_input"
+        else:
+            return None, "incomplete"
+        return (category, tuple(location_key)), "included"
+
+    def _build_function_control_effect_profile(
+        self,
+        high_function,
+        function=None,
+        parameters: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> FunctionControlEffectProfile:
+        """Conservatively census CFG/P-code for direct-call eligibility."""
+
+        function_identity_key = None
+        if function is not None:
+            try:
+                function_identity_key = CallTargetRef.from_function(function).stable_key()
+            except Exception:
+                function_identity_key = None
+
+        blocks, blocks_complete = self._collect_java_or_python_iterable(
+            getattr(high_function, "getBasicBlocks", lambda: None)()
+            if high_function is not None
+            and callable(getattr(high_function, "getBasicBlocks", None))
+            else None
+        )
+        adjacency: Dict[int, Tuple[int, ...]] = {}
+        block_keys_by_index: Dict[int, Tuple[object, ...]] = {}
+        terminal_return_indices: Set[int] = set()
+        pcode_complete = bool(blocks_complete)
+        edges_complete = bool(blocks_complete)
+        terminal_coverage_complete = bool(blocks_complete and blocks)
+        pcode_op_count = 0
+        return_block_count = 0
+        counts = {
+            "LOAD": 0,
+            "STORE": 0,
+            "CALL": 0,
+            "CALLIND": 0,
+            "CALLOTHER": 0,
+            "BRANCHIND": 0,
+        }
+        float_op_count = 0
+        pcode_after_return_count = 0
+        abnormal_terminal_block_count = 0
+        call_like_pcode_op_keys: List[Tuple[object, ...]] = []
+        call_like_identity_complete = bool(blocks_complete)
+        direct_call_target_keys: List[Tuple[object, ...]] = []
+        call_graph_edges_complete = bool(blocks_complete and function_identity_key is not None)
+        phase2_unsafe: Set[str] = set()
+        region_pcode_op_keys: List[Tuple[object, ...]] = []
+        region_live_in_keys: Set[Tuple[object, ...]] = set()
+        region_live_out_keys: Set[Tuple[object, ...]] = set()
+        region_identity_complete = bool(blocks_complete and function_identity_key is not None)
+        unsupported: Set[str] = set()
+
+        for ordinal, block in enumerate(blocks):
+            try:
+                block_index = int(block.getIndex())
+            except Exception:
+                block_index = ordinal
+                edges_complete = False
+            try:
+                start = block.getStart()
+                start_space = start.getAddressSpace().getName()
+                start_offset = int(start.getOffset())
+            except Exception:
+                start_space = None
+                start_offset = None
+                region_identity_complete = False
+            block_keys_by_index[block_index] = (
+                "pcode_block",
+                self._binary_id,
+                function_identity_key,
+                block_index,
+                start_space,
+                start_offset,
+            )
+            successors: List[int] = []
+            try:
+                out_size = int(block.getOutSize())
+            except Exception:
+                out_size = 0
+                edges_complete = False
+            for out_index in range(max(0, out_size)):
+                try:
+                    successors.append(int(block.getOut(out_index).getIndex()))
+                except Exception:
+                    edges_complete = False
+            adjacency[block_index] = tuple(successors)
+
+            ops, complete = self._collect_java_or_python_iterable(
+                getattr(block, "getIterator", lambda: None)()
+            )
+            pcode_complete = pcode_complete and complete
+            saw_return = False
+            if not complete:
+                terminal_coverage_complete = False
+            for local_ordinal, op in enumerate(ops):
+                pcode_op_count += 1
+                try:
+                    mnemonic = str(op.getMnemonic() or "").strip().upper()
+                except Exception:
+                    mnemonic = ""
+                region_ref = PcodeOpRef.from_pcode_op(
+                    op,
+                    binary_id=self._binary_id,
+                    program_uid=self._program_identity(),
+                    function_entry=self._current_function_entry_address(),
+                    local_op_ordinal=local_ordinal,
+                )
+                if region_ref is None:
+                    region_identity_complete = False
+                else:
+                    region_pcode_op_keys.append(region_ref.stable_key())
+                try:
+                    num_inputs = int(op.getNumInputs())
+                except Exception:
+                    num_inputs = 0
+                    region_identity_complete = False
+                for input_index in range(max(0, num_inputs)):
+                    try:
+                        input_varnode = op.getInput(input_index)
+                    except Exception:
+                        region_identity_complete = False
+                        continue
+                    input_key, input_status = self._region_live_in_key(
+                        input_varnode,
+                        mnemonic=mnemonic,
+                        input_index=input_index,
+                        parameters=parameters or (),
+                    )
+                    if input_status == "incomplete":
+                        region_identity_complete = False
+                    elif input_key is not None:
+                        region_live_in_keys.add(tuple(input_key))
+                if not mnemonic:
+                    unsupported.add("<missing_mnemonic>")
+                    continue
+                if mnemonic not in _FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS:
+                    unsupported.add(mnemonic)
+                elif mnemonic not in _PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS:
+                    phase2_unsafe.add(mnemonic)
+                if mnemonic in counts:
+                    counts[mnemonic] += 1
+                if saw_return:
+                    pcode_after_return_count += 1
+                    unsupported.add(f"<op_after_return:{mnemonic}>")
+                if mnemonic in {"CALL", "CALLIND", "CALLOTHER"}:
+                    ref = PcodeOpRef.from_pcode_op(
+                        op,
+                        binary_id=self._binary_id,
+                        program_uid=self._program_identity(),
+                        function_entry=self._current_function_entry_address(),
+                        local_op_ordinal=local_ordinal,
+                    )
+                    if ref is None:
+                        call_like_identity_complete = False
+                    else:
+                        call_like_pcode_op_keys.append(ref.stable_key())
+                if mnemonic == "CALL":
+                    target_key = self._direct_call_target_function_key(op)
+                    if target_key is None:
+                        call_graph_edges_complete = False
+                    else:
+                        direct_call_target_keys.append(target_key)
+                elif mnemonic in {"CALLIND", "CALLOTHER"}:
+                    call_graph_edges_complete = False
+                if "FLOAT" in mnemonic or mnemonic in {"INT2FLOAT", "FLOAT2INT"}:
+                    float_op_count += 1
+                if mnemonic == "RETURN":
+                    saw_return = True
+                    for input_index in range(max(0, num_inputs)):
+                        if self._region_input_is_nondata_operand(mnemonic, input_index):
+                            continue
+                        try:
+                            return_input = op.getInput(input_index)
+                            if bool(return_input.isConstant()):
+                                continue
+                            output_key = self._varnode_location_key(return_input)
+                        except Exception:
+                            output_key = None
+                        if output_key is not None:
+                            region_live_out_keys.add(
+                                ("return_value", input_index - 1, tuple(output_key))
+                            )
+            if not successors:
+                if saw_return:
+                    return_block_count += 1
+                    terminal_return_indices.add(block_index)
+                else:
+                    terminal_coverage_complete = False
+                    abnormal_terminal_block_count += 1
+
+        visiting: Set[int] = set()
+        visited: Set[int] = set()
+
+        def has_cycle(node: int) -> bool:
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            for successor in adjacency.get(node, ()):
+                if successor not in adjacency:
+                    nonlocal_edges_complete[0] = False
+                    continue
+                if has_cycle(successor):
+                    return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+
+        nonlocal_edges_complete = [edges_complete]
+        cfg_acyclic = bool(blocks_complete)
+        for node in adjacency:
+            if has_cycle(node):
+                cfg_acyclic = False
+                break
+        edges_complete = nonlocal_edges_complete[0]
+        predecessor_counts = {index: 0 for index in adjacency}
+        for successors in adjacency.values():
+            for successor in successors:
+                if successor in predecessor_counts:
+                    predecessor_counts[successor] += 1
+        entry_indices = tuple(
+            index for index, count in predecessor_counts.items() if count == 0
+        )
+        region_single_entry = len(entry_indices) == 1
+        region_entry_block_key = (
+            block_keys_by_index.get(entry_indices[0]) if region_single_entry else None
+        )
+        region_exit_block_keys = tuple(
+            block_keys_by_index[index]
+            for index in sorted(terminal_return_indices)
+            if index in block_keys_by_index
+        )
+        region_identity_complete = bool(
+            region_identity_complete
+            and pcode_complete
+            and edges_complete
+            and len(block_keys_by_index) == len(blocks)
+            and len(region_pcode_op_keys) == pcode_op_count
+        )
+
+        if function_identity_key is not None:
+            self._direct_call_graph[function_identity_key] = set(direct_call_target_keys)
+            if call_graph_edges_complete and pcode_complete:
+                self._direct_call_graph_complete_nodes.add(function_identity_key)
+            else:
+                self._direct_call_graph_complete_nodes.discard(function_identity_key)
+        recursive_scc_proven, recursive_scc_identity, recursive_scc_members = (
+            self._recursive_scc_certificate(function_identity_key)
+        )
+
+        return FunctionControlEffectProfile(
+            block_count=len(blocks),
+            pcode_op_count=pcode_op_count,
+            return_block_count=return_block_count,
+            pcode_enumeration_complete=pcode_complete,
+            cfg_edges_complete=edges_complete,
+            cfg_acyclic=cfg_acyclic,
+            terminal_return_coverage_complete=terminal_coverage_complete,
+            load_count=counts["LOAD"],
+            store_count=counts["STORE"],
+            call_count=counts["CALL"],
+            callind_count=counts["CALLIND"],
+            callother_count=counts["CALLOTHER"],
+            branchind_count=counts["BRANCHIND"],
+            float_op_count=float_op_count,
+            pcode_after_return_count=pcode_after_return_count,
+            abnormal_terminal_block_count=abnormal_terminal_block_count,
+            call_like_pcode_op_keys=tuple(call_like_pcode_op_keys),
+            call_like_identity_complete=(
+                call_like_identity_complete and pcode_complete
+            ),
+            function_identity_key=function_identity_key,
+            direct_call_target_keys=tuple(direct_call_target_keys),
+            call_graph_edges_complete=(call_graph_edges_complete and pcode_complete),
+            recursive_scc_proven=recursive_scc_proven,
+            recursive_scc_identity=recursive_scc_identity,
+            recursive_scc_member_keys=recursive_scc_members,
+            phase2_unsafe_mnemonics=tuple(sorted(phase2_unsafe)),
+            region_entry_block_key=region_entry_block_key,
+            region_exit_block_keys=region_exit_block_keys,
+            region_block_keys=tuple(
+                block_keys_by_index[index] for index in sorted(block_keys_by_index)
+            ),
+            region_pcode_op_keys=tuple(region_pcode_op_keys),
+            region_live_in_keys=tuple(sorted(region_live_in_keys, key=repr)),
+            region_live_out_keys=tuple(sorted(region_live_out_keys, key=repr)),
+            region_identity_complete=region_identity_complete,
+            region_single_entry=region_single_entry,
+            region_all_exits_enumerated=bool(
+                edges_complete and terminal_coverage_complete
+            ),
+            region_cross_edges_enumerated=bool(edges_complete),
+            unsupported_mnemonics=tuple(sorted(unsupported)),
+        )
+
+    def _direct_call_target_function_key(self, op) -> Optional[Tuple[object, ...]]:
+        try:
+            if op.getMnemonic() != "CALL" or op.getNumInputs() < 1:
+                return None
+            target_varnode = op.getInput(0)
+            target_address = target_varnode.getAddress()
+        except Exception:
+            return None
+        try:
+            manager = self.program.getFunctionManager()
+            target_function = manager.getFunctionAt(target_address)
+            if target_function is None:
+                target_function = manager.getFunctionContaining(target_address)
+            if target_function is None:
+                return None
+            return CallTargetRef.from_function(target_function).stable_key()
+        except Exception:
+            return None
+
+    def _recursive_scc_certificate(
+        self,
+        function_key: Optional[Tuple[object, ...]],
+    ) -> Tuple[bool, Optional[str], Tuple[Tuple[object, ...], ...]]:
+        """Return a certificate only for a fully enumerated recursive SCC."""
+
+        if function_key is None or function_key not in self._direct_call_graph:
+            return False, None, ()
+        graph = self._direct_call_graph
+        index = 0
+        stack: List[Tuple[object, ...]] = []
+        on_stack: Set[Tuple[object, ...]] = set()
+        indices: Dict[Tuple[object, ...], int] = {}
+        lowlinks: Dict[Tuple[object, ...], int] = {}
+        components: List[Tuple[Tuple[object, ...], ...]] = []
+
+        def visit(node: Tuple[object, ...]) -> None:
+            nonlocal index
+            indices[node] = index
+            lowlinks[node] = index
+            index += 1
+            stack.append(node)
+            on_stack.add(node)
+            for target in graph.get(node, set()):
+                if target not in graph:
+                    continue
+                if target not in indices:
+                    visit(target)
+                    lowlinks[node] = min(lowlinks[node], lowlinks[target])
+                elif target in on_stack:
+                    lowlinks[node] = min(lowlinks[node], indices[target])
+            if lowlinks[node] != indices[node]:
+                return
+            component: List[Tuple[object, ...]] = []
+            while stack:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node:
+                    break
+            components.append(tuple(component))
+
+        for node in tuple(graph):
+            if node not in indices:
+                visit(node)
+        component = next(
+            (candidate for candidate in components if function_key in candidate),
+            (),
+        )
+        recursive = len(component) > 1 or function_key in graph.get(function_key, set())
+        complete = bool(component) and all(
+            member in self._direct_call_graph_complete_nodes for member in component
+        )
+        if not recursive or not complete:
+            return False, None, ()
+        members = tuple(sorted(component, key=repr))
+        identity = hashlib.sha256(repr(("call_graph_scc", members)).encode("utf-8")).hexdigest()
+        return True, identity, members
 
     @staticmethod
     def _phase1_pure_return_forbids_mnemonic(mnemonic: Optional[str]) -> bool:
@@ -8740,6 +9276,9 @@ class ReturnAnalyzer:
             return self._get_freshest_callee_parameters(target)
 
         current_target = CallTargetRef.from_function(function)
+        # Register outgoing direct-call edges before recursive summary descent;
+        # recompute the certificate after descent when more graph nodes exist.
+        self._build_function_control_effect_profile(high_function, function, parameters)
         image_base = None
         try:
             image_base = self.program.getImageBase().getOffset()
@@ -8759,6 +9298,11 @@ class ReturnAnalyzer:
             read_memory_value=self._read_memory_value,
             image_base=image_base,
             debug=self.debug,
+        )
+        summary.function_control_effect_profile = self._build_function_control_effect_profile(
+            high_function,
+            function,
+            parameters,
         )
         self._effect_summary_cache[summary_cache_key] = summary
         return summary

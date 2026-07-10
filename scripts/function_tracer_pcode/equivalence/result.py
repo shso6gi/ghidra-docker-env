@@ -103,6 +103,7 @@ class EquivalenceResult:
     # ★ 新規追加: 正規化ルール適用履歴
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
     completed_recovery_proof_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    call_effect_shadow_manifest: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -194,6 +195,8 @@ class EquivalenceResult:
         }
         if self.completed_recovery_proof_evidence:
             result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
+        if self.call_effect_shadow_manifest is not None:
+            result["call_effect_shadow_manifest"] = dict(self.call_effect_shadow_manifest)
         
         # ★ 新規追加: mips64_abi_constraints
         if self.mips64_abi_constraints:

@@ -203,6 +203,223 @@ class CallTargetResolutionEvidence:
         }
 
 
+@dataclass(frozen=True)
+class CallSiteEffectSummaryEvidence:
+    """Per-callsite evidence describing whether callee effects were summarized.
+
+    This is memory/effect evidence only.  It does not claim return, termination,
+    ABI, or cross-binary equivalence and therefore cannot discharge a blocker by
+    itself.
+    """
+
+    pcode_op_ref: Optional[PcodeOpRef]
+    target_ref: Optional[CallTargetRef]
+    argument_keys: Tuple[Tuple[object, ...], ...]
+    path_condition_keys: Tuple[Tuple[object, ...], ...]
+    summary_status: str
+    memory_effect_count: int = 0
+    has_unsupported_nested_call: bool = False
+    incomplete_reasons: Tuple[str, ...] = ()
+    callee_control_profile_key: Optional[Tuple[object, ...]] = None
+    callee_recursive_scc_proven: bool = False
+    callee_recursive_scc_identity: Optional[str] = None
+    callee_recursive_scc_member_keys: Tuple[Tuple[object, ...], ...] = ()
+    return_summary_status: str = "unavailable"
+    return_value_keys: Tuple[Tuple[object, ...], ...] = ()
+    return_guard_keys: Tuple[Tuple[object, ...], ...] = ()
+    source: str = "direct_call_effect_summary"
+
+    def stable_key(self) -> Tuple[object, ...]:
+        return (
+            "call_site_effect_summary_evidence",
+            self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
+            self.target_ref.stable_key() if self.target_ref is not None else None,
+            self.argument_keys,
+            self.path_condition_keys,
+            self.summary_status,
+            int(self.memory_effect_count),
+            bool(self.has_unsupported_nested_call),
+            self.incomplete_reasons,
+            self.callee_control_profile_key,
+            self.callee_recursive_scc_proven,
+            self.callee_recursive_scc_identity,
+            self.callee_recursive_scc_member_keys,
+            self.return_summary_status,
+            self.return_value_keys,
+            self.return_guard_keys,
+            self.source,
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "kind": "call_site_effect_summary_evidence",
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
+            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
+            "argument_keys": self.argument_keys,
+            "path_condition_keys": self.path_condition_keys,
+            "summary_status": self.summary_status,
+            "memory_effect_count": int(self.memory_effect_count),
+            "has_unsupported_nested_call": bool(self.has_unsupported_nested_call),
+            "incomplete_reasons": self.incomplete_reasons,
+            "callee_control_profile_key": self.callee_control_profile_key,
+            "callee_recursive_scc_proven": bool(self.callee_recursive_scc_proven),
+            "callee_recursive_scc_identity": self.callee_recursive_scc_identity,
+            "callee_recursive_scc_member_keys": self.callee_recursive_scc_member_keys,
+            "return_summary_status": self.return_summary_status,
+            "return_value_keys": self.return_value_keys,
+            "return_guard_keys": self.return_guard_keys,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class FunctionControlEffectProfile:
+    """Object-derived function-body census for the narrow direct-call lane."""
+
+    block_count: int
+    pcode_op_count: int
+    return_block_count: int
+    pcode_enumeration_complete: bool
+    cfg_edges_complete: bool
+    cfg_acyclic: bool
+    terminal_return_coverage_complete: bool
+    load_count: int = 0
+    store_count: int = 0
+    call_count: int = 0
+    callind_count: int = 0
+    callother_count: int = 0
+    branchind_count: int = 0
+    float_op_count: int = 0
+    pcode_after_return_count: int = 0
+    abnormal_terminal_block_count: int = 0
+    call_like_pcode_op_keys: Tuple[Tuple[object, ...], ...] = ()
+    call_like_identity_complete: bool = False
+    function_identity_key: Optional[Tuple[object, ...]] = None
+    direct_call_target_keys: Tuple[Tuple[object, ...], ...] = ()
+    call_graph_edges_complete: bool = False
+    recursive_scc_proven: bool = False
+    recursive_scc_identity: Optional[str] = None
+    recursive_scc_member_keys: Tuple[Tuple[object, ...], ...] = ()
+    phase2_unsafe_mnemonics: Tuple[str, ...] = ()
+    region_entry_block_key: Optional[Tuple[object, ...]] = None
+    region_exit_block_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_block_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_pcode_op_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_live_in_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_live_out_keys: Tuple[Tuple[object, ...], ...] = ()
+    region_identity_complete: bool = False
+    region_single_entry: bool = False
+    region_all_exits_enumerated: bool = False
+    region_cross_edges_enumerated: bool = False
+    unsupported_mnemonics: Tuple[str, ...] = ()
+
+    @property
+    def phase2_memory_free_scalar_candidate(self) -> bool:
+        return (
+            self.pcode_enumeration_complete
+            and self.cfg_edges_complete
+            and self.cfg_acyclic
+            and self.terminal_return_coverage_complete
+            and self.load_count == 0
+            and self.store_count == 0
+            and self.call_count == 0
+            and self.callind_count == 0
+            and self.callother_count == 0
+            and self.branchind_count == 0
+            and self.float_op_count == 0
+            and self.pcode_after_return_count == 0
+            and self.abnormal_terminal_block_count == 0
+            and self.call_like_identity_complete
+            and not self.phase2_unsafe_mnemonics
+            and not self.unsupported_mnemonics
+        )
+
+    def stable_key(self) -> Tuple[object, ...]:
+        return (
+            "function_control_effect_profile",
+            int(self.block_count),
+            int(self.pcode_op_count),
+            int(self.return_block_count),
+            bool(self.pcode_enumeration_complete),
+            bool(self.cfg_edges_complete),
+            bool(self.cfg_acyclic),
+            bool(self.terminal_return_coverage_complete),
+            int(self.load_count),
+            int(self.store_count),
+            int(self.call_count),
+            int(self.callind_count),
+            int(self.callother_count),
+            int(self.branchind_count),
+            int(self.float_op_count),
+            int(self.pcode_after_return_count),
+            int(self.abnormal_terminal_block_count),
+            self.call_like_pcode_op_keys,
+            bool(self.call_like_identity_complete),
+            self.function_identity_key,
+            self.direct_call_target_keys,
+            bool(self.call_graph_edges_complete),
+            bool(self.recursive_scc_proven),
+            self.recursive_scc_identity,
+            self.recursive_scc_member_keys,
+            self.phase2_unsafe_mnemonics,
+            self.region_entry_block_key,
+            self.region_exit_block_keys,
+            self.region_block_keys,
+            self.region_pcode_op_keys,
+            self.region_live_in_keys,
+            self.region_live_out_keys,
+            bool(self.region_identity_complete),
+            bool(self.region_single_entry),
+            bool(self.region_all_exits_enumerated),
+            bool(self.region_cross_edges_enumerated),
+            self.unsupported_mnemonics,
+            bool(self.phase2_memory_free_scalar_candidate),
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "block_count": int(self.block_count),
+            "pcode_op_count": int(self.pcode_op_count),
+            "return_block_count": int(self.return_block_count),
+            "pcode_enumeration_complete": bool(self.pcode_enumeration_complete),
+            "cfg_edges_complete": bool(self.cfg_edges_complete),
+            "cfg_acyclic": bool(self.cfg_acyclic),
+            "terminal_return_coverage_complete": bool(self.terminal_return_coverage_complete),
+            "load_count": int(self.load_count),
+            "store_count": int(self.store_count),
+            "call_count": int(self.call_count),
+            "callind_count": int(self.callind_count),
+            "callother_count": int(self.callother_count),
+            "branchind_count": int(self.branchind_count),
+            "float_op_count": int(self.float_op_count),
+            "pcode_after_return_count": int(self.pcode_after_return_count),
+            "abnormal_terminal_block_count": int(self.abnormal_terminal_block_count),
+            "call_like_pcode_op_keys": self.call_like_pcode_op_keys,
+            "call_like_identity_complete": bool(self.call_like_identity_complete),
+            "function_identity_key": self.function_identity_key,
+            "direct_call_target_keys": self.direct_call_target_keys,
+            "call_graph_edges_complete": bool(self.call_graph_edges_complete),
+            "recursive_scc_proven": bool(self.recursive_scc_proven),
+            "recursive_scc_identity": self.recursive_scc_identity,
+            "recursive_scc_member_keys": self.recursive_scc_member_keys,
+            "phase2_unsafe_mnemonics": list(self.phase2_unsafe_mnemonics),
+            "region_entry_block_key": self.region_entry_block_key,
+            "region_exit_block_keys": self.region_exit_block_keys,
+            "region_block_keys": self.region_block_keys,
+            "region_pcode_op_keys": self.region_pcode_op_keys,
+            "region_live_in_keys": self.region_live_in_keys,
+            "region_live_out_keys": self.region_live_out_keys,
+            "region_identity_complete": bool(self.region_identity_complete),
+            "region_single_entry": bool(self.region_single_entry),
+            "region_all_exits_enumerated": bool(self.region_all_exits_enumerated),
+            "region_cross_edges_enumerated": bool(self.region_cross_edges_enumerated),
+            "unsupported_mnemonics": list(self.unsupported_mnemonics),
+            "phase2_memory_free_scalar_candidate": bool(
+                self.phase2_memory_free_scalar_candidate
+            ),
+        }
+
+
 @dataclass
 class EffectSummary:
     parameter_names: List[str]
@@ -214,11 +431,14 @@ class EffectSummary:
     call_argument_evidence: Dict[Tuple[object, ...], "CallArgumentEvidence"] = field(default_factory=dict)
     unsupported_call_sites: Tuple[UnsupportedCallEffectRef, ...] = ()
     call_target_resolution_evidence: Tuple[CallTargetResolutionEvidence, ...] = ()
+    call_site_effect_summary_evidence: Tuple[CallSiteEffectSummaryEvidence, ...] = ()
+    function_control_effect_profile: Optional[FunctionControlEffectProfile] = None
 
     def __post_init__(self) -> None:
         self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))
         self.unsupported_call_sites = tuple(self.unsupported_call_sites or ())
         self.call_target_resolution_evidence = tuple(self.call_target_resolution_evidence or ())
+        self.call_site_effect_summary_evidence = tuple(self.call_site_effect_summary_evidence or ())
         if self.parameter_refs:
             self.parameter_refs = [
                 coerced
@@ -898,6 +1118,92 @@ def summarize_store_effects(
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
     call_target_resolution_evidence: List[CallTargetResolutionEvidence] = []
+    call_site_effect_summary_evidence: List[CallSiteEffectSummaryEvidence] = []
+
+    def _pcode_ref_for_op(op) -> Optional[PcodeOpRef]:
+        make_pcode_op_ref = getattr(tracer, "_make_pcode_op_ref", None)
+        if callable(make_pcode_op_ref):
+            try:
+                return make_pcode_op_ref(op)
+            except Exception:
+                return None
+        return PcodeOpRef.from_pcode_op(op)
+
+    def _record_call_effect_summary_evidence(
+        op,
+        *,
+        target_ref: Optional[CallTargetRef],
+        arguments: Sequence[Expression],
+        path_conditions: Sequence[Condition],
+        summary_status: str,
+        callee_summary: Optional["EffectSummary"] = None,
+        incomplete_reasons: Sequence[str] = (),
+        return_expansions: Optional[Sequence[object]] = None,
+    ) -> None:
+        callee_profile = (
+            callee_summary.function_control_effect_profile
+            if callee_summary is not None
+            else None
+        )
+        expansion_values: List[Tuple[object, ...]] = []
+        expansion_guards: List[Tuple[object, ...]] = []
+        for expansion in return_expansions or ():
+            expansion_value = getattr(expansion, "value", None)
+            value_key = (
+                expression_provenance_key(expansion_value)
+                if isinstance(expansion_value, Expression)
+                else None
+            )
+            if isinstance(value_key, tuple):
+                expansion_values.append(value_key)
+            expansion_guards.extend(
+                _condition_evidence_key(condition)
+                for condition in getattr(expansion, "conditions", ()) or ()
+            )
+        call_site_effect_summary_evidence.append(
+            CallSiteEffectSummaryEvidence(
+                pcode_op_ref=_pcode_ref_for_op(op),
+                target_ref=target_ref,
+                argument_keys=tuple(
+                    expression_provenance_key(argument)
+                    for argument in arguments or ()
+                ),
+                path_condition_keys=tuple(
+                    _condition_evidence_key(condition)
+                    for condition in path_conditions or ()
+                ),
+                summary_status=str(summary_status),
+                memory_effect_count=len(getattr(callee_summary, "effects", ()) or ()),
+                has_unsupported_nested_call=bool(
+                    getattr(callee_summary, "has_unsupported_call", False)
+                ),
+                incomplete_reasons=tuple(str(reason) for reason in incomplete_reasons or ()),
+                callee_control_profile_key=(
+                    callee_profile.stable_key()
+                    if callee_profile is not None
+                    else None
+                ),
+                callee_recursive_scc_proven=bool(
+                    callee_profile is not None
+                    and callee_profile.recursive_scc_proven
+                ),
+                callee_recursive_scc_identity=(
+                    callee_profile.recursive_scc_identity
+                    if callee_profile is not None
+                    else None
+                ),
+                callee_recursive_scc_member_keys=(
+                    callee_profile.recursive_scc_member_keys
+                    if callee_profile is not None
+                    else ()
+                ),
+                return_summary_status=(
+                    "candidate" if expansion_values else "unavailable"
+                ),
+                return_value_keys=tuple(expansion_values),
+                return_guard_keys=tuple(expansion_guards),
+            )
+        )
 
     def _unsupported_call_effect_ref(
         op,
@@ -908,13 +1214,7 @@ def summarize_store_effects(
         path_conditions: Sequence[Condition] = (),
         reason: str,
     ) -> UnsupportedCallEffectRef:
-        pcode_op_ref = None
-        make_pcode_op_ref = getattr(tracer, "_make_pcode_op_ref", None)
-        if callable(make_pcode_op_ref):
-            try:
-                pcode_op_ref = make_pcode_op_ref(op)
-            except Exception:
-                pcode_op_ref = None
+        pcode_op_ref = _pcode_ref_for_op(op)
         return UnsupportedCallEffectRef.from_call_op(
             op,
             target_ref=target_ref,
@@ -1153,6 +1453,14 @@ def summarize_store_effects(
                         )
                         callee_summary = direct_call_summary(target_ref, variant_args)
                         if callee_summary is None:
+                            _record_call_effect_summary_evidence(
+                                op,
+                                target_ref=target_ref,
+                                arguments=variant_args,
+                                path_conditions=active_conditions,
+                                summary_status="missing",
+                                incomplete_reasons=("callee_effect_summary_missing",),
+                            )
                             has_unsupported_call = True
                             unsupported_call_sites.append(
                                 _unsupported_call_effect_ref(
@@ -1193,6 +1501,28 @@ def summarize_store_effects(
                                 )
                             continue
                         callee_incomplete_reasons = _effect_summary_incomplete_reasons(callee_summary)
+                        return_expansions = None
+                        if direct_call_expander is not None:
+                            try:
+                                return_expansions = direct_call_expander(
+                                    target_ref,
+                                    variant_args,
+                                )
+                            except Exception:
+                                return_expansions = None
+                        summary_complete = not callee_incomplete_reasons and not bool(
+                            callee_summary.has_unsupported_call
+                        )
+                        _record_call_effect_summary_evidence(
+                            op,
+                            target_ref=target_ref,
+                            arguments=variant_args,
+                            path_conditions=active_conditions,
+                            summary_status="complete" if summary_complete else "incomplete",
+                            callee_summary=callee_summary,
+                            incomplete_reasons=callee_incomplete_reasons,
+                            return_expansions=return_expansions,
+                        )
                         if callee_incomplete_reasons:
                             has_unsupported_call = True
                             unsupported_call_sites.append(
@@ -1358,6 +1688,7 @@ def summarize_store_effects(
         call_argument_evidence=dict(call_argument_evidence),
         unsupported_call_sites=tuple(unsupported_call_sites),
         call_target_resolution_evidence=tuple(call_target_resolution_evidence),
+        call_site_effect_summary_evidence=tuple(call_site_effect_summary_evidence),
     )
 
 

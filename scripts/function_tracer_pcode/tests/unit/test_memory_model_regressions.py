@@ -7987,6 +7987,11 @@ def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_su
     assert len(summary.effects) == 1
     assert summary.effects[0].location == _loc("slot", 0, 4)
     assert summary.effects[0].value.to_string() == "(lhs + rhs)"
+    assert len(summary.call_site_effect_summary_evidence) == 1
+    call_effect_evidence = summary.call_site_effect_summary_evidence[0]
+    assert call_effect_evidence.summary_status == "complete"
+    assert call_effect_evidence.memory_effect_count == 0
+    assert call_effect_evidence.has_unsupported_nested_call is False
 
 
 def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is_unresolved_phi():

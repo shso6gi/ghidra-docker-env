@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import time
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
-from ..smt import ParallelSolverRunner, ParallelResult, SolverResult, SolverStatus
+from ..smt import ParallelSolverRunner, ParallelResult, SolverResult
 from .formula import FormulaBuilder
 from .formula.returns import ReturnWidthMismatchError
 from .counterexample import CounterexampleFormatter
@@ -26,6 +26,11 @@ from .attempts import get_transition_reason, record_attempt, record_attempt_from
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
 from .workflow import run_check_from_binaries
 from .unknown_reason import make_unknown_reason
+from .call_effect_obligations import (
+    EquivalenceObservationContract,
+    build_call_effect_shadow_manifest,
+    build_structural_coverage_certificate,
+)
 
 
 # ============================================================================
@@ -78,6 +83,7 @@ class EquivalenceChecker:
         assume_fp_non_nan: bool = False,
         observes_errno: bool = False,
         observes_fenv: bool = False,
+        observation_contract: Optional[EquivalenceObservationContract] = None,
     ):
         """
         Args:
@@ -101,6 +107,10 @@ class EquivalenceChecker:
         self.assume_fp_non_nan = assume_fp_non_nan
         self.observes_errno = observes_errno
         self.observes_fenv = observes_fenv
+        self.observation_contract = observation_contract or EquivalenceObservationContract(
+            observe_errno=observes_errno,
+            observe_fenv=observes_fenv,
+        )
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
             enable_fact_normalization,
@@ -908,6 +918,22 @@ class EquivalenceChecker:
             # 戦略を使用してチェック
             self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
             strategy_result = strategy.check(analysis1, analysis2, save_formula)
+            call_effect_shadow_manifest = self._call_effect_shadow_manifest(
+                analysis1,
+                analysis2,
+                binary1_name,
+                binary2_name,
+            )
+            self._apply_phase2_relational_call_discharge(
+                strategy_result,
+                analysis1,
+                analysis2,
+                call_effect_shadow_manifest,
+            )
+            strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(
+                list(getattr(strategy_result, "unknown_reasons", ()) or ()),
+                call_effect_shadow_manifest,
+            )
             
             if self.debug and strategy_result.smt_formula:
                 print("\n" + "=" * 60)
@@ -967,6 +993,7 @@ class EquivalenceChecker:
                     binary1_name,
                     binary2_name,
                 ),
+                call_effect_shadow_manifest=call_effect_shadow_manifest,
             )
         
         except Exception as e:
@@ -981,6 +1008,157 @@ class EquivalenceChecker:
                 type_fix_result, retry_count,
                 original_signature1, original_signature2
             )
+
+    def _call_effect_shadow_manifest(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        binary1_name: str,
+        binary2_name: str,
+    ) -> Dict[str, Any]:
+        """Build decision-neutral evidence; shadow failures must not change a result."""
+
+        try:
+            manifest = build_call_effect_shadow_manifest(
+                analysis1,
+                analysis2,
+                binary1_name=binary1_name,
+                binary2_name=binary2_name,
+                observation_contract=self.observation_contract,
+            )
+            return self._attach_structural_coverage_certificate(manifest)
+        except Exception as exc:
+            self._debug_print(f"Call/effect shadow manifest unavailable: {exc}")
+            return {
+                "schema_version": 1,
+                "mode": "shadow_no_decision_effect",
+                "observation_contract": self.observation_contract.to_dict(),
+                "shadow_status": "inconclusive",
+                "failure_cause": "shadow_manifest_construction_failed",
+                "error_type": type(exc).__name__,
+            }
+
+    @staticmethod
+    def _attach_structural_coverage_certificate(
+        manifest: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Attach an exact deterministic certificate, not a semantic SMT proof."""
+
+        certificate = build_structural_coverage_certificate(manifest)
+        manifest["structural_coverage_certificate"] = certificate.to_dict()
+        summary = manifest.get("summary")
+        if isinstance(summary, dict):
+            summary["structural_certificate_status"] = certificate.status
+            summary["solver_proof_record_count"] = 0
+            summary["solver_proven_stage_count"] = 0
+            summary["decision_eligible_obligation_count"] = 0
+        return manifest
+
+    def _apply_phase2_relational_call_discharge(
+        self,
+        strategy_result,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        manifest: Dict[str, Any],
+    ) -> None:
+        """Decision-neutral until stage-specific semantic producers exist."""
+
+        manifest["phase2_discharge_gate"] = {
+            "status": "disabled",
+            "decision_effect": "diagnostic_only",
+            "failure_cause": "stage_specific_semantic_producers_not_implemented",
+        }
+
+    @staticmethod
+    def _specialize_call_effect_unknown_reasons(
+        reasons: List[Any],
+        manifest: Mapping[str, Any],
+    ) -> List[Any]:
+        """Move broad call unsafety to the first concrete relational proof stage."""
+
+        backlog = manifest.get("proof_stage_backlog")
+        mappings = manifest.get("legacy_blocker_mapping")
+        if not isinstance(backlog, list) or not isinstance(mappings, list):
+            return reasons
+        stage_by_obligation = {
+            str(item.get("obligation_id")): str(item.get("primary_proof_stage"))
+            for item in backlog
+            if isinstance(item, Mapping)
+            and item.get("obligation_id")
+            and item.get("primary_proof_stage")
+        }
+        blocker_stages: Dict[str, Tuple[str, ...]] = {}
+        for item in mappings:
+            if not isinstance(item, Mapping):
+                continue
+            blocker = str(item.get("legacy_blocker") or "")
+            stages = tuple(
+                sorted(
+                    {
+                        stage_by_obligation[str(obligation_id)]
+                        for obligation_id in item.get("obligation_ids", ()) or ()
+                        if str(obligation_id) in stage_by_obligation
+                    }
+                )
+            )
+            if blocker and stages:
+                blocker_stages[blocker] = stages
+
+        specialized: List[Any] = []
+        for reason in reasons:
+            if str(getattr(reason, "reason_id", "")) != "equivalence_blocking_unsafety":
+                specialized.append(reason)
+                continue
+            stages = {
+                stage
+                for ref in getattr(reason, "evidence_refs", ()) or ()
+                for stage in blocker_stages.get(str(ref), ())
+            }
+            if not stages:
+                specialized.append(reason)
+                continue
+            proof_stage = (
+                next(iter(stages))
+                if len(stages) == 1
+                else "multiple_relational_call_effect_stages_missing"
+            )
+            specialized.append(
+                make_unknown_reason(
+                    reason.reason_id,
+                    count_kind=reason.count_kind,
+                    reason_class=reason.reason_class,
+                    decision_effect=reason.decision_effect,
+                    reason_scope=reason.reason_scope,
+                    aggregation_unit=reason.aggregation_unit,
+                    stage=reason.stage,
+                    pair_or_case=reason.pair_or_case,
+                    evidence_refs=reason.evidence_refs,
+                    recovery_proof_kind=reason.recovery_proof_kind,
+                    recovery_proof_obligations=(
+                        {
+                            "proof_kind": reason.recovery_proof_kind,
+                            "proof_stage": proof_stage,
+                            "required_evidence": (
+                                "relational_call_effect_obligation",
+                                "solver_proof_record",
+                            ),
+                            "description": "Complete the obligation-specific relational call/effect proof stage.",
+                        },
+                    ),
+                    proof_stage=proof_stage,
+                    evidence_kind=reason.evidence_kind,
+                    object_target_key=reason.object_target_key,
+                    object_evidence=reason.object_evidence,
+                    proof_obligation_id=None,
+                    recovery_action="relational_call_effect_stage_proof_required",
+                    action_status=reason.action_status,
+                    target_regression=reason.target_regression,
+                    detail=(
+                        f"Relational call/effect proof is incomplete at {proof_stage}."
+                    ),
+                )
+            )
+        return specialized
 
     def _completed_recovery_proof_payload(
         self,
