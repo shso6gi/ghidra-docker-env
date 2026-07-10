@@ -29,17 +29,24 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     evaluate_obligation_proof_readiness,
 )
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.equivalence.call_effect_producer import (
+    _RenderedStage,
+    _execute_rendered_stage,
+    produce_pure_direct_call_proofs,
+)
 from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     _cross_binary_expression_shape,
 )
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
+    Condition,
     Expression,
     FunctionReturnAnalysis,
     PcodeOpRef,
     ReturnInfo,
     expression_provenance_key,
 )
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 
 def _pcode_ref(binary_id: str, function_entry: int, address: int, mnemonic: str = "CALL") -> PcodeOpRef:
@@ -130,8 +137,11 @@ def _analysis_with_call(
                     memory_effect_count=0,
                     has_unsupported_nested_call=False,
                     callee_control_profile_key=control_profile.stable_key(),
-                    return_summary_status="candidate",
+                    return_summary_status="complete",
+                    return_semantic_bit_width=32,
+                    return_signed=True,
                     return_value_keys=(expression_provenance_key(argument),),
+                    return_partitions=(((), argument),),
                 ),
             ),
             function_control_effect_profile=caller_profile,
@@ -206,8 +216,19 @@ def test_shadow_manifest_pairs_only_mutually_unique_object_shapes():
     assert eligibility["status"] == "candidate"
     assert eligibility["candidate_only"] is True
     assert "decision_eligible" not in eligibility
-    assert "return_relation" in eligibility["required_solver_stages"]
-    assert eligibility["stage_proof_status"]["target_relation"] == "pending"
+    assert eligibility["required_solver_stages"] == [
+        "guard_relation",
+        "argument_relation",
+        "return_relation",
+    ]
+    assert eligibility["structural_precondition_stages"] == {
+        "target_callee_relation": "complete",
+        "abi_relation": "complete",
+        "callee_totality_precondition": "complete",
+        "termination_relation": "complete",
+        "trap_relation": "complete",
+        "empty_state_transformer_and_frame": "complete",
+    }
     assert manifest["solver_proof_records"] == []
 
 
@@ -782,6 +803,25 @@ def test_untrusted_assert_false_artifacts_cannot_complete_any_proof_stage():
     assert mismatched.decision_eligible is False
     assert "eligibility_obligation_id_mismatch" in mismatched.blockers
 
+
+def test_arbitrary_rendered_assert_false_cannot_enter_trusted_producer():
+    rendered = _RenderedStage(
+        stage="return_relation",
+        query_text="(assert false)\n(check-sat)",
+        normalized_assertion_text="false",
+        stage_input_payload={"stage": "return_relation"},
+        precondition_payload={},
+    )
+
+    with pytest.raises(ValueError, match="untrusted_typed_stage_renderer"):
+        _execute_rendered_stage(
+            rendered,
+            None,
+            None,
+            1,
+            (),
+        )
+
 def test_deferred_call_result_shape_drops_artifact_local_caller_identity():
     left = (
         "runtime_ref",
@@ -908,6 +948,14 @@ def test_function_control_profile_rejects_unimplemented_and_ops_after_return():
     assert "NEW" in allocation.phase2_unsafe_mnemonics
     assert allocation.phase2_memory_free_scalar_candidate is False
 
+    for mnemonic in ("INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM"):
+        trapping = analyzer._build_function_control_effect_profile(
+            HighFunction([mnemonic, "RETURN"])
+        )
+        assert trapping.unsupported_mnemonics == ()
+        assert mnemonic in trapping.phase2_unsafe_mnemonics
+        assert trapping.phase2_memory_free_scalar_candidate is False
+
 
 def test_argument_extraction_failure_is_not_labeled_as_guard_coverage():
     left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
@@ -977,6 +1025,7 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
     )
     left = Expression.parameter("a", 0, data_type="int", size=4)
     right = Expression.parameter("b", 1, data_type="int", size=4)
+    callee_return = Expression.binary_op("INT_ADD", left, right)
     call_evidence = CallArgumentEvidence(
         pcode_op_ref=pcode_ref,
         target_ref=target,
@@ -1049,12 +1098,13 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                     memory_effect_count=0,
                     has_unsupported_nested_call=False,
                     callee_control_profile_key=callee_profile.stable_key(),
-                    return_summary_status="candidate",
+                    return_summary_status="complete",
+                    return_semantic_bit_width=32,
+                    return_signed=True,
                     return_value_keys=(
-                        expression_provenance_key(
-                            Expression.binary_op("INT_ADD", left, right)
-                        ),
+                        expression_provenance_key(callee_return),
                     ),
+                    return_partitions=(((), callee_return),),
                 ),
             ),
             function_control_effect_profile=caller_profile,
@@ -1067,10 +1117,15 @@ def test_return_only_unsat_cannot_discharge_call_effect_obligations():
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
 
+    for analysis in (left, right):
+        evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        object.__setattr__(evidence, "return_summary_status", "candidate")
+        object.__setattr__(evidence, "return_partitions", ())
+
     result = EquivalenceChecker(
         timeout=5,
         enable_rewrite=False,
-        enable_completed_recovery_proofs=False,
+        enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
     assert result.is_equivalent is None
@@ -1088,7 +1143,281 @@ def test_return_only_unsat_cannot_discharge_call_effect_obligations():
     assert result.unknown_reasons
     assert {
         reason.proof_stage for reason in result.unknown_reasons
-    } == {"relational_call_effect_stage_proofs_missing"}
+    } == {"callee_return_relation_missing"}
+
+
+def test_typed_pure_direct_call_proofs_can_promote_equivalence():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["mode"] == "typed_relational_call_effect_proof"
+    assert [
+        record["proof_stage"] for record in manifest["solver_proof_records"]
+    ] == ["guard_relation", "argument_relation", "return_relation"]
+    assert all(
+        record["status"] == "proven" and record["solver_result"] == "unsat"
+        for record in manifest["solver_proof_records"]
+    )
+    assert manifest["proof_readiness"][0]["decision_eligible"] is True
+    assert manifest["phase2_discharge_gate"]["status"] == "proven"
+    assert manifest["summary"]["semantic_proof_status"] == "proven"
+
+
+def test_non_call_effect_summary_incompleteness_cannot_be_cleared_by_call_proof():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    left.effect_summary.incomplete_reasons = (
+        "effect_summary_path_coverage_incomplete",
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    assert any(
+        "function1:effect_summary_path_coverage_incomplete"
+        in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+    manifest = result.call_effect_shadow_manifest
+    assert manifest["proof_readiness"][0]["decision_eligible"] is True
+    assert manifest["phase2_discharge_gate"]["status"] == "blocked"
+    assert manifest["phase2_discharge_gate"]["failure_cause"] == (
+        "non_call_effect_unsafety_present"
+    )
+    assert manifest["phase2_discharge_gate"]["non_call_effect_unsafety"] == [
+        "effect_summary_path_coverage_incomplete"
+    ]
+
+
+def test_completed_recovery_proof_flag_disables_typed_call_promotion():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=False,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    manifest = result.call_effect_shadow_manifest
+    assert len(manifest["solver_proof_records"]) == 3
+    assert manifest["proof_readiness"][0]["decision_eligible"] is True
+    assert manifest["phase2_discharge_gate"] == {
+        "status": "disabled",
+        "decision_effect": "diagnostic_only",
+        "failure_cause": "completed_recovery_proofs_disabled",
+    }
+
+
+def _phase2_manifest_with_certificate(left, right):
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+    EquivalenceChecker._attach_structural_coverage_certificate(manifest)
+    return manifest
+
+
+def test_typed_argument_stage_refutes_one_off_argument_relation():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    evidence = next(iter(right.effect_summary.call_argument_evidence.values()))
+    first, second = evidence.arguments
+    object.__setattr__(
+        evidence,
+        "arguments",
+        (
+            first,
+            Expression.binary_op("INT_ADD", second, Expression.constant(1, size=4)),
+        ),
+    )
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+    ]
+    assert production.artifacts[0].record.status == "proven"
+    assert production.artifacts[1].record.status == "refuted"
+    assert production.artifacts[1].record.solver_result == "sat"
+
+
+def test_typed_guard_stage_refutes_different_call_reachability():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    evidence = next(iter(right.effect_summary.call_argument_evidence.values()))
+    first_argument = evidence.arguments[0]
+    object.__setattr__(
+        evidence,
+        "path_conditions",
+        ((Condition(Expression.binary_op(
+            "INT_EQUAL",
+            first_argument,
+            Expression.constant(0, size=4),
+        )),),),
+    )
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert len(production.artifacts) == 1
+    assert production.artifacts[0].record.proof_stage == "guard_relation"
+    assert production.artifacts[0].record.status == "refuted"
+    assert production.artifacts[0].record.solver_result == "sat"
+
+
+def test_typed_return_stage_refutes_different_pure_callee_result():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    arguments = next(iter(right.effect_summary.call_argument_evidence.values())).arguments
+    effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(
+        effect,
+        "return_partitions",
+        (((), Expression.binary_op("INT_SUB", arguments[0], arguments[1])),),
+    )
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.status for item in production.artifacts] == [
+        "proven",
+        "proven",
+        "refuted",
+    ]
+    assert production.artifacts[-1].record.solver_result == "sat"
+
+
+def test_typed_return_stage_refutes_noncanonical_wide_high_bits():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    original = effect.return_partitions[0][1]
+    widened = Expression.unary_op("INT_SEXT", original)
+    widened.size = 8
+    noncanonical = Expression.binary_op(
+        "INT_OR",
+        widened,
+        Expression.constant(1 << 32, size=8),
+    )
+    object.__setattr__(effect, "return_semantic_bit_width", 64)
+    object.__setattr__(effect, "return_signed", True)
+    object.__setattr__(effect, "return_partitions", (((), noncanonical),))
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert production.artifacts[-1].record.proof_stage == "return_relation"
+    assert production.artifacts[-1].record.status == "refuted"
+    assert production.artifacts[-1].record.solver_result == "sat"
+
+
+@pytest.mark.parametrize("operator", ["INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM"])
+def test_typed_return_stage_rejects_potentially_trapping_integer_ops(operator):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    arguments = next(iter(right.effect_summary.call_argument_evidence.values())).arguments
+    effect = right.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(
+        effect,
+        "return_partitions",
+        (((), Expression.binary_op(operator, arguments[0], arguments[1])),),
+    )
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=checker.solver_runner,
+        timeout_seconds=5,
+    )
+
+    assert [item.record.proof_stage for item in production.artifacts] == [
+        "guard_relation",
+        "argument_relation",
+    ]
+    assert any("unsupported_return_expression" in item for item in production.failure_causes)
+
+
+@pytest.mark.parametrize("solver_status", [SolverStatus.UNKNOWN, SolverStatus.TIMEOUT])
+def test_typed_stage_unknown_or_timeout_never_completes_chain(solver_status):
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    manifest = _phase2_manifest_with_certificate(left, right)
+    runner = SimpleNamespace(
+        run_parallel=lambda _query, timeout: ParallelResult(
+            results=[SolverResult("test", solver_status)]
+        )
+    )
+
+    production = produce_pure_direct_call_proofs(
+        manifest,
+        left,
+        right,
+        solver_runner=runner,
+        timeout_seconds=1,
+    )
+
+    assert len(production.artifacts) == 1
+    assert production.artifacts[0].record.proof_stage == "guard_relation"
+    assert production.artifacts[0].record.status == "inconclusive"
+    assert production.artifacts[0].verification_failure() is None
 
 
 def test_phase2_compatibility_hook_is_decision_neutral():
@@ -1105,8 +1434,8 @@ def test_phase2_compatibility_hook_is_decision_neutral():
 
     assert strategy_result.is_equivalent is None
     assert strategy_result.unknown_reasons == ["keep"]
-    assert manifest["phase2_discharge_gate"]["status"] == "disabled"
-    assert manifest["phase2_discharge_gate"]["decision_effect"] == "diagnostic_only"
+    assert manifest["phase2_discharge_gate"]["status"] == "blocked"
+    assert manifest["phase2_discharge_gate"]["decision_effect"] == "blocks_equivalence"
 
 
 def test_phase2_discharge_cannot_promote_even_with_fabricated_manifest_proofs():
@@ -1119,6 +1448,7 @@ def test_phase2_discharge_cannot_promote_even_with_fabricated_manifest_proofs():
         binary1_name="left",
         binary2_name="right",
     )
+    checker._attach_structural_coverage_certificate(manifest)
     manifest["solver_proof_records"] = [
         {
             "proof_stage": stage,
@@ -1150,7 +1480,7 @@ def test_phase2_discharge_cannot_promote_even_with_fabricated_manifest_proofs():
 
     assert strategy_result.is_equivalent is None
     assert strategy_result.unknown_reasons == ["keep"]
-    assert manifest["phase2_discharge_gate"]["status"] == "disabled"
+    assert manifest["phase2_discharge_gate"]["status"] == "blocked"
 
 
 def test_structural_coverage_certificate_is_exact_and_decision_neutral():
@@ -1218,7 +1548,7 @@ def test_different_internal_callees_cannot_be_promoted_from_shape_candidate():
 
     assert result.is_equivalent is None
     manifest = result.call_effect_shadow_manifest
-    assert manifest["mode"] == "shadow_no_decision_effect"
+    assert manifest["mode"] == "typed_relational_call_effect_proof"
     assert manifest["relational_obligations"][0]["status"] == "pending"
 
 

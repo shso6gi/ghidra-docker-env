@@ -565,6 +565,10 @@ class Phase2DirectCallEligibility:
         result = _jsonable(self.__dict__)
         result["candidate_only"] = self.status == "candidate"
         result["semantic_proof_status"] = "pending" if self.status == "candidate" else "blocked"
+        result["structural_precondition_stages"] = {
+            stage: "complete" if self.status == "candidate" else "blocked"
+            for stage in _PHASE2_STRUCTURAL_PRECONDITION_STAGES
+        }
         result["stage_proof_status"] = {
             stage: "pending" for stage in self.required_solver_stages
         }
@@ -1198,14 +1202,15 @@ def _mutually_unique_pairs(
 
 
 _PHASE2_REQUIRED_SOLVER_STAGES = (
-    "global_coverage",
-    "reachability",
     "guard_relation",
-    "target_relation",
     "argument_relation",
-    "abi_relation",
-    "callee_precondition",
     "return_relation",
+)
+
+_PHASE2_STRUCTURAL_PRECONDITION_STAGES = (
+    "target_callee_relation",
+    "abi_relation",
+    "callee_totality_precondition",
     "termination_relation",
     "trap_relation",
     "empty_state_transformer_and_frame",
@@ -1467,7 +1472,7 @@ def _phase2_direct_call_eligibility(
                     or profile_key[-1] is not True
                 ):
                     blockers.append(f"{side}_callee_not_acyclic_memory_free_scalar")
-            if fact.callee_return_summary_statuses != ("candidate",):
+            if fact.callee_return_summary_statuses != ("complete",):
                 blockers.append(f"{side}_callee_return_summary_missing")
             if not fact.callee_return_shape_keys:
                 blockers.append(f"{side}_callee_return_shape_missing")

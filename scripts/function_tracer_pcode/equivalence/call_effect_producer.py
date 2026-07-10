@@ -1,0 +1,812 @@
+# -*- coding: utf-8 -*-
+"""Typed solver producers for the narrow, pure direct-call equivalence lane.
+
+The public entry point accepts analyses and a structural manifest, never an
+arbitrary proof stage or SMT query.  Each stage query is constructed here from
+the exact call argument and specialized callee return objects that produced the
+manifest facts.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from ..analysis.effect_summary import (
+    CallArgumentEvidence,
+    CallSiteEffectSummaryEvidence,
+)
+from ..model import (
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    expression_provenance_key,
+)
+from ..model.render_smt import expression_smt_bit_width
+from ..smt import SolverStatus
+from .call_effect_obligations import (
+    InternalSolverProofArtifact,
+    SolverProofRecord,
+    _INTERNAL_SOLVER_PRODUCER_TOKEN,
+    _digest,
+)
+from .formula.params import (
+    build_parameter_constraint,
+    build_parameter_pairs,
+    build_parameter_semantic_constraints,
+    build_symbol_name_mapping,
+    collect_param_info,
+)
+
+
+_PRODUCER_KIND = "internal_typed_pure_direct_call_stage_producer"
+_STAGES = ("guard_relation", "argument_relation", "return_relation")
+_TYPED_RENDERER_TOKEN = object()
+_TOTAL_BINARY_OPERATORS = frozenset(
+    {
+        "INT_EQUAL",
+        "INT_NOTEQUAL",
+        "INT_LESS",
+        "INT_LESSEQUAL",
+        "INT_SLESS",
+        "INT_SLESSEQUAL",
+        "INT_ADD",
+        "INT_SUB",
+        "INT_MULT",
+        "INT_AND",
+        "INT_OR",
+        "INT_XOR",
+        "BOOL_AND",
+        "BOOL_OR",
+        "BOOL_XOR",
+        "PIECE",
+        "SUBPIECE",
+    }
+)
+_TOTAL_UNARY_OPERATORS = frozenset(
+    {
+        "INT_ZEXT",
+        "INT_SEXT",
+        "INT_2COMP",
+        "INT_NEGATE",
+        "BOOL_NEGATE",
+        "CAST",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PureDirectCallProofInput:
+    obligation_id: str
+    observation_contract_id: str
+    left_fact_id: str
+    right_fact_id: str
+    structural_certificate_id: str
+    left_fact_payload: Mapping[str, Any]
+    right_fact_payload: Mapping[str, Any]
+    left_arguments: CallArgumentEvidence
+    right_arguments: CallArgumentEvidence
+    left_effect: CallSiteEffectSummaryEvidence
+    right_effect: CallSiteEffectSummaryEvidence
+    left_parameters: Tuple[Mapping[str, Any], ...]
+    right_parameters: Tuple[Mapping[str, Any], ...]
+    left_caller_observation_bit_width: Optional[int]
+    right_caller_observation_bit_width: Optional[int]
+
+
+@dataclass(frozen=True)
+class PureDirectCallProofProduction:
+    artifacts: Tuple[InternalSolverProofArtifact, ...]
+    failure_causes: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _RenderedStage:
+    stage: str
+    query_text: str
+    normalized_assertion_text: str
+    stage_input_payload: Mapping[str, Any]
+    precondition_payload: Mapping[str, Any]
+    renderer_token: Any = field(default=None, repr=False, compare=False)
+
+
+def _evidence_pcode_key(evidence: Any) -> Optional[Tuple[Any, ...]]:
+    ref = getattr(evidence, "pcode_op_ref", None)
+    stable_key = getattr(ref, "stable_key", None)
+    if not callable(stable_key):
+        return None
+    try:
+        value = stable_key()
+    except Exception:
+        return None
+    return tuple(value) if isinstance(value, (tuple, list)) else None
+
+
+def _find_call_argument_evidence(
+    analysis: FunctionReturnAnalysis,
+    pcode_key: Tuple[Any, ...],
+) -> Optional[CallArgumentEvidence]:
+    summary = getattr(analysis, "effect_summary", None)
+    candidates = tuple(
+        evidence
+        for evidence in getattr(summary, "call_argument_evidence", {}).values()
+        if isinstance(evidence, CallArgumentEvidence)
+        and _evidence_pcode_key(evidence) == pcode_key
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _find_call_effect_evidence(
+    analysis: FunctionReturnAnalysis,
+    pcode_key: Tuple[Any, ...],
+) -> Optional[CallSiteEffectSummaryEvidence]:
+    summary = getattr(analysis, "effect_summary", None)
+    candidates = tuple(
+        evidence
+        for evidence in getattr(summary, "call_site_effect_summary_evidence", ()) or ()
+        if isinstance(evidence, CallSiteEffectSummaryEvidence)
+        and _evidence_pcode_key(evidence) == pcode_key
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _fact_by_id(manifest: Mapping[str, Any], side: str) -> Dict[str, Mapping[str, Any]]:
+    return {
+        str(item.get("fact_id")): item
+        for item in manifest.get(f"{side}_facts", ()) or ()
+        if isinstance(item, Mapping) and item.get("fact_id")
+    }
+
+
+def _tuple_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(value, (tuple, list)):
+        return None
+    return tuple(
+        _tuple_key(item) if isinstance(item, (tuple, list)) else item
+        for item in value
+    )
+
+
+def _build_inputs(
+    manifest: Mapping[str, Any],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+) -> Tuple[Tuple[PureDirectCallProofInput, ...], Tuple[str, ...]]:
+    certificate = manifest.get("structural_coverage_certificate")
+    if not isinstance(certificate, Mapping):
+        return (), ("structural_coverage_certificate_missing",)
+    if certificate.get("status") != "complete" or certificate.get("verification_status") != "verified":
+        return (), ("structural_coverage_certificate_incomplete",)
+    certificate_id = str(certificate.get("certificate_id") or "")
+    if not certificate_id:
+        return (), ("structural_coverage_certificate_id_missing",)
+
+    left_by_id = _fact_by_id(manifest, "left")
+    right_by_id = _fact_by_id(manifest, "right")
+    eligibility_by_id = {
+        str(item.get("obligation_id")): item
+        for item in manifest.get("phase2_direct_call_eligibility", ()) or ()
+        if isinstance(item, Mapping)
+    }
+    inputs: List[PureDirectCallProofInput] = []
+    failures: List[str] = []
+
+    def caller_observation_width(analysis: FunctionReturnAnalysis) -> Optional[int]:
+        try:
+            width = int(analysis.get_return_value_solver_bit_width())
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return width if width > 0 else None
+
+    for obligation in manifest.get("relational_obligations", ()) or ():
+        if not isinstance(obligation, Mapping):
+            continue
+        obligation_id = str(obligation.get("obligation_id") or "")
+        eligibility = eligibility_by_id.get(obligation_id, {})
+        if obligation.get("relation_kind") != "call_to_call" or eligibility.get("status") != "candidate":
+            continue
+        left_fact_id = str(obligation.get("left_fact_id") or "")
+        right_fact_id = str(obligation.get("right_fact_id") or "")
+        left_fact = left_by_id.get(left_fact_id)
+        right_fact = right_by_id.get(right_fact_id)
+        if left_fact is None or right_fact is None:
+            failures.append(f"{obligation_id}:typed_fact_missing")
+            continue
+        if (
+            left_fact.get("operation_kind") not in {"direct_call", "indirect_call"}
+            or right_fact.get("operation_kind") not in {"direct_call", "indirect_call"}
+        ):
+            failures.append(f"{obligation_id}:pure_producer_requires_resolved_calls")
+            continue
+        left_key = _tuple_key(
+            (left_fact.get("identity") or {}).get("pcode_op_key")
+            if isinstance(left_fact.get("identity"), Mapping)
+            else None
+        )
+        right_key = _tuple_key(
+            (right_fact.get("identity") or {}).get("pcode_op_key")
+            if isinstance(right_fact.get("identity"), Mapping)
+            else None
+        )
+        if left_key is None or right_key is None:
+            failures.append(f"{obligation_id}:pcode_identity_missing")
+            continue
+        left_arguments = _find_call_argument_evidence(analysis1, left_key)
+        right_arguments = _find_call_argument_evidence(analysis2, right_key)
+        left_effect = _find_call_effect_evidence(analysis1, left_key)
+        right_effect = _find_call_effect_evidence(analysis2, right_key)
+        if left_arguments is None or right_arguments is None:
+            failures.append(f"{obligation_id}:typed_argument_evidence_missing")
+            continue
+        if not left_arguments.is_usable() or not right_arguments.is_usable():
+            failures.append(f"{obligation_id}:typed_argument_evidence_incomplete")
+            continue
+        if left_effect is None or right_effect is None:
+            failures.append(f"{obligation_id}:typed_effect_evidence_missing")
+            continue
+        if (
+            left_effect.summary_status != "complete"
+            or right_effect.summary_status != "complete"
+            or int(left_effect.memory_effect_count) != 0
+            or int(right_effect.memory_effect_count) != 0
+            or left_effect.has_unsupported_nested_call
+            or right_effect.has_unsupported_nested_call
+        ):
+            failures.append(f"{obligation_id}:pure_effect_summary_incomplete")
+            continue
+        if left_effect.return_summary_status != "complete" or right_effect.return_summary_status != "complete":
+            failures.append(f"{obligation_id}:complete_return_partition_missing")
+            continue
+        if not left_effect.return_partitions or not right_effect.return_partitions:
+            failures.append(f"{obligation_id}:typed_return_partition_missing")
+            continue
+        if (
+            len(left_effect.return_partitions) != len(left_effect.return_value_keys)
+            or len(right_effect.return_partitions) != len(right_effect.return_value_keys)
+        ):
+            failures.append(f"{obligation_id}:return_partition_key_coverage_mismatch")
+            continue
+        inputs.append(
+            PureDirectCallProofInput(
+                obligation_id=obligation_id,
+                observation_contract_id=str(obligation.get("observation_contract_id") or ""),
+                left_fact_id=left_fact_id,
+                right_fact_id=right_fact_id,
+                structural_certificate_id=certificate_id,
+                left_fact_payload=left_fact,
+                right_fact_payload=right_fact,
+                left_arguments=left_arguments,
+                right_arguments=right_arguments,
+                left_effect=left_effect,
+                right_effect=right_effect,
+                left_parameters=tuple(analysis1.parameters or ()),
+                right_parameters=tuple(analysis2.parameters or ()),
+                left_caller_observation_bit_width=caller_observation_width(analysis1),
+                right_caller_observation_bit_width=caller_observation_width(analysis2),
+            )
+        )
+    return tuple(inputs), tuple(failures)
+
+
+def _pure_scalar_expression_supported(expr: Optional[Expression]) -> bool:
+    if not isinstance(expr, Expression):
+        return False
+    if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.PARAMETER}:
+        return int(expression_smt_bit_width(expr) or 0) > 0
+    if expr.expr_type not in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
+        return False
+    operator = str(getattr(expr, "operator", "") or "")
+    if expr.expr_type == ExpressionType.BINARY_OP and operator not in _TOTAL_BINARY_OPERATORS:
+        return False
+    if expr.expr_type == ExpressionType.UNARY_OP and operator not in _TOTAL_UNARY_OPERATORS:
+        return False
+    operands = tuple(getattr(expr, "operands", ()) or ())
+    return bool(operands) and all(_pure_scalar_expression_supported(item) for item in operands)
+
+
+def _condition_supported(condition: Condition) -> bool:
+    return isinstance(condition, Condition) and _pure_scalar_expression_supported(
+        condition.expression
+    )
+
+
+def _and(*terms: str) -> str:
+    values = tuple(term for term in terms if term and term != "true")
+    if any(term == "false" for term in terms):
+        return "false"
+    if not values:
+        return "true"
+    return values[0] if len(values) == 1 else f"(and {' '.join(values)})"
+
+
+def _or(terms: Sequence[str]) -> str:
+    values = tuple(term for term in terms if term and term != "false")
+    if any(term == "true" for term in terms):
+        return "true"
+    if not values:
+        return "false"
+    return values[0] if len(values) == 1 else f"(or {' '.join(values)})"
+
+
+def _render_condition_group(
+    conditions: Sequence[Condition],
+    symbol_mapping: Mapping[str, str],
+) -> str:
+    if not all(_condition_supported(condition) for condition in conditions):
+        raise ValueError("unsupported_guard_expression")
+    return _and(
+        *(
+            condition.to_smt(symbol_name_mapping=symbol_mapping, float_mode="fp")
+            for condition in conditions
+        )
+    )
+
+
+def _render_reachability(
+    evidence: CallArgumentEvidence,
+    symbol_mapping: Mapping[str, str],
+) -> str:
+    path_groups = tuple(evidence.path_conditions or ())
+    if not path_groups:
+        return "true"
+    return _or(
+        tuple(
+            _render_condition_group(group, symbol_mapping)
+            for group in path_groups
+        )
+    )
+
+
+def _parameter_prelude(proof_input: PureDirectCallProofInput):
+    left_infos = collect_param_info(list(proof_input.left_parameters), "_1")
+    right_infos = collect_param_info(list(proof_input.right_parameters), "_2")
+    if len({item.original_name for item in left_infos}) != len(left_infos):
+        raise ValueError("left_parameter_names_ambiguous")
+    if len({item.original_name for item in right_infos}) != len(right_infos):
+        raise ValueError("right_parameter_names_ambiguous")
+    pairs = build_parameter_pairs(left_infos, right_infos)
+    if any(pair.param1 is None or pair.param2 is None for pair in pairs):
+        raise ValueError("caller_parameter_relation_incomplete")
+    if (left_infos or right_infos) and not pairs:
+        raise ValueError("caller_parameter_relation_missing")
+    lines = ["(set-logic QF_BV)"]
+    lines.extend(
+        f"(declare-const {item.smt_name} (_ BitVec {item.bit_width}))"
+        for item in tuple(left_infos) + tuple(right_infos)
+    )
+    lines.extend(build_parameter_semantic_constraints(left_infos))
+    lines.extend(build_parameter_semantic_constraints(right_infos))
+    for pair in pairs:
+        lines.extend(build_parameter_constraint(pair))
+    return (
+        lines,
+        build_symbol_name_mapping(left_infos),
+        build_symbol_name_mapping(right_infos),
+    )
+
+
+def _stage_payload(proof_input: PureDirectCallProofInput, stage: str) -> Dict[str, Any]:
+    def condition_key(condition: Condition) -> Tuple[Any, ...]:
+        structural_key = getattr(condition, "structural_key", None)
+        value = structural_key() if callable(structural_key) else None
+        return (
+            "condition",
+            bool(getattr(condition, "negated", False)),
+            value,
+        )
+
+    def argument_payload(evidence: CallArgumentEvidence) -> Dict[str, Any]:
+        return {
+            "pcode_op_key": _evidence_pcode_key(evidence),
+            "callee_param_identities": evidence.callee_param_identities,
+            "arguments": tuple(
+                expression_provenance_key(argument)
+                for argument in evidence.arguments or ()
+            ),
+            "path_conditions": tuple(
+                tuple(condition_key(condition) for condition in group)
+                for group in evidence.path_conditions or ()
+            ),
+            "coverage_complete": bool(evidence.coverage_complete),
+            "recovery_status": evidence.recovery_status,
+        }
+
+    def effect_payload(evidence: CallSiteEffectSummaryEvidence) -> Dict[str, Any]:
+        return {
+            "stable_key": evidence.stable_key(),
+            "return_summary_status": evidence.return_summary_status,
+            "return_semantic_bit_width": evidence.return_semantic_bit_width,
+            "return_signed": evidence.return_signed,
+            "return_partitions": tuple(
+                (
+                    tuple(condition_key(condition) for condition in conditions),
+                    expression_provenance_key(value),
+                )
+                for conditions, value in evidence.return_partitions or ()
+            ),
+        }
+
+    return {
+        "producer_contract": "typed_pure_direct_call_v1",
+        "stage": stage,
+        "obligation_id": proof_input.obligation_id,
+        "left_fact": proof_input.left_fact_payload,
+        "right_fact": proof_input.right_fact_payload,
+        "caller_observation_bit_widths": (
+            proof_input.left_caller_observation_bit_width,
+            proof_input.right_caller_observation_bit_width,
+        ),
+        "left_argument_evidence": argument_payload(proof_input.left_arguments),
+        "right_argument_evidence": argument_payload(proof_input.right_arguments),
+        "left_effect_evidence": effect_payload(proof_input.left_effect),
+        "right_effect_evidence": effect_payload(proof_input.right_effect),
+    }
+
+
+def _render_guard_stage(proof_input: PureDirectCallProofInput) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
+    right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
+    violation = f"(xor {left_reach} {right_reach})"
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="guard_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "guard_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _render_argument_stage(
+    proof_input: PureDirectCallProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
+    right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
+    left_args = tuple(proof_input.left_arguments.arguments or ())
+    right_args = tuple(proof_input.right_arguments.arguments or ())
+    if len(left_args) != len(right_args):
+        raise ValueError("argument_arity_relation_missing")
+    mismatches: List[str] = []
+    for left, right in zip(left_args, right_args):
+        if not _pure_scalar_expression_supported(left) or not _pure_scalar_expression_supported(right):
+            raise ValueError("unsupported_argument_expression")
+        left_bits = int(expression_smt_bit_width(left) or 0)
+        right_bits = int(expression_smt_bit_width(right) or 0)
+        if left_bits <= 0 or left_bits != right_bits:
+            raise ValueError("argument_abi_width_relation_missing")
+        left_smt = left.to_smt(symbol_name_mapping=left_mapping, float_mode="fp")
+        right_smt = right.to_smt(symbol_name_mapping=right_mapping, float_mode="fp")
+        mismatches.append(f"(not (= {left_smt} {right_smt}))")
+    violation = _and(left_reach, right_reach, _or(mismatches))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="argument_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "argument_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _render_return_stage(
+    proof_input: PureDirectCallProofInput,
+    dependency_ids: Tuple[str, ...],
+) -> _RenderedStage:
+    lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
+    left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
+    right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
+
+    left_semantic_bits = proof_input.left_effect.return_semantic_bit_width
+    right_semantic_bits = proof_input.right_effect.return_semantic_bit_width
+    if (left_semantic_bits is None) != (right_semantic_bits is None):
+        raise ValueError("return_semantic_width_evidence_incomplete")
+    if left_semantic_bits is not None and (
+        int(left_semantic_bits) <= 0 or int(right_semantic_bits) <= 0
+    ):
+        raise ValueError("return_semantic_width_invalid")
+    left_observed = proof_input.left_caller_observation_bit_width
+    right_observed = proof_input.right_caller_observation_bit_width
+    if left_observed is not None or right_observed is not None:
+        if (
+            left_observed is None
+            or right_observed is None
+            or int(left_observed) <= 0
+            or int(left_observed) != int(right_observed)
+        ):
+            raise ValueError("caller_return_observation_width_relation_missing")
+        semantic_bits = int(left_observed)
+        if left_semantic_bits is not None and (
+            semantic_bits > int(left_semantic_bits)
+            or semantic_bits > int(right_semantic_bits)
+        ):
+            raise ValueError("caller_observation_exceeds_callee_return_width")
+    elif left_semantic_bits is not None and int(left_semantic_bits) == int(right_semantic_bits):
+        semantic_bits = int(left_semantic_bits)
+    else:
+        raise ValueError("return_semantic_width_relation_missing")
+
+    def render_cases(effect, reach, mapping):
+        rendered = []
+        for conditions, value in effect.return_partitions:
+            if not _pure_scalar_expression_supported(value):
+                raise ValueError("unsupported_return_expression")
+            guard = _render_condition_group(conditions, mapping)
+            value_bits = int(expression_smt_bit_width(value) or 0)
+            value_smt = value.to_smt(symbol_name_mapping=mapping, float_mode="fp")
+            rendered_bits = value_bits
+            extension_violation = "false"
+            if semantic_bits is not None and value_bits > semantic_bits:
+                if effect.return_signed is None:
+                    raise ValueError("return_extension_signedness_missing")
+                extension = "sign_extend" if effect.return_signed else "zero_extend"
+                canonical_extension = (
+                    f"((_ {extension} {value_bits - semantic_bits}) "
+                    f"((_ extract {semantic_bits - 1} 0) {value_smt}))"
+                )
+                extension_violation = _and(
+                    _and(reach, guard),
+                    f"(not (= {value_smt} {canonical_extension}))",
+                )
+                value_smt = f"((_ extract {semantic_bits - 1} 0) {value_smt})"
+                rendered_bits = semantic_bits
+            elif semantic_bits is not None and value_bits < semantic_bits:
+                if effect.return_signed is None:
+                    raise ValueError("return_extension_signedness_missing")
+                extension = "sign_extend" if effect.return_signed else "zero_extend"
+                value_smt = (
+                    f"((_ {extension} {semantic_bits - value_bits}) {value_smt})"
+                )
+                rendered_bits = semantic_bits
+            rendered.append(
+                (
+                    _and(reach, guard),
+                    value_smt,
+                    rendered_bits,
+                    extension_violation,
+                )
+            )
+        return tuple(rendered)
+
+    left_cases = render_cases(proof_input.left_effect, left_reach, left_mapping)
+    right_cases = render_cases(proof_input.right_effect, right_reach, right_mapping)
+    if not left_cases or not right_cases:
+        raise ValueError("return_partition_missing")
+    widths = {bits for _, _, bits, _ in left_cases + right_cases}
+    if len(widths) != 1 or next(iter(widths)) <= 0:
+        raise ValueError("return_width_relation_missing")
+
+    violations: List[str] = [
+        f"(xor {left_reach} {right_reach})",
+        _and(left_reach, f"(not {_or(tuple(guard for guard, _, _, _ in left_cases))})"),
+        _and(right_reach, f"(not {_or(tuple(guard for guard, _, _, _ in right_cases))})"),
+    ]
+    violations.extend(item[3] for item in left_cases + right_cases)
+    for left_guard, left_value, _, _ in left_cases:
+        for right_guard, right_value, _, _ in right_cases:
+            violations.append(
+                _and(
+                    left_guard,
+                    right_guard,
+                    f"(not (= {left_value} {right_value}))",
+                )
+            )
+    for cases in (left_cases, right_cases):
+        for index, (first_guard, first_value, _, _) in enumerate(cases):
+            for second_guard, second_value, _, _ in cases[index + 1 :]:
+                violations.append(
+                    _and(
+                        first_guard,
+                        second_guard,
+                        f"(not (= {first_value} {second_value}))",
+                    )
+                )
+    violation = _or(tuple(violations))
+    lines.extend((f"(assert {violation})", "(check-sat)"))
+    return _RenderedStage(
+        stage="return_relation",
+        query_text="\n".join(lines),
+        normalized_assertion_text=violation,
+        stage_input_payload=_stage_payload(proof_input, "return_relation"),
+        precondition_payload={
+            "structural_certificate_id": proof_input.structural_certificate_id,
+            "dependency_proof_ids": dependency_ids,
+        },
+        renderer_token=_TYPED_RENDERER_TOKEN,
+    )
+
+
+def _solver_version(solver_name: str) -> str:
+    if solver_name.lower() == "z3":
+        try:
+            import z3
+
+            return str(z3.get_version_string())
+        except Exception:
+            pass
+    return "runtime-version-unavailable"
+
+
+def _execute_rendered_stage(
+    rendered: _RenderedStage,
+    proof_input: PureDirectCallProofInput,
+    solver_runner: Any,
+    timeout_seconds: int,
+    dependency_ids: Tuple[str, ...],
+) -> InternalSolverProofArtifact:
+    if rendered.renderer_token is not _TYPED_RENDERER_TOKEN:
+        raise ValueError("untrusted_typed_stage_renderer")
+    if rendered.stage not in _STAGES:
+        raise ValueError("unsupported_typed_proof_stage")
+    if rendered.stage_input_payload.get("stage") != rendered.stage:
+        raise ValueError("typed_stage_payload_mismatch")
+    expected_dependencies = tuple(
+        rendered.precondition_payload.get("dependency_proof_ids", ()) or ()
+    )
+    if expected_dependencies != dependency_ids:
+        raise ValueError("typed_stage_dependency_mismatch")
+    parallel_result = solver_runner.run_parallel(
+        rendered.query_text,
+        timeout=max(1, int(timeout_seconds)),
+    )
+    result = getattr(parallel_result, "first_definitive", None)
+    if result is None:
+        results = tuple(getattr(parallel_result, "results", ()) or ())
+        result = results[0] if results else None
+    status_name = (
+        str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
+        if result is not None
+        else "unknown"
+    )
+    if result is not None and result.status == SolverStatus.UNSAT:
+        record_status = "proven"
+        solver_result = "unsat"
+    elif result is not None and result.status == SolverStatus.SAT:
+        record_status = "refuted"
+        solver_result = "sat"
+    else:
+        record_status = "inconclusive"
+        solver_result = status_name
+    solver_name = str(getattr(result, "solver_name", "unavailable") or "unavailable")
+    query_digest = hashlib.sha256(rendered.query_text.encode("utf-8")).hexdigest()
+    assertion_digest = hashlib.sha256(
+        rendered.normalized_assertion_text.encode("utf-8")
+    ).hexdigest()
+    stage_input_digest = _digest(rendered.stage_input_payload)
+    precondition_digest = _digest(rendered.precondition_payload)
+    timeout_ms = max(1, int(timeout_seconds)) * 1000
+    proof_id = _digest(
+        (
+            "solver_proof_record",
+            rendered.stage,
+            proof_input.obligation_id,
+            proof_input.left_fact_id,
+            proof_input.right_fact_id,
+            proof_input.observation_contract_id,
+            query_digest,
+            assertion_digest,
+            stage_input_digest,
+            precondition_digest,
+            dependency_ids,
+            solver_name,
+            _solver_version(solver_name),
+            solver_result,
+            timeout_ms,
+            _PRODUCER_KIND,
+        )
+    )
+    record = SolverProofRecord(
+        proof_id=proof_id,
+        obligation_id=proof_input.obligation_id,
+        proof_stage=rendered.stage,
+        observation_contract_id=proof_input.observation_contract_id,
+        left_object_id=proof_input.left_fact_id,
+        right_object_id=proof_input.right_fact_id,
+        status=record_status,
+        failure_cause=None if record_status == "proven" else f"solver_{solver_result}",
+        normalized_assertion_digest=assertion_digest,
+        query_digest=query_digest,
+        stage_input_digest=stage_input_digest,
+        precondition_digest=precondition_digest,
+        solver_name=solver_name,
+        solver_version=_solver_version(solver_name),
+        solver_result=solver_result,
+        dependency_proof_ids=dependency_ids,
+        timeout_ms=timeout_ms,
+        producer_kind=_PRODUCER_KIND,
+    )
+    return InternalSolverProofArtifact(
+        record=record,
+        query_text=rendered.query_text,
+        normalized_assertion_text=rendered.normalized_assertion_text,
+        stage_input_payload=rendered.stage_input_payload,
+        precondition_payload=rendered.precondition_payload,
+        producer_kind=_PRODUCER_KIND,
+        producer_token=_INTERNAL_SOLVER_PRODUCER_TOKEN,
+    )
+
+
+def produce_pure_direct_call_proofs(
+    manifest: Mapping[str, Any],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    solver_runner: Any,
+    timeout_seconds: int,
+) -> PureDirectCallProofProduction:
+    """Produce the three fixed semantic stages for eligible pure call pairs."""
+
+    proof_inputs, failures = _build_inputs(manifest, analysis1, analysis2)
+    artifacts: List[InternalSolverProofArtifact] = []
+    failure_list = list(failures)
+    for proof_input in proof_inputs:
+        dependencies: Tuple[str, ...] = ()
+        try:
+            rendered_stages = (
+                _render_guard_stage(proof_input),
+                None,
+                None,
+            )
+            first = _execute_rendered_stage(
+                rendered_stages[0],
+                proof_input,
+                solver_runner,
+                timeout_seconds,
+                dependencies,
+            )
+            artifacts.append(first)
+            if first.record.status != "proven":
+                failure_list.append(
+                    f"{proof_input.obligation_id}:guard_relation_{first.record.solver_result}"
+                )
+                continue
+            dependencies = (first.record.proof_id,)
+
+            second_rendered = _render_argument_stage(proof_input, dependencies)
+            second = _execute_rendered_stage(
+                second_rendered,
+                proof_input,
+                solver_runner,
+                timeout_seconds,
+                dependencies,
+            )
+            artifacts.append(second)
+            if second.record.status != "proven":
+                failure_list.append(
+                    f"{proof_input.obligation_id}:argument_relation_{second.record.solver_result}"
+                )
+                continue
+            dependencies = (second.record.proof_id,)
+
+            third_rendered = _render_return_stage(proof_input, dependencies)
+            third = _execute_rendered_stage(
+                third_rendered,
+                proof_input,
+                solver_runner,
+                timeout_seconds,
+                dependencies,
+            )
+            artifacts.append(third)
+        except (TypeError, ValueError) as exc:
+            failure_list.append(f"{proof_input.obligation_id}:{exc}")
+    return PureDirectCallProofProduction(
+        artifacts=tuple(artifacts),
+        failure_causes=tuple(failure_list),
+    )
+
+
+__all__ = [
+    "PureDirectCallProofProduction",
+    "produce_pure_direct_call_proofs",
+]

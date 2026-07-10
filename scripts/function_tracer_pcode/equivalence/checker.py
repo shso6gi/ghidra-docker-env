@@ -28,9 +28,11 @@ from .workflow import run_check_from_binaries
 from .unknown_reason import make_unknown_reason
 from .call_effect_obligations import (
     EquivalenceObservationContract,
+    apply_solver_proof_artifacts_to_manifest,
     build_call_effect_shadow_manifest,
     build_structural_coverage_certificate,
 )
+from .call_effect_producer import produce_pure_direct_call_proofs
 
 
 # ============================================================================
@@ -120,6 +122,7 @@ class EquivalenceChecker:
             assume_fp_non_nan=assume_fp_non_nan,
         )
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
+        self._last_internal_call_effect_artifacts = ()
         self.phase_handler = PhaseHandler(self.type_fixer_config, debug=debug)
         
         # 各 strategy の準備
@@ -1026,8 +1029,29 @@ class EquivalenceChecker:
                 binary2_name=binary2_name,
                 observation_contract=self.observation_contract,
             )
-            return self._attach_structural_coverage_certificate(manifest)
+            self._attach_structural_coverage_certificate(manifest)
+            production = produce_pure_direct_call_proofs(
+                manifest,
+                analysis1,
+                analysis2,
+                solver_runner=self.solver_runner,
+                timeout_seconds=self.timeout,
+            )
+            self._last_internal_call_effect_artifacts = production.artifacts
+            if production.artifacts:
+                manifest["mode"] = "typed_relational_call_effect_proof"
+            apply_solver_proof_artifacts_to_manifest(
+                manifest,
+                production.artifacts,
+            )
+            manifest["stage_specific_producer"] = {
+                "producer_kind": "typed_pure_direct_call_v1",
+                "artifact_count": len(production.artifacts),
+                "failure_causes": list(production.failure_causes),
+            }
+            return manifest
         except Exception as exc:
+            self._last_internal_call_effect_artifacts = ()
             self._debug_print(f"Call/effect shadow manifest unavailable: {exc}")
             return {
                 "schema_version": 1,
@@ -1061,13 +1085,140 @@ class EquivalenceChecker:
         analysis2: FunctionReturnAnalysis,
         manifest: Dict[str, Any],
     ) -> None:
-        """Decision-neutral until stage-specific semantic producers exist."""
+        """Promote only an all-UNSAT caller result with complete typed call proofs."""
 
-        manifest["phase2_discharge_gate"] = {
-            "status": "disabled",
-            "decision_effect": "diagnostic_only",
-            "failure_cause": "stage_specific_semantic_producers_not_implemented",
+        gate = {
+            "status": "blocked",
+            "decision_effect": "blocks_equivalence",
+            "failure_cause": "call_effect_stage_proofs_incomplete",
         }
+        manifest["phase2_discharge_gate"] = gate
+        if not self.enable_completed_recovery_proofs:
+            gate["status"] = "disabled"
+            gate["decision_effect"] = "diagnostic_only"
+            gate["failure_cause"] = "completed_recovery_proofs_disabled"
+            return
+        apply_solver_proof_artifacts_to_manifest(
+            manifest,
+            self._last_internal_call_effect_artifacts,
+        )
+        certificate = manifest.get("structural_coverage_certificate")
+        rebuilt_certificate = build_structural_coverage_certificate(manifest)
+        if not isinstance(certificate, Mapping) or (
+            certificate.get("status") != "complete"
+            or certificate.get("verification_status") != "verified"
+            or certificate.get("certificate_id") != rebuilt_certificate.certificate_id
+            or rebuilt_certificate.verification_failure() is not None
+        ):
+            gate["failure_cause"] = "structural_coverage_certificate_incomplete"
+            return
+        obligations = tuple(
+            item
+            for item in manifest.get("relational_obligations", ()) or ()
+            if isinstance(item, Mapping)
+        )
+        readiness = tuple(
+            item
+            for item in manifest.get("proof_readiness", ()) or ()
+            if isinstance(item, Mapping)
+        )
+        if not obligations or len(readiness) != len(obligations):
+            gate["failure_cause"] = "call_effect_obligation_coverage_incomplete"
+            return
+        if any(item.get("relation_kind") != "call_to_call" for item in obligations):
+            gate["failure_cause"] = "unsupported_relational_call_effect_lane"
+            return
+        if not all(item.get("decision_eligible") is True for item in readiness):
+            gate["failure_cause"] = "call_effect_stage_proofs_incomplete"
+            return
+        for analysis in (analysis1, analysis2):
+            effect_summary = getattr(analysis, "effect_summary", None)
+            incomplete_reasons = tuple(
+                getattr(effect_summary, "incomplete_reasons", ()) or ()
+            )
+            if incomplete_reasons:
+                gate["failure_cause"] = "non_call_effect_unsafety_present"
+                gate["non_call_effect_unsafety"] = list(incomplete_reasons)
+                return
+            if bool(getattr(effect_summary, "has_unsupported_call", False)):
+                gate["failure_cause"] = "unsupported_call_effect_present"
+                return
+            if "effect_summary_path_coverage_incomplete" in tuple(
+                getattr(analysis, "analysis_notes", ()) or ()
+            ):
+                gate["failure_cause"] = "non_call_effect_unsafety_present"
+                gate["non_call_effect_unsafety"] = [
+                    "effect_summary_path_coverage_incomplete"
+                ]
+                return
+        raw_reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
+        if not raw_reasons or any(
+            str(getattr(reason, "reason_id", "")) != "equivalence_blocking_unsafety"
+            for reason in raw_reasons
+        ):
+            gate["failure_cause"] = "non_call_unknown_reason_present"
+            return
+        completed_obligation_ids = {
+            str(item.get("obligation_id"))
+            for item in readiness
+            if item.get("decision_eligible") is True and item.get("obligation_id")
+        }
+        blocker_mappings = tuple(
+            item
+            for item in manifest.get("legacy_blocker_mapping", ()) or ()
+            if isinstance(item, Mapping)
+        )
+        for reason in raw_reasons:
+            evidence_refs = tuple(getattr(reason, "evidence_refs", ()) or ())
+            if len(evidence_refs) != 1:
+                gate["failure_cause"] = "call_blocker_obligation_mapping_incomplete"
+                return
+            matching = tuple(
+                item
+                for item in blocker_mappings
+                if str(item.get("legacy_blocker") or "") == str(evidence_refs[0])
+            )
+            if len(matching) != 1:
+                gate["failure_cause"] = "call_blocker_obligation_mapping_incomplete"
+                return
+            mapping = matching[0]
+            obligation_ids = tuple(mapping.get("obligation_ids", ()) or ())
+            if (
+                mapping.get("mapping_basis") != "callsite_pcode_ref"
+                or mapping.get("mapping_status") != "mapped"
+                or len(obligation_ids) != 1
+                or str(obligation_ids[0]) not in completed_obligation_ids
+            ):
+                gate["failure_cause"] = "call_blocker_not_exactly_mapped"
+                gate["unmapped_blocker"] = str(evidence_refs[0])
+                return
+        total_pairs = int(getattr(strategy_result, "total_pairs", 0) or 0)
+        if (
+            total_pairs <= 0
+            or int(getattr(strategy_result, "unsat_pairs", 0) or 0) != total_pairs
+            or int(getattr(strategy_result, "sat_pairs", 0) or 0) != 0
+            or int(getattr(strategy_result, "unknown_pairs", 0) or 0) != 0
+            or int(getattr(strategy_result, "error_pairs", 0) or 0) != 0
+            or getattr(strategy_result, "is_equivalent", None) is False
+        ):
+            gate["failure_cause"] = "caller_relational_return_proof_incomplete"
+            return
+        strategy_result.is_equivalent = True
+        strategy_result.unknown_reasons = []
+        coupling = manifest.get("coupling")
+        if isinstance(coupling, dict):
+            coupling["semantic_proof_status"] = "proven"
+        summary = manifest.get("summary")
+        if isinstance(summary, dict):
+            summary["semantic_proof_status"] = "proven"
+        gate.update(
+            {
+                "status": "proven",
+                "decision_effect": "promotes_equivalence",
+                "failure_cause": None,
+                "proof_kind": "typed_pure_direct_call_relational_proof",
+            }
+        )
 
     @staticmethod
     def _specialize_call_effect_unknown_reasons(
@@ -1090,6 +1241,11 @@ class EquivalenceChecker:
         blocker_stages: Dict[str, Tuple[str, ...]] = {}
         for item in mappings:
             if not isinstance(item, Mapping):
+                continue
+            if (
+                item.get("mapping_basis") != "callsite_pcode_ref"
+                or item.get("mapping_status") != "mapped"
+            ):
                 continue
             blocker = str(item.get("legacy_blocker") or "")
             stages = tuple(

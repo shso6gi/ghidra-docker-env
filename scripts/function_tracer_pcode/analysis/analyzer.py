@@ -156,7 +156,8 @@ _FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS = frozenset(
         "INT_ADD", "INT_SUB", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
         "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR",
         "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT", "INT_DIV",
-        "INT_SDIV", "INT_REM", "INT_SREM", "BOOL_NEGATE", "BOOL_XOR",
+        "INT_SDIV", "INT_REM", "INT_SREM",
+        "BOOL_NEGATE", "BOOL_XOR",
         "BOOL_AND", "BOOL_OR", "FLOAT_EQUAL", "FLOAT_NOTEQUAL",
         "FLOAT_LESS", "FLOAT_LESSEQUAL", "FLOAT_NAN", "FLOAT_ADD",
         "FLOAT_DIV", "FLOAT_MULT", "FLOAT_SUB", "FLOAT_NEG",
@@ -181,8 +182,8 @@ _PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS = frozenset(
         "INT_LESS", "INT_LESSEQUAL", "INT_ZEXT", "INT_SEXT",
         "INT_ADD", "INT_SUB", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
         "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR",
-        "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT", "INT_DIV",
-        "INT_SDIV", "INT_REM", "INT_SREM", "BOOL_NEGATE", "BOOL_XOR",
+        "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT",
+        "BOOL_NEGATE", "BOOL_XOR",
         "BOOL_AND", "BOOL_OR", "MULTIEQUAL", "PIECE", "SUBPIECE", "CAST",
         "POPCOUNT", "LZCOUNT", "INSERT", "EXTRACT",
     }
@@ -9372,7 +9373,12 @@ class ReturnAnalyzer:
             or specialized.incomplete_control_flow
         )
 
-        expanded = []
+        class _CompleteCallExpansions(list):
+            coverage_complete: bool = False
+            return_semantic_bit_width: Optional[int] = None
+            return_signed: Optional[bool] = None
+
+        expanded = _CompleteCallExpansions()
         rejected_returns = 0
         for ret in specialized.returns:
             simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(
@@ -9421,6 +9427,28 @@ class ReturnAnalyzer:
                 f"({rejected_returns}) inlining candidates; keeping unresolved"
             )
             return None
+        expanded.coverage_complete = bool(
+            expanded
+            and rejected_returns == 0
+            and not preserve_non_exhaustive_returns
+            and not bool(getattr(analysis, "incomplete_control_flow", False))
+            and int(getattr(analysis, "unknown_event_count", 0) or 0) == 0
+        )
+        try:
+            expanded.return_semantic_bit_width = int(
+                specialized.get_return_value_solver_bit_width()
+            )
+        except (AttributeError, TypeError, ValueError):
+            expanded.return_semantic_bit_width = None
+        try:
+            expanded.return_signed = bool(
+                get_declared_type_signedness(
+                    specialized.get_comparison_type_obj(),
+                    specialized.get_comparison_type_name(),
+                )
+            )
+        except (AttributeError, TypeError, ValueError):
+            expanded.return_signed = None
         return expanded
 
     def _analysis_is_fully_argument_specialized(

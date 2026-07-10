@@ -225,8 +225,15 @@ class CallSiteEffectSummaryEvidence:
     callee_recursive_scc_identity: Optional[str] = None
     callee_recursive_scc_member_keys: Tuple[Tuple[object, ...], ...] = ()
     return_summary_status: str = "unavailable"
+    return_semantic_bit_width: Optional[int] = None
+    return_signed: Optional[bool] = None
     return_value_keys: Tuple[Tuple[object, ...], ...] = ()
     return_guard_keys: Tuple[Tuple[object, ...], ...] = ()
+    return_partitions: Tuple[Tuple[Tuple[Condition, ...], Expression], ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
     source: str = "direct_call_effect_summary"
 
     def stable_key(self) -> Tuple[object, ...]:
@@ -245,6 +252,8 @@ class CallSiteEffectSummaryEvidence:
             self.callee_recursive_scc_identity,
             self.callee_recursive_scc_member_keys,
             self.return_summary_status,
+            self.return_semantic_bit_width,
+            self.return_signed,
             self.return_value_keys,
             self.return_guard_keys,
             self.source,
@@ -266,6 +275,8 @@ class CallSiteEffectSummaryEvidence:
             "callee_recursive_scc_identity": self.callee_recursive_scc_identity,
             "callee_recursive_scc_member_keys": self.callee_recursive_scc_member_keys,
             "return_summary_status": self.return_summary_status,
+            "return_semantic_bit_width": self.return_semantic_bit_width,
+            "return_signed": self.return_signed,
             "return_value_keys": self.return_value_keys,
             "return_guard_keys": self.return_guard_keys,
             "source": self.source,
@@ -1147,8 +1158,14 @@ def summarize_store_effects(
         )
         expansion_values: List[Tuple[object, ...]] = []
         expansion_guards: List[Tuple[object, ...]] = []
+        expansion_partitions: List[Tuple[Tuple[Condition, ...], Expression]] = []
         for expansion in return_expansions or ():
             expansion_value = getattr(expansion, "value", None)
+            expansion_conditions = tuple(
+                condition
+                for condition in getattr(expansion, "conditions", ()) or ()
+                if isinstance(condition, Condition)
+            )
             value_key = (
                 expression_provenance_key(expansion_value)
                 if isinstance(expansion_value, Expression)
@@ -1156,6 +1173,9 @@ def summarize_store_effects(
             )
             if isinstance(value_key, tuple):
                 expansion_values.append(value_key)
+                expansion_partitions.append(
+                    (expansion_conditions, expansion_value)
+                )
             expansion_guards.extend(
                 _condition_evidence_key(condition)
                 for condition in getattr(expansion, "conditions", ()) or ()
@@ -1198,10 +1218,24 @@ def summarize_store_effects(
                     else ()
                 ),
                 return_summary_status=(
-                    "candidate" if expansion_values else "unavailable"
+                    "complete"
+                    if expansion_values
+                    and bool(getattr(return_expansions, "coverage_complete", False))
+                    else "candidate" if expansion_values else "unavailable"
+                ),
+                return_semantic_bit_width=(
+                    int(getattr(return_expansions, "return_semantic_bit_width"))
+                    if getattr(return_expansions, "return_semantic_bit_width", None)
+                    else None
+                ),
+                return_signed=(
+                    bool(getattr(return_expansions, "return_signed"))
+                    if getattr(return_expansions, "return_signed", None) is not None
+                    else None
                 ),
                 return_value_keys=tuple(expansion_values),
                 return_guard_keys=tuple(expansion_guards),
+                return_partitions=tuple(expansion_partitions),
             )
         )
 
