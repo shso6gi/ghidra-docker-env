@@ -1,0 +1,1128 @@
+{
+  "queries": [
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 2,
+        "unknown_pairs": 2,
+        "unsat_pairs": 0
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_dispatch_indirect:B1 \u2194 B2",
+      "smt": {
+        "major_structure_hash": "7051f61dc2cc55159f0c9300fec6839bf42deac0dd0961010a9b491ffc0ca3ad"
+      },
+      "stage": "P0_BASE",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_dispatch_indirect:B1 \u2194 B2",
+      "smt": null,
+      "stage": "P1_SIGNEDNESS",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 2,
+        "unknown_pairs": 2,
+        "unsat_pairs": 0
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_dispatch_indirect:B1 \u2194 B2",
+      "smt": {
+        "major_structure_hash": "7051f61dc2cc55159f0c9300fec6839bf42deac0dd0961010a9b491ffc0ca3ad"
+      },
+      "stage": "P2_PATTERN_INT",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNSAT",
+        "sat_pairs": 0,
+        "total_pairs": 4,
+        "unknown_pairs": 0,
+        "unsat_pairs": 4
+      },
+      "counterexample_replay": null,
+      "fallback": "UNSAT",
+      "pair_id": "fc_dispatch_indirect:B3 \u2194 B4",
+      "smt": {
+        "major_structure_hash": "319dedaa5e854695a37415a078405d85e92479261e90c8445366ce7c27822f98"
+      },
+      "stage": "P0_BASE",
+      "status": "UNSAT",
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 140,
+        "unknown_pairs": 31,
+        "unsat_pairs": 109
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_is_odd:B1 \u2194 B7",
+      "smt": {
+        "major_structure_hash": "49636a5416ef53ed21a9f123022823a57bc85fa6b99f6984b1a7fe80a5a977b2"
+      },
+      "stage": "P0_BASE",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_is_odd:B1 \u2194 B7",
+      "smt": null,
+      "stage": "P1_SIGNEDNESS",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 140,
+        "unknown_pairs": 31,
+        "unsat_pairs": 109
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_is_odd:B1 \u2194 B7",
+      "smt": {
+        "major_structure_hash": "49636a5416ef53ed21a9f123022823a57bc85fa6b99f6984b1a7fe80a5a977b2"
+      },
+      "stage": "P2_PATTERN_INT",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 10,
+        "unknown_pairs": 0,
+        "unsat_pairs": 10
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_recursive_sum:B1 \u2194 B7",
+      "smt": {
+        "major_structure_hash": "739364992755a288223c5286d9052033e3d6101bfcb7fc1132519075a34c8d33"
+      },
+      "stage": "P0_BASE",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_recursive_sum:B1 \u2194 B7",
+      "smt": null,
+      "stage": "P1_SIGNEDNESS",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_recursive_sum:B1 \u2194 B7",
+      "smt": null,
+      "stage": "P2_PATTERN_INT",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": {
+        "decisive_result": "UNKNOWN",
+        "sat_pairs": 0,
+        "total_pairs": 4,
+        "unknown_pairs": 0,
+        "unsat_pairs": 4
+      },
+      "counterexample_replay": null,
+      "fallback": "UNKNOWN",
+      "pair_id": "fc_recursive_sum:B3 \u2194 B7",
+      "smt": {
+        "major_structure_hash": "500ffe28ef33dbb7a6509db79a6759d07da981856499f47537180f797cee3a69"
+      },
+      "stage": "P0_BASE",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_recursive_sum:B3 \u2194 B7",
+      "smt": null,
+      "stage": "P1_SIGNEDNESS",
+      "status": null,
+      "timeout_budget": null
+    },
+    {
+      "counterexample_decisive": null,
+      "counterexample_replay": null,
+      "fallback": "no_changes",
+      "pair_id": "fc_recursive_sum:B3 \u2194 B7",
+      "smt": null,
+      "stage": "P2_PATTERN_INT",
+      "status": null,
+      "timeout_budget": null
+    }
+  ],
+  "records": [
+    {
+      "final_result": "UNKNOWN",
+      "function_name": "fc_dispatch_indirect",
+      "pair_identity": "B1 \u2194 B2",
+      "payloads": [
+        {
+          "active_blockers": [],
+          "completed_proof_evidence": [],
+          "counterexample_decisive": null,
+          "counterexample_replay": null,
+          "coverage_gaps": [],
+          "reason_tuples": [
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "none",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "sat_unsafety",
+              "blocks_disequivalence",
+              "pair",
+              "sat_unsafety_resolution",
+              "S_PAIRWISE",
+              "(0,0)"
+            ],
+            [
+              "sat_unsafety",
+              "blocks_disequivalence",
+              "pair",
+              "sat_unsafety_resolution",
+              "S_PAIRWISE",
+              "(0,1)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "final_result": "EQ",
+      "function_name": "fc_dispatch_indirect",
+      "pair_identity": "B3 \u2194 B4",
+      "payloads": [
+        {
+          "active_blockers": [],
+          "completed_proof_evidence": [],
+          "counterexample_decisive": null,
+          "counterexample_replay": null,
+          "coverage_gaps": [],
+          "reason_tuples": []
+        }
+      ]
+    },
+    {
+      "final_result": "UNKNOWN",
+      "function_name": "fc_is_odd",
+      "pair_identity": "B1 \u2194 B7",
+      "payloads": [
+        {
+          "active_blockers": [],
+          "completed_proof_evidence": [],
+          "counterexample_decisive": null,
+          "counterexample_replay": null,
+          "coverage_gaps": [],
+          "reason_tuples": [
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "none",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(0,13)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(1,2)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(2,4)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(3,1)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(4,6)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(5,2)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(6,4)"
+            ],
+            [
+              "return_width_bridge_missing",
+              "blocks_equivalence",
+              "query",
+              "abi_relation_high_bit_proof",
+              "S_PAIRWISE",
+              "(7,1)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,0)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,1)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,10)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,11)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,2)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,3)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,4)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,6)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,7)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,8)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(8,9)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,1)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,10)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,11)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,12)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,2)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,3)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,4)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,5)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,6)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,7)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,8)"
+            ],
+            [
+              "unresolved_expression",
+              "blocks_decision",
+              "expression",
+              "none",
+              "S_PAIRWISE",
+              "(9,9)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "final_result": "UNKNOWN",
+      "function_name": "fc_recursive_sum",
+      "pair_identity": "B1 \u2194 B7",
+      "payloads": [
+        {
+          "active_blockers": [],
+          "completed_proof_evidence": [],
+          "counterexample_decisive": null,
+          "counterexample_replay": null,
+          "coverage_gaps": [],
+          "reason_tuples": [
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "call_effect_summary_proof",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "equivalence_blocking_unsafety",
+              "blocks_equivalence",
+              "function",
+              "none",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "summary_return_candidate_invalid",
+              "blocks_equivalence",
+              "function",
+              "loop_summary_completion",
+              "S_PAIRWISE",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "final_result": "UNKNOWN",
+      "function_name": "fc_recursive_sum",
+      "pair_identity": "B3 \u2194 B7",
+      "payloads": [
+        {
+          "active_blockers": [],
+          "completed_proof_evidence": [],
+          "counterexample_decisive": null,
+          "counterexample_replay": null,
+          "coverage_gaps": [],
+          "reason_tuples": [
+            [
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "S_PAIRWISE",
+              null
+            ],
+            [
+              "summary_return_candidate_invalid",
+              "blocks_equivalence",
+              "function",
+              "loop_summary_completion",
+              "S_PAIRWISE",
+              null
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "validation": {
+    "final_result_counts": {
+      "EQ": 1,
+      "ERROR": 0,
+      "INCOMPLETE": 0,
+      "NOT_EQ": 0,
+      "TIMEOUT": 0,
+      "UNKNOWN": 4
+    },
+    "pair_final_result_multiset": [
+      {
+        "count": 1,
+        "key": [
+          "fc_dispatch_indirect",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-clang-O1",
+          "UNKNOWN"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_dispatch_indirect",
+          "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-clang-O3",
+          "EQ"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_is_odd",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_recursive_sum",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_recursive_sum",
+          "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN"
+        ]
+      }
+    ],
+    "pair_identities": [
+      [
+        "fc_dispatch_indirect",
+        "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-clang-O1"
+      ],
+      [
+        "fc_dispatch_indirect",
+        "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-clang-O3"
+      ],
+      [
+        "fc_is_odd",
+        "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2"
+      ],
+      [
+        "fc_recursive_sum",
+        "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2"
+      ],
+      [
+        "fc_recursive_sum",
+        "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-gcc-O2"
+      ]
+    ],
+    "pair_result_multiset": [
+      {
+        "count": 1,
+        "key": [
+          "fc_dispatch_indirect",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-clang-O1",
+          "UNKNOWN",
+          "equivalence_blocking_unsafety,sat_unsafety",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_dispatch_indirect",
+          "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-clang-O3",
+          "EQ",
+          "<missing>",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_is_odd",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN",
+          "equivalence_blocking_unsafety,return_coverage_gap,return_width_bridge_missing,unresolved_expression",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_recursive_sum",
+          "function_call_test-arm64-clang-O0 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN",
+          "equivalence_blocking_unsafety,return_coverage_gap,summary_return_candidate_invalid",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "fc_recursive_sum",
+          "function_call_test-arm64-clang-O2 \u2194 function_call_test-arm64-gcc-O2",
+          "UNKNOWN",
+          "return_coverage_gap,summary_return_candidate_invalid",
+          "<missing>"
+        ]
+      }
+    ],
+    "proof_action_multiset": [
+      {
+        "count": 2,
+        "key": [
+          "proof_action",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callee_effect_summary_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "proof_action",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callsite_argument_evidence_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "proof_action",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "object_evidence_collected",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "proof_action",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "recursive_call_scc_unproven",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 3,
+        "key": [
+          "proof_action",
+          "return_coverage_gap",
+          "blocks_equivalence",
+          "function",
+          "return_coverage_completion",
+          "return_guard_coverage",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 3,
+        "key": [
+          "proof_action",
+          "return_coverage_gap",
+          "blocks_equivalence",
+          "function",
+          "return_coverage_completion",
+          "return_partition_extraction",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 8,
+        "key": [
+          "proof_action",
+          "return_width_bridge_missing",
+          "blocks_equivalence",
+          "query",
+          "abi_relation_proof",
+          "abi_relation",
+          "planned"
+        ]
+      },
+      {
+        "count": 8,
+        "key": [
+          "proof_action",
+          "return_width_bridge_missing",
+          "blocks_equivalence",
+          "query",
+          "high_bit_proof",
+          "high_bit_relation",
+          "planned"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "proof_action",
+          "sat_unsafety",
+          "blocks_disequivalence",
+          "pair",
+          "sat_unsafety_resolution",
+          "sat_counterexample_safety",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "proof_action",
+          "summary_return_candidate_invalid",
+          "blocks_equivalence",
+          "function",
+          "loop_summary_completion",
+          "summary_return_candidate_validation",
+          "planned"
+        ]
+      },
+      {
+        "count": 23,
+        "key": [
+          "proof_action",
+          "unresolved_expression",
+          "blocks_decision",
+          "expression",
+          "solver_retry_or_normalization",
+          "deferred_call_result_equivalence",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 23,
+        "key": [
+          "proof_action",
+          "unresolved_expression",
+          "blocks_decision",
+          "expression",
+          "solver_retry_or_normalization",
+          "deferred_call_return_resolution",
+          "pending_proof"
+        ]
+      }
+    ],
+    "reason_record_multiset": [
+      {
+        "count": 2,
+        "key": [
+          "reason_record",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callee_effect_summary_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "reason_record",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callsite_argument_evidence_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "reason_record",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "object_evidence_collected",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "reason_record",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "recursive_call_scc_unproven",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 3,
+        "key": [
+          "reason_record",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "none",
+          "<missing>",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 3,
+        "key": [
+          "reason_record",
+          "return_coverage_gap",
+          "blocks_equivalence",
+          "function",
+          "return_coverage_completion",
+          "<missing>",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 8,
+        "key": [
+          "reason_record",
+          "return_width_bridge_missing",
+          "blocks_equivalence",
+          "query",
+          "abi_relation_high_bit_proof",
+          "<missing>",
+          "planned"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "reason_record",
+          "sat_unsafety",
+          "blocks_disequivalence",
+          "pair",
+          "sat_unsafety_resolution",
+          "sat_counterexample_safety",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "reason_record",
+          "summary_return_candidate_invalid",
+          "blocks_equivalence",
+          "function",
+          "loop_summary_completion",
+          "summary_return_candidate_validation",
+          "<missing>"
+        ]
+      },
+      {
+        "count": 23,
+        "key": [
+          "reason_record",
+          "unresolved_expression",
+          "blocks_decision",
+          "expression",
+          "none",
+          "<missing>",
+          "pending_proof"
+        ]
+      }
+    ],
+    "timeout_class_multiset": [],
+    "timeout_final_results": 0,
+    "total_results": 5,
+    "unknown_final_results": 4,
+    "validation_unknown_unit_multiset": [
+      {
+        "count": 2,
+        "key": [
+          "validation_unknown_unit",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callee_effect_summary_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "validation_unknown_unit",
+          "equivalence_blocking_unsafety",
+          "blocks_equivalence",
+          "function",
+          "call_effect_summary_proof",
+          "callsite_argument_evidence_incomplete",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 1,
+        "key": [
+          "validation_unknown_unit",
+          "return_coverage_gap",
+          "blocks_equivalence",
+          "function",
+          "return_coverage_completion",
+          "<missing>",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 8,
+        "key": [
+          "validation_unknown_unit",
+          "return_width_bridge_missing",
+          "blocks_equivalence",
+          "query",
+          "abi_relation_high_bit_proof",
+          "<missing>",
+          "planned"
+        ]
+      },
+      {
+        "count": 2,
+        "key": [
+          "validation_unknown_unit",
+          "sat_unsafety",
+          "blocks_disequivalence",
+          "pair",
+          "sat_unsafety_resolution",
+          "sat_counterexample_safety",
+          "pending_proof"
+        ]
+      },
+      {
+        "count": 23,
+        "key": [
+          "validation_unknown_unit",
+          "unresolved_expression",
+          "blocks_decision",
+          "expression",
+          "none",
+          "<missing>",
+          "pending_proof"
+        ]
+      }
+    ]
+  }
+}

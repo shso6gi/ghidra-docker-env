@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "fc11037ddc3d393ec7555657229323db1c5c5a4d",
+  "refactor_source_tree_sha256": "cd221d4428cd14628465dedc57dea4beef7afba1466a9b970a786f4cfc46d15f",
+  "environment": {
+    "ghidra": "12.0.1 PUBLIC",
+    "pyghidra": "3.0.2",
+    "python": "3.10.12",
+    "z3": "4.16.0",
+    "fixture_compiler": "gcc 11.4.0"
+  },
+  "execution": {
+    "baseline_prefix": "GHIDRA_INSTALL_DIR=/mnt/c/users/saito/git/ghidra-docker-env/.local-ghidra-extract/ghidra_12.0.1_PUBLIC JAVA_HOME=/mnt/c/users/saito/git/ghidra-docker-env/.local-jdk /tmp/clean-fc11037.fhivQh/.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main",
+    "current_prefix": "/mnt/c/users/saito/git/ghidra-docker-env/.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main",
+    "baseline_working_directory": "/tmp/clean-fc11037.fhivQh",
+    "current_working_directory": "/mnt/c/users/saito/git/ghidra-docker-env"
+  },
+  "not_eq": {
+    "comparison": "fc_guarded_call versus fc_equiv_direct",
+    "arguments": "--equiv /mnt/c/users/saito/git/ghidra-docker-env/targets/cate1/function_call_test/function_call_test-arm64-clang-O0 /mnt/c/users/saito/git/ghidra-docker-env/targets/cate1/function_call_test/function_call_test-arm64-clang-O1 -f fc_guarded_call fc_equiv_direct -d --emit-result-json",
+    "binary_sha256": [
+      "4527012e1f08f153a89a6c8523a8907c11e1645c1b76e56b0c5d635697e566a3",
+      "f1e61de2f816f7ad97a79fb2900ddef041c1109d79602979bbf8401eaf55db3e"
+    ],
+    "result": "NOT_EQ on both sides",
+    "solver_status": "SAT on P0_BASE and P4C_RETURN_TYPE_FIX",
+    "decisiveness": "pairwise_decisive present with decisive_result SAT on both sides",
+    "counterexample_replay": "case-wide replay is represented by pairwise_decisive; direct counterexample_replay field is null on both sides",
+    "attempt_final_smt_surfaces": 2,
+    "canonical_hash": "7f086bf62a5fc50c22ecc35ee3e0b350549e1b4ecbe00ce4281e1f9588ec449e",
+    "baseline_log": {"path": "logs/baseline/fc_guarded_call__fc_equiv_direct_B1_B2.log.gz", "sha256": "95a9221c399213a9baf1b9442d6fa0a3782ac5001cdf7f4ba8658edbaaf910ef"},
+    "current_log": {"path": "logs/current/fc_guarded_call__fc_equiv_direct_B1_B2.log.gz", "sha256": "e500de16f5661dfc3c541a3c369354166b82153aa53c0a964c1199e3cf0d615e"},
+    "baseline_surface": {"path": "baseline_surface.json", "sha256": "efe7a5061c124024b6e3ee26439d6f9ae2587b50f039419294f9246b3c5a0b60"},
+    "current_surface": {"path": "current_surface.json", "sha256": "efe7a5061c124024b6e3ee26439d6f9ae2587b50f039419294f9246b3c5a0b60"}
+  },
+  "sat_safety_control": {
+    "fixture_sources": ["fixtures/left.c", "fixtures/right.c"],
+    "compile_commands": [
+      "gcc -O2 -g0 -fno-ident -Wl,--build-id=none fixtures/left.c -o /tmp/refactor-sat-not-eq/bin/left",
+      "gcc -O2 -g0 -fno-ident -Wl,--build-id=none fixtures/right.c -o /tmp/refactor-sat-not-eq/bin/right"
+    ],
+    "run_arguments": "--equiv /tmp/refactor-sat-not-eq/bin/left /tmp/refactor-sat-not-eq/bin/right --binary-ids NEG_LEFT NEG_RIGHT -f refactor_not_eq -d --emit-result-json",
+    "result": "UNKNOWN on both sides",
+    "reason_id": "sat_unsafety",
+    "evidence_ref": "counterexample_replay_missing",
+    "attempt_final_smt_surfaces": 3,
+    "canonical_hash": "fd87b4ef47afd39c154ef78ce2b1c523f0385e68ee5fa11f56050b090b029e4b",
+    "baseline_log": {"path": "logs/safety-baseline/refactor_not_eq.log.gz", "sha256": "585bf1761132c50d401800d91464d4f5f717ed1be214466f4ece139c0d087b43"},
+    "current_log": {"path": "logs/safety-current/refactor_not_eq.log.gz", "sha256": "560da362b567f95ef735d778563222484f3ea325b27109deb3f86dfc3d55308d"},
+    "baseline_surface": {"path": "safety_baseline_surface.json", "sha256": "66a16546625944c9c5a327d0a7b17a7e8ed799c9f7b3e0594299c2a2c24c4bc5"},
+    "current_surface": {"path": "safety_current_surface.json", "sha256": "66a16546625944c9c5a327d0a7b17a7e8ed799c9f7b3e0594299c2a2c24c4bc5"}
+  }
+}

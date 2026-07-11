@@ -40,7 +40,7 @@ Inside the container:
 ```bash
 python3 -B -m pytest \
   scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py \
-  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_guards.py -q
+  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_*.py -q
 
 VALIDATION_RUNNER_DRY_RUN=1 \
 ./phase2_run_function_call_pre_producer_final_result_preflight.sh
@@ -147,7 +147,7 @@ Before a long rerun, require a clean tree:
 git status --short
 ./.venv/bin/python -B -m pytest \
   scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py \
-  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_guards.py -q
+  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_*.py -q
 bash -n phase2_run_function_call_pre_producer_final_result_preflight.sh
 ```
 
