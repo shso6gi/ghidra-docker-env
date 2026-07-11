@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """Query execution helpers for PairwiseStrategy."""
+import copy
+import hashlib
 import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -11,6 +13,7 @@ from ..formula.returns import (
     require_equal_return_bit_widths,
 )
 from .pairwise_models import QueryResult
+from ..obligations import AttemptCacheEntry, AttemptKey
 
 
 def _is_void_return_placeholder(expr: Any) -> bool:
@@ -222,6 +225,46 @@ def _fallback_return_width_side_object_key(
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
     timeout = strategy.per_query_timeout_hard if use_hard_timeout else strategy.per_query_timeout
+    query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    runner = strategy.solver_runner
+    configured_solvers = getattr(runner, "solvers", None)
+    if not isinstance(configured_solvers, (tuple, list)):
+        configured_solvers = getattr(runner, "_solvers", ())
+    if not isinstance(configured_solvers, (tuple, list)):
+        configured_solvers = ()
+    solver_identity = (
+        runner.__class__.__module__,
+        runner.__class__.__qualname__,
+        tuple(
+            getattr(solver, "name", solver.__class__.__qualname__)
+            for solver in configured_solvers
+        ),
+    )
+    attempt_key = AttemptKey(
+        obligation_instance_id=("logical_smt_query", query_digest, stage),
+        producer_id="pairwise.solve_query_internal",
+        producer_version="1",
+        encoding_version="smtlib-current",
+        solver_identity=solver_identity,
+        timeout_budget=float(timeout),
+        execution_policy=("hard_timeout", bool(use_hard_timeout)),
+    )
+    cache = getattr(strategy, "_exact_query_attempt_cache", None)
+    if cache is not None:
+        cached = cache.get(attempt_key)
+        if cached is not None:
+            result = copy.copy(cached.outcome)
+            result.normalization_rules = list(cached.outcome.normalization_rules)
+            strategy._debug_print(
+                f"  Pair {pair_id} {stage}: ATTEMPT CACHE HIT "
+                f"(query={query_digest[:12]}, t_saved={cached.elapsed_time:.3f}s)"
+            )
+            stats = getattr(strategy, "_active_normalization_stats", None)
+            if stats is not None:
+                stats["exact_query_attempt_cache_hits"] = int(
+                    stats.get("exact_query_attempt_cache_hits", 0) or 0
+                ) + 1
+            return result
     parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
     counterexample_raw = None
     if parallel_result.is_equivalent is False:
@@ -242,11 +285,28 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
     if strategy.save_unknown_queries and parallel_result.is_equivalent is None:
         strategy._save_unknown_query(query, pair_id, stage)
 
-    return QueryResult(
+    result = QueryResult(
         is_equivalent=parallel_result.is_equivalent,
         counterexample_raw=counterexample_raw,
         solver_results=parallel_result,
     )
+    if cache is not None:
+        cache.put(
+            attempt_key,
+            AttemptCacheEntry(
+                outcome=copy.copy(result),
+                query_digest=query_digest,
+                query_size=len(query),
+                elapsed_time=elapsed,
+                retry_eligible=parallel_result.is_equivalent is None,
+            ),
+        )
+        stats = getattr(strategy, "_active_normalization_stats", None)
+        if stats is not None:
+            stats["exact_query_attempt_cache_misses"] = int(
+                stats.get("exact_query_attempt_cache_misses", 0) or 0
+            ) + 1
+    return result
 
 
 def solve_query_twostage(

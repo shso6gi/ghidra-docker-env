@@ -294,6 +294,16 @@ class EquivalenceResult:
                     unknown=stats.get("unknown_results", 0),
                 )
             )
+            if (
+                "exact_query_attempt_cache_hits" in stats
+                or "exact_query_attempt_cache_misses" in stats
+            ):
+                lines.append(
+                    "  exact_query_cache_hits={hits}, exact_query_cache_misses={misses}".format(
+                        hits=stats.get("exact_query_attempt_cache_hits", 0),
+                        misses=stats.get("exact_query_attempt_cache_misses", 0),
+                    )
+                )
 
         if self.unknown_reasons:
             lines.append("")

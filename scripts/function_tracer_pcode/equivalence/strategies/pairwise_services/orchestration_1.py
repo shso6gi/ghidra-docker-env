@@ -200,6 +200,8 @@ def _impl_check(
         "sat_results": 0,
         "unknown_results": 0,
         "return_width_bridge_missing": 0,
+        "exact_query_attempt_cache_hits": 0,
+        "exact_query_attempt_cache_misses": 0,
     }
     unknown_reasons = []
     self._active_normalization_stats = normalization_stats

@@ -36,6 +36,13 @@ class PairwiseStrategy(CheckStrategy):
         self.enable_solver_proven_rewrite_fallback = True
         self.enable_normalization_fallback = False
         self._active_safety_checker = None
+        # Process-local obligation attempt cache.  The cache is intentionally
+        # owned by the strategy instance so recursive/derived pairwise branches
+        # can reuse identical logical queries without changing public dispatch
+        # or persisting mutable FunctionReturnAnalysis objects.
+        from ..obligations import AttemptCache
+        self._exact_query_attempt_cache = AttemptCache(max_entries=4096)
+        self._obligation_scheduler_run_id = 0
 
     def __getattr__(self, name: str):
         from .pairwise_services import resolve_method

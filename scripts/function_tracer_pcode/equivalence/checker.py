@@ -164,6 +164,13 @@ class EquivalenceChecker:
         self.loop_template_strategy.per_query_timeout = pairwise_timeout
         self.loop_template_strategy.per_query_timeout_hard = pairwise_timeout_hard
         self.loop_template_strategy.save_unknown_queries = pairwise_save_unknown
+        # Both strategies encode the same guard/value obligations.  Sharing the
+        # process-local attempt cache lets the loop-template fallback reuse the
+        # base branch's identical queries while its template-specific queries
+        # retain distinct logical digests.
+        self.loop_template_strategy._exact_query_attempt_cache = (
+            self.pairwise_strategy._exact_query_attempt_cache
+        )
         if pairwise_unknown_dir is not None:
             self.loop_template_strategy.unknown_query_dir = pairwise_unknown_dir
         
