@@ -3,9 +3,12 @@
 
 import pytest
 import json
+from types import SimpleNamespace
 from scripts.function_tracer_pcode.equivalence.debug_trace import (
     DebugTrace, Attempt, TransitionReason, PairwiseDecisiveInfo, NormalizationRuleApplication
 )
+from scripts.function_tracer_pcode.equivalence.attempts import _record_explicit_proof_completions
+from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
 
 
 def test_normalization_rule_application():
@@ -80,6 +83,284 @@ def test_attempt():
     assert attempt_dict["phase"] == "P0_BASE"
     assert attempt_dict["transition_reason"] == "UNKNOWN"
     assert attempt_dict["elapsed_time"] == 1.5
+
+
+def test_later_independent_unknown_does_not_supersede_prior_blockers():
+    trace = DebugTrace()
+    first = Attempt(
+        attempt_id=0,
+        retry_count=0,
+        phase="P0_BASE",
+        stage_path=["S_PAIRWISE"],
+        strategy="pairwise",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[
+            make_unknown_reason("return_coverage_gap"),
+            make_unknown_reason("equivalence_blocking_unsafety"),
+        ],
+    )
+    second = Attempt(
+        attempt_id=1,
+        retry_count=1,
+        phase="P1_RETRY",
+        stage_path=["S_MONOLITHIC"],
+        strategy="monolithic",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[make_unknown_reason("solver_unknown_timeout")],
+    )
+
+    trace.add_attempt(first)
+    trace.add_attempt(second)
+
+    assert trace.causal_transitions == []
+
+
+def test_explicit_reason_replacement_emits_supersession_transition():
+    trace = DebugTrace()
+    first = Attempt(
+        attempt_id=0,
+        retry_count=0,
+        phase="P0_BASE",
+        stage_path=[],
+        strategy="pairwise",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[make_unknown_reason("unresolved_expression")],
+    )
+    second = Attempt(
+        attempt_id=1,
+        retry_count=1,
+        phase="P1_RECOVERY",
+        stage_path=[],
+        strategy="pairwise",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[make_unknown_reason("unresolved_value_expression")],
+    )
+    trace.add_attempt(first)
+    trace.add_attempt(second)
+
+    trace.add_reason_replacement(
+        first.reason_occurrences[0].occurrence_id,
+        second.reason_occurrences[0].occurrence_id,
+        "expression_recovery_specialization",
+    )
+
+    assert len(trace.causal_transitions) == 1
+    transition = trace.causal_transitions[0]
+    assert transition.target_occurrence_id == first.reason_occurrences[0].occurrence_id
+    assert transition.cause_ref == second.reason_occurrences[0].occurrence_id
+    assert transition.transition_kind == "superseded"
+
+
+def test_explicit_matching_proof_completion_discharges_prior_occurrence():
+    requirement = {
+        "schema_version": 1,
+        "proof_kind": "return_coverage_completion",
+        "proof_target_key": ("function", "f"),
+        "proof_contract_key": (1, "all inputs classified"),
+    }
+    trace = DebugTrace()
+    trace.add_attempt(
+        Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=["S_PAIRWISE"],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.UNKNOWN.value,
+            unknown_reasons=[
+                make_unknown_reason(
+                    "return_coverage_gap",
+                    proof_requirement_ids=(requirement,),
+                )
+            ],
+        )
+    )
+    trace.add_attempt(
+        Attempt(
+            attempt_id=1,
+            retry_count=1,
+            phase="P1_COVERAGE",
+            stage_path=["S_PAIRWISE"],
+            strategy="pairwise",
+            result=True,
+            transition_reason=TransitionReason.UNSAT.value,
+        )
+    )
+    result = SimpleNamespace(
+        completed_recovery_proof_evidence=[
+            {
+                "side": "function1",
+                "evidence": {
+                    "proof_requirement_id": requirement,
+                    "proof_status": "verified",
+                    "proof_artifact_ref": ("return_partition", "f", "v1"),
+                },
+            }
+        ]
+    )
+
+    _record_explicit_proof_completions(trace, result)
+
+    assert len(trace.proof_completion_events) == 1
+    discharges = [
+        item for item in trace.causal_transitions
+        if item.transition_kind == "discharged"
+    ]
+    assert len(discharges) == 1
+    assert discharges[0].target_occurrence_id == trace.attempts[0].reason_occurrences[0].occurrence_id
+
+
+def test_proof_evidence_without_exact_requirement_does_not_discharge():
+    trace = DebugTrace()
+    trace.add_attempt(
+        Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=[],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.UNKNOWN.value,
+            unknown_reasons=[make_unknown_reason("return_coverage_gap")],
+        )
+    )
+    result = SimpleNamespace(
+        completed_recovery_proof_evidence=[
+            {"evidence": {"proof_status": "verified", "proof_artifact_ref": ("x",)}}
+        ]
+    )
+
+    _record_explicit_proof_completions(trace, result)
+
+    assert trace.proof_completion_events == []
+    assert trace.causal_transitions == []
+
+
+def test_production_proof_obligation_links_unique_typed_requirement():
+    requirement = {
+        "schema_version": 1,
+        "proof_kind": "return_coverage_completion",
+        "proof_target_key": ("function", "f"),
+        "proof_contract_key": (1, "all inputs classified"),
+    }
+    legacy_obligation = (
+        "proof_obligation",
+        "return_coverage_gap",
+        "return_guard_coverage",
+        ("return_partition", "f"),
+    )
+    trace = DebugTrace()
+    trace.add_attempt(
+        Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=[],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.UNKNOWN.value,
+            unknown_reasons=[
+                make_unknown_reason(
+                    "return_coverage_gap",
+                    proof_obligation_id=legacy_obligation,
+                    proof_requirement_ids=(requirement,),
+                )
+            ],
+        )
+    )
+    trace.add_attempt(
+        Attempt(
+            attempt_id=1,
+            retry_count=1,
+            phase="P1_COVERAGE",
+            stage_path=[],
+            strategy="pairwise",
+            result=True,
+            transition_reason=TransitionReason.UNSAT.value,
+        )
+    )
+    result = SimpleNamespace(
+        completed_recovery_proof_evidence=[
+            {
+                "side": "function1",
+                "evidence": {
+                    "proof_obligation_id": legacy_obligation,
+                    "status": "complete",
+                },
+            }
+        ]
+    )
+
+    _record_explicit_proof_completions(trace, result)
+
+    assert len(trace.proof_completion_events) == 1
+    assert trace.proof_completion_events[0].proof_requirement_id == requirement
+    assert trace.proof_completion_events[0].proof_status == "proven"
+    assert [item.transition_kind for item in trace.causal_transitions] == ["discharged"]
+
+
+def test_ambiguous_legacy_obligation_does_not_guess_typed_requirement():
+    legacy_obligation = ("proof_obligation", "shared")
+    trace = DebugTrace()
+    reasons = []
+    for suffix in ("left", "right"):
+        reasons.append(
+            make_unknown_reason(
+                "return_coverage_gap",
+                proof_obligation_id=legacy_obligation,
+                proof_requirement_ids=(
+                    {
+                        "schema_version": 1,
+                        "proof_kind": "return_coverage_completion",
+                        "proof_target_key": ("function", suffix),
+                        "proof_contract_key": (1, "all inputs classified"),
+                    },
+                ),
+            )
+        )
+    trace.add_attempt(
+        Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=[],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.UNKNOWN.value,
+            unknown_reasons=reasons,
+        )
+    )
+    trace.add_attempt(
+        Attempt(
+            attempt_id=1,
+            retry_count=1,
+            phase="P1_COVERAGE",
+            stage_path=[],
+            strategy="pairwise",
+            result=True,
+            transition_reason=TransitionReason.UNSAT.value,
+        )
+    )
+    result = SimpleNamespace(
+        completed_recovery_proof_evidence=[
+            {
+                "evidence": {
+                    "proof_obligation_id": legacy_obligation,
+                    "status": "complete",
+                }
+            }
+        ]
+    )
+
+    _record_explicit_proof_completions(trace, result)
+
+    assert trace.proof_completion_events == []
+    assert trace.causal_transitions == []
 
 
 def test_debug_trace():

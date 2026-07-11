@@ -1147,6 +1147,8 @@ class UnknownReasonRecord:
     object_target_key: Optional[Tuple[Any, ...]] = None
     object_evidence: Optional[Any] = None
     proof_obligation_id: Optional[Tuple[Any, ...]] = None
+    typed_cause_key: Optional[Mapping[str, Any]] = None
+    proof_requirement_ids: Tuple[Mapping[str, Any], ...] = ()
     recovery_action: Optional[str] = None
     action_status: Optional[str] = None
     target_regression: Optional[str] = None
@@ -1171,6 +1173,8 @@ class UnknownReasonRecord:
             "evidence_kind": self.evidence_kind,
             "object_target_key": self.object_target_key,
             "proof_obligation_id": self.proof_obligation_id,
+            "typed_cause_key": dict(self.typed_cause_key) if self.typed_cause_key else None,
+            "proof_requirement_ids": [dict(item) for item in self.proof_requirement_ids],
             "recovery_action": self.recovery_action,
             "action_status": self.action_status,
             "target_regression": self.target_regression,
@@ -1199,6 +1203,8 @@ class UnknownReasonRecord:
             object_target_key=payload.get("object_target_key"),
             object_evidence=payload.get("object_evidence"),
             proof_obligation_id=payload.get("proof_obligation_id"),
+            typed_cause_key=payload.get("typed_cause_key"),
+            proof_requirement_ids=payload.get("proof_requirement_ids") or (),
             recovery_action=payload.get("recovery_action"),
             action_status=payload.get("action_status"),
             target_regression=payload.get("target_regression"),
@@ -1224,6 +1230,8 @@ def make_unknown_reason(
     object_target_key: Any = None,
     object_evidence: Any = None,
     proof_obligation_id: Any = None,
+    typed_cause_key: Optional[Mapping[str, Any]] = None,
+    proof_requirement_ids: Optional[Sequence[Mapping[str, Any]]] = None,
     recovery_action: Optional[str] = None,
     action_status: Any = None,
     target_regression: Optional[str] = None,
@@ -1297,6 +1305,8 @@ def make_unknown_reason(
         object_target_key=coerced_object_target_key,
         object_evidence=object_evidence,
         proof_obligation_id=coerced_proof_obligation_id,
+        typed_cause_key=dict(typed_cause_key) if typed_cause_key else None,
+        proof_requirement_ids=tuple(dict(item) for item in (proof_requirement_ids or ())),
         recovery_action=recovery_action,
         action_status=normalized_action_status,
         target_regression=target_regression if target_regression is not None else definition.target_regression,

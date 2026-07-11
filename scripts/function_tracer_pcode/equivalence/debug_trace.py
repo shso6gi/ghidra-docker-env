@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """等価性判定のデバッグトレース（機械可読）"""
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Mapping, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -24,6 +24,95 @@ class TransitionReason(Enum):
     NO_CHANGES = "no_changes"  # Phase適用されず → スキップ
     CRITICAL_ERROR = "critical_error"  # 致命的エラー → 終了
     STAGE_FALLBACK = "stage_fallback"  # Pairwise UNKNOWN → Monolithic
+
+
+class CausalStatus(str, Enum):
+    ACTIVE_FINAL_BLOCKER = "active_final_blocker"
+    CONTRIBUTING_BLOCKER = "contributing_blocker"
+    DIAGNOSTIC_ONLY = "diagnostic_only"
+    UNCLASSIFIED = "unclassified"
+
+
+@dataclass(frozen=True)
+class AttemptIdentity:
+    strategy_identity: str
+    attempt_ordinal: int
+    trace_schema_version: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReasonOccurrenceId:
+    attempt_identity: AttemptIdentity
+    reason_ordinal: int
+    occurrence_schema_version: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "occurrence_schema_version": self.occurrence_schema_version,
+            "attempt_identity": self.attempt_identity.to_dict(),
+            "reason_ordinal": self.reason_ordinal,
+        }
+
+
+@dataclass(frozen=True)
+class ReasonOccurrence:
+    occurrence_id: ReasonOccurrenceId
+    reason_record: UnknownReasonRecord
+    initial_causal_status: str = CausalStatus.UNCLASSIFIED.value
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "occurrence_id": self.occurrence_id.to_dict(),
+            "reason_record": self.reason_record.to_dict(),
+            "attempt_identity": self.occurrence_id.attempt_identity.to_dict(),
+            "initial_causal_status": self.initial_causal_status,
+        }
+
+
+@dataclass(frozen=True)
+class ProofCompletionEvent:
+    completion_id: Tuple[Any, ...]
+    proof_requirement_id: Mapping[str, Any]
+    proof_artifact_ref: Tuple[Any, ...]
+    proof_status: str
+    completed_at_attempt: AttemptIdentity
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "completion_id": self.completion_id,
+            "proof_requirement_id": dict(self.proof_requirement_id),
+            "proof_artifact_ref": self.proof_artifact_ref,
+            "proof_status": self.proof_status,
+            "completed_at_attempt": self.completed_at_attempt.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class ReasonCausalTransition:
+    transition_id: Tuple[Any, ...]
+    target_occurrence_id: ReasonOccurrenceId
+    transition_kind: str
+    cause_kind: str
+    cause_ref: Any
+    emitted_at_attempt: AttemptIdentity
+    transition_ordinal: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        cause_ref = self.cause_ref
+        if hasattr(cause_ref, "to_dict"):
+            cause_ref = cause_ref.to_dict()
+        return {
+            "transition_id": self.transition_id,
+            "target_occurrence_id": self.target_occurrence_id.to_dict(),
+            "transition_kind": self.transition_kind,
+            "cause_kind": self.cause_kind,
+            "cause_ref": cause_ref,
+            "emitted_at_attempt": self.emitted_at_attempt.to_dict(),
+            "transition_ordinal": self.transition_ordinal,
+        }
 
 
 @dataclass
@@ -116,11 +205,21 @@ class Attempt:
     pairwise_decisive: Optional[PairwiseDecisiveInfo] = None
     normalization_rules: List[NormalizationRuleApplication] = field(default_factory=list)
     unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
+    reason_occurrences: List[ReasonOccurrence] = field(default_factory=list)
     mips64_abi_constraints: Optional[Dict[str, Any]] = None
     elapsed_time: float = 0.0
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
+        if not self.reason_occurrences:
+            identity = AttemptIdentity(self.strategy, self.attempt_id)
+            self.reason_occurrences = [
+                ReasonOccurrence(
+                    occurrence_id=ReasonOccurrenceId(identity, ordinal),
+                    reason_record=reason,
+                )
+                for ordinal, reason in enumerate(self.unknown_reasons)
+            ]
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -146,6 +245,7 @@ class Attempt:
             "pairwise_decisive": self.pairwise_decisive.to_dict() if self.pairwise_decisive else None,
             "normalization_rules": [rule.to_dict() for rule in self.normalization_rules],
             "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
+            "reason_occurrences": [item.to_dict() for item in self.reason_occurrences],
             "mips64_abi_constraints": self.mips64_abi_constraints,
             "elapsed_time": self.elapsed_time,
         }
@@ -161,10 +261,63 @@ class DebugTrace:
     final_result: Optional[bool] = None
     total_time: float = 0.0
     error_message: Optional[str] = None
+    causal_transitions: List[ReasonCausalTransition] = field(default_factory=list)
+    proof_completion_events: List[ProofCompletionEvent] = field(default_factory=list)
     
     def add_attempt(self, attempt: Attempt):
         """試行を追加"""
         self.attempts.append(attempt)
+
+    def add_reason_replacement(
+        self,
+        old_occurrence_id: ReasonOccurrenceId,
+        replacement_occurrence_id: ReasonOccurrenceId,
+        replacement_stage: str,
+    ) -> None:
+        """Record an orchestration-proven logical reason replacement."""
+        occurrence_ids = {
+            occurrence.occurrence_id
+            for attempt in self.attempts
+            for occurrence in attempt.reason_occurrences
+        }
+        if old_occurrence_id not in occurrence_ids:
+            raise ValueError("replacement source occurrence is not present in this trace")
+        if replacement_occurrence_id not in occurrence_ids:
+            raise ValueError("replacement target occurrence is not present in this trace")
+        if (
+            replacement_occurrence_id.attempt_identity.attempt_ordinal
+            <= old_occurrence_id.attempt_identity.attempt_ordinal
+        ):
+            raise ValueError("replacement occurrence must belong to a later attempt")
+        stage = str(replacement_stage or "").strip()
+        if not stage:
+            raise ValueError("reason replacement requires the recognizing stage")
+        self.causal_transitions.append(
+            ReasonCausalTransition(
+                transition_id=(
+                    "explicit_reason_replacement",
+                    old_occurrence_id.attempt_identity.strategy_identity,
+                    old_occurrence_id.attempt_identity.attempt_ordinal,
+                    old_occurrence_id.reason_ordinal,
+                    replacement_occurrence_id.attempt_identity.strategy_identity,
+                    replacement_occurrence_id.attempt_identity.attempt_ordinal,
+                    replacement_occurrence_id.reason_ordinal,
+                    stage,
+                ),
+                target_occurrence_id=old_occurrence_id,
+                transition_kind="superseded",
+                cause_kind="reason_occurrence",
+                cause_ref=replacement_occurrence_id,
+                emitted_at_attempt=replacement_occurrence_id.attempt_identity,
+                transition_ordinal=len(self.causal_transitions),
+            )
+        )
+
+    def add_causal_transition(self, transition: ReasonCausalTransition) -> None:
+        self.causal_transitions.append(transition)
+
+    def add_proof_completion(self, completion: ProofCompletionEvent) -> None:
+        self.proof_completion_events.append(completion)
 
     def get_phase_usage(self) -> List[Dict[str, Any]]:
         """Phase 利用状況を集約して返す。"""
@@ -309,6 +462,8 @@ class DebugTrace:
                     break
         return {
             "attempts": [attempt.to_dict() for attempt in self.attempts],
+            "causal_transitions": [item.to_dict() for item in self.causal_transitions],
+            "proof_completion_events": [item.to_dict() for item in self.proof_completion_events],
             "planned_phases": self.planned_phases,
             "known_phases": self.known_phases,
             "used_phases": self.get_used_phases(),

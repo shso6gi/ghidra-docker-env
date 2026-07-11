@@ -26,10 +26,22 @@ __all__ = [
     "format_validation_unknown_diff",
     "format_validation_unknown_summary",
     "summarize_validation_unknowns",
+    "AggregationSnapshot",
+    "RootBlockerSummary",
+    "format_root_blocker_summary",
+    "summarize_root_blockers",
 ]
 
 
 def __getattr__(name):
+    if name in {
+        "AggregationSnapshot",
+        "RootBlockerSummary",
+        "format_root_blocker_summary",
+        "summarize_root_blockers",
+    }:
+        module = import_module(".root_blocker_summary", __name__)
+        return getattr(module, name)
     if name in {
         "UnknownValidationDiff",
         "UnknownValidationSummary",

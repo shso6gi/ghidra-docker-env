@@ -29,6 +29,7 @@ from ..equivalence.unknown_reason import (
     coerce_unknown_reason_records,
     make_unknown_reason,
 )
+from .root_blocker_summary import compare_root_blocker_summaries, summarize_root_blockers
 
 
 _FINAL_UNKNOWN_TRANSITIONS = {"UNKNOWN", "TIMEOUT"}
@@ -99,6 +100,7 @@ class UnknownValidationSummary:
     proof_backlog_by_action_status: Dict[str, int] = field(default_factory=dict)
     operational_unknown_by_reason: Dict[str, int] = field(default_factory=dict)
     operational_unknown_by_class: Dict[str, int] = field(default_factory=dict)
+    root_blocker_summary: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -120,6 +122,7 @@ class UnknownValidationSummary:
             "proof_backlog_by_action_status": dict(self.proof_backlog_by_action_status),
             "operational_unknown_by_reason": dict(self.operational_unknown_by_reason),
             "operational_unknown_by_class": dict(self.operational_unknown_by_class),
+            "root_blocker_summary": dict(self.root_blocker_summary),
             "reason_record_correspondence": [
                 diagnostic.to_dict()
                 for diagnostic in diagnose_unknown_reason_correspondence(self)
@@ -146,6 +149,7 @@ class UnknownValidationDiff:
     proof_action_multiset_delta: Dict[Tuple[str, ...], int]
     operational_unknown_by_reason_delta: Dict[str, int]
     operational_unknown_by_class_delta: Dict[str, int]
+    root_blocker_diff: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -172,6 +176,7 @@ class UnknownValidationDiff:
             ),
             "operational_unknown_by_reason_delta": dict(self.operational_unknown_by_reason_delta),
             "operational_unknown_by_class_delta": dict(self.operational_unknown_by_class_delta),
+            "root_blocker_diff": dict(self.root_blocker_diff),
         }
 
 
@@ -181,6 +186,12 @@ def summarize_validation_unknowns(
     target_cases: Optional[Sequence[str]] = None,
 ) -> UnknownValidationSummary:
     target_filter = tuple(str(target) for target in (target_cases or ()))
+    payload_list = [_coerce_payload(raw_payload) for raw_payload in result_payloads]
+    selected_payloads = [
+        payload
+        for payload in payload_list
+        if not target_filter or _payload_matches_targets(payload, target_filter)
+    ]
     total_results = 0
     unknown_results = 0
     unknown_units = 0
@@ -198,10 +209,7 @@ def summarize_validation_unknowns(
     operational_unknown_by_reason: Dict[str, int] = {}
     operational_unknown_by_class: Dict[str, int] = {}
 
-    for raw_payload in result_payloads:
-        payload = _coerce_payload(raw_payload)
-        if target_filter and not _payload_matches_targets(payload, target_filter):
-            continue
+    for payload in selected_payloads:
         total_results += 1
         _inc(final_result_counts, _payload_final_result(payload))
         if not _payload_is_unknown(payload):
@@ -270,6 +278,7 @@ def summarize_validation_unknowns(
         proof_backlog_by_action_status=proof_backlog_by_action_status,
         operational_unknown_by_reason=operational_unknown_by_reason,
         operational_unknown_by_class=operational_unknown_by_class,
+        root_blocker_summary=summarize_root_blockers(selected_payloads).to_dict(),
     )
 
 
@@ -279,8 +288,19 @@ def compare_validation_unknowns(
     *,
     target_cases: Optional[Sequence[str]] = None,
 ) -> UnknownValidationDiff:
-    before = summarize_validation_unknowns(before_payloads, target_cases=target_cases)
-    after = summarize_validation_unknowns(after_payloads, target_cases=target_cases)
+    before_payloads_list = [_coerce_payload(item) for item in before_payloads]
+    after_payloads_list = [_coerce_payload(item) for item in after_payloads]
+    target_filter = tuple(str(target) for target in (target_cases or ()))
+    root_before = summarize_root_blockers(
+        item for item in before_payloads_list
+        if not target_filter or _payload_matches_targets(item, target_filter)
+    )
+    root_after = summarize_root_blockers(
+        item for item in after_payloads_list
+        if not target_filter or _payload_matches_targets(item, target_filter)
+    )
+    before = summarize_validation_unknowns(before_payloads_list, target_cases=target_cases)
+    after = summarize_validation_unknowns(after_payloads_list, target_cases=target_cases)
     return UnknownValidationDiff(
         before=before,
         after=after,
@@ -335,6 +355,7 @@ def compare_validation_unknowns(
             before.operational_unknown_by_class,
             after.operational_unknown_by_class,
         ),
+        root_blocker_diff=compare_root_blocker_summaries(root_before, root_after).to_dict(),
     )
 
 
@@ -521,6 +542,21 @@ def format_validation_unknown_summary(
             diagnose_unknown_reason_correspondence(summary),
             indent,
         )
+    root = summary.root_blocker_summary
+    if root:
+        lines.extend(
+            [
+                f"{indent}Root blockers:",
+                f"{indent}  Active unique blockers : {root.get('active_root_blocker_count', 0)}",
+                f"{indent}  Observed candidates     : {root.get('candidate_root_blocker_count', 0)}",
+                f"{indent}  Required unique proofs  : "
+                + (
+                    str(root.get("required_unique_proof_count"))
+                    if root.get("required_unique_proof_count") is not None
+                    else "unknown (incomplete identity)"
+                ),
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -536,6 +572,19 @@ def format_validation_unknown_diff(
         f"{indent}  Unknown results delta: {_format_delta(diff.delta_unknown_results)}",
         f"{indent}  Unknown units delta  : {_format_delta(diff.delta_unknown_units)}",
     ]
+    root_diff = diff.root_blocker_diff
+    if root_diff:
+        lines.extend(
+            [
+                f"{indent}  Active root blocker delta: {_format_delta(root_diff.get('active_root_blocker_delta', 0))}",
+                f"{indent}  Unique proof delta       : "
+                + (
+                    _format_delta(root_diff.get("required_unique_proof_delta", 0))
+                    if root_diff.get("proof_requirement_comparison_complete", True)
+                    else "unknown (incomplete requirement identity)"
+                ),
+            ]
+        )
     max_items = _summary_max_items(compact=compact, max_items=max_items)
     _append_count_block(lines, "Final results delta", diff.final_result_counts_delta, indent, max_items=max_items)
     _append_count_block(

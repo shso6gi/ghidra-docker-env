@@ -3,7 +3,7 @@
 
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
@@ -25,7 +25,15 @@ from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
 from .workflow import run_check_from_binaries
-from .unknown_reason import make_unknown_reason
+from .unknown_reason import build_unknown_recovery_actions, make_unknown_reason
+from .cause_identity import (
+    ProofRequirementContract,
+    ProofRequirementId,
+    UnaryCauseKey,
+    RelationalCauseKey,
+    ExecutionCauseKey,
+    canonical_cause_tuple,
+)
 from .call_effect_obligations import (
     EquivalenceObservationContract,
     apply_solver_proof_artifacts_to_manifest,
@@ -301,22 +309,35 @@ class EquivalenceChecker:
         binary2_id: Optional[str] = None,
         declared_return_type1: Optional[str] = None,
         declared_return_type2: Optional[str] = None,
+        binary1_content_identity: Optional[Tuple[Any, ...]] = None,
+        binary2_content_identity: Optional[Tuple[Any, ...]] = None,
     ) -> EquivalenceResult:
         """2つのバイナリから関数を解析して等価性を判定"""
-        return run_check_from_binaries(
-            self,
-            program1,
-            program2,
-            function_name1,
-            function_name2,
-            decompile_timeout=decompile_timeout,
-            save_formula=save_formula,
-            retry_with_type_fix=retry_with_type_fix,
-            binary1_id=binary1_id,
-            binary2_id=binary2_id,
-            declared_return_type1=declared_return_type1,
-            declared_return_type2=declared_return_type2,
+        previous_context = getattr(self, "_active_binary_content_identities", None)
+        self._active_binary_content_identities = (
+            binary1_content_identity,
+            binary2_content_identity,
         )
+        try:
+            result = run_check_from_binaries(
+                self,
+                program1,
+                program2,
+                function_name1,
+                function_name2,
+                decompile_timeout=decompile_timeout,
+                save_formula=save_formula,
+                retry_with_type_fix=retry_with_type_fix,
+                binary1_id=binary1_id,
+                binary2_id=binary2_id,
+                declared_return_type1=declared_return_type1,
+                declared_return_type2=declared_return_type2,
+            )
+            result.binary1_content_identity = binary1_content_identity
+            result.binary2_content_identity = binary2_content_identity
+            return result
+        finally:
+            self._active_binary_content_identities = previous_context
     
     # ★ 新規: 遷移理由を判定
     def _get_transition_reason(
@@ -933,10 +954,22 @@ class EquivalenceChecker:
                 analysis2,
                 call_effect_shadow_manifest,
             )
+            comparison_identity = self._call_effect_comparison_identity(
+                analysis1,
+                analysis2,
+                call_effect_shadow_manifest,
+            )
             strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(
                 list(getattr(strategy_result, "unknown_reasons", ()) or ()),
                 call_effect_shadow_manifest,
+                comparison_identity=comparison_identity,
             )
+            strategy_result.unknown_reasons = self._attach_root_blocker_identities(
+                strategy_result.unknown_reasons,
+                comparison_identity,
+            )
+            function1_identity = self._deterministic_analysis_identity(strategy, analysis1)
+            function2_identity = self._deterministic_analysis_identity(strategy, analysis2)
             
             if self.debug and strategy_result.smt_formula:
                 print("\n" + "=" * 60)
@@ -997,6 +1030,8 @@ class EquivalenceChecker:
                     binary2_name,
                 ),
                 call_effect_shadow_manifest=call_effect_shadow_manifest,
+                function1_identity=function1_identity,
+                function2_identity=function2_identity,
             )
         
         except Exception as e:
@@ -1277,6 +1312,7 @@ class EquivalenceChecker:
     def _specialize_call_effect_unknown_reasons(
         reasons: List[Any],
         manifest: Mapping[str, Any],
+        comparison_identity: Optional[Mapping[str, Any]] = None,
     ) -> List[Any]:
         """Move broad call unsafety to the first concrete relational proof stage."""
 
@@ -1292,6 +1328,7 @@ class EquivalenceChecker:
             and item.get("primary_proof_stage")
         }
         blocker_stages: Dict[str, Tuple[str, ...]] = {}
+        blocker_obligations: Dict[str, Tuple[str, ...]] = {}
         for item in mappings:
             if not isinstance(item, Mapping):
                 continue
@@ -1312,6 +1349,9 @@ class EquivalenceChecker:
             )
             if blocker and stages:
                 blocker_stages[blocker] = stages
+                blocker_obligations[blocker] = tuple(
+                    sorted(str(value) for value in (item.get("obligation_ids") or ()))
+                )
 
         specialized: List[Any] = []
         for reason in reasons:
@@ -1330,6 +1370,71 @@ class EquivalenceChecker:
                 next(iter(stages))
                 if len(stages) == 1
                 else "multiple_relational_call_effect_stages_missing"
+            )
+            matched_blockers = tuple(
+                sorted(
+                    str(ref)
+                    for ref in getattr(reason, "evidence_refs", ()) or ()
+                    if str(ref) in blocker_stages
+                )
+            )
+            obligation_ids = tuple(
+                sorted(
+                    {
+                        obligation_id
+                        for blocker in matched_blockers
+                        for obligation_id in blocker_obligations.get(blocker, ())
+                    }
+                )
+            )
+            coupling = manifest.get("coupling") if isinstance(manifest.get("coupling"), Mapping) else {}
+            observation = manifest.get("observation_contract") if isinstance(manifest.get("observation_contract"), Mapping) else {}
+            typed_cause = RelationalCauseKey(
+                cause_kind="deferred_call_effect_relation",
+                comparison_domain=(
+                    "semantic_comparison_domain",
+                    tuple((comparison_identity or {}).get("left_binary_content_identity") or ()),
+                    tuple((comparison_identity or {}).get("right_binary_content_identity") or ()),
+                    tuple((comparison_identity or {}).get("function_identity") or ()),
+                    tuple((comparison_identity or {}).get("architecture_identity") or ()),
+                    tuple((comparison_identity or {}).get("abi_identity") or ()),
+                    tuple((comparison_identity or {}).get("signature_storage_contract") or ()),
+                    tuple((comparison_identity or {}).get("calling_convention_fingerprint") or ()),
+                    tuple((comparison_identity or {}).get("comparison_policy_fingerprint") or ()),
+                    "call_effect_coupling",
+                    str(coupling.get("coupling_id") or "missing_coupling_id"),
+                    str(observation.get("contract_id") or "missing_observation_contract"),
+                ),
+                left_semantic_object=(
+                    "legacy_blocker_target",
+                    reason.object_target_key,
+                ),
+                right_semantic_object=(
+                    "relational_obligation_ids",
+                    obligation_ids,
+                ),
+                correspondence_contract=(
+                    "mapping_basis",
+                    "callsite_pcode_ref",
+                    "proof_stages",
+                    tuple(sorted(stages)),
+                ),
+            )
+            proof_requirement = ProofRequirementId.create(
+                reason.recovery_proof_kind,
+                canonical_cause_tuple(typed_cause),
+                ProofRequirementContract(
+                    "prove relational deferred call return/effect equivalence",
+                    relation_direction="ordered",
+                    observation_surface=(
+                        str(observation.get("contract_id") or "missing_observation_contract"),
+                    ),
+                    active_precondition=("mapped_obligations", obligation_ids),
+                ),
+            )
+            comparison_identity_complete = bool(
+                (comparison_identity or {}).get("left_binary_content_identity")
+                and (comparison_identity or {}).get("right_binary_content_identity")
             )
             specialized.append(
                 make_unknown_reason(
@@ -1359,6 +1464,14 @@ class EquivalenceChecker:
                     object_target_key=reason.object_target_key,
                     object_evidence=reason.object_evidence,
                     proof_obligation_id=None,
+                    typed_cause_key=(
+                        typed_cause.to_dict() if comparison_identity_complete else None
+                    ),
+                    proof_requirement_ids=(
+                        (proof_requirement.to_dict(),)
+                        if comparison_identity_complete
+                        else ()
+                    ),
                     recovery_action="relational_call_effect_stage_proof_required",
                     action_status=reason.action_status,
                     target_regression=reason.target_regression,
@@ -1368,6 +1481,280 @@ class EquivalenceChecker:
                 )
             )
         return specialized
+
+    @classmethod
+    def _attach_root_blocker_identities(
+        cls,
+        reasons: List[Any],
+        comparison_identity: Mapping[str, Any],
+    ) -> List[Any]:
+        """Attach typed root-cause/proof identities to all key-backed reasons."""
+
+        if not (
+            comparison_identity.get("left_binary_content_identity")
+            and comparison_identity.get("right_binary_content_identity")
+        ):
+            return reasons
+        enriched = []
+        for reason in reasons:
+            if getattr(reason, "typed_cause_key", None):
+                enriched.append(reason)
+                continue
+            target = getattr(reason, "object_target_key", None)
+            if not target:
+                enriched.append(reason)
+                continue
+            cause = cls._typed_cause_for_reason(reason, target, comparison_identity)
+            if cause is None:
+                enriched.append(reason)
+                continue
+            requirements = []
+            for action in build_unknown_recovery_actions((reason,)):
+                proof_kind = str(getattr(action, "proof_kind", "none") or "none")
+                if proof_kind == "none":
+                    continue
+                contract = ProofRequirementContract(
+                    proposition=f"complete {proof_kind}",
+                    relation_direction=(
+                        "ordered"
+                        if getattr(cause, "identity_scope", "") == "relational"
+                        else "unary"
+                    ),
+                    observation_surface=tuple(
+                        getattr(action, "required_evidence", ()) or ()
+                    ),
+                    active_precondition=(
+                        "recovery_action",
+                        str(getattr(action, "recovery_action", "") or "unspecified"),
+                    ),
+                )
+                requirements.append(
+                    ProofRequirementId.create(
+                        proof_kind,
+                        canonical_cause_tuple(cause),
+                        contract,
+                    ).to_dict()
+                )
+            enriched.append(
+                replace(
+                    reason,
+                    typed_cause_key=cause.to_dict(),
+                    proof_requirement_ids=tuple(requirements),
+                )
+            )
+        return enriched
+
+    @classmethod
+    def _typed_cause_for_reason(
+        cls,
+        reason: Any,
+        target: Tuple[Any, ...],
+        comparison_identity: Mapping[str, Any],
+    ) -> Any:
+        reason_id = str(getattr(reason, "reason_id", "unknown"))
+        discriminator = str(target[0]) if target else "unknown"
+        side = cls._root_cause_side(target)
+        execution_reasons = {"solver_unknown_timeout"}
+        relational_reasons = {
+            "sat_unsafety",
+            "sat_counterexample_ambiguous",
+            "return_width_bridge_missing",
+        }
+        unary_reasons = {
+            "return_coverage_gap",
+            "return_coverage_inconclusive",
+            "outcome_partition_unknown",
+            "method_b_closure_blocked",
+            "loop_summary_proof_missing",
+            "phi_circular_replacement_unproven",
+            "summary_return_candidate_invalid",
+            "summary_return_overlap_unproven",
+            "summary_effect_unmodeled",
+            "summary_precondition_incomplete",
+            "summary_partition_not_total",
+        }
+        if reason_id in execution_reasons or discriminator == "solver_timeout":
+            return ExecutionCauseKey(
+                cause_kind=reason_id,
+                comparison_domain=cls._root_comparison_domain(comparison_identity),
+                logical_query_identity=("object_target", target),
+                execution_semantics_identity=(
+                    "comparison_policy",
+                    tuple(comparison_identity.get("comparison_policy_fingerprint") or ()),
+                ),
+            )
+        if side is not None:
+            local_content = (
+                comparison_identity.get("left_binary_content_identity")
+                if side == "function1"
+                else comparison_identity.get("right_binary_content_identity")
+            )
+            function_identities = tuple(
+                comparison_identity.get("function_identity") or ()
+            )
+            local_function = (
+                function_identities[0]
+                if side == "function1" and function_identities
+                else function_identities[1]
+                if side == "function2" and len(function_identities) > 1
+                else ("missing_function_identity",)
+            )
+            return UnaryCauseKey(
+                cause_kind=reason_id,
+                binary_content_identity=tuple(local_content or ()),
+                function_ir_identity=("function_identity", local_function),
+                semantic_object_identity=(
+                    "object_target",
+                    cls._strip_root_cause_side(target),
+                ),
+            )
+        if reason_id in relational_reasons or reason_id in unary_reasons or reason_id in {
+            "unresolved_expression",
+            "unresolved_value_expression",
+        }:
+            function_identities = tuple(
+                comparison_identity.get("function_identity") or ()
+            )
+            return RelationalCauseKey(
+                cause_kind=reason_id,
+                comparison_domain=cls._root_comparison_domain(comparison_identity),
+                left_semantic_object=(
+                    "left_function",
+                    function_identities[0] if function_identities else (),
+                    "target",
+                    target,
+                ),
+                right_semantic_object=(
+                    "right_function",
+                    function_identities[1] if len(function_identities) > 1 else (),
+                    "target",
+                    target,
+                ),
+                correspondence_contract=("reason_scope", getattr(reason, "reason_scope", None)),
+            )
+        return None
+
+    @staticmethod
+    def _root_cause_side(value: Any) -> Optional[str]:
+        if isinstance(value, tuple):
+            for item in value[:4]:
+                if isinstance(item, str) and item in {"function1", "function2"}:
+                    return str(item)
+        return None
+
+    @classmethod
+    def _strip_root_cause_side(cls, value: Any) -> Any:
+        if isinstance(value, tuple):
+            return tuple(
+                "local_function"
+                if isinstance(item, str) and item in {"function1", "function2"}
+                else cls._strip_root_cause_side(item)
+                for item in value
+            )
+        return value
+
+    @staticmethod
+    def _root_comparison_domain(identity: Mapping[str, Any]) -> Tuple[Any, ...]:
+        return tuple(
+            (name, tuple(identity.get(name) or ()))
+            for name in (
+                "left_binary_content_identity",
+                "right_binary_content_identity",
+                "function_identity",
+                "architecture_identity",
+                "abi_identity",
+                "signature_storage_contract",
+                "calling_convention_fingerprint",
+                "comparison_policy_fingerprint",
+            )
+        )
+
+    @staticmethod
+    def _deterministic_analysis_identity(strategy: Any, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        method = getattr(strategy, "_deterministic_function_identity", None)
+        if callable(method):
+            return tuple(method(analysis))
+        function_ref = getattr(analysis, "function_ref", None)
+        return (
+            "function_identity",
+            ("binary_id", getattr(analysis, "binary_id", None)),
+            ("function_name", getattr(analysis, "function_name", None)),
+            ("entry_offset", getattr(function_ref, "entry_offset", None)),
+            ("entry_point", getattr(analysis, "entry_point", None)),
+            ("signature", FunctionSignature.from_analysis(analysis).to_dict()),
+            ("calling_convention", getattr(analysis, "calling_convention", None)),
+        )
+
+    def _call_effect_comparison_identity(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        left_content, right_content = getattr(
+            self, "_active_binary_content_identities", (None, None)
+        ) or (None, None)
+        left_identity = self._deterministic_analysis_identity(
+            self.pairwise_strategy, analysis1
+        )
+        right_identity = self._deterministic_analysis_identity(
+            self.pairwise_strategy, analysis2
+        )
+        observation = manifest.get("observation_contract")
+        observation = observation if isinstance(observation, Mapping) else {}
+        return {
+            "left_binary_content_identity": tuple(left_content or ()),
+            "right_binary_content_identity": tuple(right_content or ()),
+            "function_identity": (
+                ("left_function_identity", left_identity),
+                ("right_function_identity", right_identity),
+            ),
+            "architecture_identity": (
+                ("left", self._analysis_architecture_identity(analysis1)),
+                ("right", self._analysis_architecture_identity(analysis2)),
+            ),
+            "abi_identity": (
+                ("left", self._analysis_abi_identity(analysis1)),
+                ("right", self._analysis_abi_identity(analysis2)),
+            ),
+            "signature_storage_contract": (
+                ("left_signature", FunctionSignature.from_analysis(analysis1).to_dict()),
+                ("right_signature", FunctionSignature.from_analysis(analysis2).to_dict()),
+            ),
+            "calling_convention_fingerprint": (
+                getattr(analysis1, "calling_convention", None)
+                or getattr(analysis1, "calling_convention_name", None)
+                or "unknown_calling_convention",
+                getattr(analysis2, "calling_convention", None)
+                or getattr(analysis2, "calling_convention_name", None)
+                or "unknown_calling_convention",
+            ),
+            "comparison_policy_fingerprint": (
+                "observation_contract",
+                observation.get("contract_id"),
+                "normalize_mode",
+                getattr(self.normalization_settings, "mode", None),
+            ),
+        }
+
+    @staticmethod
+    def _analysis_architecture_identity(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return (
+            "architecture_identity",
+            ("language_id", getattr(analysis, "language_id", None) or getattr(analysis, "program_language_id", None)),
+            ("processor", getattr(analysis, "processor", None) or getattr(analysis, "processor_name", None)),
+            ("endianness", getattr(analysis, "endianness", None) or getattr(analysis, "endian", None)),
+            ("address_size", getattr(analysis, "address_size", None) or getattr(analysis, "pointer_size", None)),
+        )
+
+    @staticmethod
+    def _analysis_abi_identity(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return (
+            "abi_identity",
+            ("abi_name", getattr(analysis, "abi_name", None) or getattr(analysis, "abi", None)),
+            ("compiler_spec_id", getattr(analysis, "compiler_spec_id", None)),
+            ("compiler_artifact_identity", getattr(analysis, "compiler_artifact_identity", None)),
+        )
 
     def _completed_recovery_proof_payload(
         self,

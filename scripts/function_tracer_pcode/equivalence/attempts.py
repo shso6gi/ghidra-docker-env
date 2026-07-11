@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """Attempt 記録と遷移理由判定のヘルパー"""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .debug_trace import (
     Attempt,
+    AttemptIdentity,
     DebugTrace,
     NormalizationRuleApplication,
     PairwiseDecisiveInfo,
+    ProofCompletionEvent,
+    ReasonCausalTransition,
     TransitionReason,
 )
 from .result import EquivalenceResult, RewriteInfo
+from .cause_identity import ProofRequirementId
 from .typing.fixer import TypeFixResult
 from .unknown_reason import coerce_unknown_reason_records
 from ..smt import ParallelResult
@@ -137,6 +141,145 @@ def record_attempt_from_result(
         elapsed_time=result.total_time,
         unknown_reasons=list(result.unknown_reasons),
     )
+    _record_explicit_proof_completions(debug_trace, result)
+
+
+def _freeze_identity(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_identity(item))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_identity(item) for item in value)
+    return value
+
+
+def _record_explicit_proof_completions(
+    debug_trace: DebugTrace,
+    result: EquivalenceResult,
+) -> None:
+    """Record only proof completions carrying an exact requirement identity.
+
+    Recovery evidence without this identity remains useful diagnostic evidence,
+    but must not discharge a blocker by proof-kind or proof-stage heuristics.
+    """
+    if not debug_trace.attempts:
+        return
+    attempt = debug_trace.attempts[-1]
+    attempt_identity = AttemptIdentity(attempt.strategy, attempt.attempt_id)
+    successful_statuses = {"complete", "completed", "discharged", "proven", "verified"}
+    seen = {
+        _freeze_identity(item.proof_requirement_id)
+        for item in debug_trace.proof_completion_events
+    }
+    for wrapper in result.completed_recovery_proof_evidence or ():
+        if not isinstance(wrapper, Mapping):
+            continue
+        evidence = wrapper.get("evidence")
+        if not isinstance(evidence, Mapping):
+            continue
+        requirement = evidence.get("proof_requirement_id")
+        if not isinstance(requirement, Mapping):
+            requirement = _requirement_for_completed_evidence(debug_trace, evidence)
+        if not isinstance(requirement, Mapping):
+            continue
+        try:
+            canonical_requirement = ProofRequirementId.from_dict(requirement).to_dict()
+        except (TypeError, ValueError):
+            continue
+        status = str(
+            evidence.get("proof_status") or evidence.get("status") or ""
+        ).lower()
+        if status not in successful_statuses:
+            continue
+        frozen_requirement = _freeze_identity(canonical_requirement)
+        if frozen_requirement in seen:
+            continue
+        artifact = evidence.get("proof_artifact_ref")
+        if artifact is None:
+            artifact = evidence.get("proof_obligation_id")
+        if artifact is None:
+            continue
+        artifact_ref = _freeze_identity(artifact)
+        if not isinstance(artifact_ref, tuple):
+            artifact_ref = (artifact_ref,)
+        completion = ProofCompletionEvent(
+            completion_id=(
+                "proof_completion",
+                attempt.attempt_id,
+                len(debug_trace.proof_completion_events),
+                frozen_requirement,
+            ),
+            proof_requirement_id=canonical_requirement,
+            proof_artifact_ref=artifact_ref,
+            proof_status="proven",
+            completed_at_attempt=attempt_identity,
+        )
+        debug_trace.add_proof_completion(completion)
+        seen.add(frozen_requirement)
+
+        for previous in debug_trace.attempts[:-1]:
+            for occurrence in previous.reason_occurrences:
+                reason_requirements = getattr(
+                    occurrence.reason_record,
+                    "proof_requirement_ids",
+                    (),
+                ) or ()
+                if not any(
+                    _freeze_identity(item) == frozen_requirement
+                    for item in reason_requirements
+                ):
+                    continue
+                debug_trace.add_causal_transition(
+                    ReasonCausalTransition(
+                        transition_id=(
+                            "proof_discharge",
+                            completion.completion_id,
+                            occurrence.occurrence_id.attempt_identity.attempt_ordinal,
+                            occurrence.occurrence_id.reason_ordinal,
+                        ),
+                        target_occurrence_id=occurrence.occurrence_id,
+                        transition_kind="discharged",
+                        cause_kind="proof_completion",
+                        cause_ref=completion.completion_id,
+                        emitted_at_attempt=attempt_identity,
+                        transition_ordinal=len(debug_trace.causal_transitions),
+                    )
+                )
+
+
+def _requirement_for_completed_evidence(
+    debug_trace: DebugTrace,
+    evidence: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    """Resolve a production artifact through an exact legacy obligation id.
+
+    A legacy obligation may fan out to multiple typed requirements.  In that
+    case the artifact is intentionally left unlinked until its producer emits
+    the exact typed requirement identity.
+    """
+    proof_obligation_id = evidence.get("proof_obligation_id")
+    if proof_obligation_id is None:
+        return None
+    frozen_obligation = _freeze_identity(proof_obligation_id)
+    requirements: Dict[Any, Mapping[str, Any]] = {}
+    for attempt in debug_trace.attempts:
+        for occurrence in attempt.reason_occurrences:
+            reason = occurrence.reason_record
+            if _freeze_identity(getattr(reason, "proof_obligation_id", None)) != frozen_obligation:
+                continue
+            for requirement in getattr(reason, "proof_requirement_ids", ()) or ():
+                if not isinstance(requirement, Mapping):
+                    continue
+                try:
+                    canonical = ProofRequirementId.from_dict(requirement).to_dict()
+                except (TypeError, ValueError):
+                    continue
+                requirements[_freeze_identity(canonical)] = canonical
+    if len(requirements) != 1:
+        return None
+    return next(iter(requirements.values()))
 
 
 def _build_pairwise_decisive_info(

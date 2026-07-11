@@ -2,6 +2,7 @@
 """Equivalence-mode CLI helpers."""
 
 import json
+import hashlib
 import os
 import stat
 import sys
@@ -20,6 +21,16 @@ from .analyze import get_target_functions
 
 class ProgramImportError(RuntimeError):
     """Raised when Ghidra cannot import one of the input binaries."""
+
+
+def _binary_content_identity(binary_path: str):
+    if not os.path.isfile(binary_path):
+        return None
+    digest = hashlib.sha256()
+    with open(binary_path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return ("sha256", digest.hexdigest())
 
 
 def _safe_close_context(manager) -> None:
@@ -171,6 +182,8 @@ def _emit_import_error_result(
     func_name2: str,
     error_message: str,
     start_time: float,
+    binary1_content_identity=None,
+    binary2_content_identity=None,
 ) -> None:
     result = EquivalenceResult(
         is_equivalent=None,
@@ -179,6 +192,8 @@ def _emit_import_error_result(
         binary1_name=Path(binary1_path).name,
         binary2_name=Path(binary2_path).name,
         solver_results=ParallelResult(results=[]),
+        binary1_content_identity=binary1_content_identity,
+        binary2_content_identity=binary2_content_identity,
         total_time=time.time() - start_time,
         error_message=error_message,
     )
@@ -225,6 +240,8 @@ def run_equivalence_check(args):
     from ...equivalence.source_declarations import infer_adjacent_c_return_type
 
     binary1_path, binary2_path = args.equiv
+    binary1_content_identity = _binary_content_identity(binary1_path)
+    binary2_content_identity = _binary_content_identity(binary2_path)
     binary1_id, binary2_id = _get_binary_ids_arg(args)
     function_names = get_target_functions(args)
 
@@ -375,6 +392,8 @@ def run_equivalence_check(args):
                             binary2_id=binary2_id,
                             declared_return_type1=declared_return_type1,
                             declared_return_type2=declared_return_type2,
+                            binary1_content_identity=binary1_content_identity,
+                            binary2_content_identity=binary2_content_identity,
                         )
                     finally:
                         _safe_close_context(result2_cm)
@@ -395,6 +414,8 @@ def run_equivalence_check(args):
             func_name2=func_name2,
             error_message=str(exc),
             start_time=start_time,
+            binary1_content_identity=binary1_content_identity,
+            binary2_content_identity=binary2_content_identity,
         )
 
     output_content = result.to_string(
