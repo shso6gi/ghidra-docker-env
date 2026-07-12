@@ -43,6 +43,10 @@ class PairwiseStrategy(CheckStrategy):
         from ..obligations import AttemptCache
         self._exact_query_attempt_cache = AttemptCache(max_entries=4096)
         self._obligation_scheduler_run_id = 0
+        # Sound process-local reuse of already proven UNSAT pair obligations.
+        # Keys contain the complete pair semantic surface and ABI context;
+        # UNKNOWN/SAT outcomes are never reused across views.
+        self._obligation_pair_unsat_cache = {}
 
     def __getattr__(self, name: str):
         from .pairwise_services import resolve_method

@@ -77,7 +77,7 @@ class BranchSpec:
 class BranchActivationController:
     """Versioned sequential policy matching the legacy stage runner."""
 
-    policy_version = "legacy-sequential-v1"
+    policy_version = "obligation-sequential-v1"
 
     def __init__(self, branches: Sequence[BranchSpec]) -> None:
         self._branches = tuple(branches)
@@ -120,6 +120,12 @@ class BranchActivationController:
             for branch in self._branches:
                 if self.states[branch.branch_id] == ActivationState.DORMANT:
                     self.states[branch.branch_id] = ActivationState.SHORT_CIRCUITED
+
+    def mark_inapplicable(self, branch_id: str) -> None:
+        """Record runtime inapplicability discovered after activation."""
+        if self.states.get(branch_id) != ActivationState.ACTIVE:
+            raise ValueError(f"branch is not active: {branch_id}")
+        self.states[branch_id] = ActivationState.INAPPLICABLE
 
 
 @dataclass(frozen=True)

@@ -75,6 +75,11 @@ class EquivalenceResult:
     binary2_name: str
     solver_results: ParallelResult
     counterexample: Optional[FormattedCounterexample] = None
+    counterexample_raw: Optional[Dict[str, Any]] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     smt_formula: Optional[str] = None
     total_time: float = 0.0
     error_message: Optional[str] = None
@@ -302,6 +307,16 @@ class EquivalenceResult:
                     "  exact_query_cache_hits={hits}, exact_query_cache_misses={misses}".format(
                         hits=stats.get("exact_query_attempt_cache_hits", 0),
                         misses=stats.get("exact_query_attempt_cache_misses", 0),
+                    )
+                )
+            if (
+                "obligation_pair_cache_hits" in stats
+                or "obligation_pair_cache_misses" in stats
+            ):
+                lines.append(
+                    "  obligation_pair_cache_hits={hits}, obligation_pair_cache_misses={misses}".format(
+                        hits=stats.get("obligation_pair_cache_hits", 0),
+                        misses=stats.get("obligation_pair_cache_misses", 0),
                     )
                 )
 

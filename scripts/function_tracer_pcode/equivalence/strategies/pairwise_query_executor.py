@@ -14,6 +14,7 @@ from ..formula.returns import (
 )
 from .pairwise_models import QueryResult
 from ..obligations import AttemptCacheEntry, AttemptKey
+from ..cause_identity import ProofRequirementContract, ProofRequirementId
 
 
 def _is_void_return_placeholder(expr: Any) -> bool:
@@ -327,11 +328,32 @@ def solve_query_twostage(
         param_replace_fn2,
         pair_id,
     )
-    stage1_result = strategy._solve_query_internal(
-        cond_query,
-        pair_id,
-        stage="conds-only",
-        use_hard_timeout=False,
+    def plan_guard_query():
+        rebuilt = strategy._build_condition_only_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+        )
+        requirement = _query_requirement(
+            "guard_overlap", rebuilt, pair_id, "conds-only"
+        )
+        return requirement, "guard_overlap", lambda: strategy._solve_query_internal(
+            rebuilt,
+            pair_id,
+            stage="conds-only",
+            use_hard_timeout=False,
+        )
+
+    stage1_requirement, _kind, stage1_producer = plan_guard_query()
+    _register_query_replanner(strategy, pair_id, "guard_overlap", plan_guard_query)
+    stage1_result = _execute_query_obligation(
+        strategy,
+        stage1_requirement,
+        "guard_overlap",
+        stage1_producer,
     )
     if stage1_result.is_equivalent is True:
         stage1_result.last_query = cond_query
@@ -426,8 +448,40 @@ def solve_query_twostage(
                 pair_id,
                 exc,
             )
-        result.action_status = UnknownRecoveryActionStatus.PLANNED
         bridge_solver = getattr(strategy, "_solve_return_width_bridge_with_completed_proof", None)
+        runtime = getattr(strategy, "_obligation_runtime_session", None)
+        if runtime is not None and callable(bridge_solver):
+            def plan_width_bridge_query():
+                requirement = ProofRequirementId.create(
+                    "value_relation",
+                    ("return_width_bridge", result.object_target_key),
+                    ProofRequirementContract(
+                        proposition="equal_on_region_after_width_bridge",
+                        observation_surface=("return",),
+                        active_precondition=(runtime.premise_digest, pair_id),
+                    ),
+                )
+
+                def produce_width_bridge():
+                    bridged = bridge_solver(
+                        base_ctx,
+                        case1,
+                        case2,
+                        param_replace_fn1,
+                        param_replace_fn2,
+                        pair_id,
+                        object_target_key=result.object_target_key,
+                        blocking_detail=result.blocking_detail,
+                    )
+                    return bridged if bridged is not None else QueryResult(None)
+
+                return requirement, "value_relation", produce_width_bridge
+
+            runtime.register_target_query_replanner(
+                result.object_target_key,
+                plan_width_bridge_query,
+            )
+        result.action_status = UnknownRecoveryActionStatus.PLANNED
         if callable(bridge_solver):
             bridged_result = bridge_solver(
                 base_ctx,
@@ -461,11 +515,33 @@ def solve_query_twostage(
         param_replace_fn2,
         pair_id,
     )
-    stage2_result = strategy._solve_query_internal(
-        full_query,
-        pair_id,
-        stage="with-ineq",
-        use_hard_timeout=True,
+    def plan_value_query():
+        rebuilt = strategy._build_pair_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+        )
+        requirement = _query_requirement(
+            "value_relation", rebuilt, pair_id, "with-ineq"
+        )
+        return requirement, "value_relation", lambda: strategy._solve_query_internal(
+            rebuilt,
+            pair_id,
+            stage="with-ineq",
+            use_hard_timeout=True,
+        )
+
+    stage2_requirement, _kind, stage2_producer = plan_value_query()
+    _register_query_replanner(strategy, pair_id, "value_relation", plan_value_query)
+    stage2_result = _execute_query_obligation(
+        strategy,
+        stage2_requirement,
+        "value_relation",
+        stage2_producer,
+        depends_on=(stage1_requirement,),
     )
     stage2_result.last_query = full_query
     stage2_result.pair_stage = "with-ineq"
@@ -546,6 +622,50 @@ def solve_query_twostage(
             )
 
     return stage2_result
+
+
+def _query_requirement(
+    proof_kind: str,
+    query: str,
+    pair_id: str,
+    stage: str,
+) -> ProofRequirementId:
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    return ProofRequirementId.create(
+        proof_kind,
+        ("pair_query", pair_id, stage, digest),
+        ProofRequirementContract(
+            proposition=proof_kind,
+            relation_direction="ordered",
+            observation_surface=("return_and_effect",),
+            active_precondition=("query_digest", digest),
+        ),
+    )
+
+
+def _execute_query_obligation(
+    strategy,
+    requirement: ProofRequirementId,
+    kind: str,
+    producer,
+    *,
+    depends_on=(),
+):
+    runtime = getattr(strategy, "_obligation_runtime_session", None)
+    if runtime is None:
+        return producer()
+    return runtime.execute(
+        requirement,
+        kind,
+        producer,
+        depends_on=depends_on,
+    )
+
+
+def _register_query_replanner(strategy, pair_id, kind, replanner) -> None:
+    runtime = getattr(strategy, "_obligation_runtime_session", None)
+    if runtime is not None:
+        runtime.register_pair_query_replanner(pair_id, kind, replanner)
 
 
 def validate_counterexample_across_cases(

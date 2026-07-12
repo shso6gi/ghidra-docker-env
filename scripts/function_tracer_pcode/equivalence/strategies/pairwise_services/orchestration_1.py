@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
+from ...cause_identity import ProofRequirementContract, ProofRequirementId
+from ...obligations.model import FunctionProofOutcome
 from .. import pairwise as _pairwise_facade
 from ._shared import (
     Condition,
@@ -202,13 +205,61 @@ def _impl_check(
         "return_width_bridge_missing": 0,
         "exact_query_attempt_cache_hits": 0,
         "exact_query_attempt_cache_misses": 0,
+        "obligation_pair_cache_hits": 0,
+        "obligation_pair_cache_misses": 0,
     }
     unknown_reasons = []
     self._active_normalization_stats = normalization_stats
+    pair_obligation_keys = {}
+    cacheable_solver_unsat_pairs = set()
 
     for i, case1 in enumerate(cases1):
         for j, case2 in enumerate(cases2):
             pair_id = f"({i},{j})"
+            pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
+            readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
+                case1,
+                case2,
+                symbol_replace_fn1,
+                symbol_replace_fn2,
+            )
+            pair_cache_eligible = _pair_can_use_proof_independent_cache(
+                case1,
+                case2,
+                analysis1,
+                analysis2,
+                base_ctx,
+                readonly_contract_assertions,
+            )
+            pair_obligation_key = None
+            if pair_cache_eligible:
+                try:
+                    pair_obligation_key = _pair_obligation_query_key(
+                        self,
+                        case1,
+                        case2,
+                        base_ctx,
+                        symbol_replace_fn1,
+                        symbol_replace_fn2,
+                        pair_id,
+                    )
+                except Exception:
+                    pair_cache_eligible = False
+            pair_obligation_keys[(i, j)] = pair_obligation_key
+            if (
+                pair_cache_eligible
+                and pair_cache is not None
+                and pair_obligation_key in pair_cache
+            ):
+                unsat_count += 1
+                resolved_pairs.add((i, j))
+                normalization_stats["obligation_pair_cache_hits"] += 1
+                self._debug_print(
+                    f"  Pair {pair_id}: OBLIGATION CACHE HIT -> UNSAT "
+                    f"({unsat_count}/{total_pairs})"
+                )
+                continue
+            normalization_stats["obligation_pair_cache_misses"] += 1
             if self._cases_are_contradictory(case1, case2):
                 unsat_count += 1
                 resolved_pairs.add((i, j))
@@ -217,12 +268,6 @@ def _impl_check(
                         f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                     )
                 continue
-            readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
-                case1,
-                case2,
-                symbol_replace_fn1,
-                symbol_replace_fn2,
-            )
             if readonly_contract_assertions:
                 self._register_pairwise_extra_assertions(
                     base_ctx,
@@ -368,6 +413,17 @@ def _impl_check(
                             f"-> UNSAT ({unsat_count}/{total_pairs})"
                         )
                     continue
+                _register_loop_pair_replanner(
+                    self,
+                    pair_id,
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                    case1,
+                    case2,
+                    base_ctx,
+                    semantic_parameter_sources,
+                )
                 unknown_count += 1
                 unknown_reasons.append(reason_record)
                 self._debug_print(
@@ -492,6 +548,106 @@ def _impl_check(
                 if not readonly_contract_assertions:
                     self._clear_pairwise_extra_assertions(base_ctx, pair_id)
 
+            obligation_runtime = getattr(self, "_obligation_runtime_session", None)
+            if obligation_runtime is not None:
+                def plan_counterexample_safety(
+                    pending,
+                    *,
+                    _base_ctx=base_ctx,
+                    _cases1=cases1,
+                    _cases2=cases2,
+                    _replace1=symbol_replace_fn1,
+                    _replace2=symbol_replace_fn2,
+                    _pair=(i, j),
+                    _pair_id=pair_id,
+                    _case1=case1,
+                    _case2=case2,
+                    _sat_unsafety_reasons=tuple(sat_unsafety_reasons),
+                    _analysis1=analysis1,
+                    _analysis2=analysis2,
+                ):
+                    model_sha256 = self._counterexample_model_fingerprint(
+                        pending.counterexample_raw
+                    ) or "missing-model"
+                    requirement = ProofRequirementId.create(
+                        "counterexample_safety",
+                        (
+                            "pair_counterexample",
+                            _pair_id,
+                            model_sha256,
+                            obligation_runtime.current_view.view_id,
+                        ),
+                        ProofRequirementContract(
+                            proposition="SAT model is a safe decisive counterexample",
+                            relation_direction="ordered",
+                            observation_surface=("return_and_effect", "counterexample_model"),
+                            active_precondition=(
+                                obligation_runtime.premise_digest,
+                                model_sha256,
+                            ),
+                        ),
+                    )
+
+                    def produce_counterexample_safety():
+                        raw_model = pending.counterexample_raw
+                        if _sat_unsafety_reasons:
+                            unsafe_reason = self._make_sat_unsafety_unknown_reason(
+                                _sat_unsafety_reasons,
+                                _analysis1,
+                                _analysis2,
+                                case1=_case1,
+                                case2=_case2,
+                                pair_id=_pair_id,
+                                stage="S_PAIRWISE",
+                            )
+                            if not self._sat_unsafety_resolution_proof_is_complete(
+                                unsafe_reason,
+                                _analysis1,
+                                _analysis2,
+                                current_counterexample_raw=raw_model,
+                            ):
+                                return FunctionProofOutcome.INCONCLUSIVE
+                        if not validate_counterexample_across_cases(
+                            self,
+                            _base_ctx,
+                            _cases1,
+                            _cases2,
+                            _replace1,
+                            _replace2,
+                            _pair,
+                            raw_model,
+                        ):
+                            return FunctionProofOutcome.INCONCLUSIVE
+                        replay_reasons = self._same_function_counterexample_replay_reasons(
+                            _analysis1,
+                            _analysis2,
+                        )
+                        if replay_reasons:
+                            replay_reason = self._make_sat_unsafety_unknown_reason(
+                                replay_reasons,
+                                _analysis1,
+                                _analysis2,
+                                case1=_case1,
+                                case2=_case2,
+                                pair_id=_pair_id,
+                                stage="S_PAIRWISE",
+                            )
+                            if not self._sat_unsafety_resolution_proof_is_complete(
+                                replay_reason,
+                                _analysis1,
+                                _analysis2,
+                                current_counterexample_raw=raw_model,
+                            ):
+                                return FunctionProofOutcome.INCONCLUSIVE
+                        return FunctionProofOutcome.NOT_EQUIVALENT
+
+                    return requirement, "counterexample_safety", produce_counterexample_safety
+
+                obligation_runtime.register_counterexample_safety_replanner(
+                    pair_id,
+                    plan_counterexample_safety,
+                )
+
             result = self._solve_query_twostage(
                 base_ctx,
                 case1,
@@ -612,6 +768,12 @@ def _impl_check(
             if result.is_equivalent is True:
                 unsat_count += 1
                 resolved_pairs.add((i, j))
+                if (
+                    pair_cache_eligible
+                    and not readonly_contract_assertions
+                    and result.pair_stage in {"conds-only", "with-ineq"}
+                ):
+                    cacheable_solver_unsat_pairs.add((i, j))
                 if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                     self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                 continue
@@ -701,6 +863,12 @@ def _impl_check(
                 )
 
     elapsed_time = time.time() - start_time
+    pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
+    if pair_cache is not None:
+        for resolved_pair in cacheable_solver_unsat_pairs:
+            cache_key = pair_obligation_keys.get(resolved_pair)
+            if cache_key is not None:
+                pair_cache[cache_key] = True
     coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
         coverage_unsafety_reasons,
         analysis1,
@@ -816,6 +984,129 @@ def _impl_check(
     finally:
         self._active_safety_checker = None
         self._active_normalization_stats = None
+
+
+def _pair_obligation_query_key(
+    self,
+    case1,
+    case2,
+    base_ctx,
+    symbol_replace_fn1,
+    symbol_replace_fn2,
+    pair_id,
+):
+    """Use the complete guard/value SMT premise as reusable UNSAT identity."""
+
+    guard_query = self._build_condition_only_query(
+        base_ctx,
+        case1,
+        case2,
+        symbol_replace_fn1,
+        symbol_replace_fn2,
+        pair_id,
+    )
+    value_query = self._build_pair_query(
+        base_ctx,
+        case1,
+        case2,
+        symbol_replace_fn1,
+        symbol_replace_fn2,
+        pair_id,
+    )
+    return (
+        "proof_independent_pair_queries_v1",
+        hashlib.sha256(guard_query.encode("utf-8")).hexdigest(),
+        hashlib.sha256(value_query.encode("utf-8")).hexdigest(),
+    )
+
+
+def _pair_can_use_proof_independent_cache(
+    case1,
+    case2,
+    analysis1,
+    analysis2,
+    base_ctx,
+    readonly_contract_assertions,
+):
+    """Admit only plain solver obligations whose premise has no proof state."""
+
+    def has_observable_effects(case):
+        summary = getattr(case, "effect_summary", None)
+        if summary is None:
+            return False
+        return any((
+            getattr(summary, "effects", None),
+            getattr(summary, "synthetic_expr", None),
+            getattr(summary, "has_unsupported_call", False),
+            getattr(summary, "incomplete_reasons", None),
+            getattr(summary, "call_argument_evidence", None),
+            getattr(summary, "unsupported_call_sites", None),
+            getattr(summary, "call_target_resolution_evidence", None),
+            getattr(summary, "call_site_effect_summary_evidence", None),
+        ))
+
+    return (
+        not has_observable_effects(case1)
+        and not has_observable_effects(case2)
+        and not tuple(getattr(analysis1, "completed_recovery_proof_evidence", ()) or ())
+        and not tuple(getattr(analysis2, "completed_recovery_proof_evidence", ()) or ())
+        and not tuple(base_ctx.get("extra_assertions", ()) or ())
+        and not tuple(readonly_contract_assertions or ())
+    )
+
+
+def _register_loop_pair_replanner(
+    strategy,
+    pair_id,
+    reason_record,
+    analysis1,
+    analysis2,
+    case1,
+    case2,
+    base_ctx,
+    semantic_parameter_sources,
+):
+    runtime = getattr(strategy, "_obligation_runtime_session", None)
+    if runtime is None:
+        return
+
+    def replan():
+        requirement = ProofRequirementId.create(
+            "value_relation",
+            ("loop_pair", pair_id, getattr(reason_record, "object_target_key", None)),
+            ProofRequirementContract(
+                proposition="loop summary value relation",
+                observation_surface=("return_and_effect",),
+                active_precondition=(runtime.premise_digest, pair_id),
+            ),
+        )
+
+        def produce():
+            complete = strategy._recovery_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+            )
+            if not complete:
+                complete = (
+                    strategy._case_pair_counted_loop_summaries_match_by_closed_values(
+                        case1,
+                        case2,
+                        base_ctx=base_ctx,
+                    )
+                    or strategy._counted_loop_values_are_provably_equivalent(
+                        case1.value_expr,
+                        case2.value_expr,
+                        left_case=case1,
+                        right_case=case2,
+                        semantic_parameter_sources=semantic_parameter_sources,
+                    )
+                )
+            return QueryResult(True if complete else None)
+
+        return requirement, "value_relation", produce
+
+    runtime.register_pair_query_replanner(pair_id, "value_relation", replan)
 
 def _impl__blocking_unknown_reasons_should_replace_pair_unknowns(
     pair_unknown_reasons: Sequence[Any],

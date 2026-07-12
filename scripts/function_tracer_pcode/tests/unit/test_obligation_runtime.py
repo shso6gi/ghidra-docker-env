@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     BranchActivationController,
     BranchSpec,
     DerivedAnalysisView,
+    DecisionAggregator,
     FunctionProofOutcome,
     ProofArtifact,
     ProofCache,
@@ -28,6 +29,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     ViewPremiseRecord,
     WorkItem,
     ObligationInstanceId,
+    ObligationRuntimeSession,
     validate_artifact_applicability,
     validate_proof_closure,
 )
@@ -413,6 +415,482 @@ def test_supersede_view_invalidates_completed_obligations():
     worklist.complete(item)
     assert worklist.supersede_view(("v0",)) == 1
     assert item.state.value == "superseded"
+
+
+def test_runtime_completed_proof_builds_derived_view_and_reschedules_only_dependents():
+    left = SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000")
+    right = SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000")
+    runtime = ObligationRuntimeSession.create(left, right)
+    coverage = _requirement("return_coverage")
+    related = _requirement("guard_overlap")
+    unrelated = _requirement("call_effect")
+    calls = {"related": 0, "unrelated": 0}
+
+    def run_related():
+        calls["related"] += 1
+        return "new_guard_result"
+
+    def run_unrelated():
+        calls["unrelated"] += 1
+        return "unrelated_result"
+
+    old_related = runtime.schedule(
+        related, "guard_overlap", run_related, depends_on=(coverage,)
+    )
+    old_unrelated = runtime.schedule(unrelated, "call_effect", run_unrelated)
+
+    evidence = {
+        "proof_requirement_id": coverage.to_dict(),
+        "status": "complete",
+        "proof_source": "test_coverage_producer",
+        "proof_content": {"coverage": "proven"},
+    }
+    runtime.proof_outcomes[coverage.to_key()] = FunctionProofOutcome.EQUIVALENT
+    views = runtime.apply_completed_evidence(({"evidence": evidence},))
+
+    assert len(views) == 1
+    assert views[0].parent_view_id == runtime.base_view.view_id
+    assert views[0].validated_proof_closure_id != ("proof_closure", ())
+    assert runtime.view_records[views[0].view_id].premise_digest != (
+        runtime.view_records[runtime.base_view.view_id].premise_digest
+    )
+    assert old_related.state.value == "superseded"
+    assert old_unrelated.state.value == "superseded"
+    new_items = [
+        item for item in runtime.worklist.items()
+        if item.obligation_id.derived_view_id == views[0].view_id
+    ]
+    assert [item.kind for item in new_items] == ["guard_overlap"]
+    while runtime.run_next()[0] is not None:
+        pass
+    assert calls == {"related": 1, "unrelated": 0}
+
+
+def test_runtime_rejects_untyped_completion_and_does_not_change_view():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    before = runtime.current_view
+    assert runtime.apply_completed_evidence(({
+        "evidence": {"status": "complete", "proof_obligation_id": ("legacy",)},
+    },)) == ()
+    assert runtime.current_view is before
+
+
+def test_runtime_rejects_typed_status_without_producer_validation():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    requirement = _requirement("return_coverage")
+    assert runtime.apply_completed_evidence(({"evidence": {
+        "proof_requirement_id": requirement.to_dict(),
+        "status": "complete",
+    }},)) == ()
+    assert runtime.artifacts == []
+
+
+def test_runtime_resolves_unique_legacy_obligation_to_typed_requirement():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    requirement = _requirement("return_width")
+    reason = SimpleNamespace(
+        proof_obligation_id=("legacy", "width"),
+        proof_requirement_ids=(requirement.to_dict(),),
+    )
+    runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
+    views = runtime.apply_completed_evidence(({
+        "evidence": {
+            "status": "complete",
+            "proof_obligation_id": ("legacy", "width"),
+            "proof_source": "width_producer",
+        },
+    },), reasons=(reason,))
+    assert len(views) == 1
+    assert runtime.artifacts[0].requirement_id == requirement
+
+
+def test_runtime_rejects_ambiguous_legacy_obligation_mapping():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    reason = SimpleNamespace(
+        proof_obligation_id=("legacy", "shared"),
+        proof_requirement_ids=(
+            _requirement("return_width").to_dict(),
+            _requirement("value_relation").to_dict(),
+        ),
+    )
+    assert runtime.apply_completed_evidence(({
+        "evidence": {"status": "complete", "proof_obligation_id": ("legacy", "shared")},
+    },), reasons=(reason,)) == ()
+
+
+def test_recursive_producer_creates_real_derived_view_with_provenance():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    recursive = runtime.create_recursive_view(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+        (("match", 0),),
+    )
+    assert recursive.parent_view_id == runtime.base_view.view_id
+    assert recursive.fact_provenance
+    assert runtime.artifacts[0].requirement_id.proof_kind == "recursive_call_abstraction"
+
+
+def test_running_producer_can_supersede_its_parent_view():
+    left = SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000")
+    right = SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000")
+    runtime = ObligationRuntimeSession.create(left, right)
+    branch = _requirement("recursive_branch")
+
+    def produce_recursive_view():
+        runtime.create_recursive_view(left, right, (("match", 0),))
+        return "branch_result"
+
+    item = runtime.schedule(branch, "function_branch", produce_recursive_view)
+    popped, result = runtime.run_next()
+    assert popped is item
+    assert result == "branch_result"
+    assert item.state.value == "superseded"
+    assert runtime.events[-1].event == "completed_superseded"
+
+
+def test_decision_aggregator_turns_proof_closed_global_blocker_into_eq():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    requirement = _requirement("return_coverage")
+    reason = SimpleNamespace(reason_id="return_coverage_gap", pair_or_case=None)
+    runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
+    runtime.apply_completed_evidence(({"evidence": {
+        "proof_requirement_id": requirement.to_dict(),
+        "status": "complete",
+        "proof_source": "coverage_test",
+    }},))
+    runtime.reason_requirements[id(reason)] = (requirement,)
+    runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
+    result = SimpleNamespace(
+        is_equivalent=None,
+        unknown_reasons=[reason],
+        unknown_recovery_actions=[],
+        decision_gated_by_pending_proof=True,
+        pairwise_stats={
+            "total_pairs": 4,
+            "unsat_pairs": 4,
+            "sat_pairs": 0,
+            "unknown_pairs": 0,
+            "error_pairs": 0,
+        },
+    )
+    decision = DecisionAggregator.apply(result, runtime)
+    assert decision.outcome == FunctionProofOutcome.EQUIVALENT
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+
+
+def test_decision_aggregator_counts_proof_closed_pair_without_reusing_old_unknown():
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    requirement = _requirement("value_relation")
+    reason = SimpleNamespace(reason_id="return_width_bridge_missing", pair_or_case="(0,1)")
+    runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
+    runtime.apply_completed_evidence(({"evidence": {
+        "proof_requirement_id": requirement.to_dict(),
+        "status": "complete",
+        "proof_source": "value_test",
+    }},))
+    runtime.reason_requirements[id(reason)] = (requirement,)
+    runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
+    result = SimpleNamespace(
+        is_equivalent=None,
+        unknown_reasons=[reason],
+        unknown_recovery_actions=[],
+        decision_gated_by_pending_proof=True,
+        pairwise_stats={
+            "total_pairs": 2,
+            "unsat_pairs": 1,
+            "sat_pairs": 0,
+            "unknown_pairs": 1,
+            "error_pairs": 0,
+        },
+    )
+    DecisionAggregator.apply(result, runtime)
+    assert result.is_equivalent is True
+    assert result.pairwise_stats["unknown_pairs"] == 0
+    assert result.pairwise_stats["unsat_pairs"] == 2
+
+
+def test_pair_obligation_cache_reexecutes_only_changed_semantic_pair():
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+    from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+    from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+
+    solver = Mock()
+    solver.run_sequential.return_value = ParallelResult(results=[
+        SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001)
+    ])
+    strategy = PairwiseStrategy(
+        FormulaBuilder(),
+        solver,
+        enable_completed_recovery_proofs=False,
+    )
+    left = create_mock_analysis(
+        "left", returns=[ReturnInfo("0x1000", Expression.constant(1, 4), [])]
+    )
+    right = create_mock_analysis(
+        "right", returns=[ReturnInfo("0x2000", Expression.constant(1, 4), [])]
+    )
+    runtime = ObligationRuntimeSession.create(left, right)
+    strategy._obligation_runtime_session = runtime
+
+    first = strategy.check(left, right)
+    calls_after_first = solver.run_sequential.call_count
+    second = strategy.check(left, right)
+    assert first.is_equivalent is True
+    assert second.is_equivalent is True
+    assert solver.run_sequential.call_count == calls_after_first
+    assert second.pairwise_debug_stats["obligation_pair_cache_hits"] == 1
+    assert any(event.kind == "guard_overlap" for event in runtime.events)
+    query_completions = len([
+        event for event in runtime.events
+        if event.kind in {"guard_overlap", "value_relation"}
+        and event.event == "completed"
+    ])
+    assert query_completions == 1
+
+    changed = create_mock_analysis(
+        "right", returns=[ReturnInfo("0x2000", Expression.constant(2, 4), [])]
+    )
+    changed_result = strategy.check(left, changed)
+    assert changed_result.pairwise_debug_stats["obligation_pair_cache_hits"] == 0
+    assert changed_result.pairwise_debug_stats["obligation_pair_cache_misses"] == 1
+
+
+def test_gate_completion_requires_real_replanned_query_outcome():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    gate = _requirement("abi_relation_high_bit_proof")
+    target = ("return_width_bridge", "pair-0")
+    reason = SimpleNamespace(
+        reason_id="return_width_bridge_missing",
+        recovery_proof_kind="abi_relation_high_bit_proof",
+        proof_requirement_ids=(gate.to_dict(),),
+        object_target_key=target,
+        pair_or_case="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    query_runs = []
+
+    def replan_value_query():
+        requirement = _requirement("value_relation_replanned")
+
+        def run_query():
+            query_runs.append(runtime.current_view.view_id)
+            return QueryResult(None)
+
+        return requirement, "value_relation", run_query
+
+    runtime.register_target_query_replanner(target, replan_value_query)
+    result = SimpleNamespace(unknown_reasons=[reason])
+    runtime.plan_proof_gates(
+        result,
+        {"abi_relation_high_bit_proof": "return_width"},
+        lambda *_args: lambda: FunctionProofOutcome.EQUIVALENT,
+    )
+    while runtime.run_next()[0] is not None:
+        pass
+    evidence = {
+        "proof_requirement_id": gate.to_dict(),
+        "status": "complete",
+        "proof_source": "width_gate_test",
+    }
+    assert runtime.apply_completed_evidence(({"evidence": evidence},), reasons=(reason,))
+    while runtime.run_next()[0] is not None:
+        pass
+
+    assert len(query_runs) == 1
+    assert query_runs[0] == runtime.current_view.view_id
+    assert runtime.outcome_for_reason(reason) == FunctionProofOutcome.INCONCLUSIVE
+
+
+def test_replanned_sat_value_query_stays_unknown_until_counterexample_is_safe():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    gate = _requirement("abi_relation_high_bit_proof")
+    target = ("return_width_bridge", "pair-sat")
+    reason = SimpleNamespace(
+        reason_id="return_width_bridge_missing",
+        recovery_proof_kind="abi_relation_high_bit_proof",
+        proof_requirement_ids=(gate.to_dict(),),
+        object_target_key=target,
+        pair_or_case="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    model = {"x": 1}
+    safety_runs = []
+
+    def replan_value_query():
+        requirement = ProofRequirementId.create(
+            "value_relation",
+            ("pair_query", "(0,0)", "with-ineq", "sat-query"),
+            ProofRequirementContract(proposition="replanned value relation"),
+        )
+        return requirement, "value_relation", lambda: QueryResult(
+            False,
+            counterexample_raw=model,
+        )
+
+    def replan_safety(pending):
+        requirement = _requirement("counterexample_safety_pending")
+
+        def run_safety():
+            safety_runs.append(pending.counterexample_raw)
+            return FunctionProofOutcome.INCONCLUSIVE
+
+        return requirement, "counterexample_safety", run_safety
+
+    runtime.register_target_query_replanner(target, replan_value_query)
+    runtime.register_counterexample_safety_replanner("(0,0)", replan_safety)
+    runtime.plan_proof_gates(
+        SimpleNamespace(unknown_reasons=[reason]),
+        {"abi_relation_high_bit_proof": "return_width"},
+        lambda *_args: lambda: FunctionProofOutcome.EQUIVALENT,
+    )
+    while runtime.run_next()[0] is not None:
+        pass
+    assert runtime.apply_completed_evidence(
+        ({"evidence": {
+            "proof_requirement_id": gate.to_dict(),
+            "status": "complete",
+            "proof_source": "width_gate_test",
+        }},),
+        reasons=(reason,),
+    )
+    while runtime.run_next()[0] is not None:
+        pass
+
+    value_key = next(iter(runtime.pending_counterexamples))
+    dependent_keys = runtime.requirement_dependents[gate.to_key()]
+    assert value_key in dependent_keys
+    assert runtime.proof_outcomes[value_key] == FunctionProofOutcome.INCONCLUSIVE
+    assert runtime.pending_counterexamples[value_key].counterexample_raw == model
+    assert safety_runs == [model]
+    assert any(
+        event.event == "counterexample_safety_scheduled"
+        for event in runtime.events
+    )
+    assert runtime.outcome_for_reason(reason) == FunctionProofOutcome.INCONCLUSIVE
+    aggregate_target = SimpleNamespace(
+        is_equivalent=None,
+        unknown_reasons=[reason],
+        unknown_recovery_actions=[],
+        decision_gated_by_pending_proof=True,
+        pairwise_stats={
+            "total_pairs": 1, "unsat_pairs": 0, "sat_pairs": 0,
+            "unknown_pairs": 1, "error_pairs": 0,
+        },
+    )
+    assert DecisionAggregator.apply(aggregate_target, runtime).outcome == FunctionProofOutcome.INCONCLUSIVE
+    assert aggregate_target.unknown_reasons == [reason]
+
+
+def test_replanned_sat_becomes_not_eq_after_counterexample_safety_completes():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+
+    runtime = ObligationRuntimeSession.create(
+        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
+        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
+    )
+    gate = _requirement("coverage_proof_for_sat")
+    target = ("coverage", "pair-sat-safe")
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap",
+        recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(gate.to_dict(),),
+        object_target_key=target,
+        pair_or_case="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    model = {"x": 7}
+
+    def replan_value_query():
+        requirement = ProofRequirementId.create(
+            "value_relation",
+            ("pair_query", "(0,0)", "with-ineq", "safe-sat-query"),
+            ProofRequirementContract(proposition="replanned value relation"),
+        )
+        return requirement, "value_relation", lambda: QueryResult(
+            False,
+            counterexample_raw=model,
+        )
+
+    runtime.register_target_query_replanner(target, replan_value_query)
+    runtime.register_counterexample_safety_replanner(
+        "(0,0)",
+        lambda pending: (
+            _requirement("counterexample_safety_complete"),
+            "counterexample_safety",
+            lambda: (
+                FunctionProofOutcome.NOT_EQUIVALENT
+                if pending.counterexample_raw == model
+                else FunctionProofOutcome.INCONCLUSIVE
+            ),
+        ),
+    )
+    runtime.plan_proof_gates(
+        SimpleNamespace(unknown_reasons=[reason]),
+        {"return_coverage_completion": "return_coverage"},
+        lambda *_args: lambda: FunctionProofOutcome.EQUIVALENT,
+    )
+    while runtime.run_next()[0] is not None:
+        pass
+    assert runtime.apply_completed_evidence(
+        ({"evidence": {
+            "proof_requirement_id": gate.to_dict(),
+            "status": "complete",
+            "proof_source": "coverage_gate_test",
+        }},),
+        reasons=(reason,),
+    )
+    while runtime.run_next()[0] is not None:
+        pass
+
+    assert runtime.outcome_for_reason(reason) == FunctionProofOutcome.NOT_EQUIVALENT
+    aggregate_target = SimpleNamespace(
+        is_equivalent=None,
+        unknown_reasons=[reason],
+        unknown_recovery_actions=[],
+        decision_gated_by_pending_proof=True,
+        pairwise_stats={
+            "total_pairs": 1, "unsat_pairs": 0, "sat_pairs": 0,
+            "unknown_pairs": 1, "error_pairs": 0,
+        },
+    )
+    assert DecisionAggregator.apply(aggregate_target, runtime).outcome == FunctionProofOutcome.NOT_EQUIVALENT
+    assert aggregate_target.is_equivalent is False
 
 
 def test_pairwise_solver_attempt_cache_reuses_identical_query(monkeypatch):

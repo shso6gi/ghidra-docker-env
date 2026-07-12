@@ -535,6 +535,7 @@ class EquivalenceChecker:
                 binary2_name=ctx.binary2_name,
                 solver_results=parallel_result,
                 counterexample=counterexample,
+                counterexample_raw=strategy_result.counterexample_raw,
                 smt_formula=smt_formula,  # ★ 条件削除: 常に保存
                 total_time=total_time,
                 type_fix_result=ctx.type_fix_result,
@@ -727,6 +728,34 @@ class EquivalenceChecker:
         original_signature1: Optional[FunctionSignature],
         original_signature2: Optional[FunctionSignature]
     ) -> EquivalenceResult:
+        """Run the typed obligation branch plan (default production path)."""
+        from .obligations.stage_runner import run_obligation_branch_plan
+
+        return run_obligation_branch_plan(
+            self,
+            analysis1,
+            analysis2,
+            binary1_name,
+            binary2_name,
+            save_formula,
+            type_fix_result,
+            retry_count,
+            original_signature1,
+            original_signature2,
+        )
+
+    def _run_stage_plan_legacy(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        binary1_name: str,
+        binary2_name: str,
+        save_formula: bool,
+        type_fix_result: Optional[TypeFixResult],
+        retry_count: int,
+        original_signature1: Optional[FunctionSignature],
+        original_signature2: Optional[FunctionSignature]
+    ) -> EquivalenceResult:
         """Stage plan を実行"""
         result = None
         last_result = None
@@ -889,6 +918,7 @@ class EquivalenceChecker:
         original_signature1: Optional[FunctionSignature],
         original_signature2: Optional[FunctionSignature],
     ) -> Optional[EquivalenceResult]:
+        self._last_recursive_derived_view_identity = None
         abstraction = abstract_recursive_calls(
             analysis1,
             analysis2,
@@ -905,6 +935,19 @@ class EquivalenceChecker:
             "Deferred call abstraction fallback: matched "
             f"{len(abstraction.matches)} deferred call(s)"
         )
+        runtime = getattr(self, "_obligation_runtime_session", None)
+        if runtime is None:
+            from .obligations.runtime import ObligationRuntimeSession
+
+            runtime = ObligationRuntimeSession.create(analysis1, analysis2)
+            self._obligation_runtime_session = runtime
+        recursive_view = runtime.create_recursive_view(
+            abstraction.analysis1,
+            abstraction.analysis2,
+            abstraction.matches,
+        )
+        self._last_recursive_derived_view = recursive_view
+        self._last_recursive_derived_view_identity = recursive_view.view_id
         return self.check(
             abstraction.analysis1,
             abstraction.analysis2,

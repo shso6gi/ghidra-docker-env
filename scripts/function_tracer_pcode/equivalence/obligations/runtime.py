@@ -1,0 +1,555 @@
+"""Production proof-obligation runtime and dependency based rescheduling."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+
+from ..cause_identity import ProofRequirementContract, ProofRequirementId
+from .cache import ProofCache
+from .model import (
+    ExecutionState,
+    FunctionProofOutcome,
+    ObligationInstanceId,
+    ProofArtifact,
+    SemanticFactProvenance,
+)
+from .proof import ViewPremiseRecord, validate_proof_closure
+from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
+from .worklist import ProofWorklist, WorkItem
+
+
+_GATE_DEPENDENTS: Mapping[str, Tuple[str, ...]] = {
+    "return_coverage": ("guard_overlap", "value_relation"),
+    "return_width": ("value_relation",),
+    "call_effect": ("value_relation", "counterexample_safety"),
+    "loop_summary": ("guard_overlap", "value_relation"),
+    "counterexample_safety": (),
+}
+
+
+@dataclass(frozen=True)
+class ObligationExecutionEvent:
+    event: str
+    obligation_key: Tuple[Any, ...]
+    view_id: Tuple[Any, ...]
+    kind: str
+
+
+@dataclass(frozen=True)
+class PendingCounterexampleSafety:
+    """A SAT value query whose model has not passed global safety replay."""
+
+    requirement_key: Tuple[Any, ...]
+    counterexample_raw: Any
+
+
+@dataclass
+class ObligationRuntimeSession:
+    """Owns immutable views, proof artifacts, and the executable worklist."""
+
+    base_view: DerivedAnalysisView
+    current_view: DerivedAnalysisView
+    worklist: ProofWorklist = field(default_factory=ProofWorklist)
+    proof_cache: ProofCache = field(default_factory=ProofCache)
+    events: List[ObligationExecutionEvent] = field(default_factory=list)
+    artifacts: List[ProofArtifact] = field(default_factory=list)
+    view_records: Dict[Tuple[Any, ...], ViewPremiseRecord] = field(default_factory=dict)
+    dependencies: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = field(default_factory=dict)
+    requirement_dependents: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = field(default_factory=dict)
+    pair_query_replanners: Dict[Tuple[str, str], Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]]] = field(default_factory=dict)
+    target_query_replanners: Dict[Any, List[Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]]]] = field(default_factory=dict)
+    gate_replanners: Dict[Tuple[Any, ...], List[Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]]]] = field(default_factory=dict)
+    counterexample_safety_replanners: Dict[str, Callable[[PendingCounterexampleSafety], Tuple[ProofRequirementId, str, Callable[[], Any]]]] = field(default_factory=dict)
+    callbacks: Dict[Tuple[Any, ...], Callable[[], Any]] = field(default_factory=dict)
+    producers: Dict[Tuple[Any, ...], Callable[[], Any]] = field(default_factory=dict)
+    results: Dict[Tuple[Any, ...], Any] = field(default_factory=dict)
+    proof_outcomes: Dict[Tuple[Any, ...], FunctionProofOutcome] = field(default_factory=dict)
+    pending_counterexamples: Dict[Tuple[Any, ...], PendingCounterexampleSafety] = field(default_factory=dict)
+    reason_requirements: Dict[int, Tuple[ProofRequirementId, ...]] = field(default_factory=dict)
+
+    @classmethod
+    def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
+        left = cls._snapshot(analysis1, "left")
+        right = cls._snapshot(analysis2, "right")
+        pair_snapshot_id = ("analysis_pair", left.snapshot_id, right.snapshot_id)
+        premise = SnapshotFingerprintCodec.digest(
+            (left.semantic_fingerprint, right.semantic_fingerprint)
+        )
+        view = DerivedAnalysisView.create(
+            snapshot_id=pair_snapshot_id,
+            parent_view_id=None,
+            validated_proof_closure_id=("proof_closure", ()),
+            normalization_policy_digest="legacy-normalization-surface-v1",
+            view_builder_version="obligation-runtime-v1",
+            semantic_surface={
+                "left_snapshot": left.semantic_fingerprint,
+                "right_snapshot": right.semantic_fingerprint,
+                "premise_digest": premise,
+                "applied_artifact_ids": (),
+            },
+        )
+        session = cls(view, view)
+        session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+        return session
+
+    @staticmethod
+    def _snapshot(analysis: Any, side: str) -> AnalysisSnapshot:
+        if callable(getattr(analysis, "to_dict", None)):
+            return AnalysisSnapshot.from_function_analysis(analysis)
+        semantic = {
+            "binary_id": getattr(analysis, "binary_id", None),
+            "function_name": getattr(analysis, "function_name", None),
+            "entry_point": getattr(analysis, "entry_point", None),
+        }
+        return AnalysisSnapshot.create(("minimal_analysis", side, tuple(semantic.items())), semantic)
+
+    @property
+    def premise_digest(self) -> str:
+        return self.view_records[self.current_view.view_id].premise_digest
+
+    def schedule(
+        self,
+        requirement: ProofRequirementId,
+        kind: str,
+        callback: Optional[Callable[[], Any]] = None,
+        *,
+        depends_on: Iterable[ProofRequirementId] = (),
+        payload: Any = None,
+    ) -> WorkItem:
+        instance = ObligationInstanceId(
+            requirement,
+            self.current_view.view_id,
+            self.premise_digest,
+        )
+        item = WorkItem(instance, kind, payload)
+        self.worklist.add(item)
+        key = instance.to_key()
+        if callback is not None:
+            self.callbacks[key] = callback
+            self.producers[requirement.to_key()] = callback
+        for dependency in depends_on:
+            self.dependencies.setdefault(dependency.to_key(), set()).add(requirement.to_key())
+        self.events.append(ObligationExecutionEvent("scheduled", key, self.current_view.view_id, kind))
+        return item
+
+    def execute(
+        self,
+        requirement: ProofRequirementId,
+        kind: str,
+        producer: Callable[[], Any],
+        *,
+        depends_on: Iterable[ProofRequirementId] = (),
+    ) -> Any:
+        """Schedule and execute one concrete producer in the current view."""
+        instance = ObligationInstanceId(
+            requirement,
+            self.current_view.view_id,
+            self.premise_digest,
+        )
+        cached_key = instance.to_key()
+        if cached_key in self.results:
+            self.events.append(ObligationExecutionEvent(
+                "result_reused",
+                cached_key,
+                self.current_view.view_id,
+                kind,
+            ))
+            return self.results[cached_key]
+        self.schedule(requirement, kind, producer, depends_on=depends_on)
+        item, value = self.run_next()
+        if item is None or item.obligation_id.requirement_id != requirement:
+            raise RuntimeError("obligation producer execution order was violated")
+        return value
+
+    def run_next(self) -> Tuple[Optional[WorkItem], Any]:
+        item = self.worklist.pop()
+        if item is None:
+            return None, None
+        key = item.obligation_id.to_key()
+        callback = self.callbacks.get(key)
+        value = callback() if callback is not None else item.payload
+        self.results[key] = value
+        pending_safety: Optional[PendingCounterexampleSafety] = None
+        if isinstance(value, FunctionProofOutcome):
+            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = value
+        elif hasattr(value, "is_equivalent"):
+            semantic = getattr(value, "is_equivalent", None)
+            if item.kind == "guard_overlap" and semantic is not None:
+                outcome = FunctionProofOutcome.EQUIVALENT
+            elif semantic is True:
+                outcome = FunctionProofOutcome.EQUIVALENT
+            elif semantic is False and item.kind == "value_relation":
+                # A replanned SAT query is only a candidate counterexample.
+                # The ordinary pairwise path validates its model across every
+                # case and checks analysis/replay safety before deciding NOT_EQ.
+                # A local replanner does not own that complete validation
+                # surface, so retain the model for a counterexample_safety
+                # obligation and keep the decision inconclusive.
+                outcome = FunctionProofOutcome.INCONCLUSIVE
+                requirement_key = item.obligation_id.requirement_id.to_key()
+                pending_safety = PendingCounterexampleSafety(
+                    requirement_key=requirement_key,
+                    counterexample_raw=getattr(value, "counterexample_raw", None),
+                )
+                self.pending_counterexamples[requirement_key] = pending_safety
+            elif semantic is False:
+                outcome = FunctionProofOutcome.NOT_EQUIVALENT
+            else:
+                outcome = FunctionProofOutcome.INCONCLUSIVE
+            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = outcome
+        if item.state == ExecutionState.RUNNING:
+            self.worklist.complete(item)
+            event = "completed"
+        elif item.state == ExecutionState.SUPERSEDED:
+            # A producer may create a child view while it is running.  Its
+            # result is returned to the branch controller but never reattached
+            # to the superseded parent generation.
+            event = "completed_superseded"
+        else:
+            raise ValueError(f"work item left running in invalid state: {item.state}")
+        self.events.append(ObligationExecutionEvent(event, key, self.current_view.view_id, item.kind))
+        if pending_safety is not None:
+            self._schedule_counterexample_safety(item, pending_safety)
+        return item, value
+
+    def plan_proof_gates(
+        self,
+        result: Any,
+        gate_for_kind: Mapping[str, str],
+        producer_factory: Callable[[str, Any, ProofRequirementId], Callable[[], FunctionProofOutcome]],
+    ) -> Tuple[ProofRequirementId, ...]:
+        requirements: List[ProofRequirementId] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        reasons = tuple(getattr(result, "unknown_reasons", ()) or ())
+        for reason in reasons:
+            proof_kind = str(getattr(reason, "recovery_proof_kind", "") or "")
+            gate_kind = gate_for_kind.get(proof_kind)
+            if getattr(reason, "reason_id", None) in {
+                "method_b_closure_blocked",
+                "loop_summary_proof_missing",
+                "phi_circular_replacement_unproven",
+                "readonly_identity_missing",
+            }:
+                gate_kind = "loop_summary"
+            if gate_kind is None:
+                continue
+            typed = tuple(getattr(reason, "proof_requirement_ids", ()) or ())
+            candidates: List[ProofRequirementId] = []
+            for payload in typed:
+                try:
+                    candidates.append(ProofRequirementId.from_dict(payload))
+                except (TypeError, ValueError):
+                    continue
+            if not candidates:
+                target = getattr(reason, "object_target_key", None) or (
+                    "unknown_reason_target", getattr(reason, "reason_id", "unknown"),
+                    getattr(reason, "pair_or_case", None),
+                )
+                contract = ProofRequirementContract(
+                    proposition=proof_kind,
+                    observation_surface=(gate_kind,),
+                    active_precondition=(getattr(reason, "stage", None),),
+                )
+                candidates.append(ProofRequirementId.create(proof_kind, target, contract))
+            for requirement in candidates:
+                if requirement.to_key() in seen:
+                    continue
+                seen.add(requirement.to_key())
+                requirements.append(requirement)
+                self.reason_requirements.setdefault(id(reason), tuple())
+                self.reason_requirements[id(reason)] += (requirement,)
+                self.schedule(
+                    requirement,
+                    gate_kind,
+                    producer_factory(gate_kind, reason, requirement),
+                    payload=reason,
+                )
+                replanners = []
+                pair_id = getattr(reason, "pair_or_case", None)
+                if pair_id:
+                    for dependent_kind in _GATE_DEPENDENTS.get(gate_kind, ()):
+                        replanner = self.pair_query_replanners.get(
+                            (str(pair_id), dependent_kind)
+                        )
+                        if replanner is not None:
+                            replanners.append(replanner)
+                target = getattr(reason, "object_target_key", None)
+                if target is not None:
+                    replanners.extend(
+                        self.target_query_replanners.get(
+                            SnapshotFingerprintCodec.freeze(target),
+                            (),
+                        )
+                    )
+                if replanners:
+                    self.gate_replanners[requirement.to_key()] = list(dict.fromkeys(replanners))
+        return tuple(requirements)
+
+    def register_pair_query_replanner(
+        self,
+        pair_id: str,
+        kind: str,
+        replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
+    ) -> None:
+        self.pair_query_replanners[(str(pair_id), str(kind))] = replanner
+
+    def register_target_query_replanner(
+        self,
+        target_key: Any,
+        replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
+    ) -> None:
+        frozen = SnapshotFingerprintCodec.freeze(target_key)
+        self.target_query_replanners.setdefault(frozen, []).append(replanner)
+
+    def register_counterexample_safety_replanner(
+        self,
+        pair_id: str,
+        replanner: Callable[[PendingCounterexampleSafety], Tuple[ProofRequirementId, str, Callable[[], Any]]],
+    ) -> None:
+        self.counterexample_safety_replanners[str(pair_id)] = replanner
+
+    def _schedule_counterexample_safety(
+        self,
+        value_item: WorkItem,
+        pending: PendingCounterexampleSafety,
+    ) -> None:
+        target = value_item.obligation_id.requirement_id.proof_target_key
+        if len(target) < 2 or target[0] != "pair_query":
+            return
+        replanner = self.counterexample_safety_replanners.get(str(target[1]))
+        if replanner is None:
+            return
+        value_key = value_item.obligation_id.requirement_id.to_key()
+        parent_dependents = tuple(
+            dependents
+            for dependents in self.requirement_dependents.values()
+            if value_key in dependents
+        )
+        # Initial pairwise SAT follows the ordinary inline safety path.  Only a
+        # query rescheduled by a completed proof gate is handled here.
+        if not parent_dependents:
+            return
+        requirement, kind, producer = replanner(pending)
+        self.schedule(
+            requirement,
+            kind,
+            producer,
+            depends_on=(value_item.obligation_id.requirement_id,),
+        )
+        safety_key = requirement.to_key()
+        for dependents in parent_dependents:
+            dependents.add(safety_key)
+        self.events.append(ObligationExecutionEvent(
+            "counterexample_safety_scheduled",
+            requirement.to_key(),
+            self.current_view.view_id,
+            kind,
+        ))
+
+    def apply_completed_evidence(
+        self,
+        evidence_wrappers: Iterable[Mapping[str, Any]],
+        *,
+        reasons: Iterable[Any] = (),
+    ) -> Tuple[DerivedAnalysisView, ...]:
+        produced: List[DerivedAnalysisView] = []
+        for wrapper in evidence_wrappers:
+            evidence = wrapper.get("evidence", wrapper)
+            if not isinstance(evidence, Mapping):
+                continue
+            status = str(evidence.get("proof_status") or evidence.get("status") or "").lower()
+            if status not in {"complete", "completed", "discharged", "proven", "verified"}:
+                continue
+            requirement_payload = evidence.get("proof_requirement_id")
+            if not isinstance(requirement_payload, Mapping):
+                requirement_payload = self._unique_requirement_for_legacy_evidence(
+                    evidence,
+                    reasons,
+                )
+            if not isinstance(requirement_payload, Mapping):
+                continue
+            try:
+                requirement = ProofRequirementId.from_dict(requirement_payload)
+            except (TypeError, ValueError):
+                continue
+            producer_outcome = self.proof_outcomes.get(
+                requirement.to_key(),
+                FunctionProofOutcome.INCONCLUSIVE,
+            )
+            if producer_outcome == FunctionProofOutcome.INCONCLUSIVE:
+                # A producer status string is not proof validation.  Only an
+                # exact typed producer outcome may cross the cache/view boundary.
+                continue
+            produced.append(self._apply_artifact(requirement, evidence))
+        return tuple(produced)
+
+    @staticmethod
+    def _unique_requirement_for_legacy_evidence(
+        evidence: Mapping[str, Any],
+        reasons: Iterable[Any],
+    ) -> Optional[Mapping[str, Any]]:
+        legacy_id = evidence.get("proof_obligation_id")
+        if legacy_id is None:
+            return None
+        frozen_id = SnapshotFingerprintCodec.freeze(legacy_id)
+        requirements: Dict[Tuple[Any, ...], Mapping[str, Any]] = {}
+        for reason in reasons:
+            reason_id = getattr(reason, "proof_obligation_id", None)
+            if reason_id is None or SnapshotFingerprintCodec.freeze(reason_id) != frozen_id:
+                continue
+            for payload in getattr(reason, "proof_requirement_ids", ()) or ():
+                if not isinstance(payload, Mapping):
+                    continue
+                try:
+                    canonical = ProofRequirementId.from_dict(payload).to_dict()
+                except (TypeError, ValueError):
+                    continue
+                requirements[ProofRequirementId.from_dict(canonical).to_key()] = canonical
+        if len(requirements) != 1:
+            return None
+        return next(iter(requirements.values()))
+
+    def _apply_artifact(self, requirement: ProofRequirementId, evidence: Mapping[str, Any]) -> DerivedAnalysisView:
+        source = self.current_view
+        source_record = self.view_records[source.view_id]
+        artifact_id = (
+            "proof_artifact",
+            requirement.to_key(),
+            SnapshotFingerprintCodec.digest(evidence),
+        )
+        artifact = ProofArtifact(
+            artifact_id=artifact_id,
+            requirement_id=requirement,
+            produced_from_view_id=source.view_id,
+            premise_digest=source_record.premise_digest,
+            dependency_artifact_ids=tuple(source_record.available_artifact_ids),
+            producer_id=str(evidence.get("proof_source") or "completed_recovery_proof"),
+            artifact_validation_status="validated",
+            payload=dict(evidence),
+        )
+        materialized = tuple(self.artifacts) + (artifact,)
+        roots = tuple(item.artifact_id for item in materialized)
+        closure = validate_proof_closure(materialized, roots, self.view_records)
+        self.proof_cache.put(
+            artifact,
+            artifacts=materialized,
+            root_artifact_ids=roots,
+            view_records=self.view_records,
+            target_view=source_record,
+            candidate_independent_premise_digest=source_record.premise_digest,
+        )
+        applied = tuple(item.artifact_id for item in materialized)
+        fact_id = ("proof_fact", requirement.to_key())
+        provenance = dict(source.fact_provenance)
+        provenance[fact_id] = SemanticFactProvenance(fact_id, source_artifact_ids=(artifact_id,))
+        derived = DerivedAnalysisView.create(
+            snapshot_id=source.snapshot_id,
+            parent_view_id=source.view_id,
+            validated_proof_closure_id=closure.closure_id,
+            normalization_policy_digest=source.normalization_policy_digest,
+            view_builder_version="obligation-runtime-v1",
+            semantic_surface={**dict(source.semantic_surface), "applied_artifact_ids": applied},
+            fact_provenance=provenance,
+        )
+        self.worklist.supersede_view(source.view_id)
+        self.artifacts.append(artifact)
+        self.current_view = derived
+        derived_premise = SnapshotFingerprintCodec.digest((
+            "derived_view_premise_v1",
+            derived.semantic_fingerprint,
+            closure.validation_digest,
+            tuple(
+                (item.artifact_id, SnapshotFingerprintCodec.digest(item.payload))
+                for item in materialized
+            ),
+            derived.normalization_policy_digest,
+            derived.view_builder_version,
+        ))
+        self.view_records[derived.view_id] = ViewPremiseRecord(
+            derived.view_id,
+            derived_premise,
+            available_artifact_ids=applied,
+            parent_view_id=source.view_id,
+        )
+        self.events.append(ObligationExecutionEvent("view_created", requirement.to_key(), derived.view_id, requirement.proof_kind))
+        self._reschedule_dependents(requirement)
+        return derived
+
+    def outcome_for_reason(self, reason: Any) -> FunctionProofOutcome:
+        requirements = self.reason_requirements.get(id(reason), ())
+        validated = {artifact.requirement_id.to_key() for artifact in self.artifacts}
+        outcomes = tuple(
+            (
+                self.proof_outcomes.get(
+                    requirement.to_key(),
+                    FunctionProofOutcome.INCONCLUSIVE,
+                )
+                if requirement.to_key() in validated
+                else FunctionProofOutcome.INCONCLUSIVE
+            )
+            for requirement in requirements
+        )
+        dependent_outcomes = tuple(
+            self.proof_outcomes.get(key, FunctionProofOutcome.INCONCLUSIVE)
+            for requirement in requirements
+            for key in self.requirement_dependents.get(requirement.to_key(), ())
+        )
+        if any(
+            value == FunctionProofOutcome.NOT_EQUIVALENT
+            for value in dependent_outcomes
+        ):
+            return FunctionProofOutcome.NOT_EQUIVALENT
+        if dependent_outcomes and not all(
+            value == FunctionProofOutcome.EQUIVALENT for value in dependent_outcomes
+        ):
+            return FunctionProofOutcome.INCONCLUSIVE
+        if outcomes and all(value == FunctionProofOutcome.EQUIVALENT for value in outcomes):
+            return FunctionProofOutcome.EQUIVALENT
+        if any(value == FunctionProofOutcome.NOT_EQUIVALENT for value in outcomes):
+            return FunctionProofOutcome.NOT_EQUIVALENT
+        return FunctionProofOutcome.INCONCLUSIVE
+
+    def _reschedule_dependents(self, completed: ProofRequirementId) -> None:
+        for dependent_key in sorted(self.dependencies.get(completed.to_key(), ()), key=repr):
+            requirement = ProofRequirementId(
+                proof_kind=str(dependent_key[1]),
+                proof_target_key=tuple(dependent_key[2]),
+                proof_contract_key=tuple(dependent_key[3]),
+                schema_version=int(dependent_key[0]),
+            )
+            self.schedule(
+                requirement,
+                requirement.proof_kind,
+                self.producers.get(requirement.to_key()),
+            )
+            self.requirement_dependents.setdefault(completed.to_key(), set()).add(
+                requirement.to_key()
+            )
+        for replanner in self.gate_replanners.get(completed.to_key(), ()):
+            requirement, kind, producer = replanner()
+            self.schedule(requirement, kind, producer)
+            self.requirement_dependents.setdefault(completed.to_key(), set()).add(
+                requirement.to_key()
+            )
+
+    def create_recursive_view(self, analysis1: Any, analysis2: Any, matches: Iterable[Any]) -> DerivedAnalysisView:
+        match_digest = SnapshotFingerprintCodec.digest(tuple(matches))
+        requirement = ProofRequirementId.create(
+            "recursive_call_abstraction",
+            ("recursive_matches", match_digest),
+            ProofRequirementContract(
+                proposition="matched recursive calls share an abstract return",
+                observation_surface=("return_and_effect",),
+                active_precondition=(self.current_view.view_id,),
+            ),
+        )
+        evidence = {
+            "proof_requirement_id": requirement.to_dict(),
+            "status": "complete",
+            "proof_source": "recursive_abstraction_acceptance_gate",
+            "match_digest": match_digest,
+            "left_snapshot": self._snapshot(analysis1, "recursive_left").semantic_fingerprint,
+            "right_snapshot": self._snapshot(analysis2, "recursive_right").semantic_fingerprint,
+        }
+        return self._apply_artifact(requirement, evidence)

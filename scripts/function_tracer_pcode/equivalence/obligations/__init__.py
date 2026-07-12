@@ -8,6 +8,7 @@ progress.
 """
 
 from .cache import AttemptCache, AttemptCacheEntry, ProofCache, ProofCacheEntry
+from .decision import DecisionAggregation, DecisionAggregator
 from .model import (
     ActivationState,
     AttemptKey,
@@ -32,14 +33,32 @@ from .proof import (
     validate_proof_closure,
 )
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
+from .shadow import (
+    LegacyExecutionSnapshot,
+    ProductionShadowValidation,
+    ProductionShadowValidator,
+    ShadowComparisonReport,
+)
+from .runtime import (
+    ObligationExecutionEvent,
+    ObligationRuntimeSession,
+    PendingCounterexampleSafety,
+)
+from .stage_runner import (
+    BranchExecutionRecord,
+    InternalBranchTrace,
+    ProofGateProjection,
+    project_proof_gates,
+    run_obligation_branch_plan,
+)
 from .worklist import ProofWorklist, WorkItem
 
 __all__ = (
     "ActivationState", "AnalysisSnapshot", "ArtifactApplicabilityRecord", "AttemptCache", "AttemptCacheEntry",
     "AttemptKey", "AttemptRecordId", "BranchActivationController", "BranchSpec",
-    "DerivedAnalysisView", "ExecutionState", "FunctionProofOutcome",
-    "ObligationInstanceId", "ProofArtifact", "ProofCache", "ProofCacheEntry",
+    "BranchExecutionRecord", "DecisionAggregation", "DecisionAggregator", "DerivedAnalysisView", "ExecutionState", "FunctionProofOutcome",
+    "ObligationInstanceId", "ObligationExecutionEvent", "ObligationRuntimeSession", "PendingCounterexampleSafety", "ProofArtifact", "ProofCache", "ProofCacheEntry",
     "ProofExpression", "ProofExpressionEvaluator", "ProofEvaluation", "ProofNodeKind", "ProofWorklist",
-    "SemanticFactProvenance", "SnapshotFingerprintCodec", "ValidatedProofClosure",
-    "ViewPremiseRecord", "WorkItem", "validate_artifact_applicability", "validate_proof_closure",
+    "InternalBranchTrace", "LegacyExecutionSnapshot", "ProductionShadowValidation", "ProductionShadowValidator", "ProofGateProjection", "SemanticFactProvenance", "ShadowComparisonReport", "SnapshotFingerprintCodec", "ValidatedProofClosure",
+    "ViewPremiseRecord", "WorkItem", "project_proof_gates", "run_obligation_branch_plan", "validate_artifact_applicability", "validate_proof_closure",
 )

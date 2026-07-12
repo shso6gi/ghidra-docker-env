@@ -55,3 +55,7 @@ class ProofWorklist:
                 item.state = ExecutionState.SUPERSEDED
                 count += 1
         return count
+
+    def items(self) -> Tuple[WorkItem, ...]:
+        """Return a stable diagnostic snapshot without exposing mutable storage."""
+        return tuple(self._items.values())
