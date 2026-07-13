@@ -386,6 +386,18 @@ def solve_query_twostage(
             or expression_has_unresolved_value(case2.value_expr)
         )
 
+    call_projection_covers_value = bool(
+        tuple(
+            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                pair_id,
+                (),
+            )
+            or ()
+        )
+    )
+    if has_unresolved_value and call_projection_covers_value:
+        has_unresolved_value = False
+
     if has_unresolved_value:
         strategy._debug_print(
             f"  Pair {pair_id} with-ineq skipped: unresolved value expression detected"

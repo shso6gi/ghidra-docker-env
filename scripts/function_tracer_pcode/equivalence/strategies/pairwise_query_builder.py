@@ -509,7 +509,10 @@ def _build_pairwise_extra_assertions(
     pair_id: str,
 ) -> List[str]:
     assertions_by_pair = base_ctx.get("pairwise_extra_assertions_by_pair") or {}
-    raw_assertions = assertions_by_pair.get(pair_id) or ()
+    call_projection_by_pair = base_ctx.get("call_projection_assertions_by_pair") or {}
+    raw_assertions = tuple(call_projection_by_pair.get(pair_id) or ()) + tuple(
+        assertions_by_pair.get(pair_id) or ()
+    )
     assertions = [str(item) for item in raw_assertions if str(item).strip()]
     if not assertions:
         return []

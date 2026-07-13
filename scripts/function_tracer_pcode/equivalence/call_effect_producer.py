@@ -27,7 +27,10 @@ from ..model import (
     expression_provenance_key,
 )
 from ..model.signature import get_declared_type_signedness
-from ..model.render_smt import expression_smt_bit_width
+from ..model.render_smt import (
+    collect_unknown_smt_declarations,
+    expression_smt_bit_width,
+)
 from ..smt import SolverStatus
 from .call_effect_obligations import (
     InternalSolverProofArtifact,
@@ -549,11 +552,35 @@ def _build_inputs(
     return tuple(inputs), tuple(failures)
 
 
-def _pure_scalar_expression_supported(expr: Optional[Expression]) -> bool:
+def _deferred_call_pcode_key(expr: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(expr, Expression) or expr.expr_type != ExpressionType.UNKNOWN:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    deferred_ref = getattr(runtime_ref, "deferred_call_ref", None)
+    op_ref = getattr(deferred_ref, "pcode_op_ref", None)
+    stable_key = getattr(op_ref, "stable_key", None)
+    if not callable(stable_key):
+        return None
+    key = stable_key()
+    return tuple(key) if key is not None else None
+
+
+def _pure_scalar_expression_supported(
+    expr: Optional[Expression],
+    *,
+    allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
+) -> bool:
     if not isinstance(expr, Expression):
         return False
     if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.PARAMETER}:
         return int(expression_smt_bit_width(expr) or 0) > 0
+    if expr.expr_type == ExpressionType.UNKNOWN:
+        key = _deferred_call_pcode_key(expr)
+        return (
+            key is not None
+            and key in allowed_deferred_call_keys
+            and int(expression_smt_bit_width(expr) or 0) > 0
+        )
     if expr.expr_type not in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
         return False
     operator = str(getattr(expr, "operator", "") or "")
@@ -562,12 +589,23 @@ def _pure_scalar_expression_supported(expr: Optional[Expression]) -> bool:
     if expr.expr_type == ExpressionType.UNARY_OP and operator not in _TOTAL_UNARY_OPERATORS:
         return False
     operands = tuple(getattr(expr, "operands", ()) or ())
-    return bool(operands) and all(_pure_scalar_expression_supported(item) for item in operands)
+    return bool(operands) and all(
+        _pure_scalar_expression_supported(
+            item,
+            allowed_deferred_call_keys=allowed_deferred_call_keys,
+        )
+        for item in operands
+    )
 
 
-def _condition_supported(condition: Condition) -> bool:
+def _condition_supported(
+    condition: Condition,
+    *,
+    allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
+) -> bool:
     return isinstance(condition, Condition) and _pure_scalar_expression_supported(
-        condition.expression
+        condition.expression,
+        allowed_deferred_call_keys=allowed_deferred_call_keys,
     )
 
 
@@ -592,8 +630,16 @@ def _or(terms: Sequence[str]) -> str:
 def _render_condition_group(
     conditions: Sequence[Condition],
     symbol_mapping: Mapping[str, str],
+    *,
+    allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
 ) -> str:
-    if not all(_condition_supported(condition) for condition in conditions):
+    if not all(
+        _condition_supported(
+            condition,
+            allowed_deferred_call_keys=allowed_deferred_call_keys,
+        )
+        for condition in conditions
+    ):
         raise ValueError("unsupported_guard_expression")
     return _and(
         *(
@@ -1628,6 +1674,7 @@ def _final_memory_cases(
     reach: str,
     *,
     failure_prefix: str,
+    allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
 ) -> Dict[Tuple[Any, ...], Tuple[Tuple[str, str], ...]]:
     by_location: Dict[Tuple[Any, ...], List[Tuple[str, str]]] = {}
     must_happen_before = {
@@ -1645,21 +1692,32 @@ def _final_memory_cases(
             later_guards.extend(
                 _and(
                     reach,
-                    _render_condition_group(effect.conditions, mapping),
+                    _render_condition_group(
+                        effect.conditions,
+                        mapping,
+                        allowed_deferred_call_keys=allowed_deferred_call_keys,
+                    ),
                 )
                 for effect in later_event.effects
             )
         later_active = _or(tuple(later_guards))
         expected_bits = int(event.location_key[3]) * 8
         for effect in event.effects:
-            if not _pure_scalar_expression_supported(effect.value):
+            if not _pure_scalar_expression_supported(
+                effect.value,
+                allowed_deferred_call_keys=allowed_deferred_call_keys,
+            ):
                 raise ValueError(f"{failure_prefix}_value_relation_unsupported")
             bits = int(expression_smt_bit_width(effect.value) or 0)
             if bits <= 0 or bits != expected_bits:
                 raise ValueError(f"{failure_prefix}_value_width_relation_missing")
             guard = _and(
                 reach,
-                _render_condition_group(effect.conditions, mapping),
+                _render_condition_group(
+                    effect.conditions,
+                    mapping,
+                    allowed_deferred_call_keys=allowed_deferred_call_keys,
+                ),
             )
             if later_guards:
                 guard = _and(guard, f"(not {later_active})")
@@ -1684,6 +1742,8 @@ def _render_final_post_state_relation(
     right_call_effects: Sequence[CallSiteEffectSummaryEvidence],
     *,
     failure_prefix: str,
+    left_allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
+    right_allowed_deferred_call_keys: frozenset[Tuple[Any, ...]] = frozenset(),
 ) -> Tuple[List[str], Dict[str, Any], Dict[str, Any]]:
     left_events = _memory_write_events(left_effects, failure_prefix=failure_prefix)
     right_events = _memory_write_events(right_effects, failure_prefix=failure_prefix)
@@ -1709,6 +1769,7 @@ def _render_final_post_state_relation(
         left_mapping,
         left_reach,
         failure_prefix=failure_prefix,
+        allowed_deferred_call_keys=left_allowed_deferred_call_keys,
     )
     right_final = _final_memory_cases(
         right_events,
@@ -1716,14 +1777,27 @@ def _render_final_post_state_relation(
         right_mapping,
         right_reach,
         failure_prefix=failure_prefix,
+        allowed_deferred_call_keys=right_allowed_deferred_call_keys,
     )
     if set(left_final) != set(right_final):
         raise ValueError(f"{failure_prefix}_location_relation_missing")
 
     violations: List[str] = []
-    for events, mapping, reach, certificate in (
-        (left_events, left_mapping, left_reach, left_certificate),
-        (right_events, right_mapping, right_reach, right_certificate),
+    for events, mapping, reach, certificate, allowed_call_keys in (
+        (
+            left_events,
+            left_mapping,
+            left_reach,
+            left_certificate,
+            left_allowed_deferred_call_keys,
+        ),
+        (
+            right_events,
+            right_mapping,
+            right_reach,
+            right_certificate,
+            right_allowed_deferred_call_keys,
+        ),
     ):
         for left_index, right_index in certificate[
             "guard_exclusivity_proof_pairs"
@@ -1732,7 +1806,11 @@ def _render_final_post_state_relation(
                 tuple(
                     _and(
                         reach,
-                        _render_condition_group(effect.conditions, mapping),
+                        _render_condition_group(
+                            effect.conditions,
+                            mapping,
+                            allowed_deferred_call_keys=allowed_call_keys,
+                        ),
                     )
                     for effect in events[left_index].effects
                 )
@@ -1741,7 +1819,11 @@ def _render_final_post_state_relation(
                 tuple(
                     _and(
                         reach,
-                        _render_condition_group(effect.conditions, mapping),
+                        _render_condition_group(
+                            effect.conditions,
+                            mapping,
+                            allowed_deferred_call_keys=allowed_call_keys,
+                        ),
                     )
                     for effect in events[right_index].effects
                 )
@@ -1963,6 +2045,129 @@ def _caller_effect_coverage_payload(
     }
 
 
+def _iter_expression_nodes(expr: Optional[Expression]):
+    if not isinstance(expr, Expression):
+        return
+    yield expr
+    for operand in tuple(getattr(expr, "operands", ()) or ()):
+        yield from _iter_expression_nodes(operand)
+    value = getattr(expr, "value", None)
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                yield from _iter_expression_nodes(getattr(item[0], "expression", None))
+                yield from _iter_expression_nodes(item[1])
+
+
+def _render_call_result_value(
+    value: Expression,
+    mapping: Mapping[str, str],
+    *,
+    observed_bits: int,
+    signed: Optional[bool],
+) -> str:
+    if not _pure_scalar_expression_supported(value):
+        raise ValueError("caller_memory_call_return_expression_unsupported")
+    value_bits = int(expression_smt_bit_width(value) or 0)
+    if value_bits <= 0 or observed_bits <= 0:
+        raise ValueError("caller_memory_call_return_width_missing")
+    rendered = value.to_smt(symbol_name_mapping=mapping, float_mode="fp")
+    if value_bits > observed_bits:
+        return f"((_ extract {observed_bits - 1} 0) {rendered})"
+    if value_bits < observed_bits:
+        if signed is None:
+            raise ValueError("caller_memory_call_return_signedness_missing")
+        extension = "sign_extend" if signed else "zero_extend"
+        return f"((_ {extension} {observed_bits - value_bits}) {rendered})"
+    return rendered
+
+
+def _caller_call_result_definitions(
+    effects: Sequence[StoreEffect],
+    call_effects: Sequence[CallSiteEffectSummaryEvidence],
+    mapping: Mapping[str, str],
+    *,
+    side: str,
+) -> Tuple[List[str], frozenset[Tuple[Any, ...]], Dict[str, Any]]:
+    """Bind deferred call-result UNKNOWNs used by caller effects to typed summaries."""
+
+    evidence_by_key: Dict[Tuple[Any, ...], CallSiteEffectSummaryEvidence] = {}
+    for evidence in tuple(call_effects or ()):
+        key = _evidence_pcode_key(evidence)
+        if key is None or key in evidence_by_key:
+            raise ValueError(f"{side}_caller_call_result_identity_incomplete")
+        evidence_by_key[key] = evidence
+
+    unknowns: Dict[str, Tuple[Expression, Tuple[Any, ...]]] = {}
+    for effect in tuple(effects or ()):
+        roots = [effect.value]
+        roots.extend(
+            getattr(condition, "expression", None)
+            for condition in tuple(effect.conditions or ())
+        )
+        for root in roots:
+            for node in _iter_expression_nodes(root):
+                key = _deferred_call_pcode_key(node)
+                if key is None:
+                    continue
+                symbol = node.to_smt(symbol_name_mapping=mapping, float_mode="fp")
+                previous = unknowns.get(symbol)
+                if previous is not None and previous[1] != key:
+                    raise ValueError(f"{side}_caller_call_result_symbol_collision")
+                unknowns[symbol] = (node, key)
+
+    lines: List[str] = []
+    bindings = []
+    allowed = set()
+    for symbol, (unknown, key) in sorted(unknowns.items()):
+        evidence = evidence_by_key.get(key)
+        if evidence is None:
+            raise ValueError(f"{side}_caller_call_result_summary_missing")
+        partitions = tuple(evidence.return_partitions or ())
+        if (
+            evidence.summary_status != "complete"
+            or evidence.return_summary_status != "complete"
+            or not partitions
+            or evidence.has_unsupported_nested_call
+        ):
+            raise ValueError(f"{side}_caller_call_result_summary_incomplete")
+        declarations = collect_unknown_smt_declarations(unknown)
+        if len(declarations) != 1 or declarations[0][0] != symbol:
+            raise ValueError(f"{side}_caller_call_result_declaration_incomplete")
+        declared_symbol, observed_bits = declarations[0]
+        lines.append(
+            f"(declare-const {declared_symbol} (_ BitVec {int(observed_bits)}))"
+        )
+        guards = []
+        for conditions, value in partitions:
+            guard = _render_condition_group(conditions, mapping)
+            rendered_value = _render_call_result_value(
+                value,
+                mapping,
+                observed_bits=int(observed_bits),
+                signed=evidence.return_signed,
+            )
+            lines.append(f"(assert (=> {guard} (= {symbol} {rendered_value})))")
+            guards.append(guard)
+        allowed.add(key)
+        bindings.append(
+            (
+                key,
+                symbol,
+                int(observed_bits),
+                tuple(guards),
+                tuple(expression_provenance_key(value) for _conditions, value in partitions),
+            )
+        )
+    return lines, frozenset(allowed), {
+        "side": side,
+        "status": "complete",
+        "binding_count": len(bindings),
+        "bindings": tuple(bindings),
+        "proof_basis": "typed_call_site_return_partitions",
+    }
+
+
 def _render_caller_memory_stage(
     proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
     dependency_ids: Tuple[str, ...],
@@ -1980,6 +2185,24 @@ def _render_caller_memory_stage(
         proof_input.right_caller_call_effects,
         side="right",
     )
+    left_definition_lines, left_call_keys, left_call_result_certificate = (
+        _caller_call_result_definitions(
+            proof_input.left_caller_effects,
+            proof_input.left_caller_call_effects,
+            left_mapping,
+            side="left",
+        )
+    )
+    right_definition_lines, right_call_keys, right_call_result_certificate = (
+        _caller_call_result_definitions(
+            proof_input.right_caller_effects,
+            proof_input.right_caller_call_effects,
+            right_mapping,
+            side="right",
+        )
+    )
+    lines.extend(left_definition_lines)
+    lines.extend(right_definition_lines)
     violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
         proof_input.left_caller_effects,
         proof_input.right_caller_effects,
@@ -1992,6 +2215,8 @@ def _render_caller_memory_stage(
         proof_input.left_caller_call_effects,
         proof_input.right_caller_call_effects,
         failure_prefix="caller_memory_effect",
+        left_allowed_deferred_call_keys=left_call_keys,
+        right_allowed_deferred_call_keys=right_call_keys,
     )
     violation = _or(tuple(violations))
     lines.extend((f"(assert {violation})", "(check-sat)"))
@@ -2006,6 +2231,8 @@ def _render_caller_memory_stage(
             "memory_observation_policy": "complete_alias_aware_final_post_state",
             "left_coverage_certificate": left_coverage,
             "right_coverage_certificate": right_coverage,
+            "left_call_result_certificate": left_call_result_certificate,
+            "right_call_result_certificate": right_call_result_certificate,
             "left_partial_order_certificate": left_partial_order,
             "right_partial_order_certificate": right_partial_order,
         },

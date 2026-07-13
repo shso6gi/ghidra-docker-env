@@ -109,6 +109,9 @@ class SnapshotFingerprintCodec:
         to_key = getattr(value, "to_key", None)
         if callable(to_key):
             return (value.__class__.__qualname__, cls.freeze(to_key()))
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return (value.__class__.__qualname__, cls.freeze(to_dict()))
         if is_dataclass(value):
             return (
                 value.__class__.__qualname__,

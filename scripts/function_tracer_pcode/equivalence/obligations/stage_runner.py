@@ -153,13 +153,24 @@ def run_obligation_branch_plan(
                 # Characterization tests may use immutable opaque sentinels.
                 # Real strategy instances always accept the runtime binding.
                 pass
-            return checker.check(
-                analysis1, analysis2, binary1_name, binary2_name, save_formula,
-                type_fix_result=type_fix_result, retry_count=retry_count,
-                original_signature1=original_signature1,
-                original_signature2=original_signature2,
-                force_strategy=strategies[spec.strategy],
-            )
+            previous_branch = getattr(checker, "_active_call_proof_branch_id", None)
+            checker._active_call_proof_branch_id = branch_id
+            try:
+                return checker.check(
+                    analysis1, analysis2, binary1_name, binary2_name, save_formula,
+                    type_fix_result=type_fix_result, retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                    force_strategy=strategies[spec.strategy],
+                )
+            finally:
+                if previous_branch is None:
+                    try:
+                        del checker._active_call_proof_branch_id
+                    except AttributeError:
+                        pass
+                else:
+                    checker._active_call_proof_branch_id = previous_branch
 
         active_strategy = (
             checker.pairwise_strategy

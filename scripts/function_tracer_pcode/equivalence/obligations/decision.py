@@ -29,14 +29,10 @@ class DecisionAggregator:
         discharged = []
         remaining = []
         decisive_not_eq = False
-        discharged_pairs = set()
         for reason in reasons:
             outcome = runtime.outcome_for_reason(reason)
             if outcome == FunctionProofOutcome.EQUIVALENT:
                 discharged.append(reason)
-                pair_id = getattr(reason, "pair_or_case", None)
-                if pair_id:
-                    discharged_pairs.add(str(pair_id))
             elif outcome == FunctionProofOutcome.NOT_EQUIVALENT:
                 decisive_not_eq = True
                 discharged.append(reason)
@@ -61,14 +57,6 @@ class DecisionAggregator:
         sat = int(stats.get("sat_pairs", 0) or 0)
         unknown = int(stats.get("unknown_pairs", 0) or 0)
         errors = int(stats.get("error_pairs", 0) or 0)
-        proof_resolved_pairs = min(unknown, len(discharged_pairs))
-        if stats and proof_resolved_pairs:
-            stats["unknown_pairs"] = unknown - proof_resolved_pairs
-            stats["unsat_pairs"] = unsat + proof_resolved_pairs
-            result.pairwise_stats = stats
-            unknown -= proof_resolved_pairs
-            unsat += proof_resolved_pairs
-
         all_pair_relations_proven = (
             total > 0 and sat == 0 and errors == 0 and unknown == 0 and unsat == total
         )

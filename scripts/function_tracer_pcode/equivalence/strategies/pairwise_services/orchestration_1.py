@@ -61,19 +61,35 @@ def _impl_check(
     save_formula: bool = False
 ) -> StrategyResult:
     start_time = time.time()
+    from ...call_effect_preflight import (
+        QueryExecutionRecord,
+        consume_prepared_dispatch_frame,
+        current_dispatch_depth,
+        issue_builtin_comparison_receipt,
+        lower_call_projection_for_case_pair,
+        projection_binding_evidence_from_query,
+    )
 
-    solver_analysis1 = normalize_analysis_semantic_width(
-        analysis1,
-        infer_parameter_semantics(analysis1),
-    )
-    solver_analysis2 = normalize_analysis_semantic_width(
-        analysis2,
-        infer_parameter_semantics(analysis2),
-    )
-    solver_analysis1, solver_analysis2 = align_return_value_extension_surfaces(
-        solver_analysis1,
-        solver_analysis2,
-    )
+    dispatch_frame = None
+    if current_dispatch_depth() > 0:
+        dispatch_frame = consume_prepared_dispatch_frame(analysis1, analysis2)
+        solver_analysis1 = dispatch_frame.prepared.analysis1
+        solver_analysis2 = dispatch_frame.prepared.analysis2
+    else:
+        # Compatibility-only direct strategy invocation.  Production checker
+        # dispatch always supplies a certified prepared frame.
+        solver_analysis1 = normalize_analysis_semantic_width(
+            analysis1,
+            infer_parameter_semantics(analysis1),
+        )
+        solver_analysis2 = normalize_analysis_semantic_width(
+            analysis2,
+            infer_parameter_semantics(analysis2),
+        )
+        solver_analysis1, solver_analysis2 = align_return_value_extension_surfaces(
+            solver_analysis1,
+            solver_analysis2,
+        )
 
     base_ctx = self.formula_builder.build_base_context(
         solver_analysis1,
@@ -81,6 +97,14 @@ def _impl_check(
     )
     base_ctx["analysis1"] = solver_analysis1
     base_ctx["analysis2"] = solver_analysis2
+    if dispatch_frame is not None:
+        base_ctx["prepared_surface_digest"] = dispatch_frame.prepared.surface_digest
+        base_ctx["normalization_certificate_semantic_id"] = (
+            dispatch_frame.prepared.certificate.semantic_id
+        )
+        base_ctx["observation_contract_digest"] = (
+            dispatch_frame.prepared.certificate.observation_contract_digest
+        )
     semantic_parameter_sources = self._auxiliary_semantic_parameter_sources(base_ctx)
     safety_checker = ExpressionSafetyChecker(
         solver_runner=self.solver_runner,
@@ -97,6 +121,12 @@ def _impl_check(
         analysis1,
         analysis2,
     )
+    if dispatch_frame is not None and dispatch_frame.projection.proven:
+        covered_blockers = set(dispatch_frame.projection.covered_blockers)
+        equivalence_blocking_reasons = [
+            reason for reason in equivalence_blocking_reasons
+            if reason not in covered_blockers
+        ]
 
     cases1 = self._extract_return_cases(solver_analysis1)
     cases2 = self._extract_return_cases(solver_analysis2)
@@ -180,7 +210,21 @@ def _impl_check(
 
     if total_pairs == 0:
         self._debug_print("No return cases to check")
-        return self._create_empty_result()
+        empty_result = self._create_empty_result()
+        if dispatch_frame is not None:
+            empty_result.comparison_execution_receipt = issue_builtin_comparison_receipt(
+                dispatch_frame,
+                query_records=(),
+                consumed_projection_binding_ids=(),
+                disposition_counts={
+                    "total": 0,
+                    "unsat": 0,
+                    "sat": 0,
+                    "unknown": 0,
+                    "error": 0,
+                },
+            )
+        return empty_result
 
     unsat_count = 0
     sat_count = 0
@@ -211,11 +255,48 @@ def _impl_check(
     unknown_reasons = []
     self._active_normalization_stats = normalization_stats
     pair_obligation_keys = {}
+    query_execution_records = []
     cacheable_solver_unsat_pairs = set()
 
     for i, case1 in enumerate(cases1):
         for j, case2 in enumerate(cases2):
             pair_id = f"({i},{j})"
+            call_projection_covers_unresolved = False
+            if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
+                lowered_call_projection = lower_call_projection_for_case_pair(
+                    dispatch_frame,
+                    case1,
+                    case2,
+                    pair_id=pair_id,
+                    render_fn1=symbol_replace_fn1,
+                    render_fn2=symbol_replace_fn2,
+                )
+                if lowered_call_projection.status != "proven":
+                    unknown_count += 1
+                    pair_obligation_keys[(i, j)] = None
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            "equivalence_blocking_unsafety",
+                            stage="CALL_EFFECT_PREFLIGHT",
+                            pair_or_case=pair_id,
+                            evidence_refs=(
+                                lowered_call_projection.failure_cause,
+                                lowered_call_projection.evidence_digest,
+                            ),
+                            detail="Certified call projection could not be lowered into this pair query.",
+                        )
+                    )
+                    continue
+                base_ctx.setdefault("call_projection_assertions_by_pair", {})[
+                    pair_id
+                ] = lowered_call_projection.assertions
+                base_ctx.setdefault("call_projection_binding_ids_by_pair", {})[
+                    pair_id
+                ] = lowered_call_projection.binding_ids
+                base_ctx.setdefault("call_projection_binding_digests_by_pair", {})[
+                    pair_id
+                ] = dict(lowered_call_projection.binding_assertion_digests)
+                call_projection_covers_unresolved = True
             pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
             readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
                 case1,
@@ -447,6 +528,9 @@ def _impl_check(
                 base_ctx=base_ctx,
                 query_label=f"{pair_id}:case2",
             )
+            if call_projection_covers_unresolved:
+                case1_has_unresolved = False
+                case2_has_unresolved = False
             if case1_has_unresolved or case2_has_unresolved:
                 lowering = self._try_build_unresolved_deferred_call_lowering(
                     base_ctx=base_ctx,
@@ -656,6 +740,47 @@ def _impl_check(
                 symbol_replace_fn2,
                 pair_id,
             )
+
+            query_text = str(result.last_query or "")
+            if query_text:
+                formula_digest = hashlib.sha256(query_text.encode("utf-8")).hexdigest()
+                premise_digest = (
+                    str(pair_obligation_key[-2])
+                    if isinstance(pair_obligation_key, tuple)
+                    and len(pair_obligation_key) >= 2
+                    and len(str(pair_obligation_key[-2])) == 64
+                    else formula_digest
+                )
+                disposition = (
+                    "unsat" if result.is_equivalent is True
+                    else "sat" if result.is_equivalent is False
+                    else "unknown"
+                )
+                query_binding_evidence = projection_binding_evidence_from_query(
+                    query_text
+                )
+                expected_binding_evidence = dict(
+                    base_ctx.get("call_projection_binding_digests_by_pair", {}).get(
+                        pair_id,
+                        {},
+                    )
+                )
+                binding_ids = tuple(sorted(
+                    binding_id
+                    for binding_id, assertion_digest in query_binding_evidence.items()
+                    if expected_binding_evidence.get(binding_id) == assertion_digest
+                ))
+                query_execution_records.append(
+                    QueryExecutionRecord(
+                        query_label=pair_id,
+                        premise_digest=premise_digest,
+                        formula_digest=formula_digest,
+                        disposition=disposition,
+                        proof_kind=str(result.pair_stage or "pairwise_solver_query"),
+                        projection_binding_ids=binding_ids,
+                        formula_text=query_text,
+                    )
+                )
 
             if result.last_query:
                 last_formula = result.last_query
@@ -963,7 +1088,28 @@ def _impl_check(
     )
 
     try:
-        return StrategyResult(
+        consumed_projection_binding_ids = tuple(sorted({
+            binding_id
+            for record in query_execution_records
+            for binding_id in record.projection_binding_ids
+        }))
+        comparison_receipt = (
+            issue_builtin_comparison_receipt(
+                dispatch_frame,
+                query_records=query_execution_records,
+                consumed_projection_binding_ids=consumed_projection_binding_ids,
+                disposition_counts={
+                    "total": total_pairs,
+                    "unsat": unsat_count,
+                    "sat": sat_count,
+                    "unknown": unknown_count,
+                    "error": error_count,
+                },
+            )
+            if dispatch_frame is not None
+            else None
+        )
+        final_result = StrategyResult(
             is_equivalent=final_is_equiv,
             solver_results=aggregate_result,
             smt_formula=last_formula,
@@ -981,6 +1127,8 @@ def _impl_check(
             pairwise_debug_stats=normalization_stats,
             unknown_reasons=unknown_reasons,
         )
+        final_result.comparison_execution_receipt = comparison_receipt
+        return final_result
     finally:
         self._active_safety_checker = None
         self._active_normalization_stats = None
@@ -1014,7 +1162,10 @@ def _pair_obligation_query_key(
         pair_id,
     )
     return (
-        "proof_independent_pair_queries_v1",
+        "proof_independent_pair_queries_v2",
+        base_ctx.get("prepared_surface_digest", "legacy_direct_strategy_surface"),
+        base_ctx.get("normalization_certificate_semantic_id", "legacy_no_certificate"),
+        base_ctx.get("observation_contract_digest", "legacy_observation_contract"),
         hashlib.sha256(guard_query.encode("utf-8")).hexdigest(),
         hashlib.sha256(value_query.encode("utf-8")).hexdigest(),
     )
@@ -2700,3 +2851,8 @@ def _impl__accumulator_proof_count_surface_expressions(self, accumulator_proof):
         expr = getattr(condition, "expression", condition)
         if expr is not None:
             yield expr
+
+
+from ...call_effect_preflight import _register_builtin_receipt_executor
+
+_register_builtin_receipt_executor("pairwise", _impl_check)

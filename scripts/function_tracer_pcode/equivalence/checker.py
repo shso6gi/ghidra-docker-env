@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass, replace
 import time
+from uuid import uuid4
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
 from ..smt import ParallelSolverRunner, ParallelResult, SolverResult
@@ -41,6 +42,16 @@ from .call_effect_obligations import (
     build_structural_coverage_certificate,
 )
 from .call_effect_producer import produce_pure_direct_call_proofs
+from .call_effect_preflight import (
+    CallProofDecisionMode,
+    PreparedDispatchFrame,
+    StrategySourceAnalysisPair,
+    close_prepared_dispatch_frame,
+    diagnostic_projection,
+    prepare_solver_surface,
+    push_prepared_dispatch_frame,
+    validate_call_resolution_projection,
+)
 
 
 # ============================================================================
@@ -94,6 +105,7 @@ class EquivalenceChecker:
         observes_errno: bool = False,
         observes_fenv: bool = False,
         observation_contract: Optional[EquivalenceObservationContract] = None,
+        call_proof_decision_mode: str = "preflight_projection",
     ):
         """
         Args:
@@ -121,6 +133,8 @@ class EquivalenceChecker:
             observe_errno=observes_errno,
             observe_fenv=observes_fenv,
         )
+        self.call_proof_decision_mode = CallProofDecisionMode(call_proof_decision_mode)
+        self._call_proof_generation = 0
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
             enable_fact_normalization,
@@ -988,22 +1002,135 @@ class EquivalenceChecker:
             
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
-            
-            # 戦略を使用してチェック
-            self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
-            strategy_result = strategy.check(analysis1, analysis2, save_formula)
-            call_effect_shadow_manifest = self._call_effect_shadow_manifest(
-                analysis1,
-                analysis2,
-                binary1_name,
-                binary2_name,
+
+            self._call_proof_generation += 1
+            generation = self._call_proof_generation
+            comparison_session_id = uuid4().hex
+            branch_id = str(
+                getattr(self, "_active_call_proof_branch_id", None)
+                or strategy.__class__.__name__
             )
-            self._apply_phase2_relational_call_discharge(
-                strategy_result,
-                analysis1,
-                analysis2,
-                call_effect_shadow_manifest,
-            )
+            decision_mode = self.call_proof_decision_mode
+            dispatch_frame = None
+            cleanup_complete = True
+            preflight_gate_delta_diagnostic = None
+
+            if decision_mode == CallProofDecisionMode.PREFLIGHT_PROJECTION:
+                source_pair = StrategySourceAnalysisPair.create(analysis1, analysis2)
+                prepared_pair = prepare_solver_surface(
+                    source_pair,
+                    observation_contract_digest=self.observation_contract.contract_id,
+                    comparison_session_id=comparison_session_id,
+                    branch_id=branch_id,
+                    generation=generation,
+                    decision_mode=decision_mode,
+                )
+                call_effect_shadow_manifest = self._call_effect_shadow_manifest(
+                    prepared_pair.analysis1,
+                    prepared_pair.analysis2,
+                    binary1_name,
+                    binary2_name,
+                )
+                projection = validate_call_resolution_projection(
+                    call_effect_shadow_manifest,
+                    prepared_pair,
+                    generation=generation,
+                    trusted_proof_artifacts=self._last_internal_call_effect_artifacts,
+                )
+                if not self.enable_completed_recovery_proofs and projection.required:
+                    projection = replace(
+                        projection,
+                        status="inconclusive",
+                        root_blockers=("completed_recovery_proofs_disabled",),
+                        covered_blockers=(),
+                    )
+                dispatch_frame = PreparedDispatchFrame(
+                    comparison_session_id=comparison_session_id,
+                    branch_id=branch_id,
+                    generation=generation,
+                    source=source_pair,
+                    prepared=prepared_pair,
+                    projection=projection,
+                    preflight_manifest=call_effect_shadow_manifest,
+                    trusted_proof_artifacts=tuple(
+                        self._last_internal_call_effect_artifacts
+                    ),
+                    decision_mode=decision_mode,
+                )
+
+                self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
+                if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
+                    token = None
+                    try:
+                        token = push_prepared_dispatch_frame(dispatch_frame)
+                        strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                    finally:
+                        if token is None:
+                            dispatch_frame.close()
+                            dispatch_frame.cleanup_complete = True
+                            cleanup_complete = True
+                        else:
+                            cleanup_complete = close_prepared_dispatch_frame(
+                                dispatch_frame,
+                                token,
+                            )
+                else:
+                    # Non-built-in compatibility branches cannot consume a
+                    # projection.  Their EQ is vetoed below whenever call proof
+                    # preflight is required.
+                    try:
+                        strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                    finally:
+                        dispatch_frame.close()
+                        dispatch_frame.cleanup_complete = True
+                ordinary_outcome = strategy_result.is_equivalent
+                self._apply_preflight_final_gate(
+                    strategy_result,
+                    dispatch_frame,
+                    cleanup_complete=cleanup_complete,
+                )
+                call_effect_shadow_manifest = diagnostic_projection(
+                    call_effect_shadow_manifest,
+                    dispatch_frame,
+                )
+                preflight_gate_delta_diagnostic = {
+                    "status": "diagnostic_not_legacy_canary",
+                    "ordinary_comparison_outcome": (
+                        "EQ" if ordinary_outcome is True
+                        else "NOT_EQ" if ordinary_outcome is False
+                        else "UNKNOWN"
+                    ),
+                    "preflight_terminal_outcome": (
+                        "EQ" if strategy_result.is_equivalent is True
+                        else "NOT_EQ" if strategy_result.is_equivalent is False
+                        else "UNKNOWN"
+                    ),
+                    "gate_effect": (
+                        "agree"
+                        if ordinary_outcome is strategy_result.is_equivalent
+                        else "preflight_veto"
+                    ),
+                    "decision_mode": "preflight_projection",
+                    "comparison_branch": branch_id,
+                }
+                call_effect_shadow_manifest["preflight_gate_delta_diagnostic"] = (
+                    preflight_gate_delta_diagnostic
+                )
+            else:
+                self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
+                strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                call_effect_shadow_manifest = self._call_effect_shadow_manifest(
+                    analysis1,
+                    analysis2,
+                    binary1_name,
+                    binary2_name,
+                )
+                self._apply_phase2_relational_call_discharge(
+                    strategy_result,
+                    analysis1,
+                    analysis2,
+                    call_effect_shadow_manifest,
+                )
             comparison_identity = self._call_effect_comparison_identity(
                 analysis1,
                 analysis2,
@@ -1080,6 +1207,34 @@ class EquivalenceChecker:
                     binary2_name,
                 ),
                 call_effect_shadow_manifest=call_effect_shadow_manifest,
+                call_proof_terminal_provenance=(
+                    {
+                        "comparison_session_id": comparison_session_id,
+                        "terminal_branch_id": branch_id,
+                        "decision_owner_mode": decision_mode.value,
+                        "decision_owner_lease_id": (
+                            dispatch_frame.decision_lease.decision_owner_id
+                            if dispatch_frame is not None else None
+                        ),
+                        "terminal_outcome": (
+                            "EQ" if strategy_result.is_equivalent is True
+                            else "NOT_EQ" if strategy_result.is_equivalent is False
+                            else "UNKNOWN"
+                        ),
+                        "projection_generation": generation,
+                        "comparison_receipt_id": (
+                            dispatch_frame.receipt.receipt_id
+                            if dispatch_frame is not None and dispatch_frame.receipt is not None
+                            else None
+                        ),
+                        "dispatch_cleanup_complete": (
+                            dispatch_frame.cleanup_complete if dispatch_frame is not None else True
+                        ),
+                        "preflight_gate_delta_diagnostic": (
+                            preflight_gate_delta_diagnostic
+                        ),
+                    }
+                ),
                 function1_identity=function1_identity,
                 function2_identity=function2_identity,
             )
@@ -1096,6 +1251,157 @@ class EquivalenceChecker:
                 type_fix_result, retry_count,
                 original_signature1, original_signature2
             )
+
+    @staticmethod
+    def _apply_preflight_final_gate(
+        strategy_result: Any,
+        frame: PreparedDispatchFrame,
+        *,
+        cleanup_complete: bool,
+    ) -> None:
+        """Apply veto-only preflight checks without rewriting pair outcomes."""
+
+        receipt = getattr(strategy_result, "comparison_execution_receipt", None)
+        receipt_valid = bool(
+            receipt is not None
+            and frame.receipt is receipt
+            and receipt.is_trusted_for(frame)
+        )
+        source_valid = frame.source.is_unchanged()
+        prepared_valid = frame.prepared.is_valid_for(frame.source) and frame.prepared.is_unchanged()
+        projection_valid = frame.projection.proven
+        recomputed_projection = validate_call_resolution_projection(
+            frame.preflight_manifest,
+            frame.prepared,
+            generation=frame.generation,
+            trusted_proof_artifacts=frame.trusted_proof_artifacts,
+        )
+        mapping_valid = (
+            recomputed_projection.projection_id == frame.projection.projection_id
+            and recomputed_projection.use_census_digest == frame.projection.use_census_digest
+            and recomputed_projection.coverage_mapping_digest
+            == frame.projection.coverage_mapping_digest
+        )
+        total = int(getattr(strategy_result, "total_pairs", 0) or 0)
+        pairwise_complete = (
+            total > 0
+            and int(getattr(strategy_result, "unsat_pairs", 0) or 0) == total
+            and int(getattr(strategy_result, "sat_pairs", 0) or 0) == 0
+            and int(getattr(strategy_result, "unknown_pairs", 0) or 0) == 0
+            and int(getattr(strategy_result, "error_pairs", 0) or 0) == 0
+        )
+        receipt_queries = tuple(getattr(receipt, "query_records", ()) or ())
+        receipt_counts = dict(getattr(receipt, "disposition_counts", ()) or ())
+        receipt_matches_pair_dispositions = bool(
+            receipt is not None
+            and receipt_counts.get("total") == total
+            and receipt_counts.get("unsat")
+            == int(getattr(strategy_result, "unsat_pairs", 0) or 0)
+            and receipt_counts.get("sat")
+            == int(getattr(strategy_result, "sat_pairs", 0) or 0)
+            and receipt_counts.get("unknown")
+            == int(getattr(strategy_result, "unknown_pairs", 0) or 0)
+            and receipt_counts.get("error")
+            == int(getattr(strategy_result, "error_pairs", 0) or 0)
+        )
+        monolithic_complete = (
+            len(receipt_queries) == 1
+            and receipt_queries[0].query_label == "monolithic"
+            and receipt_queries[0].disposition == "unsat"
+            and all(
+                receipt_counts.get(name) == count
+                for name, count in {
+                    "total": 1,
+                    "unsat": 1,
+                    "sat": 0,
+                    "unknown": 0,
+                    "error": 0,
+                }.items()
+            )
+            and getattr(getattr(strategy_result, "solver_results", None), "is_equivalent", None)
+            is True
+        )
+        ordinary_complete = (
+            pairwise_complete and receipt_matches_pair_dispositions
+        ) or monolithic_complete
+        required_projection_binding_ids = tuple(sorted(
+            binding.binding_id for binding in frame.projection.semantic_bindings
+        ))
+        consumed_projection_binding_ids = tuple(
+            getattr(receipt, "consumed_projection_binding_ids", ()) or ()
+        )
+        projection_bindings_consumed = (
+            not frame.projection.required
+            or (
+                bool(required_projection_binding_ids)
+                and consumed_projection_binding_ids == required_projection_binding_ids
+            )
+        )
+        projection_active_total = int(
+            receipt_counts.get("projection_active_total", -1)
+        )
+        projection_receipt_partition_valid = bool(
+            receipt is not None
+            and projection_active_total
+            == sum(1 for record in receipt_queries if record.projection_binding_ids)
+            and int(receipt_counts.get("projection_inactive_total", -1))
+            == sum(1 for record in receipt_queries if not record.projection_binding_ids)
+        )
+        no_active_pair_proven = bool(
+            int(receipt_counts.get("projection_no_active_pair_proven", 0)) == 1
+        )
+
+        blockers = []
+        if not cleanup_complete or not frame.cleanup_complete:
+            blockers.append("dispatch_cleanup_incomplete")
+        if not source_valid:
+            blockers.append("source_analysis_mutated")
+        if not prepared_valid:
+            blockers.append("prepared_surface_invalid")
+        if frame.projection.required and not projection_valid:
+            blockers.extend(frame.projection.root_blockers or ("call_effect_preflight_incomplete",))
+        if not mapping_valid:
+            blockers.append("deferred_call_use_coverage_mapping_invalid")
+        if frame.projection.required and not receipt_valid:
+            blockers.append("comparison_receipt_missing")
+        if receipt_valid and not projection_receipt_partition_valid:
+            blockers.append("call_projection_active_pair_receipt_invalid")
+        if (
+            receipt_valid
+            and frame.projection.required
+            and projection_valid
+            and projection_active_total == 0
+            and not no_active_pair_proven
+        ):
+            blockers.append("call_projection_no_active_pair_proof_missing")
+        if (
+            receipt_valid
+            and getattr(strategy_result, "is_equivalent", None) is True
+            and not projection_bindings_consumed
+        ):
+            blockers.append("call_projection_binding_consumption_incomplete")
+        if receipt_valid and getattr(strategy_result, "is_equivalent", None) is True and not ordinary_complete:
+            blockers.append("ordinary_comparison_proof_incomplete")
+
+        if blockers:
+            if getattr(strategy_result, "is_equivalent", None) is True:
+                strategy_result.is_equivalent = None
+            existing = {
+                str(ref)
+                for reason in tuple(getattr(strategy_result, "unknown_reasons", ()) or ())
+                for ref in tuple(getattr(reason, "evidence_refs", ()) or ())
+            }
+            for blocker in dict.fromkeys(str(item) for item in blockers):
+                if blocker in existing:
+                    continue
+                strategy_result.unknown_reasons.append(
+                    make_unknown_reason(
+                        "equivalence_blocking_unsafety",
+                        stage="CALL_EFFECT_PREFLIGHT",
+                        evidence_refs=(blocker,),
+                        detail=f"Call/effect preflight veto: {blocker}",
+                    )
+                )
 
     def _call_effect_shadow_manifest(
         self,

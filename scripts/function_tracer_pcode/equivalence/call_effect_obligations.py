@@ -13,12 +13,12 @@ serializable identities and semantic keys are retained.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from ..model import FunctionReturnAnalysis, expression_provenance_key
+from ..model import Expression, FunctionReturnAnalysis, expression_provenance_key
 
 
 SCHEMA_VERSION = 1
@@ -210,6 +210,241 @@ class ArtifactObjectIdentity:
 
 
 @dataclass(frozen=True)
+class CallInvocationContract:
+    call_pcode_op_key: Tuple[Any, ...]
+    use_pcode_op_key: Optional[Tuple[Any, ...]]
+    call_block_key: Optional[Tuple[Any, ...]]
+    use_block_key: Optional[Tuple[Any, ...]]
+    call_guard_keys: Tuple[Tuple[Any, ...], ...]
+    use_guard_keys: Tuple[Tuple[Any, ...], ...]
+    invocation_proof_status: str
+    guard_implication_status: str
+    execution_order_proof: str
+    reaching_definition_status: str
+    cfg_evidence_digest: Optional[str]
+    phi_incoming_edge_key: Optional[Tuple[Any, ...]] = None
+    status: str = "inconclusive"
+
+    @property
+    def proven(self) -> bool:
+        return (
+            self.status == "proven"
+            and self.invocation_proof_status.startswith("proven_")
+            and self.guard_implication_status == "proven_structural_conjunction"
+            and self.execution_order_proof in {
+                "proven_same_block_sequence",
+                "proven_cfg_dominance",
+                "proven_phi_incoming_edge_dominance",
+            }
+            and self.reaching_definition_status == "proven_exact_runtime_ref"
+            and bool(self.cfg_evidence_digest)
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "call_pcode_op_key": _jsonable(self.call_pcode_op_key),
+            "use_pcode_op_key": _jsonable(self.use_pcode_op_key),
+            "call_block_key": _jsonable(self.call_block_key),
+            "use_block_key": _jsonable(self.use_block_key),
+            "call_guard_keys": _jsonable(self.call_guard_keys),
+            "use_guard_keys": _jsonable(self.use_guard_keys),
+            "invocation_proof_status": self.invocation_proof_status,
+            "guard_implication_status": self.guard_implication_status,
+            "execution_order_proof": self.execution_order_proof,
+            "reaching_definition_status": self.reaching_definition_status,
+            "cfg_evidence_digest": self.cfg_evidence_digest,
+            "phi_incoming_edge_key": _jsonable(self.phi_incoming_edge_key),
+            "status": self.status,
+            "proven": self.proven,
+        }
+
+
+@dataclass(frozen=True)
+class CallOutputUseBinding:
+    use_id: str
+    semantic_location: Tuple[Any, ...]
+    runtime_ref_key: Tuple[Any, ...]
+    use_guard_keys: Tuple[Tuple[Any, ...], ...]
+    call_guard_keys: Tuple[Tuple[Any, ...], ...]
+    reaching_definition_status: str
+    execution_before_use_status: str
+    invocation_contract: CallInvocationContract
+
+    @property
+    def proven(self) -> bool:
+        return (
+            self.reaching_definition_status == "proven_exact_runtime_ref"
+            and self.execution_before_use_status == "proven_guarded_execution_before_use"
+            and self.invocation_contract.proven
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "use_id": self.use_id,
+            "semantic_location": _jsonable(self.semantic_location),
+            "runtime_ref_key": _jsonable(self.runtime_ref_key),
+            "use_guard_keys": _jsonable(self.use_guard_keys),
+            "call_guard_keys": _jsonable(self.call_guard_keys),
+            "reaching_definition_status": self.reaching_definition_status,
+            "execution_before_use_status": self.execution_before_use_status,
+            "invocation_contract": self.invocation_contract.to_dict(),
+            "proven": self.proven,
+        }
+
+
+USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION = "prepared_call_use_mapping_v1"
+_USE_DOMAIN_COVERAGE_MAPPING_ISSUER = object()
+
+
+def _call_use_mapping_record(value: Any) -> Optional[Dict[str, Any]]:
+    payload = value.to_dict() if isinstance(value, CallSiteFact) else value
+    if not isinstance(payload, Mapping) or payload.get("fact_kind") != "call_site":
+        return None
+    identity = payload.get("identity") if isinstance(payload.get("identity"), Mapping) else {}
+    return {
+        "pcode_op_key": _jsonable(identity.get("pcode_op_key")),
+        "guard_keys": _jsonable(payload.get("guard_keys", ())),
+        "invocation_proof_status": payload.get("invocation_proof_status"),
+        "observed_output_use_count": payload.get("observed_output_use_count"),
+        "output_use_reaching_definition_status": payload.get(
+            "output_use_reaching_definition_status"
+        ),
+        "output_use_census_status": payload.get("output_use_census_status"),
+        "output_use_census_digest": payload.get("output_use_census_digest"),
+        "output_use_bindings": _jsonable(payload.get("output_use_bindings", ())),
+    }
+
+
+def call_use_mapping_payload_from_manifest(
+    manifest: Mapping[str, Any],
+) -> Tuple[Tuple[str, Tuple[Mapping[str, Any], ...]], ...]:
+    """Return the persisted use/domain mapping payload in canonical side order."""
+
+    return tuple(
+        (
+            side,
+            tuple(
+                record
+                for value in tuple(manifest.get(f"{side}_facts", ()) or ())
+                for record in (_call_use_mapping_record(value),)
+                if record is not None
+            ),
+        )
+        for side in ("left", "right")
+    )
+
+
+def _use_mapping_endpoint(value: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(value, Mapping):
+        return None
+    identity = value.get("identity") if isinstance(value.get("identity"), Mapping) else {}
+    if value.get("fact_kind") == "call_site":
+        return ("call_site", _jsonable(identity.get("pcode_op_key")))
+    function_identity = (
+        value.get("function_identity")
+        if isinstance(value.get("function_identity"), Mapping)
+        else {}
+    )
+    if value.get("fact_kind") == "region":
+        return (
+            "region",
+            _jsonable(function_identity.get("function_key")),
+            _jsonable(value.get("guard_key")),
+            _jsonable(value.get("output_relation_key")),
+        )
+    return (str(value.get("fact_kind") or "unknown"), value.get("fact_id"))
+
+
+def call_use_obligation_edges_from_manifest(
+    manifest: Mapping[str, Any],
+) -> Tuple[Tuple[Any, ...], ...]:
+    facts = {
+        str(item.get("fact_id")): item
+        for side in ("left", "right")
+        for item in (
+            tuple(manifest.get(f"{side}_facts", ()) or ())
+            + tuple(manifest.get(f"{side}_regions", ()) or ())
+        )
+        if isinstance(item, Mapping) and item.get("fact_id")
+    }
+    edges = tuple(
+        (
+            str(item.get("relation_kind") or ""),
+            _use_mapping_endpoint(facts.get(str(item.get("left_fact_id") or ""))),
+            _use_mapping_endpoint(facts.get(str(item.get("right_fact_id") or ""))),
+        )
+        for item in tuple(manifest.get("relational_obligations", ()) or ())
+        if isinstance(item, Mapping)
+    )
+    return tuple(sorted(edges, key=_digest))
+
+
+@dataclass(frozen=True)
+class UseDomainCoverageMapping:
+    builder_version: str
+    payload: Tuple[Tuple[str, Tuple[Mapping[str, Any], ...]], ...]
+    obligation_edges: Tuple[Tuple[Any, ...], ...]
+    mapping_digest: str
+    _issuer: Any = field(repr=False, compare=False)
+
+    def verification_failure(self) -> Optional[str]:
+        if self._issuer is not _USE_DOMAIN_COVERAGE_MAPPING_ISSUER:
+            return "untrusted_use_domain_mapping_issuer"
+        if self.builder_version != USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION:
+            return "use_domain_mapping_builder_version_mismatch"
+        expected = _digest((self.builder_version, self.payload, self.obligation_edges))
+        if self.mapping_digest != expected:
+            return "use_domain_mapping_digest_mismatch"
+        for _side, records in self.payload:
+            for record in records:
+                bindings = tuple(record.get("output_use_bindings", ()) or ())
+                if int(record.get("observed_output_use_count", 0) or 0) != len(bindings):
+                    return "use_domain_mapping_count_mismatch"
+                for binding in bindings:
+                    contract = (
+                        binding.get("invocation_contract")
+                        if isinstance(binding, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(binding, Mapping)
+                        or binding.get("proven") is not True
+                        or not isinstance(contract, Mapping)
+                        or contract.get("proven") is not True
+                    ):
+                        return "use_domain_mapping_invocation_contract_unproven"
+        return None
+
+
+def build_use_domain_coverage_mapping(
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    binary1_name: str,
+    binary2_name: str,
+) -> UseDomainCoverageMapping:
+    """Independently rebuild call-result consumers from prepared analyses."""
+
+    rebuilt_manifest = build_call_effect_shadow_manifest(
+        analysis1,
+        analysis2,
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+    )
+    payload = call_use_mapping_payload_from_manifest(rebuilt_manifest)
+    obligation_edges = call_use_obligation_edges_from_manifest(rebuilt_manifest)
+    return UseDomainCoverageMapping(
+        builder_version=USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION,
+        payload=payload,
+        obligation_edges=obligation_edges,
+        mapping_digest=_digest(
+            (USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION, payload, obligation_edges)
+        ),
+        _issuer=_USE_DOMAIN_COVERAGE_MAPPING_ISSUER,
+    )
+
+
+@dataclass(frozen=True)
 class CallSiteFact:
     fact_id: str
     identity: ArtifactObjectIdentity
@@ -222,6 +457,12 @@ class CallSiteFact:
     callee_parameter_keys: Tuple[Tuple[Any, ...], ...] = ()
     guard_keys: Tuple[Tuple[Any, ...], ...] = ()
     call_site_multiplicity: Optional[int] = None
+    invocation_proof_status: str = "inconclusive"
+    output_use_reaching_definition_status: str = "inconclusive"
+    observed_output_use_count: int = 0
+    output_use_census_status: str = "inconclusive"
+    output_use_census_digest: Optional[str] = None
+    output_use_bindings: Tuple[CallOutputUseBinding, ...] = ()
     effect_classes: Tuple[str, ...] = ()
     callee_effect_summary_statuses: Tuple[str, ...] = ()
     callee_memory_effect_counts: Tuple[int, ...] = ()
@@ -279,6 +520,12 @@ class CallSiteFact:
             "callee_parameter_keys": _jsonable(self.callee_parameter_keys),
             "guard_keys": _jsonable(self.guard_keys),
             "call_site_multiplicity": self.call_site_multiplicity,
+            "invocation_proof_status": self.invocation_proof_status,
+            "output_use_reaching_definition_status": self.output_use_reaching_definition_status,
+            "observed_output_use_count": int(self.observed_output_use_count),
+            "output_use_census_status": self.output_use_census_status,
+            "output_use_census_digest": self.output_use_census_digest,
+            "output_use_bindings": [item.to_dict() for item in self.output_use_bindings],
             "effect_classes": list(self.effect_classes),
             "callee_effect_summary_statuses": list(self.callee_effect_summary_statuses),
             "callee_memory_effect_counts": list(self.callee_memory_effect_counts),
@@ -744,6 +991,7 @@ def _extract_side_facts(
     function_key = _analysis_function_key(analysis)
     binary_id = str(getattr(analysis, "binary_id", None) or binary_name or "") or None
     summary = getattr(analysis, "effect_summary", None)
+    caller_profile = getattr(summary, "function_control_effect_profile", None)
     buckets: Dict[str, Dict[str, Any]] = {}
     function_ref = getattr(analysis, "function_ref", None)
     expected_function_entry = getattr(function_ref, "entry_offset", None)
@@ -796,6 +1044,515 @@ def _extract_side_facts(
             },
         )
         return bucket
+
+    def contains_nested(value: Any, needle: Tuple[Any, ...]) -> bool:
+        if value == needle:
+            return True
+        if isinstance(value, (tuple, list)):
+            return any(contains_nested(item, needle) for item in value)
+        return False
+
+    def output_use_census(
+        call_pcode_ref: Any,
+        pcode_key: Optional[Tuple[Any, ...]],
+        call_guard_groups: Tuple[Tuple[Tuple[Any, ...], ...], ...],
+        invocation_proof_status: str,
+    ) -> Tuple[str, Tuple[CallOutputUseBinding, ...], str]:
+        """Build a closed, guard-aware use index for one call result."""
+
+        if pcode_key is None:
+            return "inconclusive", (), _digest(("call_output_use_census_v1", "missing_pcode"))
+
+        def condition_keys(conditions: Iterable[Any]) -> Tuple[Tuple[Any, ...], ...]:
+            return tuple(
+                key
+                for condition in tuple(conditions or ())
+                for key in [_condition_key(condition)]
+                if key is not None
+            )
+
+        def block_key_for_ref(ref: Any) -> Optional[Tuple[Any, ...]]:
+            if ref is None or caller_profile is None:
+                return None
+            block_index = getattr(ref, "block_index", None)
+            binary_id = getattr(ref, "binary_id", None)
+            function_entry = getattr(ref, "function_entry_offset", None)
+            matches = tuple(
+                tuple(item)
+                for item in tuple(getattr(caller_profile, "region_block_keys", ()) or ())
+                if isinstance(item, (tuple, list))
+                and len(item) > 3
+                and item[0] == "pcode_block"
+                and item[1] == binary_id
+                and item[3] == block_index
+                and (
+                    function_entry is None
+                    or not isinstance(item[2], (tuple, list))
+                    or len(item[2]) < 3
+                    or item[2][2] == function_entry
+                )
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if all(
+                getattr(ref, attribute, None) is not None
+                for attribute in (
+                    "binary_id",
+                    "function_entry_space",
+                    "function_entry_offset",
+                    "block_index",
+                )
+            ):
+                return (
+                    "pcode_block_by_op",
+                    getattr(ref, "binary_id"),
+                    (
+                        "function_entry",
+                        getattr(ref, "function_entry_space"),
+                        int(getattr(ref, "function_entry_offset")),
+                    ),
+                    int(getattr(ref, "block_index")),
+                )
+            return None
+
+        def sequence_key(ref: Any) -> Optional[Tuple[int, int, int]]:
+            try:
+                values = (
+                    getattr(ref, "seq_time", None),
+                    getattr(ref, "seq_order", None),
+                    getattr(ref, "local_op_ordinal", None),
+                )
+                if any(value is None for value in values):
+                    return None
+                return tuple(int(value) for value in values)
+            except (TypeError, ValueError):
+                return None
+
+        block_keys = tuple(
+            tuple(item)
+            for item in tuple(getattr(caller_profile, "region_block_keys", ()) or ())
+            if isinstance(item, (tuple, list))
+        ) if caller_profile is not None else ()
+        edge_keys = tuple(
+            (tuple(item[0]), tuple(item[1]))
+            for item in tuple(getattr(caller_profile, "region_cfg_edge_keys", ()) or ())
+            if isinstance(item, (tuple, list))
+            and len(item) == 2
+            and isinstance(item[0], (tuple, list))
+            and isinstance(item[1], (tuple, list))
+        ) if caller_profile is not None else ()
+        graph = {key: set() for key in block_keys}
+        graph_closed = bool(block_keys) and all(
+            source in graph and target in graph for source, target in edge_keys
+        )
+        if graph_closed:
+            for source, target in edge_keys:
+                graph[source].add(target)
+
+        def reachable(
+            source: Tuple[Any, ...],
+            target: Tuple[Any, ...],
+            *,
+            excluded: Optional[Tuple[Any, ...]] = None,
+        ) -> bool:
+            if source == excluded or target == excluded:
+                return False
+            pending = [source]
+            visited = set()
+            while pending:
+                current = pending.pop()
+                if current == target:
+                    return True
+                if current in visited or current == excluded:
+                    continue
+                visited.add(current)
+                pending.extend(graph.get(current, ()))
+            return False
+
+        def invocation_contract(
+            use_ref: Any,
+            use_guards: Tuple[Tuple[Any, ...], ...],
+            *,
+            phi_branch: bool,
+            use_site_kind: str,
+            runtime_ref_exact: bool,
+        ) -> CallInvocationContract:
+            call_guards = call_guard_groups[0] if len(call_guard_groups) == 1 else ()
+            guard_status = (
+                "proven_structural_conjunction"
+                if len(call_guard_groups) <= 1
+                and set(call_guards).issubset(set(use_guards))
+                else "inconclusive_guard_implication"
+            )
+            call_block = block_key_for_ref(call_pcode_ref)
+            use_block = block_key_for_ref(use_ref)
+            order_proof = "inconclusive_use_site_provenance_missing"
+            if phi_branch:
+                order_proof = "inconclusive_phi_incoming_edge_dominance_missing"
+            elif use_site_kind != "value":
+                order_proof = "inconclusive_condition_evaluation_site_missing"
+            elif call_block is not None and call_block == use_block:
+                call_sequence = sequence_key(call_pcode_ref)
+                use_sequence = sequence_key(use_ref)
+                order_proof = (
+                    "proven_same_block_sequence"
+                    if call_sequence is not None
+                    and use_sequence is not None
+                    and call_sequence < use_sequence
+                    else "inconclusive_same_block_sequence"
+                )
+            elif (
+                call_block is not None
+                and use_block is not None
+                and graph_closed
+                and getattr(caller_profile, "pcode_enumeration_complete", False) is True
+                and getattr(caller_profile, "cfg_edges_complete", False) is True
+                and getattr(caller_profile, "region_identity_complete", False) is True
+                and getattr(caller_profile, "region_single_entry", False) is True
+                and getattr(caller_profile, "region_all_exits_enumerated", False) is True
+            ):
+                entry = getattr(caller_profile, "region_entry_block_key", None)
+                entry = tuple(entry) if isinstance(entry, (tuple, list)) else None
+                dominates = bool(
+                    entry in graph
+                    and reachable(entry, use_block)
+                    and reachable(call_block, use_block)
+                    and (
+                        entry == call_block
+                        or not reachable(entry, use_block, excluded=call_block)
+                    )
+                )
+                order_proof = (
+                    "proven_cfg_dominance"
+                    if dominates
+                    else "inconclusive_guarded_subgraph_dominance_missing"
+                )
+            invocation_proven = invocation_proof_status.startswith("proven_")
+            execution_proven = order_proof.startswith("proven_")
+            exact_definition = bool(
+                invocation_proven
+                and guard_status == "proven_structural_conjunction"
+                and execution_proven
+                and runtime_ref_exact
+            )
+            cfg_digest = _digest(
+                (
+                    "call_invocation_contract_cfg_v1",
+                    getattr(caller_profile, "stable_key", lambda: None)(),
+                    pcode_key,
+                    _stable_key(use_ref),
+                    call_block,
+                    use_block,
+                    edge_keys,
+                    order_proof,
+                )
+            ) if caller_profile is not None else None
+            return CallInvocationContract(
+                call_pcode_op_key=tuple(pcode_key or ()),
+                use_pcode_op_key=_stable_key(use_ref),
+                call_block_key=call_block,
+                use_block_key=use_block,
+                call_guard_keys=tuple(call_guards),
+                use_guard_keys=tuple(use_guards),
+                invocation_proof_status=invocation_proof_status,
+                guard_implication_status=guard_status,
+                execution_order_proof=order_proof,
+                reaching_definition_status=(
+                    "proven_exact_runtime_ref"
+                    if exact_definition
+                    else (
+                        "inconclusive_runtime_ref_identity"
+                        if not runtime_ref_exact
+                        else "inconclusive"
+                    )
+                ),
+                cfg_evidence_digest=cfg_digest,
+                status="proven" if exact_definition else "inconclusive",
+            )
+
+        roots: List[
+            Tuple[
+                Tuple[Any, ...],
+                Any,
+                Tuple[Tuple[Any, ...], ...],
+                Any,
+                str,
+            ]
+        ] = []
+
+        def add_return_info(prefix: Tuple[Any, ...], ret: Any) -> None:
+            guards = condition_keys(getattr(ret, "conditions", ()) or ())
+            use_ref = getattr(ret, "pcode_op_ref", None)
+            roots.append((prefix + ("value",), getattr(ret, "value", None), guards, use_ref, "value"))
+            for index, condition in enumerate(tuple(getattr(ret, "conditions", ()) or ())):
+                roots.append((prefix + ("condition", index), getattr(condition, "expression", None), (), None, "condition"))
+
+        for index, ret in enumerate(tuple(getattr(analysis, "returns", ()) or ())):
+            add_return_info(("returns", index), ret)
+        for index, outcome in enumerate(tuple(getattr(analysis, "return_outcomes", ()) or ())):
+            guards = condition_keys(getattr(outcome, "guard", ()) or ())
+            outcome_return = getattr(outcome, "return_info", None)
+            roots.append((("return_outcomes", index, "value"), getattr(outcome, "value", None), guards, getattr(outcome_return, "pcode_op_ref", None), "value"))
+            for guard_index, condition in enumerate(tuple(getattr(outcome, "guard", ()) or ())):
+                roots.append((("return_outcomes", index, "guard", guard_index), getattr(condition, "expression", None), (), None, "condition"))
+        for index, candidate in enumerate(tuple(getattr(analysis, "summary_return_candidates", ()) or ())):
+            add_return_info(("summary_return_candidates", index, "return_info"), getattr(candidate, "return_info", None))
+        for index, effect in enumerate(tuple(getattr(summary, "effects", ()) or ())):
+            guards = condition_keys(getattr(effect, "conditions", ()) or ())
+            provenance = getattr(effect, "provenance", None)
+            roots.append((("effects", index, "value"), getattr(effect, "value", None), guards, getattr(provenance, "producer_pcode_op_ref", None), "value"))
+            for guard_index, condition in enumerate(tuple(getattr(effect, "conditions", ()) or ())):
+                roots.append((("effects", index, "condition", guard_index), getattr(condition, "expression", None), (), None, "condition"))
+        argument_evidence = (
+            tuple(getattr(summary, "call_argument_evidence", {}).values())
+            if summary is not None
+            else ()
+        )
+        for evidence_index, evidence in enumerate(argument_evidence):
+            guard_groups = tuple(getattr(evidence, "path_conditions", ()) or ())
+            guards = condition_keys(guard_groups[0]) if len(guard_groups) == 1 else ()
+            for argument_index, argument in enumerate(tuple(getattr(evidence, "arguments", ()) or ())):
+                roots.append((("call_argument_evidence", evidence_index, "argument", argument_index), argument, guards, getattr(evidence, "pcode_op_ref", None), "value"))
+            for group_index, group in enumerate(guard_groups):
+                for guard_index, condition in enumerate(tuple(group or ())):
+                    roots.append((("call_argument_evidence", evidence_index, "guard", group_index, guard_index), getattr(condition, "expression", None), (), None, "condition"))
+        for site_index, site in enumerate(tuple(getattr(summary, "unsupported_call_sites", ()) or ())):
+            guards = condition_keys(getattr(site, "path_conditions", ()) or ())
+            roots.append((("unsupported_call_sites", site_index, "target"), getattr(site, "target_expr", None), guards, getattr(site, "pcode_op_ref", None), "value"))
+            for argument_index, argument in enumerate(tuple(getattr(site, "arguments", ()) or ())):
+                roots.append((("unsupported_call_sites", site_index, "argument", argument_index), argument, guards, getattr(site, "pcode_op_ref", None), "value"))
+        for call_index, info in enumerate(tuple(getattr(analysis, "deferred_calls", {}).values())):
+            for argument_index, argument in enumerate(tuple(getattr(info, "arguments", ()) or ())):
+                deferred_ref = getattr(info, "deferred_call_ref", None)
+                roots.append((("deferred_calls", call_index, "argument", argument_index), argument, (), getattr(deferred_ref, "pcode_op_ref", None), "value"))
+
+        indexed_target_expression_ids: set[int] = set()
+        bindings: List[CallOutputUseBinding] = []
+
+        def visit_expression(
+            expr: Any,
+            location: Tuple[Any, ...],
+            inherited_guards: Tuple[Tuple[Any, ...], ...],
+            use_ref: Any,
+            use_site_kind: str,
+            phi_branch: bool,
+            active: set[int],
+        ) -> None:
+            if not isinstance(expr, Expression) or id(expr) in active:
+                return
+            active = set(active)
+            active.add(id(expr))
+            runtime_key = _stable_key(getattr(expr, "runtime_ref", None))
+            if runtime_key is not None and contains_nested(runtime_key, pcode_key):
+                indexed_target_expression_ids.add(id(expr))
+                call_guards = call_guard_groups[0] if len(call_guard_groups) == 1 else ()
+                runtime_ref = getattr(expr, "runtime_ref", None)
+                deferred_ref = getattr(runtime_ref, "deferred_call_ref", None)
+                runtime_ref_exact = (
+                    _stable_key(getattr(deferred_ref, "pcode_op_ref", None))
+                    == pcode_key
+                )
+                contract = invocation_contract(
+                    use_ref,
+                    inherited_guards,
+                    phi_branch=phi_branch,
+                    use_site_kind=use_site_kind,
+                    runtime_ref_exact=runtime_ref_exact,
+                )
+                use_id = _digest(("call_output_use_v1", pcode_key, location, runtime_key, inherited_guards))
+                bindings.append(
+                    CallOutputUseBinding(
+                        use_id=use_id,
+                        semantic_location=location,
+                        runtime_ref_key=runtime_key,
+                        use_guard_keys=inherited_guards,
+                        call_guard_keys=call_guards,
+                        reaching_definition_status=contract.reaching_definition_status,
+                        execution_before_use_status=(
+                            "proven_guarded_execution_before_use"
+                            if contract.proven
+                            else contract.execution_order_proof
+                        ),
+                        invocation_contract=contract,
+                    )
+                )
+            value = getattr(expr, "value", None)
+            if isinstance(value, (tuple, list)) and getattr(getattr(expr, "expr_type", None), "name", None) == "PHI":
+                for branch_index, item in enumerate(value):
+                    if not isinstance(item, (tuple, list)) or len(item) != 2:
+                        continue
+                    condition, branch_value = item
+                    branch_guard = _condition_key(condition) if condition is not None else None
+                    branch_guards = inherited_guards + ((branch_guard,) if branch_guard is not None else ())
+                    if condition is not None:
+                        visit_expression(
+                            getattr(condition, "expression", None),
+                            location + ("phi_condition", branch_index),
+                            inherited_guards,
+                            None,
+                            "condition",
+                            True,
+                            active,
+                        )
+                    visit_expression(
+                        branch_value,
+                        location + ("phi_value", branch_index),
+                        branch_guards,
+                        use_ref,
+                        use_site_kind,
+                        True,
+                        active,
+                    )
+            for operand_index, operand in enumerate(tuple(getattr(expr, "operands", ()) or ())):
+                visit_expression(
+                    operand,
+                    location + ("operand", operand_index),
+                    inherited_guards,
+                    use_ref,
+                    use_site_kind,
+                    phi_branch,
+                    active,
+                )
+
+        for location, expression, guards, use_ref, use_site_kind in roots:
+            visit_expression(
+                expression,
+                location,
+                guards,
+                use_ref,
+                use_site_kind,
+                False,
+                set(),
+            )
+
+        all_target_expression_ids: set[int] = set()
+        walked_objects: set[int] = set()
+
+        def collect_all(value: Any) -> None:
+            if value is None or isinstance(value, (str, bytes, int, float, bool)):
+                return
+            if id(value) in walked_objects:
+                return
+            walked_objects.add(id(value))
+            if isinstance(value, Expression):
+                runtime_key = _stable_key(getattr(value, "runtime_ref", None))
+                if runtime_key is not None and contains_nested(runtime_key, pcode_key):
+                    all_target_expression_ids.add(id(value))
+                for operand in tuple(getattr(value, "operands", ()) or ()):
+                    collect_all(operand)
+                phi_value = getattr(value, "value", None)
+                if isinstance(phi_value, (tuple, list)):
+                    for item in phi_value:
+                        if isinstance(item, (tuple, list)) and len(item) == 2:
+                            collect_all(getattr(item[0], "expression", None))
+                            collect_all(item[1])
+                return
+            if isinstance(value, Mapping):
+                for item in value.values():
+                    collect_all(item)
+                return
+            if isinstance(value, (tuple, list, set, frozenset)):
+                for item in value:
+                    collect_all(item)
+                return
+            if is_dataclass(value):
+                for item in fields(value):
+                    if item.name in {"data_type_obj", "function_ref"}:
+                        continue
+                    collect_all(getattr(value, item.name))
+
+        collect_all(analysis)
+        census_closed = all_target_expression_ids == indexed_target_expression_ids
+        ordered_bindings = tuple(sorted(bindings, key=lambda item: item.use_id))
+        census_digest = _digest(
+            (
+                "call_output_use_census_v1",
+                pcode_key,
+                tuple(item.to_dict() for item in ordered_bindings),
+                len(all_target_expression_ids),
+                len(indexed_target_expression_ids),
+                census_closed,
+            )
+        )
+        if not census_closed:
+            return "inconclusive", ordered_bindings, census_digest
+        if not ordered_bindings:
+            return "not_observed_closed", (), census_digest
+        if all(item.proven for item in ordered_bindings):
+            return "proven_guarded_reaching_definition", ordered_bindings, census_digest
+        return "inconclusive", ordered_bindings, census_digest
+
+    def invocation_status(
+        pcode_ref: Any,
+        pcode_key: Optional[Tuple[Any, ...]],
+    ) -> str:
+        """Prove that one static call operation executes at most once.
+
+        The whole-function acyclic case is the fast path.  For a cyclic CFG,
+        a call block outside every cycle is still single-visit; this is proved
+        only from the complete object-derived region block/edge census.
+        """
+
+        if (
+            caller_profile is None
+            or pcode_key is None
+            or getattr(caller_profile, "pcode_enumeration_complete", False) is not True
+            or getattr(caller_profile, "cfg_edges_complete", False) is not True
+            or pcode_key not in tuple(
+                getattr(caller_profile, "call_like_pcode_op_keys", ()) or ()
+            )
+        ):
+            return "inconclusive"
+        if getattr(caller_profile, "cfg_acyclic", False) is True:
+            return "proven_acyclic_cfg"
+        if not (
+            getattr(caller_profile, "region_identity_complete", False) is True
+            and getattr(caller_profile, "region_single_entry", False) is True
+            and getattr(caller_profile, "region_all_exits_enumerated", False) is True
+            and getattr(caller_profile, "region_cross_edges_enumerated", False) is True
+        ):
+            return "inconclusive"
+        block_keys = tuple(
+            tuple(item)
+            for item in getattr(caller_profile, "region_block_keys", ()) or ()
+            if isinstance(item, (tuple, list))
+        )
+        edge_keys = tuple(
+            (tuple(item[0]), tuple(item[1]))
+            for item in getattr(caller_profile, "region_cfg_edge_keys", ()) or ()
+            if isinstance(item, (tuple, list))
+            and len(item) == 2
+            and isinstance(item[0], (tuple, list))
+            and isinstance(item[1], (tuple, list))
+        )
+        block_index = getattr(pcode_ref, "block_index", None)
+        call_blocks = tuple(
+            item
+            for item in block_keys
+            if len(item) > 3
+            and item[0] == "pcode_block"
+            and item[1] == getattr(pcode_ref, "binary_id", None)
+            and item[3] == block_index
+        )
+        if len(call_blocks) != 1:
+            return "inconclusive"
+        call_block = call_blocks[0]
+        graph = {item: set() for item in block_keys}
+        for source, target in edge_keys:
+            if source not in graph or target not in graph:
+                return "inconclusive"
+            graph[source].add(target)
+        pending = list(graph.get(call_block, ()))
+        visited = set()
+        while pending:
+            current = pending.pop()
+            if current == call_block:
+                return "inconclusive"
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(graph.get(current, ()))
+        return "proven_cfg_single_visit"
 
     if summary is not None:
         seen_argument_evidence: set[int] = set()
@@ -1058,6 +1815,20 @@ def _extract_side_facts(
         if bucket["unsupported_reasons"]:
             extraction_failure_causes.append("unsupported_call_effect")
         fact_id = _digest(("call_site_fact", identity.stable_key(), operation_kind))
+        call_invocation_status = invocation_status(pcode_ref, bucket["pcode_key"])
+        call_guard_groups = tuple(
+            tuple(group) for group in _dedupe(bucket["guards"])
+        )
+        (
+            output_use_status,
+            output_use_bindings,
+            output_use_census_digest,
+        ) = output_use_census(
+            pcode_ref,
+            bucket["pcode_key"],
+            call_guard_groups,
+            call_invocation_status,
+        )
         facts.append(
             CallSiteFact(
                 fact_id=fact_id,
@@ -1078,6 +1849,14 @@ def _extract_side_facts(
                 callee_parameter_keys=parameter_groups[0] if len(parameter_groups) == 1 else (),
                 guard_keys=tuple(key for group in _dedupe(bucket["guards"]) for key in group),
                 call_site_multiplicity=multiplicities[0] if len(multiplicities) == 1 else None,
+                invocation_proof_status=call_invocation_status,
+                output_use_reaching_definition_status=output_use_status,
+                observed_output_use_count=len(output_use_bindings),
+                output_use_census_status=(
+                    "closed" if output_use_status != "inconclusive" else "inconclusive"
+                ),
+                output_use_census_digest=output_use_census_digest,
+                output_use_bindings=output_use_bindings,
                 effect_classes=tuple(sorted(set(bucket["effect_classes"]))),
                 callee_effect_summary_statuses=tuple(
                     sorted(set(bucket["callee_effect_summary_statuses"]))
@@ -1435,6 +2214,10 @@ def _phase2_direct_call_eligibility(
     if call_region_pair:
         region = right if isinstance(right, RegionFact) else left
         call = left if isinstance(left, CallSiteFact) else right
+        if not call.invocation_proof_status.startswith("proven_"):
+            blockers.append("call_invocation_multiplicity_unproven")
+        if call.output_use_reaching_definition_status == "inconclusive":
+            blockers.append("call_output_reaching_definition_unproven")
         if call.correspondence_operation_class() != "resolved_internal_call_candidate":
             blockers.append("call_to_region_call_target_incomplete")
         if call.extraction_status != "complete":
@@ -1525,6 +2308,10 @@ def _phase2_direct_call_eligibility(
                 )
     else:
         for side, fact in (("left", left), ("right", right)):
+            if not fact.invocation_proof_status.startswith("proven_"):
+                blockers.append(f"{side}_call_invocation_multiplicity_unproven")
+            if fact.output_use_reaching_definition_status == "inconclusive":
+                blockers.append(f"{side}_call_output_reaching_definition_unproven")
             if fact.correspondence_operation_class() != "resolved_internal_call_candidate":
                 blockers.append(f"{side}_not_resolved_internal_call_candidate")
             if fact.extraction_status != "complete":
@@ -2385,6 +3172,8 @@ def build_structural_coverage_certificate(
 __all__ = [
     "ArtifactObjectIdentity",
     "CallSiteFact",
+    "UseDomainCoverageMapping",
+    "USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION",
     "EquivalenceObservationContract",
     "ObligationProofReadiness",
     "Phase2DirectCallEligibility",
@@ -2395,6 +3184,9 @@ __all__ = [
     "SolverProofRecord",
     "UserOpFact",
     "build_call_effect_shadow_manifest",
+    "build_use_domain_coverage_mapping",
+    "call_use_obligation_edges_from_manifest",
+    "call_use_mapping_payload_from_manifest",
     "StructuralCoverageCertificate",
     "build_structural_coverage_certificate",
     "evaluate_obligation_proof_readiness",

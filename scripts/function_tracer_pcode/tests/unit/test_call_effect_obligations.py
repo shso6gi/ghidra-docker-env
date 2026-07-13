@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -29,8 +30,15 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     build_call_effect_shadow_manifest,
     build_structural_coverage_certificate,
     evaluate_obligation_proof_readiness,
+    _condition_key,
 )
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    CallProofDecisionMode,
+    StrategySourceAnalysisPair,
+    prepare_solver_surface,
+    validate_call_resolution_projection,
+)
 from scripts.function_tracer_pcode.equivalence.call_effect_producer import (
     _RenderedStage,
     _execute_rendered_stage,
@@ -44,6 +52,8 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     ComparisonSurface,
     Condition,
+    DeferredCallInfo,
+    DeferredCallRef,
     Expression,
     FunctionReturnAnalysis,
     LocationBaseRef,
@@ -1250,6 +1260,559 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
     )
 
 
+def _observe_phase2_call_result(analysis: FunctionReturnAnalysis) -> None:
+    evidence = next(iter(analysis.effect_summary.call_argument_evidence.values()))
+    deferred_ref = DeferredCallRef(
+        caller_program_id=analysis.function_ref.program_id,
+        caller_entry_offset=analysis.function_ref.entry_offset,
+        pcode_op_ref=evidence.pcode_op_ref,
+        target_ref=evidence.target_ref,
+        sequence=0,
+    )
+    info = DeferredCallInfo(
+        deferred_call_ref=deferred_ref,
+        target_ref=evidence.target_ref,
+        arguments=list(evidence.arguments),
+        call_argument_recovery_status="complete",
+        call_site_multiplicity=1,
+    )
+    analysis.deferred_calls = {deferred_ref.stable_key(): info}
+    value = Expression.unknown("observed_call_result", runtime_ref=info.unknown_ref)
+    value.size = 4
+    analysis.returns = [
+        ReturnInfo(
+            address=hex(int(analysis.entry_point, 16) + 0x20),
+            conditions=[],
+            value=value,
+            pcode_op_ref=_pcode_ref(
+                analysis.binary_id,
+                int(analysis.entry_point, 16),
+                int(analysis.entry_point, 16) + 0x20,
+                mnemonic="RETURN",
+                seq_time=1,
+            ),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "tamper_kind",
+    (
+        "consuming_use_id",
+        "consumer_domain",
+        "invocation_contract",
+        "census_digest",
+        "different_guarded_use",
+        "obligation_use_edge",
+    ),
+)
+def test_prepared_use_domain_mapping_rebuild_rejects_manifest_tampering(tamper_kind):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _observe_phase2_call_result(left)
+    _observe_phase2_call_result(right)
+    source = StrategySourceAnalysisPair.create(left, right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    prepared = prepare_solver_surface(
+        source,
+        observation_contract_digest=checker.observation_contract.contract_id,
+        comparison_session_id="mapping-tamper",
+        branch_id="PairwiseStrategy",
+        generation=1,
+        decision_mode=CallProofDecisionMode.PREFLIGHT_PROJECTION,
+    )
+    manifest = checker._call_effect_shadow_manifest(
+        prepared.analysis1,
+        prepared.analysis2,
+        "left",
+        "right",
+    )
+    original = validate_call_resolution_projection(
+        manifest,
+        prepared,
+        generation=1,
+        trusted_proof_artifacts=checker._last_internal_call_effect_artifacts,
+    )
+    assert original.proven
+    assert original.use_mapping_builder_version == "prepared_call_use_mapping_v1"
+
+    tampered = deepcopy(manifest)
+    fact = tampered["left_facts"][0]
+    binding = fact["output_use_bindings"][0]
+    if tamper_kind == "consuming_use_id":
+        binding["use_id"] = "reassigned-use"
+    elif tamper_kind == "consumer_domain":
+        binding["semantic_location"][0] = "effects"
+    elif tamper_kind == "invocation_contract":
+        binding["invocation_contract"]["proven"] = False
+    elif tamper_kind == "census_digest":
+        fact["output_use_census_digest"] = "0" * 64
+    elif tamper_kind == "obligation_use_edge":
+        tampered["relational_obligations"][0]["left_fact_id"] = "reattached-call"
+    else:
+        binding["semantic_location"] = ["effects", 99, "value"]
+        binding["use_guard_keys"] = [["condition", "different"]]
+
+    rejected = validate_call_resolution_projection(
+        tampered,
+        prepared,
+        generation=1,
+        trusted_proof_artifacts=checker._last_internal_call_effect_artifacts,
+    )
+    assert rejected.status == "inconclusive"
+    assert "prepared_use_domain_coverage_mapping_mismatch" in rejected.root_blockers
+
+
+def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkeypatch):
+    pytest.importorskip("z3")
+    import scripts.function_tracer_pcode.equivalence.checker as checker_module
+
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _observe_phase2_call_result(left)
+    _observe_phase2_call_result(right)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    trusted_validate = checker_module.validate_call_resolution_projection
+    call_count = 0
+
+    def tamper_before_final_gate(manifest, prepared, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            manifest["left_facts"][0]["output_use_census_digest"] = "f" * 64
+        return trusted_validate(manifest, prepared, **kwargs)
+
+    monkeypatch.setattr(
+        checker_module,
+        "validate_call_resolution_projection",
+        tamper_before_final_gate,
+    )
+    result = checker.check(left, right, "left", "right")
+
+    assert call_count == 2
+    assert result.is_equivalent is None
+    assert any(
+        "deferred_call_use_coverage_mapping_invalid" in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
+def _observe_phase2_call_result_in_store(
+    analysis: FunctionReturnAnalysis,
+    address: int,
+) -> None:
+    _observe_phase2_call_result(analysis)
+    call_value = analysis.returns[0].value
+    analysis.returns = [
+        ReturnInfo(
+            address=hex(int(analysis.entry_point, 16) + 0x20),
+            conditions=[],
+            value=Expression.constant(0, size=4),
+        )
+    ]
+    profile = analysis.effect_summary.function_control_effect_profile
+    object.__setattr__(profile, "store_count", 1)
+    analysis.effect_summary.effects = [
+        StoreEffect(
+            CanonicalLocation(
+                base_ref=LocationBaseRef.parameter("a", index=0),
+                offset=0,
+                size=4,
+            ),
+            Expression.binary_op(
+                "INT_ADD", call_value, Expression.constant(1, size=4)
+            ),
+            [],
+            10,
+            provenance=_local_store_provenance(
+                _pcode_ref(
+                    analysis.binary_id,
+                    int(analysis.entry_point, 16),
+                    address,
+                    mnemonic="STORE",
+                    seq_time=1,
+                )
+            ),
+        )
+    ]
+
+
+def test_observed_call_result_projection_is_lowered_and_receipted():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _observe_phase2_call_result(left)
+    _observe_phase2_call_result(right)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    projection = result.call_effect_shadow_manifest["preflight_projection"]
+    assert projection["status"] == "proven"
+    assert len(projection["semantic_bindings"]) == 1
+    binding = projection["semantic_bindings"][0]
+    assert len(binding["left_use_bindings"]) == 1
+    assert len(binding["right_use_bindings"]) == 1
+    assert result.call_proof_terminal_provenance["comparison_receipt_id"]
+    assert "certified call projection" in (result.smt_formula or "")
+
+
+def test_observed_call_result_stored_to_memory_is_proven_and_receipted():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis, address in ((left, 0x1018), (right, 0x3018)):
+        _observe_phase2_call_result_in_store(analysis, address)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    projection = result.call_effect_shadow_manifest["preflight_projection"]
+    binding = projection["semantic_bindings"][0]
+    assert dict(binding["left_use_bindings"][0])["semantic_location"][0] == "effects"
+    assert dict(binding["right_use_bindings"][0])["semantic_location"][0] == "effects"
+    caller_artifact = next(
+        artifact
+        for artifact in result.call_effect_shadow_manifest["solver_proof_records"]
+        if artifact["proof_stage"] == "caller_memory_relation"
+    )
+    assert caller_artifact["status"] == "proven"
+    assert projection["normalization_trust_basis"] == (
+        "trusted_solver_semantic_width_tcb_v1"
+    )
+    assert projection["surface_delta_audit_id"]
+    assert projection["semantic_transformation_certificate_id"]
+    assert projection["comparison_receipt_disposition_counts"][
+        "projection_active_total"
+    ] > 0
+    assert result.call_effect_shadow_manifest["preflight_gate_delta_diagnostic"][
+        "decision_mode"
+    ] == (
+        "preflight_projection"
+    )
+    receipt = result.call_proof_terminal_provenance
+    assert receipt["comparison_receipt_id"]
+
+
+def test_observed_call_result_store_does_not_hide_different_call_semantics():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    _observe_phase2_call_result_in_store(left, 0x1018)
+    _observe_phase2_call_result_in_store(right, 0x3018)
+    right_evidence = right.effect_summary.call_site_effect_summary_evidence[0]
+    different = Expression.constant(99, size=4)
+    object.__setattr__(right_evidence, "return_partitions", (((), different),))
+    object.__setattr__(
+        right_evidence,
+        "return_value_keys",
+        (expression_provenance_key(different),),
+    )
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is not True
+
+
+def test_no_active_pair_receipt_fails_closed_without_relational_certificate():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    left.returns = []
+    right.returns = []
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    counts = result.call_effect_shadow_manifest["preflight_projection"][
+        "comparison_receipt_disposition_counts"
+    ]
+    assert counts["projection_active_total"] == 0
+    assert counts["projection_no_active_pair_proven"] == 0
+    assert any(
+        "call_projection_no_active_pair_proof_missing"
+        in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
+def test_conditional_call_projection_is_distributed_to_consuming_cases_only():
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    parameter = Expression.parameter("a", 0, data_type="int", size=4)
+    guard = Condition(
+        Expression.binary_op("INT_SLESS", parameter, Expression.constant(0, size=4)),
+        False,
+    )
+    for analysis in (left, right):
+        _observe_phase2_call_result(analysis)
+        call_return = analysis.returns[0]
+        call_return.conditions = [guard]
+        analysis.returns.append(
+            ReturnInfo(
+                address=hex(int(analysis.entry_point, 16) + 0x24),
+                conditions=[Condition(guard.expression, True)],
+                value=Expression.constant(7, size=4),
+            )
+        )
+        argument_evidence = next(
+            iter(analysis.effect_summary.call_argument_evidence.values())
+        )
+        object.__setattr__(argument_evidence, "path_conditions", ((guard,),))
+        effect_evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+        object.__setattr__(effect_evidence, "path_condition_keys", (_condition_key(guard),))
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert not any(
+        "call_projection_use_binding_mismatch" in str(reason.detail)
+        for reason in result.unknown_reasons
+    )
+
+
+def test_observed_call_to_inline_region_projection_lowers_to_region_value():
+    pytest.importorskip("z3")
+    left, right, _ = _call_to_region_proof_inputs()
+    _observe_phase2_call_result(left)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    projection = result.call_effect_shadow_manifest["preflight_projection"]
+    binding = projection["semantic_bindings"][0]
+    assert binding["relation_kind"] == "call_to_region"
+    assert binding["call_on_left"] is True
+    assert len(binding["left_use_bindings"]) == 1
+    assert len(binding["right_use_bindings"]) == 0
+    assert "certified call projection" in (result.smt_formula or "")
+
+
+@pytest.mark.parametrize(
+    ("return_guarded", "expected_status"),
+    [
+        (False, "inconclusive"),
+        (True, "proven_guarded_reaching_definition"),
+    ],
+)
+def test_call_output_use_requires_guarded_execution_before_use(
+    return_guarded,
+    expected_status,
+):
+    analysis = _phase2_caller_analysis("B1", 1, 0x1000)
+    _observe_phase2_call_result(analysis)
+    parameter = Expression.parameter("a", 0, data_type="int", size=4)
+    guard = Condition(
+        Expression.binary_op("INT_SLESS", parameter, Expression.constant(0, size=4)),
+        False,
+    )
+    argument_evidence = next(
+        iter(analysis.effect_summary.call_argument_evidence.values())
+    )
+    object.__setattr__(argument_evidence, "path_conditions", ((guard,),))
+    effect_evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(effect_evidence, "path_condition_keys", (_condition_key(guard),))
+    if return_guarded:
+        analysis.returns[0].conditions = [guard]
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        _phase2_caller_analysis("B2", 2, 0x3000),
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["left_facts"][0][
+        "output_use_reaching_definition_status"
+    ] == expected_status
+    binding = manifest["left_facts"][0]["output_use_bindings"][0]
+    if return_guarded:
+        assert binding["invocation_contract"]["execution_order_proof"] == (
+            "proven_same_block_sequence"
+        )
+        assert binding["invocation_contract"]["proven"] is True
+
+
+def test_call_output_use_without_consumer_op_provenance_is_inconclusive():
+    analysis = _phase2_caller_analysis("B1", 1, 0x1000)
+    counterpart = _phase2_caller_analysis("B2", 2, 0x3000)
+    _observe_phase2_call_result(analysis)
+    _observe_phase2_call_result(counterpart)
+    analysis.returns[0].pcode_op_ref = None
+    counterpart.returns[0].pcode_op_ref = None
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        counterpart,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    fact = manifest["left_facts"][0]
+    assert fact["output_use_reaching_definition_status"] == "inconclusive"
+    contract = fact["output_use_bindings"][0]["invocation_contract"]
+    assert contract["execution_order_proof"] == (
+        "inconclusive_use_site_provenance_missing"
+    )
+    assert contract["proven"] is False
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(analysis, counterpart, "left", "right")
+    assert result.is_equivalent is None
+    assert result.call_effect_shadow_manifest["preflight_projection"]["status"] == (
+        "inconclusive"
+    )
+
+
+def test_call_output_use_before_call_in_same_block_is_inconclusive():
+    analysis = _phase2_caller_analysis("B1", 1, 0x1000)
+    _observe_phase2_call_result(analysis)
+    analysis.returns[0].pcode_op_ref = _pcode_ref(
+        "B1", 0x1000, 0x1008, mnemonic="RETURN", seq_time=0
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        _phase2_caller_analysis("B2", 2, 0x3000),
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    contract = manifest["left_facts"][0]["output_use_bindings"][0][
+        "invocation_contract"
+    ]
+    assert contract["execution_order_proof"] == "inconclusive_same_block_sequence"
+    assert contract["proven"] is False
+
+
+def _configure_call_use_cfg(
+    analysis: FunctionReturnAnalysis,
+    *,
+    bypass_call: bool,
+) -> None:
+    entry = int(analysis.entry_point, 16)
+    old_argument = next(iter(analysis.effect_summary.call_argument_evidence.values()))
+    call_ref = _pcode_ref(
+        analysis.binary_id,
+        entry,
+        entry + 0x10,
+        block_index=1,
+        seq_time=0,
+    )
+    object.__setattr__(old_argument, "pcode_op_ref", call_ref)
+    effect_evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
+    object.__setattr__(effect_evidence, "pcode_op_ref", call_ref)
+    profile = analysis.effect_summary.function_control_effect_profile
+    blocks = tuple(
+        _block_ref_for_pcode(
+            _pcode_ref(
+                analysis.binary_id,
+                entry,
+                entry + index * 0x10,
+                block_index=index,
+            )
+        ).stable_key()
+        for index in range(3)
+    )
+    edges = (
+        ((blocks[0], blocks[1]), (blocks[0], blocks[2]), (blocks[1], blocks[2]))
+        if bypass_call
+        else ((blocks[0], blocks[1]), (blocks[1], blocks[2]))
+    )
+    object.__setattr__(profile, "call_like_pcode_op_keys", (call_ref.stable_key(),))
+    object.__setattr__(profile, "region_block_keys", blocks)
+    object.__setattr__(profile, "region_cfg_edge_keys", edges)
+    object.__setattr__(profile, "region_entry_block_key", blocks[0])
+    object.__setattr__(profile, "region_identity_complete", True)
+    object.__setattr__(profile, "region_single_entry", True)
+    object.__setattr__(profile, "region_all_exits_enumerated", True)
+    _observe_phase2_call_result(analysis)
+    analysis.returns[0].pcode_op_ref = _pcode_ref(
+        analysis.binary_id,
+        entry,
+        entry + 0x30,
+        mnemonic="RETURN",
+        block_index=2,
+        seq_time=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("bypass_call", "expected_proof"),
+    [
+        (False, "proven_cfg_dominance"),
+        (True, "inconclusive_guarded_subgraph_dominance_missing"),
+    ],
+)
+def test_call_output_use_requires_cfg_dominance(bypass_call, expected_proof):
+    analysis = _phase2_caller_analysis("B1", 1, 0x1000)
+    _configure_call_use_cfg(analysis, bypass_call=bypass_call)
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        _phase2_caller_analysis("B2", 2, 0x3000),
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    contract = manifest["left_facts"][0]["output_use_bindings"][0][
+        "invocation_contract"
+    ]
+    assert contract["execution_order_proof"] == expected_proof
+    assert contract["proven"] is (not bypass_call)
+
+
+def test_call_output_use_inside_phi_requires_incoming_edge_dominance():
+    analysis = _phase2_caller_analysis("B1", 1, 0x1000)
+    _observe_phase2_call_result(analysis)
+    call_value = analysis.returns[0].value
+    analysis.returns[0].value = Expression.phi(
+        [(None, call_value), (None, Expression.constant(0, size=4))]
+    )
+
+    manifest = build_call_effect_shadow_manifest(
+        analysis,
+        _phase2_caller_analysis("B2", 2, 0x3000),
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    contract = manifest["left_facts"][0]["output_use_bindings"][0][
+        "invocation_contract"
+    ]
+    assert contract["execution_order_proof"] == (
+        "inconclusive_phi_incoming_edge_dominance_missing"
+    )
+    assert contract["proven"] is False
+
+
 def test_return_only_unsat_cannot_discharge_call_effect_obligations():
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)
@@ -1310,6 +1873,277 @@ def test_typed_pure_direct_call_proofs_can_promote_equivalence():
     assert manifest["phase2_discharge_gate"]["status"] == "proven"
     assert manifest["summary"]["semantic_proof_status"] == "proven"
     assert manifest["legacy_replacement_readiness"]["status"] == "ready"
+    assert manifest["decision_mode"] == "preflight_projection"
+    assert manifest["preflight_projection"]["comparison_receipt_id"]
+    resolutions = manifest["preflight_projection"]["blocker_resolutions"]
+    assert resolutions
+    assert len({item["occurrence_id"] for item in resolutions}) == len(resolutions)
+    assert all(
+        item["status"] == "proven"
+        and item["mapping_basis"] == "callsite_pcode_ref"
+        and item["requirement_id"]["proof_kind"] == "call_effect_summary_proof"
+        for item in resolutions
+    )
+    assert result.call_proof_terminal_provenance["decision_owner_mode"] == (
+        "preflight_projection"
+    )
+    assert result.call_proof_terminal_provenance["dispatch_cleanup_complete"] is True
+    assert manifest["left_facts"][0]["invocation_proof_status"] == "proven_acyclic_cfg"
+    assert manifest["left_facts"][0]["output_use_reaching_definition_status"] == (
+        "not_observed_closed"
+    )
+
+
+def test_preflight_rejects_call_invocation_without_acyclic_cfg_proof():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis in (left, right):
+        profile = analysis.effect_summary.function_control_effect_profile
+        object.__setattr__(profile, "cfg_acyclic", False)
+
+    result = EquivalenceChecker(timeout=5, enable_rewrite=False).check(
+        left, right, "left", "right"
+    )
+
+    assert result.is_equivalent is None
+    backlog = result.call_effect_shadow_manifest["proof_stage_backlog"][0]
+    assert "left_call_invocation_multiplicity_unproven" in backlog["blocking_stages"]
+    assert "right_call_invocation_multiplicity_unproven" in backlog["blocking_stages"]
+
+
+def test_preflight_proves_single_visit_call_block_outside_cfg_cycle():
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    for analysis in (left, right):
+        profile = analysis.effect_summary.function_control_effect_profile
+        call_ref = next(iter(analysis.effect_summary.call_argument_evidence.values())).pcode_op_ref
+        blocks = tuple(
+            PcodeBlockRef(
+                block_index=index,
+                start_address_offset=int(call_ref.function_entry_offset) + index * 0x100,
+                binary_id=call_ref.binary_id,
+                function_entry_space=call_ref.function_entry_space,
+                function_entry_offset=call_ref.function_entry_offset,
+            ).stable_key()
+            for index in range(3)
+        )
+        object.__setattr__(profile, "cfg_acyclic", False)
+        object.__setattr__(profile, "region_block_keys", blocks)
+        object.__setattr__(
+            profile,
+            "region_cfg_edge_keys",
+            ((blocks[0], blocks[1]), (blocks[1], blocks[1]), (blocks[1], blocks[2])),
+        )
+        object.__setattr__(profile, "region_entry_block_key", blocks[0])
+        object.__setattr__(profile, "region_exit_block_keys", (blocks[2],))
+        object.__setattr__(profile, "region_identity_complete", True)
+        object.__setattr__(profile, "region_single_entry", True)
+        object.__setattr__(profile, "region_all_exits_enumerated", True)
+        object.__setattr__(profile, "region_cross_edges_enumerated", True)
+
+    manifest = build_call_effect_shadow_manifest(
+        left,
+        right,
+        binary1_name="left",
+        binary2_name="right",
+    )
+
+    assert manifest["left_facts"][0]["invocation_proof_status"] == (
+        "proven_cfg_single_visit"
+    )
+    assert manifest["right_facts"][0]["invocation_proof_status"] == (
+        "proven_cfg_single_visit"
+    )
+
+
+def test_preflight_preserves_source_arguments_for_pairwise_override(monkeypatch):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    original = checker.pairwise_strategy.check
+    observed = []
+
+    def override(a1, a2, save_formula=False):
+        observed.append((a1, a2))
+        return original(a1, a2, save_formula)
+
+    monkeypatch.setattr(checker.pairwise_strategy, "check", override)
+    result = checker.check(left, right, "left", "right")
+
+    assert observed == [(left, right)]
+    assert result.is_equivalent is True
+
+
+def test_preflight_rejects_override_eq_without_consumption_receipt(monkeypatch):
+    from scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared import StrategyResult
+
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    def override(_a1, _a2, _save_formula=False):
+        return StrategyResult(
+            is_equivalent=True,
+            solver_results=ParallelResult(results=[]),
+            total_pairs=1,
+            unsat_pairs=1,
+        )
+
+    monkeypatch.setattr(checker.pairwise_strategy, "check", override)
+    result = checker.check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    assert any(
+        "comparison_receipt_missing" in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
+def test_preflight_monolithic_branch_consumes_prepared_surface_and_emits_receipt(monkeypatch):
+    pytest.importorskip("z3")
+    import scripts.function_tracer_pcode.equivalence.call_effect_preflight as preflight_module
+    from scripts.function_tracer_pcode.equivalence.strategies import monolithic as monolithic_module
+
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    ambient_dispatch_reads = 0
+    trusted_current_dispatch_depth = preflight_module.current_dispatch_depth
+
+    def counted_current_dispatch_depth():
+        nonlocal ambient_dispatch_reads
+        ambient_dispatch_reads += 1
+        return trusted_current_dispatch_depth()
+
+    monkeypatch.setattr(
+        preflight_module,
+        "current_dispatch_depth",
+        counted_current_dispatch_depth,
+    )
+
+    def reject_uncertified_decision_transform(*_args, **_kwargs):
+        raise AssertionError("monolithic decision stage transformed prepared surface")
+
+    monkeypatch.setattr(
+        monolithic_module,
+        "normalize_analysis_semantic_width",
+        reject_uncertified_decision_transform,
+    )
+    monkeypatch.setattr(
+        monolithic_module,
+        "align_return_value_extension_surfaces",
+        reject_uncertified_decision_transform,
+    )
+
+    result = EquivalenceChecker(
+        strategy="monolithic",
+        timeout=5,
+        enable_rewrite=False,
+        enable_completed_recovery_proofs=True,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    provenance = result.call_proof_terminal_provenance
+    assert provenance["terminal_branch_id"] == "MonolithicStrategy"
+    assert provenance["comparison_receipt_id"]
+    assert provenance["dispatch_cleanup_complete"] is True
+    assert ambient_dispatch_reads == 1
+
+
+def test_monolithic_deep_helpers_ignore_ambient_dispatch_context(monkeypatch):
+    import scripts.function_tracer_pcode.equivalence.call_effect_preflight as preflight_module
+    from scripts.function_tracer_pcode.equivalence.strategies import monolithic as monolithic_module
+
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    strategy = EquivalenceChecker(
+        strategy="monolithic",
+        timeout=5,
+        enable_rewrite=False,
+    ).monolithic_strategy
+    prepared_context = monolithic_module._MonolithicDecisionExecutionContext.create(
+        left,
+        right,
+        decision_surface="prepared",
+        prepared_surface_digest="prepared-surface",
+    )
+
+    def reject_ambient_read():
+        raise AssertionError("deep monolithic helper read ambient dispatch context")
+
+    def reject_transform(*_args, **_kwargs):
+        raise AssertionError("prepared monolithic helper transformed its surface")
+
+    monkeypatch.setattr(preflight_module, "current_dispatch_depth", reject_ambient_read)
+    monkeypatch.setattr(
+        monolithic_module,
+        "normalize_analysis_semantic_width",
+        reject_transform,
+    )
+    monkeypatch.setattr(
+        monolithic_module,
+        "align_return_value_extension_surfaces",
+        reject_transform,
+    )
+
+    assert strategy._build_validation_analyses_for_surface(
+        left,
+        right,
+        prepared_context,
+    ) == (left, right)
+    assert strategy._counterexample_is_decisive_for_surface(
+        left,
+        right,
+        None,
+        prepared_context,
+    ) is True
+    assert strategy._collect_monolithic_return_coverage_unsafety_reasons(
+        left,
+        right,
+        prepared_context,
+    ) == []
+
+    normalized = []
+
+    def record_legacy_transform(analysis, *_args, **_kwargs):
+        normalized.append(analysis)
+        return analysis
+
+    monkeypatch.setattr(
+        monolithic_module,
+        "normalize_analysis_semantic_width",
+        record_legacy_transform,
+    )
+    monkeypatch.setattr(
+        monolithic_module,
+        "align_return_value_extension_surfaces",
+        lambda analysis1, analysis2: (analysis1, analysis2),
+    )
+    assert strategy._build_validation_analyses(left, right) == (left, right)
+    assert normalized == [left, right]
+
+
+def test_default_preflight_mode_does_not_enter_legacy_post_pairwise_gate(monkeypatch):
+    pytest.importorskip("z3")
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+
+    def rejected_legacy_path(*_args, **_kwargs):
+        raise AssertionError("legacy post-pairwise gate entered")
+
+    monkeypatch.setattr(
+        checker,
+        "_apply_phase2_relational_call_discharge",
+        rejected_legacy_path,
+    )
+
+    result = checker.check(left, right, "left", "right")
+
+    assert result.is_equivalent is True
+    assert result.call_proof_terminal_provenance["decision_owner_mode"] == (
+        "preflight_projection"
+    )
 
 
 def test_non_call_effect_summary_incompleteness_cannot_be_cleared_by_call_proof():

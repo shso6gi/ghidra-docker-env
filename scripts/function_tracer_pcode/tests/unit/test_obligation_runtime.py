@@ -755,7 +755,7 @@ def test_decision_aggregator_turns_proof_closed_global_blocker_into_eq():
     assert result.unknown_reasons == []
 
 
-def test_decision_aggregator_counts_proof_closed_pair_without_reusing_old_unknown():
+def test_decision_aggregator_does_not_reclassify_proof_closed_reason_as_pair_unsat():
     runtime = ObligationRuntimeSession.create(
         SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
         SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
@@ -784,9 +784,10 @@ def test_decision_aggregator_counts_proof_closed_pair_without_reusing_old_unknow
         },
     )
     DecisionAggregator.apply(result, runtime)
-    assert result.is_equivalent is True
-    assert result.pairwise_stats["unknown_pairs"] == 0
-    assert result.pairwise_stats["unsat_pairs"] == 2
+    assert result.is_equivalent is None
+    assert result.unknown_reasons == []
+    assert result.pairwise_stats["unknown_pairs"] == 1
+    assert result.pairwise_stats["unsat_pairs"] == 1
 
 
 def test_pair_obligation_cache_reexecutes_only_changed_semantic_pair():

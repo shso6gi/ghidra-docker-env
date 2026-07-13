@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Monolithic戦略（全条件を一度に検証）"""
 
+import hashlib
 import time
 
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, Mapping, Set
 
 from ...model import FunctionReturnAnalysis
@@ -19,6 +21,46 @@ from .pairwise_query_executor import (
     count_counterexample_model_assertions,
     validate_counterexample_globally,
 )
+
+
+@dataclass(frozen=True)
+class _MonolithicDecisionExecutionContext:
+    decision_surface: str
+    analysis_object_ids: tuple[int, int]
+    prepared_surface_digest: Optional[str] = None
+
+    @classmethod
+    def create(
+        cls,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        decision_surface: str,
+        prepared_surface_digest: Optional[str] = None,
+    ) -> "_MonolithicDecisionExecutionContext":
+        if decision_surface not in {"prepared", "legacy_source"}:
+            raise ValueError("invalid_monolithic_decision_surface")
+        if decision_surface == "prepared" and not prepared_surface_digest:
+            raise ValueError("prepared_monolithic_surface_digest_missing")
+        if decision_surface == "legacy_source" and prepared_surface_digest is not None:
+            raise ValueError("legacy_monolithic_surface_has_prepared_digest")
+        return cls(
+            decision_surface=decision_surface,
+            analysis_object_ids=(id(analysis1), id(analysis2)),
+            prepared_surface_digest=prepared_surface_digest,
+        )
+
+    def assert_bound_to(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> None:
+        if self.analysis_object_ids != (id(analysis1), id(analysis2)):
+            raise RuntimeError("monolithic_decision_context_analysis_mismatch")
+
+    @property
+    def uses_prepared_surface(self) -> bool:
+        return self.decision_surface == "prepared"
 
 
 class MonolithicStrategy(CheckStrategy):
@@ -46,11 +88,35 @@ class MonolithicStrategy(CheckStrategy):
         analysis2: FunctionReturnAnalysis,
         counterexample_raw: Optional[Dict[str, Any]],
     ) -> bool:
+        decision_context = _MonolithicDecisionExecutionContext.create(
+            analysis1,
+            analysis2,
+            decision_surface="legacy_source",
+        )
+        return self._counterexample_is_decisive_for_surface(
+            analysis1,
+            analysis2,
+            counterexample_raw,
+            decision_context,
+        )
+
+    def _counterexample_is_decisive_for_surface(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        counterexample_raw: Optional[Dict[str, Any]],
+        decision_context: _MonolithicDecisionExecutionContext,
+    ) -> bool:
+        decision_context.assert_bound_to(analysis1, analysis2)
         self._last_counterexample_replay_fixed_model_assertion_count = 0
         if not counterexample_raw:
             return True
 
-        normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
+        normalized1, normalized2 = self._build_validation_analyses_for_surface(
+            analysis1,
+            analysis2,
+            decision_context,
+        )
         base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
         bridge_narrow_bits = self._completed_return_width_bridge_narrow_bits_for_sizes(
             analysis1,
@@ -63,16 +129,19 @@ class MonolithicStrategy(CheckStrategy):
         self._last_counterexample_replay_fixed_model_assertion_count = (
             count_counterexample_model_assertions(base_ctx, counterexample_raw)
         )
-        render_analysis1 = normalize_analysis_semantic_width(
-            normalized1,
-            infer_parameter_semantics(normalized1),
-            base_ctx.get("extra_vars1", []),
-        )
-        render_analysis2 = normalize_analysis_semantic_width(
-            normalized2,
-            infer_parameter_semantics(normalized2),
-            base_ctx.get("extra_vars2", []),
-        )
+        if decision_context.uses_prepared_surface:
+            render_analysis1, render_analysis2 = normalized1, normalized2
+        else:
+            render_analysis1 = normalize_analysis_semantic_width(
+                normalized1,
+                infer_parameter_semantics(normalized1),
+                base_ctx.get("extra_vars1", []),
+            )
+            render_analysis2 = normalize_analysis_semantic_width(
+                normalized2,
+                infer_parameter_semantics(normalized2),
+                base_ctx.get("extra_vars2", []),
+            )
 
         cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
         cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
@@ -102,6 +171,25 @@ class MonolithicStrategy(CheckStrategy):
             counterexample_raw,
         )
 
+    def _dispatch_counterexample_decisiveness(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        counterexample_raw: Optional[Dict[str, Any]],
+        decision_context: _MonolithicDecisionExecutionContext,
+    ) -> bool:
+        """Preserve the legacy override hook without ambient context reads."""
+
+        validator = self._counterexample_is_decisive_across_case_split
+        if getattr(validator, "__func__", None) is MonolithicStrategy._counterexample_is_decisive_across_case_split:
+            return self._counterexample_is_decisive_for_surface(
+                analysis1,
+                analysis2,
+                counterexample_raw,
+                decision_context,
+            )
+        return validator(analysis1, analysis2, counterexample_raw)
+
     def _completed_return_width_bridge_narrow_bits_for_sizes(
         self,
         analysis1: FunctionReturnAnalysis,
@@ -128,6 +216,29 @@ class MonolithicStrategy(CheckStrategy):
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
     ) -> tuple[FunctionReturnAnalysis, FunctionReturnAnalysis]:
+        decision_context = _MonolithicDecisionExecutionContext.create(
+            analysis1,
+            analysis2,
+            decision_surface="legacy_source",
+        )
+        return self._build_validation_analyses_for_surface(
+            analysis1,
+            analysis2,
+            decision_context,
+        )
+
+    def _build_validation_analyses_for_surface(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        decision_context: _MonolithicDecisionExecutionContext,
+    ) -> tuple[FunctionReturnAnalysis, FunctionReturnAnalysis]:
+        decision_context.assert_bound_to(analysis1, analysis2)
+        if decision_context.uses_prepared_surface:
+            # The preflight certificate and comparison receipt are bound to
+            # these exact children.  Decision-side validation must not derive
+            # an unreceipted normalization/alignment surface.
+            return analysis1, analysis2
         hints1 = infer_parameter_semantics(analysis1)
         hints2 = infer_parameter_semantics(analysis2)
         normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
@@ -141,8 +252,14 @@ class MonolithicStrategy(CheckStrategy):
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        decision_context: _MonolithicDecisionExecutionContext,
     ) -> list[str]:
-        normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
+        decision_context.assert_bound_to(analysis1, analysis2)
+        normalized1, normalized2 = self._build_validation_analyses_for_surface(
+            analysis1,
+            analysis2,
+            decision_context,
+        )
         preliminary_cases1 = extract_return_cases(normalized1, self.normalization_settings)
         preliminary_cases2 = extract_return_cases(normalized2, self.normalization_settings)
         if self._return_cases_have_object_centric_total_coverage(
@@ -151,20 +268,24 @@ class MonolithicStrategy(CheckStrategy):
             return []
 
         base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
-        render_analysis1 = normalize_analysis_semantic_width(
-            normalized1,
-            infer_parameter_semantics(normalized1),
-            base_ctx.get("extra_vars1", []),
-        )
-        render_analysis2 = normalize_analysis_semantic_width(
-            normalized2,
-            infer_parameter_semantics(normalized2),
-            base_ctx.get("extra_vars2", []),
-        )
-        render_analysis1, render_analysis2 = align_return_value_extension_surfaces(
-            render_analysis1,
-            render_analysis2,
-        )
+        if decision_context.uses_prepared_surface:
+            render_analysis1, render_analysis2 = normalized1, normalized2
+            assert render_analysis1 is analysis1 and render_analysis2 is analysis2
+        else:
+            render_analysis1 = normalize_analysis_semantic_width(
+                normalized1,
+                infer_parameter_semantics(normalized1),
+                base_ctx.get("extra_vars1", []),
+            )
+            render_analysis2 = normalize_analysis_semantic_width(
+                normalized2,
+                infer_parameter_semantics(normalized2),
+                base_ctx.get("extra_vars2", []),
+            )
+            render_analysis1, render_analysis2 = align_return_value_extension_surfaces(
+                render_analysis1,
+                render_analysis2,
+            )
         cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
         cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
         replace1 = build_symbol_replacer(
@@ -212,12 +333,72 @@ class MonolithicStrategy(CheckStrategy):
     ) -> StrategyResult:
         """等価性をチェック（monolithic方式）"""
         start_time = time.time()  # ★ これで使える
+        from ..call_effect_preflight import (
+            QueryExecutionRecord,
+            consume_prepared_dispatch_frame,
+            current_dispatch_depth,
+            issue_builtin_comparison_receipt,
+            lower_call_projection_for_case_pair,
+            projection_binding_evidence_from_query,
+        )
+
+        source_analysis1 = analysis1
+        source_analysis2 = analysis2
+        dispatch_frame = None
+        if current_dispatch_depth() > 0:
+            dispatch_frame = consume_prepared_dispatch_frame(analysis1, analysis2)
+            analysis1 = dispatch_frame.prepared.analysis1
+            analysis2 = dispatch_frame.prepared.analysis2
+        decision_context = _MonolithicDecisionExecutionContext.create(
+            analysis1,
+            analysis2,
+            decision_surface=(
+                "prepared" if dispatch_frame is not None else "legacy_source"
+            ),
+            prepared_surface_digest=(
+                dispatch_frame.prepared.surface_digest
+                if dispatch_frame is not None
+                else None
+            ),
+        )
+        call_projection_assertions = ()
+        call_projection_binding_ids = ()
+        if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
+            lowered_call_projection = lower_call_projection_for_case_pair(
+                dispatch_frame,
+                analysis1,
+                analysis2,
+                pair_id="monolithic",
+            )
+            if lowered_call_projection.status != "proven":
+                return StrategyResult(
+                    is_equivalent=None,
+                    solver_results=ParallelResult(results=[]),
+                    unknown_reasons=[
+                        make_unknown_reason(
+                            "equivalence_blocking_unsafety",
+                            stage="CALL_EFFECT_PREFLIGHT",
+                            evidence_refs=(
+                                lowered_call_projection.failure_cause,
+                                lowered_call_projection.evidence_digest,
+                            ),
+                            detail="Certified call projection could not be lowered into the monolithic query.",
+                        )
+                    ],
+                )
+            call_projection_assertions = lowered_call_projection.assertions
+            call_projection_binding_ids = lowered_call_projection.binding_ids
         
         try:
             # SMT式を構築
             try:
+                build_kwargs = {}
+                if call_projection_assertions:
+                    build_kwargs["extra_assertions"] = list(call_projection_assertions)
                 result = self.formula_builder.build_equivalence_formula_extended(
-                    analysis1, analysis2
+                    analysis1,
+                    analysis2,
+                    **build_kwargs,
                 )
             except ReturnWidthMismatchError as width_mismatch:
                 bridge_narrow_bits = (
@@ -233,10 +414,12 @@ class MonolithicStrategy(CheckStrategy):
                     "Monolithic return-width mismatch bridged by completed pairwise "
                     f"proofs at {bridge_narrow_bits} bits"
                 )
+                bridge_build_kwargs = dict(build_kwargs)
+                bridge_build_kwargs["return_width_bridge_narrow_bits"] = bridge_narrow_bits
                 result = self.formula_builder.build_equivalence_formula_extended(
                     analysis1,
                     analysis2,
-                    return_width_bridge_narrow_bits=bridge_narrow_bits,
+                    **bridge_build_kwargs,
                 )
             smt_formula = result.formula
             return_var1 = result.return_var1
@@ -264,18 +447,26 @@ class MonolithicStrategy(CheckStrategy):
             final_is_equivalent = parallel_result.is_equivalent
             unknown_reasons = []
             sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
-                analysis1,
-                analysis2,
+                source_analysis1,
+                source_analysis2,
             )
             equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(
-                analysis1,
-                analysis2,
+                source_analysis1,
+                source_analysis2,
             )
+            if dispatch_frame is not None and dispatch_frame.projection.proven:
+                covered_blockers = set(dispatch_frame.projection.covered_blockers)
+                equivalence_blocking_reasons = [
+                    reason
+                    for reason in equivalence_blocking_reasons
+                    if reason not in covered_blockers
+                ]
             coverage_unsafety_reasons = []
             if final_is_equivalent in {True, False}:
                 coverage_unsafety_reasons = self._collect_monolithic_return_coverage_unsafety_reasons(
                     analysis1,
                     analysis2,
+                    decision_context,
                 )
             sat_unsafety_reasons.extend(coverage_unsafety_reasons)
             if final_is_equivalent is True and coverage_unsafety_reasons:
@@ -334,10 +525,11 @@ class MonolithicStrategy(CheckStrategy):
                     )
                     final_is_equivalent = None
                     counterexample_raw = None
-            if final_is_equivalent is False and not self._counterexample_is_decisive_across_case_split(
+            if final_is_equivalent is False and not self._dispatch_counterexample_decisiveness(
                 analysis1,
                 analysis2,
                 counterexample_raw,
+                decision_context,
             ):
                 unknown_reasons.append(
                     self._make_sat_counterexample_ambiguous_unknown_reason(
@@ -405,7 +597,7 @@ class MonolithicStrategy(CheckStrategy):
                     )
                 )
             
-            return StrategyResult(
+            strategy_result = StrategyResult(
                 is_equivalent=final_is_equivalent,
                 solver_results=parallel_result,
                 smt_formula=smt_formula,  # ★ 修正: save_formula の条件を削除（常に保存）
@@ -415,6 +607,49 @@ class MonolithicStrategy(CheckStrategy):
                 constrained_fragments=constrained_fragments,
                 unknown_reasons=unknown_reasons,
             )
+            if dispatch_frame is not None:
+                query_digest = hashlib.sha256(
+                    smt_formula.encode("utf-8")
+                ).hexdigest()
+                disposition = (
+                    "unsat" if parallel_result.is_equivalent is True
+                    else "sat" if parallel_result.is_equivalent is False
+                    else "unknown"
+                )
+                expected_binding_evidence = dict(
+                    lowered_call_projection.binding_assertion_digests
+                    if call_projection_binding_ids else ()
+                )
+                actual_call_projection_binding_ids = tuple(sorted(
+                    binding_id
+                    for binding_id, assertion_digest in (
+                        projection_binding_evidence_from_query(smt_formula).items()
+                    )
+                    if expected_binding_evidence.get(binding_id) == assertion_digest
+                ))
+                strategy_result.comparison_execution_receipt = issue_builtin_comparison_receipt(
+                    dispatch_frame,
+                    query_records=(
+                        QueryExecutionRecord(
+                            query_label="monolithic",
+                            premise_digest=query_digest,
+                            formula_digest=query_digest,
+                            disposition=disposition,
+                            proof_kind="monolithic_solver_query",
+                            projection_binding_ids=actual_call_projection_binding_ids,
+                            formula_text=smt_formula,
+                        ),
+                    ),
+                    consumed_projection_binding_ids=actual_call_projection_binding_ids,
+                    disposition_counts={
+                        "total": 1,
+                        "unsat": 1 if parallel_result.is_equivalent is True else 0,
+                        "sat": 1 if parallel_result.is_equivalent is False else 0,
+                        "unknown": 1 if parallel_result.is_equivalent is None else 0,
+                        "error": 0,
+                    },
+                )
+            return strategy_result
         
         except ReturnWidthMismatchError as e:
             reason_id = getattr(e, "reason_id", "return_width_bridge_missing")
@@ -617,3 +852,8 @@ class MonolithicStrategy(CheckStrategy):
                 continue
             completed.setdefault(target, {})[slot_stage] = evidence
         return completed
+
+
+from ..call_effect_preflight import _register_builtin_receipt_executor
+
+_register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)

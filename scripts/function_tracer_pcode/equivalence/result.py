@@ -109,6 +109,7 @@ class EquivalenceResult:
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
     completed_recovery_proof_evidence: List[Dict[str, Any]] = field(default_factory=list)
     call_effect_shadow_manifest: Optional[Dict[str, Any]] = None
+    call_proof_terminal_provenance: Optional[Dict[str, Any]] = None
     binary1_content_identity: Optional[Tuple[Any, ...]] = None
     binary2_content_identity: Optional[Tuple[Any, ...]] = None
     function1_identity: Optional[Tuple[Any, ...]] = None
@@ -210,6 +211,10 @@ class EquivalenceResult:
             result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
         if self.call_effect_shadow_manifest is not None:
             result["call_effect_shadow_manifest"] = dict(self.call_effect_shadow_manifest)
+        if self.call_proof_terminal_provenance is not None:
+            result["call_proof_terminal_provenance"] = dict(
+                self.call_proof_terminal_provenance
+            )
         
         # ★ 新規追加: mips64_abi_constraints
         if self.mips64_abi_constraints:
