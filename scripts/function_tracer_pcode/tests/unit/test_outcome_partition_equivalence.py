@@ -1,10 +1,21 @@
 # -*- coding: utf-8 -*-
 
 from unittest.mock import Mock
+from dataclasses import replace
+
+import pytest
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.analyzer_services.return_extraction_1 import (
+    _build_function_outcome_seed,
+    _produce_standard_termination_path_effect_evidence,
+)
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage import (
+    _prove_unary_outcome_for_analysis,
+)
+from scripts.function_tracer_pcode.equivalence.obligations import AnalysisSnapshot, ObligationRuntimeSession
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     Condition,
@@ -13,14 +24,219 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    FunctionOutcomeSeed,
     PcodeOpRef,
     ReturnInfo,
+    ReturnPathEvidence,
     ReturnOutcome,
+    SymbolicRegionCandidate,
+    TerminalCandidate,
+    TerminationContractRef,
+    TerminationPathEffectEvidence,
     UnknownOutcome,
     UnknownValueRef,
 )
 from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+
+
+class _CompleteProfile:
+    pcode_enumeration_complete = True
+    cfg_edges_complete = True
+    region_identity_complete = True
+    region_single_entry = True
+    region_all_exits_enumerated = True
+    region_cross_edges_enumerated = True
+    terminal_return_coverage_complete = True
+    unsupported_mnemonics = ()
+    branchind_count = 0
+    callind_count = 0
+    callother_count = 0
+    abnormal_terminal_block_count = 0
+    cfg_acyclic = True
+    return_block_count = 1
+    region_pcode_op_keys = (PcodeOpRef(address_offset=1, mnemonic="RETURN").stable_key(),)
+    region_entry_block_key = ("block", 0)
+    region_block_keys = (("block", 0),)
+    region_exit_block_keys = (("block", 0),)
+    region_cfg_edge_keys = ()
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "complete")
+
+
+class _EffectSummaryStub:
+    def __init__(self, profile=None):
+        self.function_control_effect_profile = profile or _CompleteProfile()
+
+    def stable_key(self):
+        return ("effect_summary_stub", self.function_control_effect_profile.stable_key())
+
+
+class _DisconnectedProfile(_CompleteProfile):
+    region_block_keys = (("block", 0), ("block", 1))
+    region_exit_block_keys = (("block", 0),)
+    region_cfg_edge_keys = ()
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "disconnected")
+
+
+class _TerminationProfile(_CompleteProfile):
+    call_ref = PcodeOpRef(address_offset=2, mnemonic="CALL")
+    region_pcode_op_keys = (call_ref.stable_key(),)
+    terminal_return_coverage_complete = False
+    abnormal_terminal_block_count = 1
+    return_block_count = 0
+    region_exit_block_keys = ()
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "termination")
+
+
+class _DivergenceProfile(_CompleteProfile):
+    region_entry_block_key = ("pcode_block", "bin", ("function",), 0, "ram", 0)
+    region_block_keys = (
+        region_entry_block_key,
+        ("pcode_block", "bin", ("function",), 1, "ram", 16),
+    )
+    region_exit_block_keys = (region_entry_block_key,)
+    region_cfg_edge_keys = (
+        (
+            ("pcode_block", "bin", ("function_entry",), 0, 0),
+            ("pcode_block", "bin", ("function_entry",), 1, 16),
+        ),
+        (
+            ("pcode_block", "bin", ("function_entry",), 1, 16),
+            ("pcode_block", "bin", ("function_entry",), 1, 16),
+        ),
+    )
+    cfg_acyclic = False
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "divergence")
+
+
+class _MultiReturnProfile(_CompleteProfile):
+    return_block_count = 2
+    region_entry_block_key = ("block", 0)
+    region_block_keys = (("block", 0), ("block", 1), ("block", 2))
+    region_exit_block_keys = (("block", 1), ("block", 2))
+    region_cfg_edge_keys = ((("block", 0), ("block", 1)), (("block", 0), ("block", 2)))
+    region_pcode_op_keys = (
+        PcodeOpRef(address_offset=1, mnemonic="RETURN").stable_key(),
+        PcodeOpRef(address_offset=2, mnemonic="RETURN").stable_key(),
+    )
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "multi_return")
+
+
+class _ThreeReturnProfile(_CompleteProfile):
+    return_block_count = 3
+    region_entry_block_key = ("block", 0)
+    region_block_keys = (("block", 0), ("block", 1), ("block", 2), ("block", 3))
+    region_exit_block_keys = (("block", 1), ("block", 2), ("block", 3))
+    region_cfg_edge_keys = tuple((("block", 0), ("block", index)) for index in (1, 2, 3))
+    region_pcode_op_keys = tuple(
+        PcodeOpRef(address_offset=index, mnemonic="RETURN").stable_key() for index in (1, 2, 3)
+    )
+
+    def stable_key(self):
+        return ("function_control_effect_profile", "three_return")
+
+
+def _valid_must_diverge_proof():
+    return {
+        "proof_kind": "single_guard_nonprogress_must_diverge",
+        "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
+        "guard": "param_positive",
+        "return_partition": "param_nonpositive_return_zero",
+        "scc_blocks": [1],
+        "entry_edges": [{"source": 0, "target": 1, "guard_relation": "entry_guard_equivalent_to_divergence_guard"}],
+        "exit_edges": [],
+        "side_effect_control_safety": {
+            "forbidden_ops_absent": True,
+            "return_ops_absent_in_scc": True,
+            "guard_state_writes_absent": True,
+        },
+        "invariant_preservation": {
+            "internal_guarded_continue": True,
+            "internal_unconditional_continue": False,
+        },
+        "cfg_applicability_surface": ((0, 1), ((0, 1), (1, 1))),
+    }
+
+
+def _valid_branch_structural_proof():
+    return {
+        "proof_kind": "branch_guarded_structural_nonprogress_must_diverge",
+        "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+        "invariant": ["param_1 > 0"],
+        "structural_recurrence_proof": ("branch_guarded_affine_unit_count_structural_proof", "v1"),
+        "nonprogress_backedges": ((1, 1),),
+        "conditional_progress_backedges": (),
+        "conditional_progress_guard_keys": (),
+        "conditional_progress_guard_negated_by_invariant": False,
+        "state_preservation": "state_phi_nonprogress_backedge_identity",
+        "accumulator_preservation": "accumulator_phi_nonprogress_backedge_identity",
+        "loop_has_cfg_cycle": True,
+        "forbidden_control_effect_ops_absent": True,
+        "cfg_applicability_surface": ((0, 1), ((0, 1), (1, 1))),
+    }
+
+
+def _valid_branch_while_proof():
+    return {
+        "proof_kind": "branch_guarded_while_nonprogress_must_diverge",
+        "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+        "invariant": ["param_1 > 0"],
+        "reachable_blocks": ["0", "1"],
+        "cycle_blocks": ["1"],
+        "excluded_edges": [{
+            "source": "0", "target": "1", "edge_condition": "param_1 <= 0",
+            "relation": "invariant_contradicts_edge",
+        }],
+        "side_effect_control_safety": {
+            "forbidden_ops_absent": True,
+            "return_ops_absent_under_invariant": True,
+            "guard_state_writes_absent_under_invariant": True,
+            "guard_dependency_writes_absent_under_invariant": True,
+        },
+        "cfg_applicability_surface": ((0, 1), ((0, 1), (1, 1))),
+    }
+
+
+def _process_termination_contract(terminal_id, guard=(), payload=("symbolic",)):
+    profile = _TerminationProfile()
+    source = (
+        "terminal_path_effect_evidence_v1",
+        profile.call_ref.stable_key(),
+        profile.stable_key(),
+        tuple(sorted((condition.structural_key() for condition in guard), key=repr)),
+    )
+    return TerminationContractRef(
+        termination_class="process",
+        object_identity_key=profile.call_ref.stable_key(),
+        payload_key=(
+            "process_exit_payload_v1", "immediate_process_exit",
+            ("termination_callee_contract_v1", ("external_function", "libc.so.6", "_Exit", 1)),
+            payload,
+        ),
+        effect_key=(
+            "termination_effect_v2", "process", "immediate_process_exit",
+            ("atexit_handlers", False),
+            ("quick_exit_handlers", False),
+            ("stdio_flush", False),
+            ("automatic_object_cleanup", False),
+        ),
+        observation_contract_key=(
+            "termination_observation_v2", "process",
+            ("process_exit_status", True),
+            ("pretermination_memory_effects", "compared_separately"),
+        ),
+        source_contract_key=source,
+    )
 
 
 def _param() -> Expression:
@@ -33,6 +249,23 @@ def _param2() -> Expression:
 
 def _const(value: int) -> Expression:
     return Expression.constant(value, 4)
+
+
+def _attach_complete_return_path_evidence(analysis, index=0, condition_sets=None):
+    ref = PcodeOpRef(address_offset=index + 1, mnemonic="RETURN")
+    info = analysis.returns[index]
+    info.pcode_op_ref = ref
+    conditions = condition_sets if condition_sets is not None else [tuple(info.conditions)]
+    info.return_path_evidence = ReturnPathEvidence(
+        terminal_op_ref=ref,
+        coverage_status="complete",
+        path_block_keys=((('path_block', 0, '0x0'),),),
+        path_guard_keys=tuple(sorted({
+            tuple(sorted((condition.structural_key() for condition in group), key=repr))
+            for group in conditions
+        }, key=repr)),
+    )
+    return info.return_path_evidence
 
 
 def _positive() -> Condition:
@@ -57,6 +290,10 @@ def _gt_one() -> Condition:
 
 def _le_one() -> Condition:
     return _gt_one().negate()
+
+
+def _equals(value: int) -> Condition:
+    return Condition(Expression.binary_op("INT_EQUAL", _param(), _const(value)), False)
 
 
 def _analysis(
@@ -807,6 +1044,608 @@ def test_outcome_partition_equivalence_accepts_matching_divergence_guard():
         _replace_param("p1"),
         _replace_param("p2"),
     ) == {"function1", "function2"}
+
+
+def test_unary_seed_accepts_total_return_only_partition_without_divergence():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[]], divergence_guards=[])
+    right = _analysis(return_guards=[[]], divergence_guards=[])
+    for analysis in (left, right):
+        terminal_id = ("return", analysis.entry_point)
+        evidence = _attach_complete_return_path_evidence(analysis)
+        analysis.return_outcomes = ()
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "return", op_ref=PcodeOpRef(address_offset=1, mnemonic="RETURN")
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), True,
+                producer_evidence_key=("return_path_evidence", evidence.stable_key()),
+                observed_value=_const(0)
+            ),),
+            control_flow_evidence_key=_CompleteProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub()
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_unary_seed_accepts_complementary_multi_return_partition():
+    strategy = _strategy()
+    left = _analysis(
+        return_guards=[[_positive()], [_nonpositive()]], divergence_guards=[],
+        return_values=[_const(1), _const(0)],
+    )
+    right = _analysis(
+        return_guards=[[_positive()], [_nonpositive()]], divergence_guards=[],
+        return_values=[_const(1), _const(0)],
+    )
+    for analysis in (left, right):
+        _attach_complete_return_path_evidence(analysis, 0)
+        _attach_complete_return_path_evidence(analysis, 1)
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_MultiReturnProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_MultiReturnProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_unary_seed_aggregates_multiple_paths_to_one_return_terminal():
+    strategy = _strategy()
+    analyses = []
+    for _ in range(2):
+        analysis = _analysis(return_guards=[[_positive()]], divergence_guards=[])
+        info = analysis.returns[0]
+        evidence = _attach_complete_return_path_evidence(
+            analysis, 0, condition_sets=[(_positive(),), (_nonpositive(),)]
+        )
+        analysis.return_outcomes = (
+            ReturnOutcome((_positive(),), _const(0), return_info=info),
+            ReturnOutcome((_nonpositive(),), _const(0), return_info=info),
+        )
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_CompleteProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub()
+        assert len(analysis.outcome_seed.terminal_candidates) == 1
+        assert len(analysis.outcome_seed.symbolic_regions) == 2
+        assert all(
+            region.producer_evidence_key == ("return_path_evidence", evidence.stable_key())
+            for region in analysis.outcome_seed.symbolic_regions
+        )
+        analyses.append(analysis)
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_unary_seed_rejects_multi_return_guard_not_matching_path_evidence():
+    strategy = _strategy()
+    analysis = _analysis(
+        return_guards=[[_positive()], [_nonpositive()]], divergence_guards=[],
+        return_values=[_const(1), _const(0)],
+    )
+    _attach_complete_return_path_evidence(analysis, 0)
+    _attach_complete_return_path_evidence(analysis, 1)
+    _build_function_outcome_seed(analysis)
+    first = analysis.outcome_seed.symbolic_regions[0]
+    analysis.outcome_seed = replace(
+        analysis.outcome_seed,
+        symbolic_regions=(replace(first, guard=()), *analysis.outcome_seed.symbolic_regions[1:]),
+        control_flow_evidence_key=_MultiReturnProfile().stable_key(),
+    )
+    analysis.effect_summary = _EffectSummaryStub(_MultiReturnProfile())
+    assert not strategy._analysis_has_proved_outcome_partition(
+        _base_ctx(), analysis, _replace_param("p1"), "function1"
+    )
+
+
+@pytest.mark.parametrize("guards", [
+    [[_equals(0)], [_equals(1)], [_equals(0).negate(), _equals(1).negate()]],
+    [[_positive()], [_nonpositive(), _equals(0).negate()], [_equals(0)]],
+])
+def test_unary_seed_accepts_three_way_and_switch_shaped_return_partitions(guards):
+    strategy = _strategy()
+    analyses = [
+        _analysis(return_guards=guards, divergence_guards=[], return_values=[_const(0), _const(1), _const(2)])
+        for _ in range(2)
+    ]
+    for analysis in analyses:
+        for index in range(3):
+            _attach_complete_return_path_evidence(analysis, index)
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_ThreeReturnProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_ThreeReturnProfile())
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_unary_seed_rejects_return_only_partition_with_control_gap():
+    strategy = _strategy()
+    analysis = _analysis(return_guards=[[]], divergence_guards=[])
+    terminal_id = ("return", analysis.entry_point)
+    analysis.outcome_seed = FunctionOutcomeSeed(
+        function_identity=analysis.outcome_function_identity(),
+        input_domain_contract=("all_inputs",),
+        terminal_candidates=(TerminalCandidate(terminal_id, "return", cfg_reachable=True),),
+        symbolic_regions=(SymbolicRegionCandidate(
+            ("region", terminal_id), terminal_id, (), True, observed_value=_const(0)
+        ),),
+        unresolved_control_evidence=(("indirect_branch",),),
+    )
+    assert not strategy._analysis_has_proved_outcome_partition(
+        _base_ctx(), analysis, _replace_param("p1"), "function1"
+    )
+
+
+def test_unary_gate_does_not_add_redundant_blocker_for_incomplete_control_flow():
+    strategy = _strategy()
+    analyses = []
+    for _ in range(2):
+        analysis = _analysis(return_guards=[[]], divergence_guards=[])
+        evidence = _attach_complete_return_path_evidence(analysis)
+        terminal_id = ("return", analysis.entry_point)
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "return", op_ref=evidence.terminal_op_ref,
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), True,
+                producer_evidence_key=("return_path_evidence", evidence.stable_key()),
+                observed_value=_const(0),
+            ),),
+            control_flow_evidence_key=_CompleteProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub()
+        analysis.incomplete_control_flow = True
+        analyses.append(analysis)
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+    assert strategy._last_unary_outcome_blockers == {}
+
+
+def test_unary_production_gate_rejects_unclassified_termination_candidate():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[]], divergence_guards=[])
+    right = _analysis(return_guards=[[]], divergence_guards=[])
+    for analysis in (left, right):
+        terminal_id = ("termination", analysis.entry_point)
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "exceptional_termination", op_ref=PcodeOpRef(address_offset=1, mnemonic="CALL")
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), True
+            ),),
+            control_flow_evidence_key=_CompleteProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub()
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+    assert set(strategy._last_unary_outcome_blockers.values()) == {
+        "outcome_termination_classification_unclassified"
+    }
+
+
+def test_outcome_seed_identity_excludes_divergence_proof_payload():
+    left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    right = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    left.divergence_outcomes = (
+        DivergenceOutcome((_positive(),), {"proof_kind": "must_diverge", "solver": "first"}),
+    )
+    right.divergence_outcomes = (
+        DivergenceOutcome((_positive(),), {"proof_kind": "must_diverge", "solver": "second"}),
+    )
+    _build_function_outcome_seed(left)
+    _build_function_outcome_seed(right)
+    assert left.outcome_seed.stable_key() == right.outcome_seed.stable_key()
+
+
+def test_unary_cfg_producer_rejects_unreachable_block_surface():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[]], divergence_guards=[])
+    right = _analysis(return_guards=[[]], divergence_guards=[])
+    for analysis in (left, right):
+        terminal_id = ("return", analysis.entry_point)
+        analysis.return_outcomes = ()
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "return", op_ref=PcodeOpRef(address_offset=1, mnemonic="RETURN")
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), False, observed_value=_const(0)
+            ),),
+            control_flow_evidence_key=_DisconnectedProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_DisconnectedProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+    assert set(strategy._last_unary_outcome_blockers.values()) == {
+        "outcome_cfg_reachability_incomplete"
+    }
+
+
+def test_unary_blocker_target_excludes_pair_side_label():
+    strategy = _strategy()
+    analysis = _analysis(return_guards=[[]], divergence_guards=[])
+    terminal_id = ("return", analysis.entry_point)
+    analysis.outcome_seed = FunctionOutcomeSeed(
+        function_identity=analysis.outcome_function_identity(),
+        input_domain_contract=("all_inputs",),
+        terminal_candidates=(TerminalCandidate(terminal_id, "return"),),
+        symbolic_regions=(SymbolicRegionCandidate(
+            ("region", terminal_id), terminal_id, (), False, observed_value=_const(0)
+        ),),
+    )
+    left = strategy._outcome_partition_unknown_object_target_key(
+        "function1:outcome_path_region_incomplete", analysis, analysis
+    )
+    right = strategy._outcome_partition_unknown_object_target_key(
+        "function2:outcome_path_region_incomplete", analysis, analysis
+    )
+    assert left == right
+
+
+def test_unary_partition_rejects_explicit_unknown_outcome_even_when_return_is_total():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[]], divergence_guards=[], unknown_guards=[[]])
+    right = _analysis(return_guards=[[]], divergence_guards=[], unknown_guards=[[]])
+    for analysis in (left, right):
+        _attach_complete_return_path_evidence(analysis)
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_CompleteProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub()
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+    assert set(strategy._last_unary_outcome_blockers.values()) == {
+        "outcome_path_region_completeness_incomplete"
+    }
+
+
+def test_validated_process_termination_contract_is_compared_relationally():
+    strategy = _strategy()
+    left = _analysis(return_guards=[], divergence_guards=[])
+    right = _analysis(return_guards=[], divergence_guards=[])
+    for analysis in (left, right):
+        terminal_id = ("termination", analysis.entry_point)
+        contract = _process_termination_contract(terminal_id)
+        analysis.termination_path_effect_evidence = (TerminationPathEffectEvidence(
+            terminal_candidate_id=terminal_id,
+            terminal_op_ref=_TerminationProfile.call_ref,
+            control_effect_profile_key=_TerminationProfile().stable_key(),
+            path_guard_key=(),
+            contract=contract,
+        ),)
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id,
+                "process_termination",
+                op_ref=_TerminationProfile.call_ref,
+                termination_contract=contract,
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), False,
+                producer_evidence_key=contract.source_contract_key,
+            ),),
+            control_flow_evidence_key=_TerminationProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_termination_path_effect_evidence_changes_unary_snapshot_premise():
+    analysis = _analysis(return_guards=[], divergence_guards=[])
+    terminal_id = ("termination", analysis.entry_point)
+    contract = _process_termination_contract(terminal_id)
+    evidence = TerminationPathEffectEvidence(
+        terminal_candidate_id=terminal_id,
+        terminal_op_ref=_TerminationProfile.call_ref,
+        control_effect_profile_key=_TerminationProfile().stable_key(),
+        path_guard_key=(),
+        contract=contract,
+    )
+    without_evidence = AnalysisSnapshot.from_function_analysis(analysis)
+    analysis.termination_path_effect_evidence = (evidence,)
+    with_evidence = AnalysisSnapshot.from_function_analysis(analysis)
+    assert with_evidence.semantic_fingerprint != without_evidence.semantic_fingerprint
+    analysis.termination_path_effect_evidence = (replace(
+        evidence,
+        contract=replace(contract, effect_key=("termination_effect_v2", "process", "changed")),
+    ),)
+    changed_effect = AnalysisSnapshot.from_function_analysis(analysis)
+    assert changed_effect.semantic_fingerprint != with_evidence.semantic_fingerprint
+    analysis.termination_path_effect_evidence = (replace(evidence, path_guard_key=(("changed",),)),)
+    changed_guard = AnalysisSnapshot.from_function_analysis(analysis)
+    assert changed_guard.semantic_fingerprint != with_evidence.semantic_fingerprint
+
+
+def test_production_termination_producer_builds_seed_from_object_derived_exit_call():
+    analyzer = ReturnAnalyzer(program=None)
+    analysis = _analysis(return_guards=[], divergence_guards=[])
+    analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+    external_function = Mock()
+    external_function.getParameterCount.return_value = 1
+    parameter = Mock()
+    parameter.getDataType.return_value.getName.return_value = "int"
+    external_function.getParameters.return_value = [parameter]
+    external_function.getReturnType.return_value.getName.return_value = "void"
+    target = CallTargetRef.from_name(
+        "_Exit", program_id=1, is_external=True, library_name="libc.so.6",
+        function_obj=external_function,
+    )
+    analyzer._current_noreturn_terminal_observations = [{
+        "pcode_op_ref": _TerminationProfile.call_ref,
+        "target_refs": (target,),
+        "noreturn_contract_keys": ((
+            "resolved_noreturn_function_v1", target.stable_key(), target.stable_key(),
+        ),),
+        "argument_keys": (("constant", 0),),
+        "conditions": (_positive(),),
+    }]
+    _produce_standard_termination_path_effect_evidence(analyzer, analysis)
+    _build_function_outcome_seed(analysis)
+    assert len(analysis.termination_path_effect_evidence) == 1
+    assert analysis.termination_path_effect_evidence[0].contract.termination_class == "process"
+    assert analysis.outcome_seed.terminal_candidates[0].terminal_kind_candidate == "process_termination"
+    assert analysis.outcome_seed.symbolic_regions[0].guard == (_positive(),)
+
+
+def test_production_termination_producer_does_not_classify_unknown_noreturn_symbol():
+    analyzer = ReturnAnalyzer(program=None)
+    analysis = _analysis(return_guards=[], divergence_guards=[])
+    analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+    analyzer._current_noreturn_terminal_observations = [{
+        "pcode_op_ref": _TerminationProfile.call_ref,
+        "target_refs": (CallTargetRef.from_name("project_specific_noreturn"),),
+        "noreturn_contract_keys": (("resolved_noreturn_function_v1", ("local",), ("local",)),),
+        "argument_keys": (),
+        "conditions": (),
+    }]
+    _produce_standard_termination_path_effect_evidence(analyzer, analysis)
+    assert analysis.termination_path_effect_evidence == ()
+    assert analysis.unknown_outcomes[0].reason == "unknown_nonreturning_contract"
+
+
+@pytest.mark.parametrize("target", [
+    CallTargetRef.from_name("_Exit", program_id=1, entry_offset=0x1000, is_external=False),
+    CallTargetRef.from_name("exit", program_id=1, is_external=True, library_name="libc.so.6"),
+    CallTargetRef.from_name("quick_exit", program_id=1, is_external=True, library_name="libc.so.6"),
+])
+def test_termination_producer_keeps_local_or_unmodeled_standard_names_unknown(target):
+    analyzer = ReturnAnalyzer(program=None)
+    analysis = _analysis(return_guards=[], divergence_guards=[])
+    analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+    analyzer._current_noreturn_terminal_observations = [{
+        "pcode_op_ref": _TerminationProfile.call_ref,
+        "target_refs": (target,),
+        "noreturn_contract_keys": ((
+            "resolved_noreturn_function_v1", target.stable_key(), target.stable_key(),
+        ),),
+        "argument_keys": (("constant", 0),),
+        "conditions": (_positive(),),
+    }]
+    _produce_standard_termination_path_effect_evidence(analyzer, analysis)
+    assert analysis.termination_path_effect_evidence == ()
+    assert analysis.unknown_outcomes[0].reason == "unknown_nonreturning_contract"
+
+
+def test_cached_termination_partition_rejects_removed_prerequisite_evidence():
+    strategy = _strategy()
+    analyses = []
+    for _ in range(2):
+        analysis = _analysis(return_guards=[], divergence_guards=[])
+        terminal_id = ("termination", analysis.entry_point)
+        contract = _process_termination_contract(terminal_id)
+        evidence = TerminationPathEffectEvidence(
+            terminal_candidate_id=terminal_id,
+            terminal_op_ref=_TerminationProfile.call_ref,
+            control_effect_profile_key=_TerminationProfile().stable_key(),
+            path_guard_key=(),
+            contract=contract,
+        )
+        analysis.termination_path_effect_evidence = (evidence,)
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "process_termination", op_ref=_TerminationProfile.call_ref,
+                termination_contract=contract,
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), True,
+                producer_evidence_key=contract.source_contract_key,
+            ),),
+            control_flow_evidence_key=_TerminationProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+        analyses.append(analysis)
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    proof = _prove_unary_outcome_for_analysis(
+        strategy, _base_ctx(), left, _replace_param("p1")
+    )
+    assert proof.complete and proof.cache_entry is not None
+    left.termination_path_effect_evidence = ()
+    pair = ObligationRuntimeSession.create(left, right)
+    with pytest.raises(ValueError, match="premise|snapshot"):
+        pair.import_unary_artifact_for_analysis(
+            proof.cache_entry,
+            analysis=left,
+            pair_side="left",
+            domain_contract=("all_inputs",),
+            normalization_policy_digest=(
+                strategy._return_coverage_normalization_policy_digest(
+                    strategy._return_coverage_normalization_policy()
+                ) or "return-coverage-normalization-unavailable"
+            ),
+        )
+
+
+def test_process_termination_payload_difference_is_not_equivalent():
+    strategy = _strategy()
+    analyses = []
+    for payload in (("exit_status", 0), ("exit_status", 1)):
+        analysis = _analysis(return_guards=[], divergence_guards=[])
+        terminal_id = ("termination", analysis.entry_point)
+        contract = _process_termination_contract(terminal_id, payload=payload)
+        analysis.termination_path_effect_evidence = (TerminationPathEffectEvidence(
+            terminal_candidate_id=terminal_id,
+            terminal_op_ref=_TerminationProfile.call_ref,
+            control_effect_profile_key=_TerminationProfile().stable_key(),
+            path_guard_key=(),
+            contract=contract,
+        ),)
+        analysis.outcome_seed = FunctionOutcomeSeed(
+            function_identity=analysis.outcome_function_identity(),
+            input_domain_contract=("all_inputs",),
+            terminal_candidates=(TerminalCandidate(
+                terminal_id, "process_termination", op_ref=_TerminationProfile.call_ref,
+                termination_contract=contract,
+            ),),
+            symbolic_regions=(SymbolicRegionCandidate(
+                ("region", terminal_id), terminal_id, (), False,
+                producer_evidence_key=contract.source_contract_key,
+            ),),
+            control_flow_evidence_key=_TerminationProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_TerminationProfile())
+        analyses.append(analysis)
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+
+
+def test_must_diverge_requires_exact_validated_proof_schema():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    right = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    for analysis in (left, right):
+        _attach_complete_return_path_evidence(analysis)
+        analysis.divergence_outcomes = (
+            DivergenceOutcome((_positive(),), {"proof_kind": "must_diverge"}),
+        )
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_DivergenceProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_DivergenceProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
+    assert set(strategy._last_unary_outcome_blockers.values()) == {
+        "outcome_path_region_completeness_incomplete"
+    }
+
+
+def test_must_diverge_exact_schema_participates_in_validated_partition():
+    strategy = _strategy()
+    left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    right = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    for analysis in (left, right):
+        _attach_complete_return_path_evidence(analysis)
+        analysis.divergence_outcomes = (
+            DivergenceOutcome((_positive(),), _valid_must_diverge_proof()),
+        )
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_DivergenceProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_DivergenceProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+@pytest.mark.parametrize("proof_factory", [_valid_branch_structural_proof, _valid_branch_while_proof])
+def test_branch_guarded_must_diverge_schemas_participate_in_validated_partition(proof_factory):
+    strategy = _strategy()
+    left = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    right = _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+    for analysis in (left, right):
+        _attach_complete_return_path_evidence(analysis)
+        analysis.divergence_outcomes = (DivergenceOutcome((_positive(),), proof_factory()),)
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_DivergenceProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_DivergenceProfile())
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == {"function1", "function2"}
+
+
+def test_branch_guarded_must_diverge_rejects_stale_cfg_applicability_surface():
+    strategy = _strategy()
+    analyses = [
+        _analysis(return_guards=[[_nonpositive()]], divergence_guards=[[_positive()]])
+        for _ in range(2)
+    ]
+    for analysis in analyses:
+        _attach_complete_return_path_evidence(analysis)
+        proof = _valid_branch_while_proof()
+        proof["cfg_applicability_surface"] = ((0, 9), ((0, 9), (9, 9)))
+        analysis.divergence_outcomes = (DivergenceOutcome((_positive(),), proof),)
+        _build_function_outcome_seed(analysis)
+        analysis.outcome_seed = replace(
+            analysis.outcome_seed,
+            control_flow_evidence_key=_DivergenceProfile().stable_key(),
+        )
+        analysis.effect_summary = _EffectSummaryStub(_DivergenceProfile())
+    left, right = analyses
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, right)
+    assert strategy._outcome_partition_covered_labels(
+        _base_ctx(), left, right, _replace_param("p1"), _replace_param("p2")
+    ) == set()
 
 
 def test_outcome_partition_equivalence_requires_side_specific_base_context():

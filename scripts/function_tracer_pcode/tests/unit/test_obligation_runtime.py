@@ -32,6 +32,8 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     ObligationRuntimeSession,
     validate_artifact_applicability,
     validate_proof_closure,
+    UnaryProducerResult,
+    prove_unary_partition,
 )
 from scripts.function_tracer_pcode.equivalence.obligations.snapshot import (
     FUNCTION_ANALYSIS_FIELD_CLASSIFICATION,
@@ -358,6 +360,162 @@ def test_artifact_applicability_checks_candidate_independent_premise():
         validated_closure_id=("closure",),
     )
     assert record.status == "requires_reproof"
+
+
+def test_unary_view_identity_excludes_pair_peer():
+    analysis = SimpleNamespace(function_name="left", entry_point="0x1", binary_id="bin", outcome_seed=None)
+    first = ObligationRuntimeSession.create_unary(
+        analysis,
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+    )
+    second = ObligationRuntimeSession.create_unary(
+        analysis,
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+    )
+    assert first.premise_digest == second.premise_digest
+    assert first.current_view.snapshot_id == second.current_view.snapshot_id
+
+
+def test_unary_view_changes_with_function_snapshot():
+    first = ObligationRuntimeSession.create_unary(
+        SimpleNamespace(function_name="left", entry_point="0x1", binary_id="bin", outcome_seed=None),
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+    )
+    second = ObligationRuntimeSession.create_unary(
+        SimpleNamespace(function_name="other", entry_point="0x2", binary_id="bin", outcome_seed=None),
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+    )
+    assert first.premise_digest != second.premise_digest
+
+
+class _UnarySeed:
+    function_identity = ("function", "bin-a", 0x1000)
+    input_domain_contract = ("all_inputs",)
+    partition_revision = 1
+    extraction_schema_version = 1
+
+    def stable_key(self):
+        return ("unary_seed", self.function_identity, self.partition_revision)
+
+
+def _unary_analysis(name="f", seed=None):
+    return SimpleNamespace(
+        function_name=name,
+        entry_point="0x1000",
+        binary_id="bin-a",
+        outcome_seed=seed or _UnarySeed(),
+    )
+
+
+def _proved_unary_producers(counter=None):
+    def producer():
+        if counter is not None:
+            counter[0] += 1
+        return UnaryProducerResult("proved")
+    return {
+        stage: producer
+        for stage in (
+            "termination_classification", "cfg_reachability", "path_region_completeness", "member_classification",
+            "same_kind_consistency", "cross_kind_disjointness", "residual_totality",
+            "partition_complete",
+        )
+    }
+
+
+def test_validated_unary_artifact_cache_reuses_exact_function_premise():
+    counter = [0]
+    first = prove_unary_partition(
+        _unary_analysis(),
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+        producers=_proved_unary_producers(counter),
+    )
+    assert first.complete
+    assert len(first.cache_entry.closure_artifacts) == 8
+    assert counter[0] == 8
+    second = prove_unary_partition(
+        _unary_analysis(),
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-v1",
+        producers=_proved_unary_producers(counter),
+    )
+    assert second.complete
+    assert second.final_artifact.artifact_id == first.final_artifact.artifact_id
+    assert counter[0] == 8
+
+
+def test_imported_unary_artifact_preserves_source_closure_dependency():
+    left = _unary_analysis()
+    proof = prove_unary_partition(
+        left,
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-import-v1",
+        producers=_proved_unary_producers(),
+    )
+    pair = ObligationRuntimeSession.create(
+        left,
+        SimpleNamespace(function_name="g", entry_point="0x2000", binary_id="bin-b"),
+    )
+    pair.import_unary_artifact_for_analysis(
+        proof.cache_entry,
+        analysis=left,
+        pair_side="left",
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-import-v1",
+    )
+    imported = pair.artifacts[-1]
+    assert proof.final_artifact.artifact_id in imported.dependency_artifact_ids
+    validate_proof_closure(pair.artifacts, (imported.artifact_id,), pair.view_records)
+
+
+def test_unary_artifact_cache_rejects_stale_seed_surface():
+    left = _unary_analysis()
+    proof = prove_unary_partition(
+        left,
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-stale-v1",
+        producers=_proved_unary_producers(),
+    )
+    pair = ObligationRuntimeSession.create(
+        left,
+        SimpleNamespace(function_name="g", entry_point="0x2000", binary_id="bin-b"),
+    )
+    left.outcome_seed = SimpleNamespace(
+        stable_key=lambda: ("changed_seed",),
+        input_domain_contract=("all_inputs",),
+    )
+    with pytest.raises(ValueError, match="function premise mismatch"):
+        pair.import_unary_artifact_for_analysis(
+            proof.cache_entry,
+            analysis=left,
+            pair_side="left",
+            domain_contract=("all_inputs",),
+            normalization_policy_digest="norm-stale-v1",
+        )
+
+
+def test_unary_artifact_import_rejects_different_pair_side_analysis():
+    left = _unary_analysis()
+    other = SimpleNamespace(function_name="x", entry_point="0x9000", binary_id="bin-x", outcome_seed=_UnarySeed())
+    proof = prove_unary_partition(
+        left,
+        domain_contract=("all_inputs",),
+        normalization_policy_digest="norm-wrong-side-v1",
+        producers=_proved_unary_producers(),
+    )
+    pair = ObligationRuntimeSession.create(left, other)
+    with pytest.raises(ValueError, match="function premise mismatch"):
+        pair.import_unary_artifact_for_analysis(
+            proof.cache_entry,
+            analysis=other,
+            pair_side="right",
+            domain_contract=("all_inputs",),
+            normalization_policy_digest="norm-wrong-side-v1",
+        )
 
 
 def test_branch_activation_short_circuits_after_terminal_result():

@@ -44,6 +44,13 @@ from .runtime import (
     ObligationRuntimeSession,
     PendingCounterexampleSafety,
 )
+from .outcome_partition import (
+    UnaryPartitionProofResult,
+    UnaryProducerResult,
+    outcome_seed_digest,
+    prove_unary_partition,
+    requirement_for_stage,
+)
 from .stage_runner import (
     BranchExecutionRecord,
     InternalBranchTrace,
@@ -61,4 +68,5 @@ __all__ = (
     "ProofExpression", "ProofExpressionEvaluator", "ProofEvaluation", "ProofNodeKind", "ProofWorklist",
     "InternalBranchTrace", "LegacyExecutionSnapshot", "ProductionShadowValidation", "ProductionShadowValidator", "ProofGateProjection", "SemanticFactProvenance", "ShadowComparisonReport", "SnapshotFingerprintCodec", "ValidatedProofClosure",
     "ViewPremiseRecord", "WorkItem", "project_proof_gates", "run_obligation_branch_plan", "validate_artifact_applicability", "validate_proof_closure",
+    "UnaryPartitionProofResult", "UnaryProducerResult", "outcome_seed_digest", "prove_unary_partition", "requirement_for_stage",
 )

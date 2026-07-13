@@ -24,6 +24,7 @@ class AnalysisSession:
     function_prototype: Optional[Any] = None
     function_entry_address: Optional[Any] = None
     blocked_return_path_conditions: List[List[Condition]] = field(default_factory=list)
+    noreturn_terminal_observations: List[Dict[str, Any]] = field(default_factory=list)
     return_path_entry_cache: Dict[
         Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]
     ] = field(default_factory=dict)

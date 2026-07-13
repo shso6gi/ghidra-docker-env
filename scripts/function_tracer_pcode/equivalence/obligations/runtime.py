@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
-from .cache import ProofCache
+from .cache import ProofCache, ValidatedUnaryArtifactCache, ValidatedUnaryArtifactEntry
 from .model import (
     ExecutionState,
     FunctionProofOutcome,
@@ -17,6 +17,9 @@ from .model import (
 from .proof import ViewPremiseRecord, validate_proof_closure
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
 from .worklist import ProofWorklist, WorkItem
+
+
+GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE = ValidatedUnaryArtifactCache()
 
 
 _GATE_DEPENDENTS: Mapping[str, Tuple[str, ...]] = {
@@ -67,6 +70,9 @@ class ObligationRuntimeSession:
     proof_outcomes: Dict[Tuple[Any, ...], FunctionProofOutcome] = field(default_factory=dict)
     pending_counterexamples: Dict[Tuple[Any, ...], PendingCounterexampleSafety] = field(default_factory=dict)
     reason_requirements: Dict[int, Tuple[ProofRequirementId, ...]] = field(default_factory=dict)
+    unary_artifact_cache: ValidatedUnaryArtifactCache = field(
+        default_factory=lambda: GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE
+    )
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
@@ -92,6 +98,145 @@ class ObligationRuntimeSession:
         session = cls(view, view)
         session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
         return session
+
+    @classmethod
+    def create_unary(
+        cls,
+        analysis: Any,
+        *,
+        domain_contract: Any,
+        normalization_policy_digest: str,
+    ) -> "ObligationRuntimeSession":
+        snapshot = cls._snapshot(analysis, "unary")
+        seed = getattr(analysis, "outcome_seed", None)
+        seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
+        seed_digest = SnapshotFingerprintCodec.digest(seed_key)
+        premise = SnapshotFingerprintCodec.digest((
+            "function_unary_premise_v1",
+            snapshot.semantic_fingerprint,
+            SnapshotFingerprintCodec.freeze(domain_contract),
+            str(normalization_policy_digest),
+            seed_digest,
+        ))
+        view = DerivedAnalysisView.create(
+            snapshot_id=("function_analysis", snapshot.snapshot_id),
+            parent_view_id=None,
+            validated_proof_closure_id=("proof_closure", ()),
+            normalization_policy_digest=str(normalization_policy_digest),
+            view_builder_version="unary-obligation-runtime-v1",
+            semantic_surface={
+                "function_snapshot": snapshot.semantic_fingerprint,
+                "domain_contract": SnapshotFingerprintCodec.freeze(domain_contract),
+                "outcome_seed_digest": seed_digest,
+                "premise_digest": premise,
+                "applied_artifact_ids": (),
+            },
+        )
+        session = cls(view, view)
+        session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+        return session
+
+    def publish_unary_artifact(
+        self,
+        artifact: ProofArtifact,
+        *,
+        function_snapshot_fingerprint: str,
+        outcome_seed_digest: str,
+        function_premise_digest: str,
+        attempt_candidate_independent: bool,
+        pair_independent: bool,
+    ) -> None:
+        source_record = self.view_records.get(artifact.produced_from_view_id)
+        if source_record is None:
+            raise ValueError("unary artifact source view is unavailable")
+        closure = validate_proof_closure(
+            tuple(self.artifacts),
+            (artifact.artifact_id,),
+            self.view_records,
+        )
+        self.unary_artifact_cache.put(ValidatedUnaryArtifactEntry(
+            artifact=artifact,
+            function_premise_digest=str(function_premise_digest),
+            function_snapshot_fingerprint=function_snapshot_fingerprint,
+            outcome_seed_digest=outcome_seed_digest,
+            attempt_candidate_independent=bool(attempt_candidate_independent),
+            pair_independent=bool(pair_independent),
+            closure_artifacts=tuple(
+                item for artifact_id in closure.topological_order
+                for item in self.artifacts if item.artifact_id == artifact_id
+            ),
+            source_view_records=dict(self.view_records),
+        ))
+
+    def import_unary_artifact_for_analysis(
+        self,
+        entry: ValidatedUnaryArtifactEntry,
+        *,
+        analysis: Any,
+        pair_side: str,
+        domain_contract: Any,
+        normalization_policy_digest: str,
+    ) -> DerivedAnalysisView:
+        if pair_side not in {"left", "right"}:
+            raise ValueError("pair side must be left or right")
+        current_snapshot = self._snapshot(analysis, pair_side)
+        pair_snapshot_fingerprint = self.current_view.semantic_surface.get(
+            f"{pair_side}_snapshot"
+        )
+        if pair_snapshot_fingerprint != current_snapshot.semantic_fingerprint:
+            raise ValueError("unary artifact pair-side snapshot mismatch")
+        seed = getattr(analysis, "outcome_seed", None)
+        seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
+        expected_outcome_seed_digest = SnapshotFingerprintCodec.digest(seed_key)
+        unary_view = self.create_unary(
+            analysis,
+            domain_contract=domain_contract,
+            normalization_policy_digest=normalization_policy_digest,
+        )
+        expected_function_premise_digest = unary_view.premise_digest
+        expected_snapshot_fingerprint = str(
+            unary_view.current_view.semantic_surface["function_snapshot"]
+        )
+        if entry.function_premise_digest != expected_function_premise_digest:
+            raise ValueError("unary artifact function premise mismatch")
+        if entry.function_snapshot_fingerprint != expected_snapshot_fingerprint:
+            raise ValueError("unary artifact function snapshot mismatch")
+        if entry.outcome_seed_digest != expected_outcome_seed_digest:
+            raise ValueError("unary artifact outcome seed mismatch")
+        validate_proof_closure(
+            entry.closure_artifacts,
+            (entry.artifact.artifact_id,),
+            entry.source_view_records,
+        )
+        # Preserve the complete imported proof closure as real provenance.
+        for view_id, record in entry.source_view_records.items():
+            self.view_records.setdefault(view_id, record)
+        for artifact in entry.closure_artifacts:
+            if all(item.artifact_id != artifact.artifact_id for item in self.artifacts):
+                self.artifacts.append(artifact)
+        current_record = self.view_records[self.current_view.view_id]
+        imported_ids = tuple(item.artifact_id for item in entry.closure_artifacts)
+        missing_ids = tuple(
+            artifact_id for artifact_id in imported_ids
+            if artifact_id not in current_record.available_artifact_ids
+        )
+        if missing_ids:
+            self.view_records[self.current_view.view_id] = ViewPremiseRecord(
+                current_record.view_id,
+                current_record.premise_digest,
+                available_artifact_ids=current_record.available_artifact_ids + missing_ids,
+                parent_view_id=current_record.parent_view_id,
+            )
+        evidence = dict(entry.artifact.payload)
+        evidence["proof_source"] = "imported_unary_artifact"
+        evidence["source_unary_artifact_id"] = entry.artifact.artifact_id
+        if any(
+            item.requirement_id == entry.artifact.requirement_id
+            and item.payload.get("source_unary_artifact_id") == entry.artifact.artifact_id
+            for item in self.artifacts
+        ):
+            return self.current_view
+        return self._apply_artifact(entry.artifact.requirement_id, evidence)
 
     @staticmethod
     def _snapshot(analysis: Any, side: str) -> AnalysisSnapshot:

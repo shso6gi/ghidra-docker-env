@@ -18,6 +18,753 @@ from ._shared import (
     hashlib,
     make_unknown_reason,
 )
+from ...obligations import (
+    SnapshotFingerprintCodec,
+    UnaryPartitionProofResult,
+    UnaryProducerResult,
+    prove_unary_partition,
+)
+
+
+def _unary_header_context(base_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Keep declarations/definitions but exclude pair-derived assertions."""
+    header = []
+    for line in (base_ctx.get("header_lines", ()) if isinstance(base_ctx, Mapping) else ()) or ():
+        stripped = str(line).lstrip()
+        if stripped.startswith(("(declare-", "(define-", "(set-logic", "(set-option")):
+            header.append(str(line))
+    return {"header_lines": header}
+
+
+def _unary_outcome_regions(seed: Any, kind: str) -> Tuple[Any, ...]:
+    kinds = {
+        tuple(item.candidate_id): str(item.terminal_kind_candidate)
+        for item in (getattr(seed, "terminal_candidates", ()) or ())
+    }
+    return tuple(
+        region for region in (getattr(seed, "symbolic_regions", ()) or ())
+        if kinds.get(tuple(region.terminal_candidate_id)) == kind
+    )
+
+
+def _unary_solver_status(self, ctx: Mapping[str, Any], assertions: Sequence[str], title: str) -> str:
+    header_lines = list(ctx.get("header_lines", ()) or ())
+    if not header_lines or not assertions:
+        return "unknown"
+    normalized = self._normalize_zero_constant_widths_for_declared_symbols(assertions, header_lines)
+    query = "\n".join((
+        f"; {title}", *header_lines,
+        *(f"(assert {assertion})" for assertion in normalized),
+        "(check-sat)", "(get-model)",
+    ))
+    result = self.solver_runner.run_sequential(query)
+    if result.is_equivalent is True:
+        return "unsat"
+    if result.is_equivalent is False:
+        return "sat"
+    raw = str(getattr(result, "error_message", "") or getattr(result, "raw_output", "")).lower()
+    return "timeout" if "timeout" in raw or "timed out" in raw else "unknown"
+
+
+def _unary_blocker_reason_id(blocker: str) -> UnknownReasonId:
+    text = str(blocker or "")
+    if "cfg_reachability" in text:
+        return UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE
+    if "path_region" in text:
+        return UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE
+    if "member_classification" in text:
+        return UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED
+    if "same_kind_consistency_conflict" in text:
+        return UnknownReasonId.OUTCOME_RETURN_VALUE_CONFLICT
+    if "same_kind_consistency" in text:
+        return UnknownReasonId.OUTCOME_RETURN_CONSISTENCY_UNKNOWN
+    if "cross_kind" in text:
+        return UnknownReasonId.OUTCOME_CROSS_KIND_OVERLAP
+    if "residual_totality_residual_sat" in text:
+        return UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT
+    if "residual_totality_timeout" in text:
+        return UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT
+    return UnknownReasonId.OUTCOME_PARTITION_UNKNOWN
+
+
+def _prove_unary_outcome_for_analysis(
+    self,
+    base_ctx: Mapping[str, Any],
+    analysis: FunctionReturnAnalysis,
+    replace_fn,
+):
+    seed = getattr(analysis, "outcome_seed", None)
+    runtime = getattr(self, "_obligation_runtime_session", None)
+    if seed is None or runtime is None:
+        return None
+    unary_ctx = _unary_header_context(base_ctx)
+    return_regions = _unary_outcome_regions(seed, "return")
+    divergence_regions = _unary_outcome_regions(seed, "must_diverge")
+    unknown_regions = _unary_outcome_regions(seed, "unknown")
+    termination_kinds = {
+        "exceptional_termination", "process_termination", "nonlocal_control_transfer"
+    }
+    termination_regions = tuple(
+        region for kind in termination_kinds for region in _unary_outcome_regions(seed, kind)
+    )
+    terminals = tuple(getattr(seed, "terminal_candidates", ()) or ())
+    profile = getattr(getattr(analysis, "effect_summary", None), "function_control_effect_profile", None)
+
+    validated_termination_state = {"contracts": None, "artifact_keys": ()}
+    validated_cfg_state = {"acyclic": False, "adjacency": ()}
+
+    def _termination_tuple_schema(contract, terminal_kind):
+        payload = tuple(contract.payload_key)
+        effect = tuple(contract.effect_key)
+        observation = tuple(contract.observation_contract_key)
+        if terminal_kind != "process_termination" or contract.termination_class != "process":
+            return False
+        expected_flags = {
+            ("atexit_handlers", False),
+            ("quick_exit_handlers", False),
+            ("stdio_flush", False),
+            ("automatic_object_cleanup", False),
+        }
+        return bool(
+            len(payload) == 4
+            and payload[:2] == ("process_exit_payload_v1", "immediate_process_exit")
+            and isinstance(payload[2], tuple)
+            and payload[2][:1] == ("termination_callee_contract_v1",)
+            and effect[:3] == (
+                "termination_effect_v2", "process", "immediate_process_exit"
+            )
+            and set(effect[3:]) == expected_flags
+            and observation == (
+                "termination_observation_v2", "process",
+                ("process_exit_status", True),
+                ("pretermination_memory_effects", "compared_separately"),
+            )
+        )
+
+    def termination_classification():
+        terminal_by_id = {
+            tuple(item.candidate_id): item for item in terminals
+            if str(item.terminal_kind_candidate) in termination_kinds
+        }
+        contracts = []
+        producer_evidence_by_terminal = {
+            tuple(item.terminal_candidate_id): item
+            for item in (getattr(analysis, "termination_path_effect_evidence", ()) or ())
+        }
+        profile_ops = set(getattr(profile, "region_pcode_op_keys", ()) or ())
+        artifact_keys = []
+        for region in termination_regions:
+            terminal = terminal_by_id.get(tuple(region.terminal_candidate_id))
+            contract = getattr(terminal, "termination_contract", None) if terminal is not None else None
+            op_ref = getattr(terminal, "op_ref", None) if terminal is not None else None
+            producer_evidence = producer_evidence_by_terminal.get(tuple(region.terminal_candidate_id))
+            expected_guard_key = tuple(
+                sorted((condition.structural_key() for condition in region.guard), key=repr)
+            )
+            if (
+                contract is None
+                or producer_evidence is None
+                or op_ref is None
+                or int(getattr(producer_evidence, "schema_version", 0) or 0) != 1
+                or producer_evidence.producer_id != "analyzer_terminal_path_effect_v1"
+                or producer_evidence.contract.stable_key() != contract.stable_key()
+                or producer_evidence.terminal_op_ref.stable_key() != op_ref.stable_key()
+                or tuple(producer_evidence.control_effect_profile_key) != tuple(profile.stable_key())
+                or tuple(producer_evidence.path_guard_key) != expected_guard_key
+                or int(getattr(contract, "schema_version", 0) or 0) != 1
+                or not _termination_tuple_schema(contract, terminal.terminal_kind_candidate)
+                or tuple(contract.object_identity_key) != tuple(op_ref.stable_key())
+                or tuple(op_ref.stable_key()) not in profile_ops
+                or not tuple(contract.source_contract_key)
+                or tuple(contract.source_contract_key) != tuple(region.producer_evidence_key)
+                or tuple(contract.source_contract_key)[:1] != ("terminal_path_effect_evidence_v1",)
+                or len(tuple(contract.source_contract_key)) < 4
+                or tuple(contract.source_contract_key)[1] != tuple(op_ref.stable_key())
+                or tuple(contract.source_contract_key)[2] != tuple(profile.stable_key())
+                or tuple(contract.source_contract_key)[3] != expected_guard_key
+            ):
+                return UnaryProducerResult("unclassified")
+            contracts.append(contract)
+            artifact_keys.append((
+                "validated_termination_classification_v1",
+                tuple(terminal.candidate_id),
+                contract.stable_key(),
+                tuple(profile.stable_key()),
+                producer_evidence.stable_key(),
+            ))
+        validated_termination_state["contracts"] = tuple(contracts)
+        validated_termination_state["artifact_keys"] = tuple(artifact_keys)
+        return UnaryProducerResult(
+            "proved",
+            {"termination_classification_artifact_keys": tuple(artifact_keys)},
+        )
+
+    def validated_termination_contracts():
+        return validated_termination_state["contracts"]
+
+    def validated_divergence_payloads():
+        outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
+        if len(outcomes) != len(divergence_regions):
+            return None
+        def profile_block_identity(key):
+            key = tuple(key) if isinstance(key, (tuple, list)) else key
+            if isinstance(key, tuple) and key:
+                if key[0] == "pcode_block" and len(key) >= 5:
+                    return key[3]
+                if key[0] == "pcode_block" and len(key) >= 2:
+                    return key[1]
+                if key[0] == "block" and len(key) >= 2:
+                    return key[1]
+            return key
+
+        profile_block_indices = {
+            profile_block_identity(key)
+            for key in (getattr(profile, "region_block_keys", ()) or ())
+        }
+        profile_edge_indices = {
+            (profile_block_identity(source), profile_block_identity(target))
+            for source, target in (getattr(profile, "region_cfg_edge_keys", ()) or ())
+        }
+        current_cfg_surface = (
+            tuple(sorted(profile_block_indices, key=repr)),
+            tuple(sorted(profile_edge_indices, key=repr)),
+        )
+        validated = []
+        for outcome, region in zip(outcomes, divergence_regions):
+            proof = getattr(outcome, "proof", None)
+            if not isinstance(proof, Mapping):
+                return None
+            if tuple(getattr(outcome, "guard", ()) or ()) != tuple(getattr(region, "guard", ()) or ()):
+                return None
+            proof_kind = proof.get("proof_kind")
+            proof_cfg_surface = proof.get("cfg_applicability_surface")
+            if not (
+                isinstance(proof_cfg_surface, (tuple, list))
+                and len(proof_cfg_surface) == 2
+                and tuple(proof_cfg_surface[0]) == current_cfg_surface[0]
+                and tuple(tuple(edge) for edge in proof_cfg_surface[1]) == current_cfg_surface[1]
+            ):
+                return None
+            if proof_kind == "branch_guarded_structural_nonprogress_must_diverge":
+                nonprogress_edges = {
+                    tuple(edge) for edge in tuple(proof.get("nonprogress_backedges") or ())
+                    if isinstance(edge, (tuple, list)) and len(edge) == 2
+                }
+                conditional_edges = {
+                    tuple(edge) for edge in tuple(proof.get("conditional_progress_backedges") or ())
+                    if isinstance(edge, (tuple, list)) and len(edge) == 2
+                }
+                if not (
+                    proof.get("candidate_rule") == "branch_guarded_loop_invariant_nonprogress"
+                    and tuple(proof.get("invariant") or ())
+                    and tuple(proof.get("structural_recurrence_proof") or ())[:1]
+                    == ("branch_guarded_affine_unit_count_structural_proof",)
+                    and (tuple(proof.get("nonprogress_backedges") or ()) or (
+                        tuple(proof.get("conditional_progress_backedges") or ())
+                        and proof.get("conditional_progress_guard_negated_by_invariant") is True
+                    ))
+                    and proof.get("state_preservation") == "state_phi_nonprogress_backedge_identity"
+                    and proof.get("accumulator_preservation") == "accumulator_phi_nonprogress_backedge_identity"
+                    and proof.get("loop_has_cfg_cycle") is True
+                    and proof.get("forbidden_control_effect_ops_absent") is True
+                    and getattr(profile, "cfg_acyclic", True) is False
+                    and nonprogress_edges.issubset(profile_edge_indices)
+                    and conditional_edges.issubset(profile_edge_indices)
+                ):
+                    return None
+                validated.append(proof)
+                continue
+            if proof_kind == "branch_guarded_while_nonprogress_must_diverge":
+                safety = proof.get("side_effect_control_safety")
+                reachable = set(proof.get("reachable_blocks") or ())
+                cycle = set(proof.get("cycle_blocks") or ())
+                excluded = {
+                    (edge.get("source"), edge.get("target"))
+                    for edge in tuple(proof.get("excluded_edges") or ())
+                    if isinstance(edge, Mapping)
+                }
+                # Legacy producer serializes block identities for this proof.
+                profile_blocks_text = {str(key) for key in profile_block_indices}
+                profile_edges_text = {(str(source), str(target)) for source, target in profile_edge_indices}
+                cycle_exits = {
+                    edge for edge in profile_edges_text
+                    if edge[0] in cycle and edge[1] not in cycle
+                }
+                if not (
+                    proof.get("candidate_rule") == "branch_guarded_loop_invariant_nonprogress"
+                    and tuple(proof.get("invariant") or ())
+                    and tuple(proof.get("reachable_blocks") or ())
+                    and tuple(proof.get("cycle_blocks") or ())
+                    and tuple(proof.get("excluded_edges") or ())
+                    and isinstance(safety, Mapping)
+                    and all(safety.get(key) is True for key in (
+                        "forbidden_ops_absent", "return_ops_absent_under_invariant",
+                        "guard_state_writes_absent_under_invariant",
+                        "guard_dependency_writes_absent_under_invariant",
+                    ))
+                    and all(
+                        isinstance(edge, Mapping)
+                        and edge.get("relation") == "invariant_contradicts_edge"
+                        and "source" in edge and "target" in edge and bool(edge.get("edge_condition"))
+                        for edge in tuple(proof.get("excluded_edges") or ())
+                    )
+                    and getattr(profile, "cfg_acyclic", True) is False
+                    and reachable.issubset(profile_blocks_text)
+                    and cycle and cycle.issubset(reachable)
+                    and excluded.issubset(profile_edges_text)
+                    and cycle_exits.issubset(excluded)
+                    and any(source in cycle and target in cycle for source, target in profile_edges_text)
+                ):
+                    return None
+                validated.append(proof)
+                continue
+            required_scalars = {
+                "proof_kind": "single_guard_nonprogress_must_diverge",
+                "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
+                "guard": "param_positive",
+                "return_partition": "param_nonpositive_return_zero",
+            }
+            if any(proof.get(key) != value for key, value in required_scalars.items()):
+                return None
+            scc_blocks = tuple(proof.get("scc_blocks") or ())
+            entry_edges = tuple(proof.get("entry_edges") or ())
+            exit_edges = tuple(proof.get("exit_edges") or ())
+            safety = proof.get("side_effect_control_safety")
+            invariant = proof.get("invariant_preservation")
+            if (
+                not scc_blocks
+                or not set(scc_blocks).issubset(profile_block_indices)
+                or not entry_edges
+                or not isinstance(safety, Mapping)
+                or not all(safety.get(key) is True for key in (
+                    "forbidden_ops_absent", "return_ops_absent_in_scc", "guard_state_writes_absent"
+                ))
+                or not isinstance(invariant, Mapping)
+                or not (
+                    invariant.get("internal_guarded_continue") is True
+                    or invariant.get("internal_unconditional_continue") is True
+                )
+            ):
+                return None
+            for edge in (*entry_edges, *exit_edges):
+                if not isinstance(edge, Mapping) or "source" not in edge or "target" not in edge or "guard_relation" not in edge:
+                    return None
+            validated.append(proof)
+        return tuple(validated)
+
+    def cfg_reachability():
+        def block_identity(value):
+            key = tuple(value) if isinstance(value, (tuple, list)) else value
+            if isinstance(key, tuple) and len(key) >= 5 and key[0] == "pcode_block":
+                return ("pcode_block", key[3], key[-1])
+            if isinstance(key, tuple) and len(key) == 3 and key[0] == "pcode_block":
+                return ("pcode_block", key[1], key[2])
+            return key
+        region_op_keys = set(getattr(profile, "region_pcode_op_keys", ()) or ()) if profile is not None else set()
+        block_keys = {
+            block_identity(item) for item in (getattr(profile, "region_block_keys", ()) or ())
+        } if profile is not None else set()
+        entry_key = getattr(profile, "region_entry_block_key", None) if profile is not None else None
+        adjacency = {}
+        for source, target in (getattr(profile, "region_cfg_edge_keys", ()) or ()) if profile is not None else ():
+            adjacency.setdefault(block_identity(source), set()).add(block_identity(target))
+        reachable = set()
+        pending = [block_identity(entry_key)] if entry_key is not None else []
+        while pending:
+            current = pending.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            pending.extend(adjacency.get(current, ()))
+        all_blocks_reachable = bool(block_keys) and reachable == block_keys
+        visiting = set()
+        visited = set()
+
+        def has_cfg_cycle(node):
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            if any(has_cfg_cycle(successor) for successor in adjacency.get(node, ())):
+                return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+
+        cfg_surface_acyclic = bool(block_keys) and not any(
+            has_cfg_cycle(block) for block in block_keys if block not in visited
+        )
+        validated_cfg_state["acyclic"] = cfg_surface_acyclic
+        validated_cfg_state["adjacency"] = tuple(sorted(
+            ((source, tuple(sorted(targets, key=repr))) for source, targets in adjacency.items()),
+            key=repr,
+        ))
+        all_return_exits_reachable = all(
+            block_identity(item) in reachable for item in (getattr(profile, "region_exit_block_keys", ()) or ())
+        ) if profile is not None else False
+        return_terminals = tuple(
+            item for item in terminals if str(item.terminal_kind_candidate) == "return"
+        )
+        terminal_objects_linked = all(
+            getattr(item, "op_ref", None) is not None
+            and item.op_ref.stable_key() in region_op_keys
+            for item in return_terminals
+        )
+        termination_terminals = tuple(
+            item for item in terminals if str(item.terminal_kind_candidate) in termination_kinds
+        )
+        termination_objects_linked = all(
+            getattr(item, "op_ref", None) is not None
+            and item.op_ref.stable_key() in region_op_keys
+            for item in termination_terminals
+        )
+        termination_surface_complete = bool(
+            not termination_terminals
+            and getattr(profile, "terminal_return_coverage_complete", False)
+            and int(getattr(profile, "abnormal_terminal_block_count", 0) or 0) == 0
+        ) or bool(
+            termination_terminals
+            and len(termination_terminals) == int(getattr(profile, "abnormal_terminal_block_count", 0) or 0)
+            and termination_objects_linked
+            and (not termination_terminals or validated_termination_contracts() is not None)
+        )
+        profile_key = profile.stable_key() if callable(getattr(profile, "stable_key", None)) else None
+        profile_is_typed = bool(
+            isinstance(profile_key, tuple)
+            and profile_key
+            and profile_key[0] == "function_control_effect_profile"
+            and tuple(getattr(seed, "control_flow_evidence_key", ()) or ()) == profile_key
+        )
+        complete = bool(
+            profile_is_typed
+            and getattr(profile, "pcode_enumeration_complete", False)
+            and getattr(profile, "cfg_edges_complete", False)
+            and getattr(profile, "region_identity_complete", False)
+            and getattr(profile, "region_single_entry", False)
+            and getattr(profile, "region_all_exits_enumerated", False)
+            and getattr(profile, "region_cross_edges_enumerated", False)
+            and termination_surface_complete
+            and not getattr(profile, "unsupported_mnemonics", ())
+            and int(getattr(profile, "branchind_count", 0) or 0) == 0
+            and int(getattr(profile, "callind_count", 0) or 0) == 0
+            and int(getattr(profile, "callother_count", 0) or 0) == 0
+            and terminal_objects_linked
+            and all_blocks_reachable
+            and all_return_exits_reachable
+        )
+        if not complete and getattr(self, "debug", False):
+            self._debug_print(
+                "Unary outcome CFG prerequisite incomplete: "
+                f"typed={profile_is_typed}, pcode={getattr(profile, 'pcode_enumeration_complete', False)}, "
+                f"edges={getattr(profile, 'cfg_edges_complete', False)}, "
+                f"identity={getattr(profile, 'region_identity_complete', False)}, "
+                f"single_entry={getattr(profile, 'region_single_entry', False)}, "
+                f"all_exits={getattr(profile, 'region_all_exits_enumerated', False)}, "
+                f"cross_edges={getattr(profile, 'region_cross_edges_enumerated', False)}, "
+                f"termination={termination_surface_complete}, terminals={terminal_objects_linked}, "
+                f"blocks_reachable={all_blocks_reachable}, returns_reachable={all_return_exits_reachable}, "
+                f"entry={block_identity(entry_key)!r}, blocks={tuple(sorted(block_keys, key=repr))!r}, "
+                f"reachable={tuple(sorted(reachable, key=repr))!r}, "
+                f"edges={tuple(getattr(profile, 'region_cfg_edge_keys', ()) or ())!r}"
+            )
+        return UnaryProducerResult(
+            "proved" if complete else "incomplete",
+            {"control_flow_profile_key": profile_key if complete else None},
+        )
+
+    def path_region_completeness():
+        base_complete = bool(
+            terminals
+            and not unknown_regions
+            and not getattr(analysis, "unknown_outcomes", ())
+            and not getattr(seed, "unresolved_control_evidence", ())
+            and not getattr(analysis, "incomplete_control_flow", False)
+            and {
+                tuple(region.terminal_candidate_id)
+                for region in (getattr(seed, "symbolic_regions", ()) or ())
+            } == {tuple(terminal.candidate_id) for terminal in terminals}
+            and all(
+                self._outcome_conditions_smt(tuple(region.guard), replace_fn) is not None
+                for region in (getattr(seed, "symbolic_regions", ()) or ())
+            )
+        )
+        def guard_key(guards):
+            return tuple(sorted((condition.structural_key() for condition in guards or ()), key=repr))
+
+        terminal_by_id = {tuple(item.candidate_id): item for item in terminals}
+        return_infos_by_ref = {}
+        for info in (getattr(analysis, "returns", ()) or ()):
+            evidence = getattr(info, "return_path_evidence", None)
+            if evidence is not None and evidence.terminal_op_ref is not None:
+                return_infos_by_ref.setdefault(evidence.terminal_op_ref.stable_key(), []).append(info)
+
+        def rewrite_proofs_valid(evidence):
+            for proof in tuple(getattr(evidence, "guard_rewrite_proof_keys", ()) or ()):
+                if not (
+                    isinstance(proof, tuple)
+                    and len(proof) == 3
+                    and proof[0] in {
+                        "return_extraction_guard_materialization_v1",
+                        "bounded_refinement_guard_rewrite_v1",
+                    }
+                    and isinstance(proof[1], tuple)
+                    and proof[1][:1] == ("return_path_evidence_v1",)
+                    and tuple(proof[2]) == tuple(evidence.path_guard_keys)
+                    and proof[1][2] == evidence.terminal_op_ref.stable_key()
+                    and proof[1][3] == "complete"
+                ):
+                    return False
+            return True
+        return_member_proofs = []
+        for terminal_id, terminal in terminal_by_id.items():
+            if terminal.terminal_kind_candidate != "return":
+                continue
+            op_ref = getattr(terminal, "op_ref", None)
+            infos = return_infos_by_ref.get(op_ref.stable_key(), ()) if op_ref is not None else ()
+            evidences = tuple(
+                info.return_path_evidence for info in infos
+                if getattr(info, "return_path_evidence", None) is not None
+            )
+            member_regions = tuple(
+                region for region in return_regions
+                if tuple(region.terminal_candidate_id) == terminal_id
+            )
+            actual_guard_keys = tuple(sorted({guard_key(region.guard) for region in member_regions}, key=repr))
+            evidence_guard_keys = tuple(sorted({
+                guard for evidence in evidences for guard in tuple(evidence.path_guard_keys)
+            }, key=repr))
+            evidence_keys = {evidence.stable_key() for evidence in evidences}
+            complete = bool(
+                evidences
+                and all(
+                    evidence.coverage_status == "complete"
+                    and evidence.terminal_op_ref is not None
+                    and evidence.terminal_op_ref.stable_key() == op_ref.stable_key()
+                    and not evidence.pruning_proof_keys
+                    and rewrite_proofs_valid(evidence)
+                    for evidence in evidences
+                )
+                and evidence_guard_keys == actual_guard_keys
+                and member_regions
+                and all(
+                    tuple(region.producer_evidence_key)[:1] == ("return_path_evidence",)
+                    and tuple(region.producer_evidence_key)[1] in evidence_keys
+                    for region in member_regions
+                )
+            )
+            member_evidence_key = tuple(sorted(evidence_keys, key=repr)) if complete else None
+            return_member_proofs.append((terminal_id, complete, member_evidence_key))
+            if not complete and getattr(self, "debug", False):
+                self._debug_print(
+                    "Return terminal path evidence mismatch: "
+                    f"terminal={terminal_id!r}, op={op_ref.stable_key() if op_ref is not None else None!r}, "
+                    f"statuses={tuple(getattr(e, 'coverage_status', None) for e in evidences)!r}, "
+                    f"evidence_guards={evidence_guard_keys!r}, "
+                    f"region_guards={actual_guard_keys!r}, pruning={tuple(getattr(e, 'pruning_proof_keys', None) for e in evidences)!r}, "
+                    f"producer_keys={tuple(region.producer_evidence_key for region in member_regions)!r}"
+                )
+        all_return_members_exact = bool(
+            len(return_member_proofs) == len({
+                tuple(region.terminal_candidate_id) for region in return_regions
+            })
+            and all(item[1] for item in return_member_proofs)
+        )
+        general_return_exact = bool(
+            base_complete
+            and return_regions
+            and not divergence_regions
+            and not termination_regions
+            and all_return_members_exact
+            and validated_cfg_state["acyclic"]
+        )
+        guarded_divergence_exact = bool(
+            base_complete
+            and len(return_regions) == 1
+            and len(divergence_regions) == 1
+            and len(terminals) == 2
+            and validated_divergence_payloads() is not None
+            and all_return_members_exact
+        )
+        termination_exact = bool(
+            base_complete
+            and termination_regions
+            and validated_termination_contracts() is not None
+            and all(tuple(region.producer_evidence_key) for region in termination_regions)
+            and (not return_regions or all_return_members_exact)
+            and (not divergence_regions or validated_divergence_payloads() is not None)
+        )
+        if not (general_return_exact or guarded_divergence_exact or termination_exact) and getattr(self, "debug", False):
+            self._debug_print(
+                "Unary outcome path prerequisite incomplete: "
+                f"base={base_complete}, return_regions={len(return_regions)}, "
+                f"divergence_regions={len(divergence_regions)}, termination_regions={len(termination_regions)}, "
+                f"acyclic={validated_cfg_state['acyclic']}, profile_acyclic={getattr(profile, 'cfg_acyclic', False)}, "
+                f"adjacency={validated_cfg_state['adjacency']!r}, return_members={return_member_proofs!r}"
+            )
+        return UnaryProducerResult(
+            "proved" if general_return_exact or guarded_divergence_exact or termination_exact else "incomplete",
+            {
+                "path_proof_kind": "acyclic_return_paths" if general_return_exact else "guarded_scc_partition" if guarded_divergence_exact else "validated_termination_contract" if termination_exact else None,
+                "return_member_path_artifacts": tuple(item[2] for item in return_member_proofs if item[1]),
+            },
+        )
+
+    def member_classification():
+        kinds = tuple(str(item.terminal_kind_candidate) for item in terminals)
+        supported = bool(not unknown_regions and not getattr(analysis, "unknown_outcomes", ()))
+        supported = supported and all(kind in {"return", "must_diverge", *termination_kinds} for kind in kinds)
+        divergence_proofs = validated_divergence_payloads()
+        divergence_proof_digests = tuple(
+            SnapshotFingerprintCodec.digest(item)
+            for item in (divergence_proofs or ())
+        )
+        if divergence_regions and divergence_proofs is None:
+            supported = False
+        termination_contracts = validated_termination_contracts()
+        if termination_regions and termination_contracts is None:
+            supported = False
+        return UnaryProducerResult(
+            "proved" if supported else "unclassified",
+            {
+                "member_kinds": kinds,
+                "divergence_proof_digests": divergence_proof_digests,
+                "termination_contract_keys": tuple(
+                    item.stable_key() for item in (termination_contracts or ())
+                ),
+            },
+        )
+
+    def same_kind_consistency():
+        for index, left in enumerate(return_regions):
+            left_value = getattr(left, "observed_value", None)
+            if left_value is None:
+                return UnaryProducerResult("comparison_surface_missing")
+            for right in return_regions[index + 1:]:
+                right_value = getattr(right, "observed_value", None)
+                if right_value is None:
+                    return UnaryProducerResult("comparison_surface_missing")
+                left_guard = self._outcome_conditions_smt(tuple(left.guard), replace_fn)
+                right_guard = self._outcome_conditions_smt(tuple(right.guard), replace_fn)
+                left_smt = self._outcome_expression_smt(left_value, replace_fn)
+                right_smt = self._outcome_expression_smt(right_value, replace_fn)
+                left_bits = int(expression_smt_bit_width(left_value) or 0)
+                right_bits = int(expression_smt_bit_width(right_value) or 0)
+                if (
+                    left_guard is None or right_guard is None
+                    or left_smt is None or right_smt is None
+                    or left_bits <= 0 or right_bits <= 0
+                    or left_bits != right_bits
+                ):
+                    return UnaryProducerResult("comparison_surface_missing")
+                status = _unary_solver_status(self, unary_ctx, [
+                    *left_guard, *right_guard,
+                    f"(not (= {left_smt} {right_smt}))",
+                ], "Unary return disequality")
+                if status != "unsat":
+                    return UnaryProducerResult("conflict" if status == "sat" else status)
+        terminal_by_id = {
+            tuple(item.candidate_id): item for item in terminals
+        }
+        for index, left in enumerate(termination_regions):
+            left_contract = terminal_by_id[tuple(left.terminal_candidate_id)].termination_contract
+            for right in termination_regions[index + 1:]:
+                right_contract = terminal_by_id[tuple(right.terminal_candidate_id)].termination_contract
+                if left_contract.stable_key() == right_contract.stable_key():
+                    continue
+                assertions = []
+                for region in (left, right):
+                    rendered = self._outcome_conditions_smt(tuple(region.guard), replace_fn)
+                    if rendered is None:
+                        return UnaryProducerResult("unknown")
+                    assertions.extend(rendered)
+                status = _unary_solver_status(self, unary_ctx, assertions, "Unary termination contract conflict")
+                if status != "unsat":
+                    return UnaryProducerResult("conflict" if status == "sat" else status)
+        return UnaryProducerResult("proved")
+
+    def cross_kind_disjointness():
+        kind_groups = (return_regions, divergence_regions, termination_regions)
+        for left_index, left_group in enumerate(kind_groups):
+            for right_group in kind_groups[left_index + 1:]:
+                for left in left_group:
+                    for right in right_group:
+                        assertions = []
+                        for region in (left, right):
+                            rendered = self._outcome_conditions_smt(tuple(region.guard), replace_fn)
+                            if rendered is None:
+                                return UnaryProducerResult("unknown")
+                            assertions.extend(rendered)
+                        status = _unary_solver_status(self, unary_ctx, assertions, "Unary cross-kind overlap")
+                        if status != "unsat":
+                            return UnaryProducerResult("overlap" if status == "sat" else status)
+        return UnaryProducerResult("proved")
+
+    def residual_totality():
+        union = self._outcome_guard_union_smt(
+            [tuple(region.guard) for region in (return_regions + divergence_regions + termination_regions)], replace_fn
+        )
+        if union is None:
+            return UnaryProducerResult("incomplete")
+        status = _unary_solver_status(self, unary_ctx, [f"(not {union})"], "Unary classified residual")
+        return UnaryProducerResult("proved" if status == "unsat" else ("residual_sat" if status == "sat" else status))
+
+    producers = {
+        "cfg_reachability": cfg_reachability,
+        "termination_classification": termination_classification,
+        "path_region_completeness": path_region_completeness,
+        "member_classification": member_classification,
+        "same_kind_consistency": same_kind_consistency,
+        "cross_kind_disjointness": cross_kind_disjointness,
+        "residual_totality": residual_totality,
+        "partition_complete": lambda: UnaryProducerResult(
+            "proved"
+            if not unknown_regions and not getattr(analysis, "unknown_outcomes", ())
+            else "unclassified"
+        ),
+    }
+    proof = prove_unary_partition(
+        analysis,
+        domain_contract=getattr(seed, "input_domain_contract", ()),
+        normalization_policy_digest=(
+            self._return_coverage_normalization_policy_digest(
+                self._return_coverage_normalization_policy()
+            ) or "return-coverage-normalization-unavailable"
+        ),
+        producers=producers,
+    )
+    if not proof.complete or proof.cache_entry is None:
+        return proof
+    pair_side = "left" if replace_fn is getattr(self, "_param_replace_fn1", None) else None
+    # Callers use function1/function2 replacement closures that are not stable
+    # identity objects.  Match the current pair snapshots instead.
+    current_fingerprint = runtime._snapshot(analysis, "candidate").semantic_fingerprint
+    left_fingerprint = runtime.current_view.semantic_surface.get("left_snapshot")
+    right_fingerprint = runtime.current_view.semantic_surface.get("right_snapshot")
+    if current_fingerprint == left_fingerprint and current_fingerprint != right_fingerprint:
+        pair_side = "left"
+    elif current_fingerprint == right_fingerprint and current_fingerprint != left_fingerprint:
+        pair_side = "right"
+    elif current_fingerprint == left_fingerprint == right_fingerprint:
+        pair_side = "left"
+    else:
+        return None
+    normalization_digest = (
+        self._return_coverage_normalization_policy_digest(
+            self._return_coverage_normalization_policy()
+        ) or "return-coverage-normalization-unavailable"
+    )
+    try:
+        runtime.import_unary_artifact_for_analysis(
+            proof.cache_entry,
+            analysis=analysis,
+            pair_side=pair_side,
+            domain_contract=getattr(seed, "input_domain_contract", ()),
+            normalization_policy_digest=normalization_digest,
+        )
+    except ValueError:
+        return UnaryPartitionProofResult("blocked", "outcome_pair_import_applicability_mismatch")
+    return proof
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -65,10 +812,11 @@ def _impl__collect_return_coverage_unsafety_reasons(
                 solver_status="unsat",
             )
         elif label in outcome_inconclusive_labels:
+            unary_blocker = (getattr(self, "_last_unary_outcome_blockers", {}) or {}).get(label)
             coverage_result = ReturnCoverageCheckResult(
                 status="inconclusive",
-                reason_id=UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
-                detail=f"Outcome partition unknown for {label}: UnknownOutcome covers missing control region",
+                reason_id=_unary_blocker_reason_id(unary_blocker),
+                detail=f"Outcome partition unknown for {label}: {unary_blocker or 'unknown outcome region'}",
                 inconclusive_cause="unknown_outcome_partition",
                 solver_status="unknown",
             )
@@ -1148,20 +1896,30 @@ def _impl__outcome_partition_unknown_object_target_key(
 ) -> Optional[Tuple[Any, ...]]:
     label, _reason_text = self._split_blocking_reason(blocking_reason)
     reason_kind = self._blocking_reason_kind(blocking_reason)
-    if reason_kind != "outcome_partition_unknown":
+    if reason_kind != "outcome_partition_unknown" and not reason_kind.startswith("outcome_"):
         return None
     analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
     if analysis is None:
         return None
-    target = (
-        "outcome_partition_unknown",
-        ("target_schema_version", 1),
-        label,
-        self._deterministic_function_identity(analysis),
-        self._return_storage_object_key(analysis),
-        self._outcome_partition_identity_key(analysis),
-        self._unknown_outcome_identity_key(analysis),
-    )
+    if reason_kind == "outcome_partition_unknown":
+        target = (
+            reason_kind,
+            ("target_schema_version", 1),
+            label,
+            self._deterministic_function_identity(analysis),
+            self._return_storage_object_key(analysis),
+            ("outcome_seed_identity", getattr(getattr(analysis, "outcome_seed", None), "stable_key", lambda: ())()),
+        )
+    else:
+        # Unary blockers deliberately exclude pair-side labels so the same
+        # function requirement aggregates across every dependent case pair.
+        target = (
+            "unary_outcome_partition",
+            ("target_schema_version", 1),
+            self._deterministic_function_identity(analysis),
+            reason_kind,
+            ("outcome_seed_identity", getattr(getattr(analysis, "outcome_seed", None), "stable_key", lambda: ())()),
+        )
     return self._identity_freeze(
         self._artifact_stable_key_for_analysis(
             self._identity_freeze(target),
@@ -1368,6 +2126,51 @@ def _impl__outcome_partition_covered_labels(
 ) -> Set[str]:
     if analysis1 is None or analysis2 is None:
         return set()
+    if (
+        getattr(self, "_obligation_runtime_session", None) is not None
+        and (
+            getattr(analysis1, "outcome_seed", None) is not None
+            or getattr(analysis2, "outcome_seed", None) is not None
+        )
+    ):
+        blockers = {}
+        proofs_complete = True
+        left_proof = _prove_unary_outcome_for_analysis(
+            self, base_ctx, analysis1, param_replace_fn1
+        )
+        right_proof = _prove_unary_outcome_for_analysis(
+            self, base_ctx, analysis2, param_replace_fn2
+        )
+        for label, analysis, proof in (
+            ("function1", analysis1, left_proof),
+            ("function2", analysis2, right_proof),
+        ):
+            if proof is None or not proof.complete:
+                proofs_complete = False
+                # Do not add a redundant outcome backlog when extraction has
+                # already established that the function-level semantic surface
+                # is incomplete.  The unary proof still fails and cannot cover
+                # the label; the pre-existing extraction/unsafety reason owns
+                # recovery until that prerequisite is repaired.
+                has_unresolved_return = getattr(analysis, "has_unresolved_return_value", None)
+                independently_incomplete = bool(
+                    getattr(analysis, "incomplete_control_flow", False)
+                    or (callable(has_unresolved_return) and has_unresolved_return())
+                )
+                if not independently_incomplete:
+                    blockers[label] = getattr(proof, "blocker_kind", None) or "outcome_unary_artifact_missing"
+        self._last_unary_outcome_blockers = blockers
+        if not proofs_complete:
+            return set()
+        if not self._outcome_partitions_are_equivalent(
+            base_ctx, analysis1, analysis2, param_replace_fn1, param_replace_fn2
+        ):
+            self._last_unary_outcome_blockers = {
+                "function1": "outcome_relational_consistency_unknown",
+                "function2": "outcome_relational_consistency_unknown",
+            }
+            return set()
+        return {"function1", "function2"}
     if not self._analysis_has_proved_outcome_partition(
         base_ctx,
         analysis1,
@@ -1404,11 +2207,15 @@ def _impl__outcome_partition_inconclusive_labels(
     param_replace_fn2,
 ) -> Set[str]:
     labels: Set[str] = set()
+    unary_blockers = getattr(self, "_last_unary_outcome_blockers", {}) or {}
     for label, analysis, replace_fn in (
         ("function1", analysis1, param_replace_fn1),
         ("function2", analysis2, param_replace_fn2),
     ):
         if analysis is None:
+            continue
+        if getattr(analysis, "outcome_seed", None) is not None and label in unary_blockers:
+            labels.add(label)
             continue
         if not getattr(analysis, "unknown_outcomes", ()) or ():
             continue
@@ -1453,6 +2260,12 @@ def _impl__analysis_has_proved_outcome_partition(
 ) -> bool:
     if getattr(analysis, "unknown_outcomes", ()) or ():
         return False
+    seed = getattr(analysis, "outcome_seed", None)
+    if seed is not None and getattr(self, "_obligation_runtime_session", None) is not None:
+        # Semantic seeds are candidates only.  The production gate must never
+        # infer proof completion from candidate booleans or guard unions.
+        # A later branch consumes only imported validated unary artifacts.
+        return False
     return_outcomes = tuple(getattr(analysis, "return_outcomes", ()) or ())
     divergence_outcomes = tuple(getattr(analysis, "divergence_outcomes", ()) or ())
     if not divergence_outcomes:
@@ -1476,10 +2289,60 @@ def _impl__outcome_partitions_are_equivalent(
     divergence2 = tuple(getattr(analysis2, "divergence_outcomes", ()) or ())
     returns1 = tuple(getattr(analysis1, "return_outcomes", ()) or ())
     returns2 = tuple(getattr(analysis2, "return_outcomes", ()) or ())
-    if not divergence1 or not divergence2:
-        self._debug_print("Outcome partition equivalence declined: missing divergence outcomes")
+    seed1 = getattr(analysis1, "outcome_seed", None)
+    seed2 = getattr(analysis2, "outcome_seed", None)
+    def termination_groups(seed):
+        groups = {}
+        if seed is None:
+            return groups
+        terminals = {
+            tuple(item.candidate_id): item
+            for item in (getattr(seed, "terminal_candidates", ()) or ())
+        }
+        for region in (getattr(seed, "symbolic_regions", ()) or ()):
+            terminal = terminals.get(tuple(region.terminal_candidate_id))
+            contract = getattr(terminal, "termination_contract", None) if terminal is not None else None
+            if contract is None:
+                continue
+            signature = (
+                contract.termination_class,
+                tuple(contract.payload_key),
+                tuple(contract.effect_key),
+                tuple(contract.observation_contract_key),
+            )
+            groups.setdefault(signature, []).append(region)
+        return {key: tuple(value) for key, value in groups.items()}
+    termination1 = termination_groups(seed1)
+    termination2 = termination_groups(seed2)
+    if seed1 is not None and not returns1:
+        terminal_kinds = {tuple(item.candidate_id): item.terminal_kind_candidate for item in seed1.terminal_candidates}
+        returns1 = tuple(
+            region for region in seed1.symbolic_regions
+            if terminal_kinds.get(tuple(region.terminal_candidate_id)) == "return"
+        )
+    if seed2 is not None and not returns2:
+        terminal_kinds = {tuple(item.candidate_id): item.terminal_kind_candidate for item in seed2.terminal_candidates}
+        returns2 = tuple(
+            region for region in seed2.symbolic_regions
+            if terminal_kinds.get(tuple(region.terminal_candidate_id)) == "return"
+        )
+    if bool(divergence1) != bool(divergence2):
+        self._debug_print("Outcome partition equivalence declined: one-sided divergence outcomes")
         return False
-    if not self._outcome_guard_unions_equivalent(
+    if set(termination1) != set(termination2):
+        self._debug_print("Outcome partition equivalence declined: termination contracts differ")
+        return False
+    for signature in termination1:
+        if not self._outcome_guard_unions_equivalent(
+            base_ctx,
+            [tuple(region.guard) for region in termination1[signature]],
+            [tuple(region.guard) for region in termination2[signature]],
+            param_replace_fn1,
+            param_replace_fn2,
+        ):
+            self._debug_print("Outcome partition equivalence declined: termination regions differ")
+            return False
+    if divergence1 and not self._outcome_guard_unions_equivalent(
         base_ctx,
         [tuple(getattr(outcome, "guard", ()) or ()) for outcome in divergence1],
         [tuple(getattr(outcome, "guard", ()) or ()) for outcome in divergence2],
@@ -1497,6 +2360,19 @@ def _impl__outcome_partitions_are_equivalent(
     ):
         self._debug_print("Outcome partition equivalence declined: function1 returns overlap function2 divergence")
         return False
+    flat_termination1 = tuple(region for regions in termination1.values() for region in regions)
+    flat_termination2 = tuple(region for regions in termination2.values() for region in regions)
+    for left_members, right_members, left_replace, right_replace in (
+        (returns1, flat_termination2, param_replace_fn1, param_replace_fn2),
+        (returns2, flat_termination1, param_replace_fn2, param_replace_fn1),
+        (divergence1, flat_termination2, param_replace_fn1, param_replace_fn2),
+        (divergence2, flat_termination1, param_replace_fn2, param_replace_fn1),
+    ):
+        if not self._outcome_cross_kind_disjoint(
+            base_ctx, left_members, right_members, left_replace, right_replace
+        ):
+            self._debug_print("Outcome partition equivalence declined: cross-side termination overlap")
+            return False
     if not self._outcome_cross_kind_disjoint(
         base_ctx,
         returns2,
@@ -1529,10 +2405,14 @@ def _impl__return_outcome_values_are_equivalent(
         left_guard = tuple(getattr(left, "guard", ()) or ())
         left_value = getattr(left, "value", None)
         if left_value is None:
+            left_value = getattr(left, "observed_value", None)
+        if left_value is None:
             return False
         for right in returns2 or ():
             right_guard = tuple(getattr(right, "guard", ()) or ())
             right_value = getattr(right, "value", None)
+            if right_value is None:
+                right_value = getattr(right, "observed_value", None)
             if right_value is None:
                 return False
             if self._outcome_condition_groups_are_unsat(

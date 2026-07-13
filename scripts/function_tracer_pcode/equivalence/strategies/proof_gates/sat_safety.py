@@ -90,6 +90,20 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
     if reason_kind == "outcome_partition_unknown":
         return UnknownReasonId.OUTCOME_PARTITION_UNKNOWN
+    unary_outcome_ids = {
+        item.value: item for item in (
+            UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
+            UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE,
+            UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED,
+            UnknownReasonId.OUTCOME_RETURN_CONSISTENCY_UNKNOWN,
+            UnknownReasonId.OUTCOME_RETURN_VALUE_CONFLICT,
+            UnknownReasonId.OUTCOME_CROSS_KIND_OVERLAP,
+            UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT,
+            UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT,
+        )
+    }
+    if reason_kind in unary_outcome_ids:
+        return unary_outcome_ids[reason_kind]
     summary_return_reason_ids = {
         UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID.value: UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
         UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN.value: UnknownReasonId.SUMMARY_RETURN_OVERLAP_UNPROVEN,
@@ -124,7 +138,18 @@ def _impl__make_blocking_unsafety_unknown_reason(
             analysis2,
             stage=stage,
         )
-    if typed_reason_id == UnknownReasonId.OUTCOME_PARTITION_UNKNOWN:
+    unary_outcome_reason_ids = {
+        UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
+        UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
+        UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE,
+        UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED,
+        UnknownReasonId.OUTCOME_RETURN_CONSISTENCY_UNKNOWN,
+        UnknownReasonId.OUTCOME_RETURN_VALUE_CONFLICT,
+        UnknownReasonId.OUTCOME_CROSS_KIND_OVERLAP,
+        UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT,
+        UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT,
+    }
+    if typed_reason_id in unary_outcome_reason_ids:
         object_target_key = self._outcome_partition_unknown_object_target_key(
             blocking_reason,
             analysis1,
@@ -153,11 +178,11 @@ def _impl__make_blocking_unsafety_unknown_reason(
                     description="Resolve UnknownOutcome members into proved return/divergence outcomes.",
                 ),
             ),
-            proof_stage="outcome_partition_unknown",
+            proof_stage="unary_outcome_partition",
             evidence_kind="outcome_partition",
             object_target_key=object_target_key,
             object_evidence=object_evidence,
-            recovery_action="outcome_partition_resolution_required",
+            recovery_action="unary_outcome_partition_proof_required",
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )
     if typed_reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY:

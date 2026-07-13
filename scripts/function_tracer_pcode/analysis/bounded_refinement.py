@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from ..model import (
@@ -14,6 +15,7 @@ from ..model import (
     ExpressionType,
     FunctionReturnAnalysis,
     ReturnInfo,
+    ReturnPathEvidence,
 )
 from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
@@ -256,6 +258,23 @@ class BoundedCallRefiner:
                 )
                 if ConditionSimplifier.is_contradiction(merged_conditions):
                     continue
+                return_path_evidence = getattr(ret, "return_path_evidence", None)
+                if isinstance(return_path_evidence, ReturnPathEvidence):
+                    target_guard_keys = (tuple(sorted(
+                        (condition.structural_key() for condition in merged_conditions), key=repr
+                    )),)
+                    original_key = return_path_evidence.stable_key()
+                    return_path_evidence = replace(
+                        return_path_evidence,
+                        path_guard_keys=target_guard_keys,
+                        guard_rewrite_proof_keys=(
+                            (
+                                "bounded_refinement_guard_rewrite_v1",
+                                original_key,
+                                target_guard_keys,
+                            ),
+                        ),
+                    )
                 results.append(
                     ReturnInfo(
                         address=ret.address,
@@ -269,6 +288,7 @@ class BoundedCallRefiner:
                         return_value_pcode_op_refs=tuple(
                             getattr(ret, "return_value_pcode_op_refs", ()) or ()
                         ),
+                        return_path_evidence=return_path_evidence,
                     )
                 )
                 if len(results) >= self.max_cases:

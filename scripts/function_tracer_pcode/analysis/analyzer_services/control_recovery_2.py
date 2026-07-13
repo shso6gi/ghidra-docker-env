@@ -8,6 +8,7 @@ from ._shared import (
     ConditionSimplifier,
     Expression,
 )
+from ...model import CallTargetRef
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -31,8 +32,45 @@ def _impl__filter_noreturn_return_path_entries(
     filtered = []
     blocked_conditions: List[List[Condition]] = []
     for block_path, conditions in path_entries:
-        if self._block_path_contains_noreturn_call(block_path, tracer, return_op):
+        noreturn_op = None
+        for block_info in block_path:
+            for candidate_op in getattr(block_info, "pcode_ops", []) or []:
+                if self._pcode_ops_match(candidate_op, return_op):
+                    break
+                if self._is_noreturn_control_transfer_op(candidate_op, tracer):
+                    noreturn_op = candidate_op
+                    break
+            if noreturn_op is not None:
+                break
+        if noreturn_op is not None:
             blocked_conditions.append(list(conditions))
+            targets = tuple(self._resolve_object_centric_transfer_targets(noreturn_op, tracer) or ())
+            noreturn_contract_keys = []
+            for target_ref in targets:
+                target_function = self._resolve_function_from_call_target_ref(target_ref)
+                if target_function is None or not self._function_has_no_return(target_function):
+                    noreturn_contract_keys = []
+                    break
+                noreturn_contract_keys.append((
+                    "resolved_noreturn_function_v1",
+                    target_ref.stable_key(),
+                    CallTargetRef.from_function(target_function).stable_key(),
+                ))
+            argument_keys = []
+            try:
+                for input_index in range(1, int(noreturn_op.getNumInputs())):
+                    expression = tracer.trace_varnode(noreturn_op.getInput(input_index), use_cache=False)
+                    argument_keys.append(expression.structural_key())
+            except Exception:
+                argument_keys = []
+            site = self._describe_pcode_site(noreturn_op, "unknown")
+            self._current_noreturn_terminal_observations.append({
+                "pcode_op_ref": site.get("pcode_op_ref"),
+                "target_refs": targets,
+                "noreturn_contract_keys": tuple(noreturn_contract_keys),
+                "argument_keys": tuple(argument_keys),
+                "conditions": tuple(conditions or ()),
+            })
             if self.debug:
                 cond_strs = [
                     ConditionSimplifier.get_simplified_condition_string(c)

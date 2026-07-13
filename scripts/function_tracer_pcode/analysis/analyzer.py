@@ -22,6 +22,7 @@ class ReturnAnalyzer:
         self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
         self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
         self._current_blocked_return_path_conditions: List[List[Condition]] = []
+        self._current_noreturn_terminal_observations: List[Dict[str, Any]] = []
         self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
@@ -87,6 +88,14 @@ class ReturnAnalyzer:
     @_current_blocked_return_path_conditions.setter
     def _current_blocked_return_path_conditions(self, value):
         self._ensure_analysis_session().blocked_return_path_conditions = value
+
+    @property
+    def _current_noreturn_terminal_observations(self):
+        return self._ensure_analysis_session().noreturn_terminal_observations
+
+    @_current_noreturn_terminal_observations.setter
+    def _current_noreturn_terminal_observations(self, value):
+        self._ensure_analysis_session().noreturn_terminal_observations = value
 
     @property
     def _return_path_entry_cache(self):

@@ -21,7 +21,7 @@ from .signature import (
     parameters_without_runtime_objects,
 )
 from .call_target import CallTargetRef, coerce_call_target_ref
-from .runtime_refs import DeferredCallRef, PcodeOpRef, UnknownValueRef
+from .runtime_refs import DeferredCallRef, PcodeBlockRef, PcodeOpRef, UnknownValueRef
 
 
 def _jsonable_nested_tuple(value: Any) -> Any:
@@ -51,6 +51,40 @@ def _stable_json_digest(value: Any) -> str:
 
 
 @dataclass
+class ReturnPathEvidence:
+    terminal_op_ref: Optional[PcodeOpRef]
+    coverage_status: str
+    path_block_keys: Tuple[Tuple[Any, ...], ...] = ()
+    path_guard_keys: Tuple[Tuple[Any, ...], ...] = ()
+    pruning_proof_keys: Tuple[Tuple[Any, ...], ...] = ()
+    guard_rewrite_proof_keys: Tuple[Tuple[Any, ...], ...] = ()
+    schema_version: int = 1
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "return_path_evidence_v1",
+            int(self.schema_version),
+            self.terminal_op_ref.stable_key() if self.terminal_op_ref is not None else None,
+            self.coverage_status,
+            self.path_block_keys,
+            self.path_guard_keys,
+            self.pruning_proof_keys,
+            self.guard_rewrite_proof_keys,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": int(self.schema_version),
+            "terminal_op_ref": self.terminal_op_ref.to_dict() if self.terminal_op_ref is not None else None,
+            "coverage_status": self.coverage_status,
+            "path_block_keys": _jsonable_nested_tuple(self.path_block_keys),
+            "path_guard_keys": _jsonable_nested_tuple(self.path_guard_keys),
+            "pruning_proof_keys": _jsonable_nested_tuple(self.pruning_proof_keys),
+            "guard_rewrite_proof_keys": _jsonable_nested_tuple(self.guard_rewrite_proof_keys),
+        }
+
+
+@dataclass
 class ReturnInfo:
     """単一のreturn文の情報"""
     address: str
@@ -68,6 +102,7 @@ class ReturnInfo:
     summary_candidate_source_key: Optional[Tuple[Any, ...]] = None
     summary_transition_evidence_key: Optional[Tuple[Any, ...]] = None
     validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
+    return_path_evidence: Optional[ReturnPathEvidence] = None
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""
@@ -108,6 +143,8 @@ class ReturnInfo:
             )
         if self.validation_blockers:
             result["validation_blockers"] = list(self.validation_blockers)
+        if self.return_path_evidence is not None:
+            result["return_path_evidence"] = self.return_path_evidence.to_dict()
         return result
 
 
@@ -164,6 +201,175 @@ class UnknownOutcome:
             "guard": [condition.to_dict() for condition in self.guard],
             "reason": self.reason,
             "evidence": _jsonable_nested_tuple(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
+class TerminationContractRef:
+    termination_class: str
+    object_identity_key: Tuple[Any, ...]
+    payload_key: Tuple[Any, ...]
+    effect_key: Tuple[Any, ...]
+    observation_contract_key: Tuple[Any, ...]
+    source_contract_key: Tuple[Any, ...]
+    schema_version: int = 1
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "termination_contract_v1",
+            int(self.schema_version),
+            self.termination_class,
+            self.object_identity_key,
+            self.payload_key,
+            self.effect_key,
+            self.observation_contract_key,
+            self.source_contract_key,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": int(self.schema_version),
+            "termination_class": self.termination_class,
+            "object_identity_key": _jsonable_nested_tuple(self.object_identity_key),
+            "payload_key": _jsonable_nested_tuple(self.payload_key),
+            "effect_key": _jsonable_nested_tuple(self.effect_key),
+            "observation_contract_key": _jsonable_nested_tuple(self.observation_contract_key),
+            "source_contract_key": _jsonable_nested_tuple(self.source_contract_key),
+        }
+
+
+@dataclass(frozen=True)
+class TerminationPathEffectEvidence:
+    """Producer output kept outside the semantic outcome seed until validated."""
+
+    terminal_candidate_id: Tuple[Any, ...]
+    terminal_op_ref: PcodeOpRef
+    control_effect_profile_key: Tuple[Any, ...]
+    path_guard_key: Tuple[Any, ...]
+    contract: TerminationContractRef
+    path_guard: Tuple[Condition, ...] = field(default=(), repr=False, compare=False)
+    producer_id: str = "analyzer_terminal_path_effect_v1"
+    schema_version: int = 1
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "termination_path_effect_evidence_v1", int(self.schema_version), self.producer_id,
+            self.terminal_candidate_id, self.terminal_op_ref.stable_key(),
+            self.control_effect_profile_key, self.path_guard_key, self.contract.stable_key(),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": int(self.schema_version),
+            "producer_id": self.producer_id,
+            "terminal_candidate_id": _jsonable_nested_tuple(self.terminal_candidate_id),
+            "terminal_op_ref": self.terminal_op_ref.to_dict(),
+            "control_effect_profile_key": _jsonable_nested_tuple(self.control_effect_profile_key),
+            "path_guard_key": _jsonable_nested_tuple(self.path_guard_key),
+            "path_guard": [condition.to_dict() for condition in self.path_guard],
+            "contract": self.contract.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class TerminalCandidate:
+    """Object-derived terminal candidate; this is evidence, not a proof result."""
+
+    candidate_id: Tuple[Any, ...]
+    terminal_kind_candidate: str
+    block_ref: Optional[PcodeBlockRef] = None
+    op_ref: Optional[PcodeOpRef] = None
+    cfg_reachable: Optional[bool] = None
+    evidence_key: Tuple[Any, ...] = ()
+    termination_contract: Optional[TerminationContractRef] = None
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "terminal_candidate_v1",
+            self.candidate_id,
+            self.terminal_kind_candidate,
+            self.block_ref.stable_key() if self.block_ref is not None else None,
+            self.op_ref.stable_key() if self.op_ref is not None else None,
+            self.cfg_reachable,
+            self.evidence_key,
+            self.termination_contract.stable_key() if self.termination_contract is not None else None,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
+            "terminal_kind_candidate": self.terminal_kind_candidate,
+            "block_ref": self.block_ref.to_dict() if self.block_ref is not None else None,
+            "op_ref": self.op_ref.to_dict() if self.op_ref is not None else None,
+            "cfg_reachable": self.cfg_reachable,
+            "evidence_key": _jsonable_nested_tuple(self.evidence_key),
+            "termination_contract": (
+                self.termination_contract.to_dict()
+                if self.termination_contract is not None else None
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class SymbolicRegionCandidate:
+    """Candidate input region associated with one concrete terminal candidate."""
+
+    candidate_id: Tuple[Any, ...]
+    terminal_candidate_id: Tuple[Any, ...]
+    guard: Tuple[Condition, ...]
+    guard_extraction_complete: bool
+    producer_evidence_key: Tuple[Any, ...] = ()
+    observed_value: Optional[Expression] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
+            "terminal_candidate_id": _jsonable_nested_tuple(self.terminal_candidate_id),
+            "guard": [condition.to_dict() for condition in self.guard],
+            "guard_extraction_complete": bool(self.guard_extraction_complete),
+            "producer_evidence_key": _jsonable_nested_tuple(self.producer_evidence_key),
+        }
+        if self.observed_value is not None:
+            result["observed_value"] = self.observed_value.to_dict()
+        return result
+
+
+@dataclass(frozen=True)
+class FunctionOutcomeSeed:
+    """Proof-free semantic surface used by unary outcome obligations."""
+
+    function_identity: Tuple[Any, ...]
+    input_domain_contract: Tuple[Any, ...]
+    terminal_candidates: Tuple[TerminalCandidate, ...] = ()
+    symbolic_regions: Tuple[SymbolicRegionCandidate, ...] = ()
+    unresolved_control_evidence: Tuple[Tuple[Any, ...], ...] = ()
+    control_flow_evidence_key: Tuple[Any, ...] = ()
+    partition_revision: int = 0
+    extraction_schema_version: int = 1
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "function_outcome_seed_v1",
+            self.function_identity,
+            self.input_domain_contract,
+            tuple(candidate.stable_key() for candidate in self.terminal_candidates),
+            tuple(_stable_json_digest(region.to_dict()) for region in self.symbolic_regions),
+            self.unresolved_control_evidence,
+            self.control_flow_evidence_key,
+            int(self.partition_revision),
+            int(self.extraction_schema_version),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "function_identity": _jsonable_nested_tuple(self.function_identity),
+            "input_domain_contract": _jsonable_nested_tuple(self.input_domain_contract),
+            "terminal_candidates": [item.to_dict() for item in self.terminal_candidates],
+            "symbolic_regions": [item.to_dict() for item in self.symbolic_regions],
+            "unresolved_control_evidence": _jsonable_nested_tuple(self.unresolved_control_evidence),
+            "control_flow_evidence_key": _jsonable_nested_tuple(self.control_flow_evidence_key),
+            "partition_revision": int(self.partition_revision),
+            "extraction_schema_version": int(self.extraction_schema_version),
         }
 
 
@@ -787,6 +993,8 @@ class FunctionReturnAnalysis:
     unknown_outcomes: Tuple[UnknownOutcome, ...] = ()
     analysis_view_identity: Optional[Tuple[Any, ...]] = None
     partition_revision: int = 0
+    outcome_seed: Optional[FunctionOutcomeSeed] = None
+    termination_path_effect_evidence: Tuple[TerminationPathEffectEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -804,6 +1012,14 @@ class FunctionReturnAnalysis:
         if not self.return_type_provenance:
             self.return_type_provenance = self._build_return_type_provenance()
         self.normalize_deferred_calls()
+
+    def outcome_function_identity(self) -> Tuple[Any, ...]:
+        return (
+            "function_identity_v1",
+            self.binary_id,
+            self.function_ref.stable_key() if self.function_ref is not None else None,
+            self.entry_point,
+        )
 
     def with_accepted_return_partition(
         self,
@@ -995,6 +1211,13 @@ class FunctionReturnAnalysis:
                 *(outcome.to_dict() for outcome in self.return_outcomes),
                 *(outcome.to_dict() for outcome in self.divergence_outcomes),
                 *(outcome.to_dict() for outcome in self.unknown_outcomes),
+            ]
+        if self.outcome_seed is not None:
+            result["outcome_seed"] = self.outcome_seed.to_dict()
+        if self.termination_path_effect_evidence:
+            result["termination_path_effect_evidence"] = [
+                evidence.to_dict()
+                for evidence in self.termination_path_effect_evidence
             ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key

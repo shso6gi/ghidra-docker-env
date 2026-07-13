@@ -758,3 +758,19 @@ class ConditionTracker:
                     limit_paths=limit_paths,
                 )
         return []
+
+    def get_path_coverage_to_return(
+        self,
+        return_op,
+        limit_paths: Optional[int] = None,
+    ) -> PathCoverageResult:
+        """Return tri-state object/path coverage for one concrete RETURN op."""
+        return_parent = return_op.getParent()
+        if return_parent:
+            return_block_info = self.get_block_by_hash(return_parent)
+            if return_block_info:
+                return self.get_path_coverage_to_block(
+                    return_block_info,
+                    limit_paths=limit_paths,
+                )
+        return PathCoverageResult("inconclusive", [])

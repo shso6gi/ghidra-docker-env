@@ -29,6 +29,15 @@ from ._shared import (
     replace,
 )
 from ._api import StructuralRecurrenceSummarizer, accept_summary_return_candidates
+from ...model import (
+    FunctionOutcomeSeed,
+    ReturnPathEvidence,
+    SymbolicRegionCandidate,
+    TerminalCandidate,
+    TerminationContractRef,
+    TerminationPathEffectEvidence,
+)
+from ...model.structural import expression_key_safe as _outcome_expression_key_safe
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -162,6 +171,26 @@ def _impl__make_return_info(
     site_metadata: Optional[Dict[str, Optional[object]]] = None,
 ) -> ReturnInfo:
     site_metadata = site_metadata or {}
+    return_path_evidence = cast(
+        Optional[ReturnPathEvidence], site_metadata.get("return_path_evidence")
+    )
+    if return_path_evidence is not None:
+        target_guard_keys = (tuple(sorted(
+            (condition.structural_key() for condition in (conditions or ())), key=repr
+        )),)
+        if tuple(return_path_evidence.path_guard_keys) != target_guard_keys:
+            original_key = return_path_evidence.stable_key()
+            return_path_evidence = replace(
+                return_path_evidence,
+                path_guard_keys=target_guard_keys,
+                guard_rewrite_proof_keys=(
+                    (
+                        "return_extraction_guard_materialization_v1",
+                        original_key,
+                        target_guard_keys,
+                    ),
+                ),
+            )
     return ReturnInfo(
         address=address,
         value=value,
@@ -176,6 +205,7 @@ def _impl__make_return_info(
             for ref in (site_metadata.get("return_value_pcode_op_refs") or ())
             if isinstance(ref, PcodeOpRef)
         ),
+        return_path_evidence=return_path_evidence,
     )
 
 def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
@@ -481,13 +511,323 @@ def _impl__apply_outcome_partition_summaries(
     if analysis is None:
         return
     self._clear_outcome_partition_summaries(analysis)
-    if self._try_apply_triangular_mod_caller_outcomes(high_function, analysis):
+    applied = self._try_apply_triangular_mod_caller_outcomes(high_function, analysis)
+    if not applied:
+        applied = self._try_apply_triangular_mod_optimized_outcomes(high_function, analysis)
+    if not applied:
+        applied = self._try_apply_branch_guarded_while_outcomes(high_function, analysis)
+    if not applied:
+        self._try_apply_single_guard_nonprogress_loop_outcomes(high_function, analysis)
+    _produce_standard_termination_path_effect_evidence(self, analysis)
+    _build_function_outcome_seed(analysis)
+
+
+def _termination_external_provenance(target_ref) -> Optional[Tuple[Any, ...]]:
+    if target_ref is None or not target_ref.is_function():
+        return None
+    if target_ref.is_external is True and target_ref.library_name:
+        return ("external_import", str(target_ref.library_name).lower())
+    if (
+        target_ref.is_thunk is True
+        and target_ref.thunked_is_external is True
+        and target_ref.thunked_library_name
+    ):
+        return ("verified_external_thunk", str(target_ref.thunked_library_name).lower())
+    return None
+
+
+def _termination_signature_key(target_ref, expected_parameter_count: int) -> Optional[Tuple[Any, ...]]:
+    function = getattr(target_ref, "function_obj", None)
+    if function is None:
+        return None
+    try:
+        parameter_count = int(function.getParameterCount())
+    except Exception:
+        try:
+            parameter_count = len(tuple(function.getParameters() or ()))
+        except Exception:
+            return None
+    if parameter_count != int(expected_parameter_count):
+        return None
+    try:
+        parameters = tuple(function.getParameters() or ())
+        parameter_type_names = tuple(
+            str(parameter.getDataType().getName()).strip().lower()
+            for parameter in parameters
+        )
+    except Exception:
+        return None
+    if len(parameter_type_names) != parameter_count or any(
+        name not in {"int", "signed int", "int32_t"} for name in parameter_type_names
+    ):
+        return None
+    try:
+        return_type = function.getReturnType()
+        return_name = str(getattr(return_type, "getName", lambda: return_type)()).lower()
+    except Exception:
+        return None
+    if "void" not in return_name:
+        return None
+    return ("c_abi_signature_v1", "void", parameter_type_names)
+
+
+def _standard_termination_contract_descriptor(target_ref) -> Optional[Dict[str, Any]]:
+    """Return a fully modeled ABI contract; names alone never classify a target."""
+    provenance = _termination_external_provenance(target_ref)
+    if provenance is None:
+        return None
+    library = str(provenance[1]).lower().rsplit("/", 1)[-1]
+    if not (library == "libc" or library.startswith("libc.so")):
+        return None
+    raw_name = str(getattr(target_ref, "function_name", None) or "").split("@", 1)[0]
+    symbol = raw_name.rsplit("::", 1)[-1]
+    # Only _Exit has a bounded observation contract here.  exit/quick_exit,
+    # abort/assert failures, traps, and longjmp have cleanup/signal/diagnostic
+    # or state-restoration effects that this lane intentionally leaves UNKNOWN.
+    if symbol not in {"_Exit", "_exit"}:
+        return None
+    signature = _termination_signature_key(target_ref, 1)
+    if signature is None:
+        return None
+    callee_contract_key = (
+        "termination_callee_contract_v1",
+        target_ref.stable_key(),
+        provenance,
+        symbol,
+        signature,
+    )
+    return {
+        "termination_class": "process",
+        "semantic_subtype": "immediate_process_exit",
+        "payload_schema": "process_exit_payload_v1",
+        "callee_contract_key": callee_contract_key,
+        "effect_contract": (
+            "termination_effect_v2", "process", "immediate_process_exit",
+            ("atexit_handlers", False),
+            ("quick_exit_handlers", False),
+            ("stdio_flush", False),
+            ("automatic_object_cleanup", False),
+        ),
+        "observation_contract": (
+            "termination_observation_v2", "process",
+            ("process_exit_status", True),
+            ("pretermination_memory_effects", "compared_separately"),
+        ),
+    }
+
+
+def _produce_standard_termination_path_effect_evidence(self, analysis: FunctionReturnAnalysis) -> None:
+    profile = getattr(getattr(analysis, "effect_summary", None), "function_control_effect_profile", None)
+    if not callable(getattr(profile, "stable_key", None)):
+        analysis.termination_path_effect_evidence = ()
         return
-    if self._try_apply_triangular_mod_optimized_outcomes(high_function, analysis):
+    profile_key = profile.stable_key()
+    raw_profile_ops = getattr(profile, "region_pcode_op_keys", ())
+    if not (
+        isinstance(profile_key, tuple)
+        and profile_key[:1] == ("function_control_effect_profile",)
+        and isinstance(raw_profile_ops, (tuple, list))
+    ):
+        analysis.termination_path_effect_evidence = ()
         return
-    if self._try_apply_branch_guarded_while_outcomes(high_function, analysis):
-        return
-    self._try_apply_single_guard_nonprogress_loop_outcomes(high_function, analysis)
+    profile_ops = set(raw_profile_ops)
+    produced = []
+    unknown_nonreturning = []
+    for observation in tuple(getattr(self, "_current_noreturn_terminal_observations", ()) or ()):
+        op_ref = observation.get("pcode_op_ref")
+        targets = tuple(observation.get("target_refs") or ())
+        noreturn_contract_keys = tuple(observation.get("noreturn_contract_keys") or ())
+        descriptors = tuple(_standard_termination_contract_descriptor(target) for target in targets)
+        guard = tuple(observation.get("conditions") or ())
+        if (
+            not isinstance(op_ref, PcodeOpRef)
+            or op_ref.stable_key() not in profile_ops
+            or not targets
+            or len(noreturn_contract_keys) != len(targets)
+            or any(
+                not isinstance(key, tuple)
+                or len(key) != 3
+                or key[0] != "resolved_noreturn_function_v1"
+                or tuple(key[1]) != tuple(target.stable_key())
+                for key, target in zip(noreturn_contract_keys, targets)
+            )
+            or any(descriptor is None for descriptor in descriptors)
+            or len({repr(descriptor) for descriptor in descriptors}) != 1
+        ):
+            unknown_nonreturning.append(UnknownOutcome(
+                guard=guard,
+                reason="unknown_nonreturning_contract",
+                evidence={
+                    "terminal_op_ref": op_ref.stable_key() if isinstance(op_ref, PcodeOpRef) else None,
+                    "target_keys": tuple(target.stable_key() for target in targets),
+                    "noreturn_contract_keys": noreturn_contract_keys,
+                },
+            ))
+            continue
+        descriptor = descriptors[0]
+        termination_class = descriptor["termination_class"]
+        terminal_id = ("termination_terminal", op_ref.stable_key())
+        guard_key = tuple(sorted((condition.structural_key() for condition in guard), key=repr))
+        source_key = (
+            "terminal_path_effect_evidence_v1", op_ref.stable_key(), profile_key, guard_key,
+        )
+        contract = TerminationContractRef(
+            termination_class=termination_class,
+            object_identity_key=op_ref.stable_key(),
+            payload_key=(
+                descriptor["payload_schema"], descriptor["semantic_subtype"],
+                descriptor["callee_contract_key"],
+                tuple(observation.get("argument_keys") or ()),
+            ),
+            effect_key=descriptor["effect_contract"],
+            observation_contract_key=descriptor["observation_contract"],
+            source_contract_key=source_key,
+        )
+        produced.append(TerminationPathEffectEvidence(
+            terminal_candidate_id=terminal_id,
+            terminal_op_ref=op_ref,
+            control_effect_profile_key=profile_key,
+            path_guard_key=guard_key,
+            contract=contract,
+            path_guard=guard,
+        ))
+    analysis.termination_path_effect_evidence = tuple(produced)
+    if unknown_nonreturning:
+        analysis.unknown_outcomes = tuple(getattr(analysis, "unknown_outcomes", ()) or ()) + tuple(
+            unknown_nonreturning
+        )
+
+
+def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
+    terminals = []
+    regions = []
+    terminal_ids = set()
+    return_sources = tuple(getattr(analysis, "return_outcomes", ()) or ())
+    if not return_sources:
+        return_sources = tuple(
+            ReturnOutcome(
+                guard=tuple(getattr(info, "conditions", ()) or ()),
+                value=info.value,
+                provenance={"source": "extracted_return"},
+                return_info=info,
+            )
+            for info in (getattr(analysis, "returns", ()) or ())
+        )
+    for index, outcome in enumerate(return_sources):
+        info = getattr(outcome, "return_info", None)
+        op_ref = getattr(info, "pcode_op_ref", None)
+        terminal_id = (
+            "return_terminal",
+            op_ref.stable_key() if op_ref is not None else getattr(info, "site_key", lambda: index)(),
+        )
+        if terminal_id not in terminal_ids:
+            terminal_ids.add(terminal_id)
+            terminals.append(TerminalCandidate(
+                candidate_id=terminal_id,
+                terminal_kind_candidate="return",
+                op_ref=op_ref,
+                cfg_reachable=None,
+                evidence_key=("existing_return_terminal", terminal_id),
+            ))
+        regions.append(SymbolicRegionCandidate(
+            candidate_id=("return_region", terminal_id),
+            terminal_candidate_id=terminal_id,
+            guard=tuple(getattr(outcome, "guard", ()) or ()),
+            guard_extraction_complete=False,
+            producer_evidence_key=(
+                "return_path_evidence",
+                info.return_path_evidence.stable_key(),
+            ) if info is not None and info.return_path_evidence is not None else (
+                "return_path_evidence_missing",
+                _outcome_expression_key_safe(getattr(outcome, "value", None)),
+            ),
+            observed_value=getattr(outcome, "value", None),
+        ))
+    for index, outcome in enumerate(getattr(analysis, "divergence_outcomes", ()) or ()):
+        terminal_id = ("must_diverge_terminal", index, getattr(analysis, "entry_point", None))
+        terminals.append(TerminalCandidate(
+            candidate_id=terminal_id,
+            terminal_kind_candidate="must_diverge",
+            cfg_reachable=None,
+            evidence_key=("divergence_candidate", index),
+        ))
+        regions.append(SymbolicRegionCandidate(
+            candidate_id=("must_diverge_region", terminal_id),
+            terminal_candidate_id=terminal_id,
+            guard=tuple(getattr(outcome, "guard", ()) or ()),
+            guard_extraction_complete=False,
+            producer_evidence_key=("divergence_candidate", index),
+        ))
+    for index, outcome in enumerate(getattr(analysis, "unknown_outcomes", ()) or ()):
+        terminal_id = ("unknown_terminal", index, getattr(analysis, "entry_point", None))
+        terminals.append(TerminalCandidate(
+            candidate_id=terminal_id,
+            terminal_kind_candidate="unknown",
+            cfg_reachable=None,
+            evidence_key=("unknown_outcome", str(getattr(outcome, "reason", "unknown"))),
+        ))
+        regions.append(SymbolicRegionCandidate(
+            candidate_id=("unknown_region", terminal_id),
+            terminal_candidate_id=terminal_id,
+            guard=tuple(getattr(outcome, "guard", ()) or ()),
+            guard_extraction_complete=False,
+            producer_evidence_key=("unknown_outcome", str(getattr(outcome, "reason", "unknown"))),
+        ))
+    for evidence in tuple(getattr(analysis, "termination_path_effect_evidence", ()) or ()):
+        contract = evidence.contract
+        kind = {
+            "process": "process_termination",
+            "exceptional": "exceptional_termination",
+            "nonlocal_control_transfer": "nonlocal_control_transfer",
+        }.get(contract.termination_class)
+        if kind is None:
+            continue
+        terminals.append(TerminalCandidate(
+            candidate_id=evidence.terminal_candidate_id,
+            terminal_kind_candidate=kind,
+            op_ref=evidence.terminal_op_ref,
+            cfg_reachable=None,
+            evidence_key=evidence.stable_key(),
+            termination_contract=contract,
+        ))
+        regions.append(SymbolicRegionCandidate(
+            candidate_id=("termination_region", evidence.terminal_candidate_id),
+            terminal_candidate_id=evidence.terminal_candidate_id,
+            guard=tuple(evidence.path_guard),
+            guard_extraction_complete=True,
+            producer_evidence_key=contract.source_contract_key,
+        ))
+    unresolved = []
+    profile = getattr(getattr(analysis, "effect_summary", None), "function_control_effect_profile", None)
+    control_flow_evidence_key = ()
+    if callable(getattr(profile, "stable_key", None)):
+        candidate_profile_key = profile.stable_key()
+        if (
+            isinstance(candidate_profile_key, tuple)
+            and candidate_profile_key
+            and candidate_profile_key[0] == "function_control_effect_profile"
+        ):
+            control_flow_evidence_key = candidate_profile_key
+    if getattr(analysis, "incomplete_control_flow", False):
+        unresolved.append(("incomplete_control_flow",))
+    for reason in getattr(analysis, "unknown_event_reasons", ()) or ():
+        if any(token in str(reason).lower() for token in ("branch", "control", "terminal", "callind")):
+            unresolved.append(("analysis_unknown", str(reason)))
+    analysis.outcome_seed = FunctionOutcomeSeed(
+        function_identity=analysis.outcome_function_identity(),
+        input_domain_contract=(
+            "parameter_domain_v1",
+            tuple(
+                (item.get("index"), item.get("size"), item.get("data_type"), item.get("is_signed"))
+                for item in (getattr(analysis, "parameters", ()) or ())
+            ),
+        ),
+        terminal_candidates=tuple(terminals),
+        symbolic_regions=tuple(regions),
+        unresolved_control_evidence=tuple(unresolved),
+        control_flow_evidence_key=tuple(control_flow_evidence_key or ()),
+        partition_revision=int(getattr(analysis, "partition_revision", 0) or 0),
+    )
 
 def _impl__clear_outcome_partition_summaries(self, analysis: FunctionReturnAnalysis) -> None:
     """Drop synthetic outcome partition state before rebuilding it from current returns."""
@@ -1315,9 +1655,21 @@ def _impl__analyze_return_op(
     self._debug_print(f"RETURN at {address}, inputs: {num_inputs}")
 
     raw_path_entries = None
-    get_block_paths = getattr(condition_tracker, "get_all_valid_block_paths_to_return", None)
-    if callable(get_block_paths):
-        raw_path_entries = get_block_paths(return_op)
+    path_coverage_status = "inconclusive"
+    get_path_coverage = getattr(condition_tracker, "get_path_coverage_to_return", None)
+    if callable(get_path_coverage):
+        coverage = get_path_coverage(return_op)
+        candidate_status = getattr(coverage, "status", None)
+        candidate_paths = getattr(coverage, "block_paths", None)
+        if candidate_status in {"complete", "inconclusive", "incomplete"} and isinstance(
+            candidate_paths, (tuple, list)
+        ):
+            path_coverage_status = str(candidate_status)
+            raw_path_entries = candidate_paths
+    if raw_path_entries is None:
+        get_block_paths = getattr(condition_tracker, "get_all_valid_block_paths_to_return", None)
+        if callable(get_block_paths):
+            raw_path_entries = get_block_paths(return_op)
 
     path_entries = self._coerce_block_path_entries(raw_path_entries)
     blocked_path_conditions: List[List[Condition]] = []
@@ -1339,6 +1691,36 @@ def _impl__analyze_return_op(
         # Fall back to the pre-existing condition-only API if block paths are unavailable.
         path_conditions = condition_tracker.get_path_conditions_to_return(return_op)
         all_valid_path_conditions = condition_tracker.get_all_valid_paths_to_return(return_op)
+        if not isinstance(path_conditions, (tuple, list)):
+            path_conditions = []
+        if not isinstance(all_valid_path_conditions, (tuple, list)):
+            all_valid_path_conditions = [list(path_conditions or ())]
+
+    def condition_group_key(conditions):
+        return tuple(sorted((condition.structural_key() for condition in conditions or ()), key=repr))
+
+    path_block_keys = tuple(
+        tuple(
+            ("path_block", int(getattr(block_info, "index", -1)), str(getattr(block_info, "start", "")))
+            for block_info in blocks
+        )
+        for blocks, _conditions in (path_entries or ())
+    )
+    terminal_ref = site_metadata.get("pcode_op_ref")
+    site_metadata["return_path_evidence"] = ReturnPathEvidence(
+        terminal_op_ref=terminal_ref if isinstance(terminal_ref, PcodeOpRef) else None,
+        coverage_status=(
+            "complete"
+            if path_coverage_status == "complete" and not blocked_path_conditions
+            else "inconclusive"
+        ),
+        path_block_keys=path_block_keys,
+        path_guard_keys=tuple(sorted(
+            {condition_group_key(conditions) for conditions in (all_valid_path_conditions or ())},
+            key=repr,
+        )),
+        pruning_proof_keys=(),
+    )
 
     if self.debug and path_conditions:
         cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in path_conditions]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import OrderedDict
 from threading import RLock
 from typing import Any, Dict, Generic, Iterable, Mapping, Optional, Tuple, TypeVar
@@ -136,3 +136,71 @@ class ProofCache:
 
     def get(self, key: Tuple[Any, ...]) -> Optional[ProofCacheEntry]:
         return self._entries.get(key)
+
+
+@dataclass(frozen=True)
+class ValidatedUnaryArtifactEntry:
+    artifact: ProofArtifact
+    function_premise_digest: str
+    function_snapshot_fingerprint: str
+    outcome_seed_digest: str
+    attempt_candidate_independent: bool
+    pair_independent: bool
+    closure_artifacts: Tuple[ProofArtifact, ...] = ()
+    source_view_records: Mapping[Tuple[Any, ...], ViewPremiseRecord] = field(
+        default_factory=dict, compare=False, hash=False
+    )
+
+
+class ValidatedUnaryArtifactCache:
+    """Process-local cache for function-scoped, pair-independent proof artifacts."""
+
+    def __init__(self, max_entries: int = 2048) -> None:
+        if max_entries <= 0:
+            raise ValueError("ValidatedUnaryArtifactCache max_entries must be positive")
+        self.max_entries = int(max_entries)
+        self._entries: "OrderedDict[Tuple[Any, ...], ValidatedUnaryArtifactEntry]" = OrderedDict()
+        self._lock = RLock()
+
+    @staticmethod
+    def key(requirement_key: Tuple[Any, ...], function_premise_digest: str) -> Tuple[Any, ...]:
+        return ("validated_unary_artifact_v1", requirement_key, function_premise_digest)
+
+    def put(self, entry: ValidatedUnaryArtifactEntry) -> None:
+        if not entry.artifact.is_validated:
+            raise ValueError("unary cache accepts only validated artifacts")
+        if not entry.attempt_candidate_independent:
+            raise ValueError("unary artifact depends on an attempt/counterexample candidate")
+        if not entry.pair_independent:
+            raise ValueError("unary artifact depends on a pair peer or side label")
+        key = self.key(entry.artifact.requirement_id.to_key(), entry.function_premise_digest)
+        with self._lock:
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+
+    def get(
+        self,
+        requirement_key: Tuple[Any, ...],
+        function_premise_digest: str,
+        *,
+        function_snapshot_fingerprint: str,
+        outcome_seed_digest: str,
+        producer_version: str,
+        encoding_version: str,
+    ) -> Optional[ValidatedUnaryArtifactEntry]:
+        key = self.key(requirement_key, function_premise_digest)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            if (
+                entry.function_snapshot_fingerprint != function_snapshot_fingerprint
+                or entry.outcome_seed_digest != outcome_seed_digest
+                or entry.artifact.producer_version != producer_version
+                or entry.artifact.encoding_version != encoding_version
+            ):
+                return None
+            self._entries.move_to_end(key)
+            return entry

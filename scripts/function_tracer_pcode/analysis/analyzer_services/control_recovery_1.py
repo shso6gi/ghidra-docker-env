@@ -179,6 +179,17 @@ def _impl__block_debug_key(self, block) -> Any:
         pass
     return f"block@{id(block):x}"
 
+
+def _current_cfg_applicability_surface(self, high_function) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, Any], ...]]:
+    blocks = tuple(self._iter_high_basic_blocks(high_function))
+    block_keys = tuple(sorted((self._block_debug_key(block) for block in blocks), key=repr))
+    edge_keys = tuple(sorted((
+        (self._block_debug_key(block), self._block_debug_key(successor))
+        for block in blocks
+        for successor in self._block_successors(block)
+    ), key=repr))
+    return block_keys, edge_keys
+
 def _impl__try_apply_branch_guarded_while_outcomes(
     self,
     high_function,
@@ -390,6 +401,7 @@ def _impl__prove_branch_guarded_structural_nonprogress_must_diverge(
         "accumulator_preservation": "accumulator_phi_nonprogress_backedge_identity",
         "loop_has_cfg_cycle": True,
         "forbidden_control_effect_ops_absent": True,
+        "cfg_applicability_surface": _current_cfg_applicability_surface(self, high_function),
     }
 
 def _impl__branch_guarded_structural_proof_from_return(
@@ -1410,6 +1422,7 @@ def _impl__prove_branch_guarded_while_nonprogress_must_diverge(
             "guard_state_writes_absent_under_invariant": True,
             "guard_dependency_writes_absent_under_invariant": True,
         },
+        "cfg_applicability_surface": _current_cfg_applicability_surface(self, high_function),
     }
 
 def _impl__high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call: bool) -> bool:

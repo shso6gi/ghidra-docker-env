@@ -27,6 +27,14 @@ class UnknownReasonId(str, Enum):
     RETURN_COVERAGE_GAP = "return_coverage_gap"
     RETURN_COVERAGE_INCONCLUSIVE = "return_coverage_inconclusive"
     OUTCOME_PARTITION_UNKNOWN = "outcome_partition_unknown"
+    OUTCOME_CFG_REACHABILITY_INCOMPLETE = "outcome_cfg_reachability_incomplete"
+    OUTCOME_PATH_REGION_INCOMPLETE = "outcome_path_region_incomplete"
+    OUTCOME_MEMBER_UNCLASSIFIED = "outcome_member_unclassified"
+    OUTCOME_RETURN_CONSISTENCY_UNKNOWN = "outcome_return_consistency_unknown"
+    OUTCOME_RETURN_VALUE_CONFLICT = "outcome_return_value_conflict"
+    OUTCOME_CROSS_KIND_OVERLAP = "outcome_cross_kind_overlap"
+    OUTCOME_PARTITION_RESIDUAL_SAT = "outcome_partition_residual_sat"
+    OUTCOME_PARTITION_TOTALITY_TIMEOUT = "outcome_partition_totality_timeout"
     SUMMARY_RETURN_CANDIDATE_INVALID = "summary_return_candidate_invalid"
     SUMMARY_RETURN_OVERLAP_UNPROVEN = "summary_return_overlap_unproven"
     SUMMARY_EFFECT_UNMODELED = "summary_effect_unmodeled"
@@ -448,6 +456,27 @@ def _register_defaults() -> None:
             recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
             target_regression="outcome_partition_unknown",
         ),
+        *(
+            UnknownReasonDefinition.create(
+                reason_id,
+                UnknownReasonClass.PROOF_OBLIGATION,
+                UnknownDecisionEffect.BLOCKS_EQUIVALENCE,
+                UnknownReasonScope.FUNCTION,
+                UnknownAggregationUnit.FUNCTION,
+                recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                target_regression=reason_id.value,
+            )
+            for reason_id in (
+                UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
+                UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE,
+                UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED,
+                UnknownReasonId.OUTCOME_RETURN_CONSISTENCY_UNKNOWN,
+                UnknownReasonId.OUTCOME_RETURN_VALUE_CONFLICT,
+                UnknownReasonId.OUTCOME_CROSS_KIND_OVERLAP,
+                UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT,
+                UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT,
+            )
+        ),
         UnknownReasonDefinition.create(
             UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,
             UnknownReasonClass.PROOF_OBLIGATION,
@@ -797,6 +826,35 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="outcome_partition_unknown",
             description="Recover unknown outcome partitions by proving the unknown member semantics.",
+        ),
+        *(
+            UnknownRecoveryPlan.create(
+                reason_id,
+                (
+                    UnknownRecoveryProofObligation.create(
+                        UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                        "unary_outcome_partition",
+                        required_evidence=(
+                            "function_outcome_seed",
+                            "validated_unary_proof_closure",
+                            "function_premise_digest",
+                        ),
+                        description="Complete the named function-scoped outcome proof obligation.",
+                    ),
+                ),
+                target_regression=reason_id.value,
+                description="Recover only by completing the exact unary outcome requirement.",
+            )
+            for reason_id in (
+                UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
+                UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE,
+                UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED,
+                UnknownReasonId.OUTCOME_RETURN_CONSISTENCY_UNKNOWN,
+                UnknownReasonId.OUTCOME_RETURN_VALUE_CONFLICT,
+                UnknownReasonId.OUTCOME_CROSS_KIND_OVERLAP,
+                UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT,
+                UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT,
+            )
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SUMMARY_RETURN_CANDIDATE_INVALID,

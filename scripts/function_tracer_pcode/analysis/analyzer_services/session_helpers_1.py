@@ -231,11 +231,13 @@ def _impl__analysis_context(
     previous_deferred_calls = self._current_deferred_calls
     previous_function_prototype = self._current_function_prototype
     previous_function_entry_address = self._current_function_entry_address_value
+    previous_noreturn_observations = self._current_noreturn_terminal_observations
     self._current_parameters = parameters
     self._current_effect_summary = effect_summary
     self._current_deferred_calls = {}
     self._current_function_prototype = function_prototype
     self._current_function_entry_address_value = function_entry_address
+    self._current_noreturn_terminal_observations = []
     try:
         yield
     finally:
@@ -244,6 +246,7 @@ def _impl__analysis_context(
         self._current_deferred_calls = previous_deferred_calls
         self._current_function_prototype = previous_function_prototype
         self._current_function_entry_address_value = previous_function_entry_address
+        self._current_noreturn_terminal_observations = previous_noreturn_observations
 
 def _impl_dispose(self):
     if self._decompiler is not None:
@@ -1502,12 +1505,21 @@ def _impl__prove_single_guard_nonprogress_region_must_diverge(
             tracer=tracer,
         )
         if proof is not None:
+            cfg_blocks = tuple(sorted(
+                (self._block_debug_key(block) for block in blocks), key=repr
+            ))
+            cfg_edges = tuple(sorted((
+                (self._block_debug_key(block), self._block_debug_key(successor))
+                for block in blocks
+                for successor in self._block_successors(block)
+            ), key=repr))
             proof.update(
                 {
                     "proof_kind": "single_guard_nonprogress_must_diverge",
                     "candidate_rule": "side_effect_free_nonprogress_loop_guard_complement",
                     "guard": "param_positive",
                     "return_partition": "param_nonpositive_return_zero",
+                    "cfg_applicability_surface": (cfg_blocks, cfg_edges),
                 }
             )
             return proof
