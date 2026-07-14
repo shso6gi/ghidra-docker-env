@@ -34,15 +34,24 @@ from .proof import (
 )
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
 from .shadow import (
+    DecisivenessSnapshot,
     LegacyExecutionSnapshot,
     ProductionShadowValidation,
     ProductionShadowValidator,
     ShadowComparisonReport,
+    SolverOutcomeClass,
 )
 from .runtime import (
     ObligationExecutionEvent,
     ObligationRuntimeSession,
     PendingCounterexampleSafety,
+)
+from .return_width import (
+    RETURN_WIDTH_ENCODING_VERSION,
+    RETURN_WIDTH_PRODUCER_VERSION,
+    UnaryWidthProofResult,
+    prove_function_return_width,
+    return_width_requirement,
 )
 from .outcome_partition import (
     UnaryPartitionProofResult,
@@ -66,7 +75,9 @@ __all__ = (
     "BranchExecutionRecord", "DecisionAggregation", "DecisionAggregator", "DerivedAnalysisView", "ExecutionState", "FunctionProofOutcome",
     "ObligationInstanceId", "ObligationExecutionEvent", "ObligationRuntimeSession", "PendingCounterexampleSafety", "ProofArtifact", "ProofCache", "ProofCacheEntry",
     "ProofExpression", "ProofExpressionEvaluator", "ProofEvaluation", "ProofNodeKind", "ProofWorklist",
-    "InternalBranchTrace", "LegacyExecutionSnapshot", "ProductionShadowValidation", "ProductionShadowValidator", "ProofGateProjection", "SemanticFactProvenance", "ShadowComparisonReport", "SnapshotFingerprintCodec", "ValidatedProofClosure",
+    "InternalBranchTrace", "LegacyExecutionSnapshot", "ProductionShadowValidation", "ProductionShadowValidator", "ProofGateProjection", "SemanticFactProvenance", "ShadowComparisonReport", "SnapshotFingerprintCodec", "ValidatedProofClosure", "DecisivenessSnapshot", "SolverOutcomeClass",
     "ViewPremiseRecord", "WorkItem", "project_proof_gates", "run_obligation_branch_plan", "validate_artifact_applicability", "validate_proof_closure",
     "UnaryPartitionProofResult", "UnaryProducerResult", "outcome_seed_digest", "prove_unary_partition", "requirement_for_stage",
+    "UnaryWidthProofResult", "prove_function_return_width", "return_width_requirement",
+    "RETURN_WIDTH_PRODUCER_VERSION", "RETURN_WIDTH_ENCODING_VERSION",
 )

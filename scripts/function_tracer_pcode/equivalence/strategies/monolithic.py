@@ -2,18 +2,25 @@
 """Monolithic戦略（全条件を一度に検証）"""
 
 import hashlib
+import re
 import time
 
-from dataclasses import dataclass
-from typing import Optional, Dict, Any, Mapping, Set
+from dataclasses import dataclass, field, replace
+from typing import Optional, Dict, Any, Mapping, Set, Tuple
 
 from ...model import FunctionReturnAnalysis
+from ...model.structural import condition_key, expression_provenance_key
 from ...smt import ParallelResult
 from ..formula.symbol_replace import build_symbol_replacer
 from ..formula.returns import ReturnWidthMismatchError
 from ..normalize import NormalizationSettings
 from ..param_semantics import infer_parameter_semantics
 from ..semantic_width import align_return_value_extension_surfaces, normalize_analysis_semantic_width
+from ..return_width_pipeline import (
+    prepare_function_return_widths,
+    prepare_pair_return_observation,
+    return_coverage_artifact_ids,
+)
 from ..unknown_reason import UnknownReasonId, make_unknown_reason
 from .base import CheckStrategy, StrategyResult
 from .pairwise_query_builder import extract_return_cases
@@ -24,10 +31,83 @@ from .pairwise_query_executor import (
 
 
 @dataclass(frozen=True)
+class _MonolithicReturnWidthQueryBundle:
+    canonical_width: int
+    observations_by_pair: Tuple[Tuple[str, Any], ...]
+    left_case_identities: Tuple[Tuple[Any, ...], ...]
+    right_case_identities: Tuple[Tuple[Any, ...], ...]
+    ordered_receipt_digests: Tuple[str, ...]
+    ordered_markers: Tuple[str, ...]
+    view_digest: str
+    binding_digest: str
+    production_query_digest: str = ""
+    production_query_text: str = field(default="", repr=False, compare=False)
+
+    @property
+    def bundle_digest(self) -> str:
+        return hashlib.sha256(repr((
+            "monolithic_return_width_query_bundle_v1",
+            self.canonical_width,
+            tuple(pair_id for pair_id, _ in self.observations_by_pair),
+            self.left_case_identities,
+            self.right_case_identities,
+            self.ordered_receipt_digests,
+            self.ordered_markers,
+            self.view_digest,
+            self.binding_digest,
+            self.production_query_digest,
+        )).encode("utf-8")).hexdigest()
+
+    def bind_query(self, query: str) -> "_MonolithicReturnWidthQueryBundle":
+        query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        markers = tuple(re.findall(
+            r"^; canonical_return_width_binding_receipt [0-9a-f]{64}$",
+            query,
+            flags=re.MULTILINE,
+        ))
+        if markers != self.ordered_markers:
+            raise ValueError("monolithic_canonical_binding_receipt_order_mismatch")
+        return replace(
+            self,
+            production_query_digest=query_digest,
+            production_query_text=query,
+        )
+
+    def validate(self) -> bool:
+        return bool(
+            self.production_query_text
+            and len(self.production_query_digest) == 64
+            and hashlib.sha256(
+                self.production_query_text.encode("utf-8")
+            ).hexdigest() == self.production_query_digest
+            and tuple(re.findall(
+                r"^; canonical_return_width_binding_receipt [0-9a-f]{64}$",
+                self.production_query_text,
+                flags=re.MULTILINE,
+            )) == self.ordered_markers
+            and tuple(
+                observation.binding_receipt.binding_digest
+                for _, observation in self.observations_by_pair
+            ) == self.ordered_receipt_digests
+        )
+
+
+def _monolithic_case_identity(case: Any) -> Tuple[Any, ...]:
+    return (
+        "monolithic_return_case_v1",
+        int(getattr(case, "index", -1)),
+        tuple(int(item) for item in tuple(getattr(case, "source_indices", ()) or ())),
+        tuple(expression_provenance_key(getattr(case, "value_expr", None))),
+        tuple(condition_key(item) for item in tuple(getattr(case, "conditions", ()) or ())),
+    )
+
+
+@dataclass(frozen=True)
 class _MonolithicDecisionExecutionContext:
     decision_surface: str
     analysis_object_ids: tuple[int, int]
     prepared_surface_digest: Optional[str] = None
+    return_width_query_bundle: Optional[_MonolithicReturnWidthQueryBundle] = None
 
     @classmethod
     def create(
@@ -62,6 +142,14 @@ class _MonolithicDecisionExecutionContext:
     def uses_prepared_surface(self) -> bool:
         return self.decision_surface == "prepared"
 
+    def with_return_width_query_bundle(
+        self,
+        bundle: _MonolithicReturnWidthQueryBundle,
+    ) -> "_MonolithicDecisionExecutionContext":
+        if not bundle.validate():
+            raise ValueError("monolithic_return_width_query_bundle_invalid")
+        return replace(self, return_width_query_bundle=bundle)
+
 
 class MonolithicStrategy(CheckStrategy):
     """Monolithic戦略（全条件を一度に検証）"""
@@ -81,6 +169,128 @@ class MonolithicStrategy(CheckStrategy):
             enable_completed_recovery_proofs=enable_completed_recovery_proofs,
         )
         self.normalization_settings = normalization_settings or NormalizationSettings.safe()
+
+    def _canonical_return_width_observation_for_analyses(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ):
+        runtime = getattr(self, "_obligation_runtime_session", None)
+        cases1 = extract_return_cases(analysis1, self.normalization_settings)
+        cases2 = extract_return_cases(analysis2, self.normalization_settings)
+        if not cases1 or not cases2:
+            return None
+        prepared1 = prepare_function_return_widths(analysis1, cases1)
+        prepared2 = prepare_function_return_widths(analysis2, cases2)
+        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        replace1 = build_symbol_replacer(
+            base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
+        )
+        replace2 = build_symbol_replacer(
+            base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp"
+        )
+        from .proof_gates.return_coverage import (
+            prepare_unary_return_coverage_for_width,
+        )
+        prepare_unary_return_coverage_for_width(
+            self,
+            base_ctx,
+            analysis1,
+            analysis2,
+            replace1,
+            replace2,
+        )
+        coverage_ids = return_coverage_artifact_ids(
+            runtime,
+            (
+                tuple(analysis1.outcome_function_identity()),
+                tuple(analysis2.outcome_function_identity()),
+            ),
+        )
+        if not coverage_ids:
+            return None
+        observations = []
+        for left_index, left in enumerate(cases1):
+            for right_index, right in enumerate(cases2):
+                observations.append((
+                    f"({left_index},{right_index})",
+                    prepare_pair_return_observation(
+                analysis1,
+                analysis2,
+                left,
+                right,
+                prepared1,
+                prepared2,
+                return_coverage_ids=coverage_ids,
+                proof_runtime=runtime,
+                left_query_parameters=base_ctx["params1"],
+                right_query_parameters=base_ctx["params2"],
+                left_replace_fn=replace1,
+                right_replace_fn=replace2,
+                    ),
+                ))
+        if not observations or not all(item.proven for _, item in observations):
+            return None
+        widths = {item.view.canonical_comparison_width for _, item in observations}
+        if len(widths) != 1:
+            return None
+        view_digest = hashlib.sha256(
+            repr(tuple(item.view.digest for _, item in observations)).encode("utf-8")
+        ).hexdigest()
+        binding_digest = hashlib.sha256(
+            repr(tuple(item.binding_receipt.binding_digest for _, item in observations)).encode("utf-8")
+        ).hexdigest()
+        markers = tuple(
+            f"; canonical_return_width_binding_receipt {item.binding_receipt.binding_digest}"
+            for _, item in observations
+        )
+        return _MonolithicReturnWidthQueryBundle(
+            canonical_width=next(iter(widths)),
+            observations_by_pair=tuple(observations),
+            left_case_identities=tuple(_monolithic_case_identity(item) for item in cases1),
+            right_case_identities=tuple(_monolithic_case_identity(item) for item in cases2),
+            ordered_receipt_digests=tuple(
+                item.binding_receipt.binding_digest for _, item in observations
+            ),
+            ordered_markers=markers,
+            view_digest=view_digest,
+            binding_digest=binding_digest,
+        )
+
+    def _bind_original_canonical_return_width_replay_observations(
+        self,
+        decision_context: _MonolithicDecisionExecutionContext,
+        base_ctx: Dict[str, Any],
+        cases1,
+        cases2,
+    ) -> bool:
+        """Reuse the exact receipt bundle consumed by the production query."""
+
+        if int(base_ctx.get("return_size1", 32)) == int(base_ctx.get("return_size2", 32)):
+            return True
+        bundle = decision_context.return_width_query_bundle
+        if bundle is None or not bundle.validate():
+            return False
+        if (
+            tuple(_monolithic_case_identity(item) for item in cases1)
+            != bundle.left_case_identities
+            or tuple(_monolithic_case_identity(item) for item in cases2)
+            != bundle.right_case_identities
+        ):
+            return False
+        base_ctx["return_width_observations_by_pair"] = dict(
+            bundle.observations_by_pair
+        )
+        base_ctx["canonical_return_replay_authorization"] = {
+            "bundle_digest": bundle.bundle_digest,
+            "production_query_digest": bundle.production_query_digest,
+            "ordered_receipt_digests": bundle.ordered_receipt_digests,
+            "binding_projection_order": tuple(
+                pair_id for pair_id, _ in bundle.observations_by_pair
+            ),
+        }
+        base_ctx["require_original_canonical_return_query_bundle"] = True
+        return bool(bundle.observations_by_pair)
 
     def _counterexample_is_decisive_across_case_split(
         self,
@@ -118,14 +328,6 @@ class MonolithicStrategy(CheckStrategy):
             decision_context,
         )
         base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
-        bridge_narrow_bits = self._completed_return_width_bridge_narrow_bits_for_sizes(
-            analysis1,
-            analysis2,
-            base_ctx.get("return_size1"),
-            base_ctx.get("return_size2"),
-        )
-        if bridge_narrow_bits is not None:
-            base_ctx["return_width_bridge_narrow_bits"] = bridge_narrow_bits
         self._last_counterexample_replay_fixed_model_assertion_count = (
             count_counterexample_model_assertions(base_ctx, counterexample_raw)
         )
@@ -161,6 +363,17 @@ class MonolithicStrategy(CheckStrategy):
             base_ctx.get("extra_vars2", []),
             float_mode="fp",
         )
+        if not self._bind_original_canonical_return_width_replay_observations(
+            decision_context,
+            base_ctx,
+            cases1,
+            cases2,
+        ):
+            self._debug_print(
+                "Monolithic SAT counterexample rejected: canonical return-width receipt "
+                "is not applicable to the replay cases"
+            )
+            return False
         return validate_counterexample_globally(
             self,
             base_ctx,
@@ -189,28 +402,6 @@ class MonolithicStrategy(CheckStrategy):
                 decision_context,
             )
         return validator(analysis1, analysis2, counterexample_raw)
-
-    def _completed_return_width_bridge_narrow_bits_for_sizes(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-        return_size1,
-        return_size2,
-    ) -> Optional[int]:
-        try:
-            mismatch = ReturnWidthMismatchError(
-                "validation return width mismatch",
-                return_size1=int(return_size1),
-                return_size2=int(return_size2),
-            )
-        except (TypeError, ValueError):
-            return None
-        return self._completed_return_width_bridge_narrow_bits_for_monolithic(
-            analysis1,
-            analysis2,
-            mismatch,
-        )
-
     def _build_validation_analyses(
         self,
         analysis1: FunctionReturnAnalysis,
@@ -363,12 +554,28 @@ class MonolithicStrategy(CheckStrategy):
         )
         call_projection_assertions = ()
         call_projection_binding_ids = ()
+        call_width_receipt_digests = ()
+        call_width_receipt_assertion_digests = ()
+        canonical_width_observation = None
         if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
+            call_base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+            call_replace1 = build_symbol_replacer(
+                call_base_ctx["params1"],
+                call_base_ctx.get("extra_vars1", []),
+                float_mode="fp",
+            )
+            call_replace2 = build_symbol_replacer(
+                call_base_ctx["params2"],
+                call_base_ctx.get("extra_vars2", []),
+                float_mode="fp",
+            )
             lowered_call_projection = lower_call_projection_for_case_pair(
                 dispatch_frame,
                 analysis1,
                 analysis2,
                 pair_id="monolithic",
+                render_fn1=call_replace1,
+                render_fn2=call_replace2,
             )
             if lowered_call_projection.status != "proven":
                 return StrategyResult(
@@ -388,6 +595,12 @@ class MonolithicStrategy(CheckStrategy):
                 )
             call_projection_assertions = lowered_call_projection.assertions
             call_projection_binding_ids = lowered_call_projection.binding_ids
+            call_width_receipt_digests = (
+                lowered_call_projection.return_width_receipt_digests
+            )
+            call_width_receipt_assertion_digests = (
+                lowered_call_projection.return_width_receipt_assertion_digests
+            )
         
         try:
             # SMT式を構築
@@ -401,12 +614,15 @@ class MonolithicStrategy(CheckStrategy):
                     **build_kwargs,
                 )
             except ReturnWidthMismatchError as width_mismatch:
-                bridge_narrow_bits = (
-                    self._completed_return_width_bridge_narrow_bits_for_monolithic(
-                        analysis1,
-                        analysis2,
-                        width_mismatch,
+                canonical_width_observation = (
+                    self._canonical_return_width_observation_for_analyses(
+                        analysis1, analysis2
                     )
+                )
+                bridge_narrow_bits = (
+                    canonical_width_observation.canonical_width
+                    if canonical_width_observation is not None
+                    else None
                 )
                 if bridge_narrow_bits is None:
                     raise
@@ -415,13 +631,28 @@ class MonolithicStrategy(CheckStrategy):
                     f"proofs at {bridge_narrow_bits} bits"
                 )
                 bridge_build_kwargs = dict(build_kwargs)
-                bridge_build_kwargs["return_width_bridge_narrow_bits"] = bridge_narrow_bits
+                bridge_build_kwargs["canonical_return_observation_width"] = bridge_narrow_bits
+                bridge_build_kwargs["extra_assertions"] = list(
+                    bridge_build_kwargs.get("extra_assertions", ())
+                ) + list(canonical_width_observation.ordered_markers)
                 result = self.formula_builder.build_equivalence_formula_extended(
                     analysis1,
                     analysis2,
                     **bridge_build_kwargs,
                 )
+                if not all(
+                    marker in result.formula
+                    for marker in canonical_width_observation.ordered_markers
+                ):
+                    raise ValueError("monolithic_canonical_binding_receipt_not_consumed")
             smt_formula = result.formula
+            if canonical_width_observation is not None:
+                canonical_width_observation = canonical_width_observation.bind_query(
+                    smt_formula
+                )
+                decision_context = decision_context.with_return_width_query_bundle(
+                    canonical_width_observation
+                )
             return_var1 = result.return_var1
             return_var2 = result.return_var2
             constrained_fragments = result.constrained_fragments
@@ -638,6 +869,27 @@ class MonolithicStrategy(CheckStrategy):
                             proof_kind="monolithic_solver_query",
                             projection_binding_ids=actual_call_projection_binding_ids,
                             formula_text=smt_formula,
+                            return_width_observation_view_digest=(
+                                canonical_width_observation.view_digest
+                                if canonical_width_observation is not None
+                                else ""
+                            ),
+                            return_width_binding_receipt_digest=(
+                                canonical_width_observation.binding_digest
+                                if canonical_width_observation is not None
+                                else ""
+                            ),
+                            call_site_return_width_receipt_digests=(
+                                call_width_receipt_digests
+                            ),
+                            call_site_return_width_receipt_assertion_digests=(
+                                call_width_receipt_assertion_digests
+                            ),
+                            canonical_return_width_receipt_digests=(
+                                canonical_width_observation.ordered_receipt_digests
+                                if canonical_width_observation is not None
+                                else ()
+                            ),
                         ),
                     ),
                     consumed_projection_binding_ids=actual_call_projection_binding_ids,
@@ -668,10 +920,12 @@ class MonolithicStrategy(CheckStrategy):
                         reason_id,
                         stage="S_MONOLITHIC_FALLBACK",
                         evidence_refs=(str(e),),
-                        object_target_key=self._return_width_bridge_object_target_key(
-                            analysis1=analysis1,
-                            analysis2=analysis2,
-                            mismatch=e,
+                        object_target_key=(
+                            "canonical_return_observation",
+                            tuple(analysis1.outcome_function_identity()),
+                            tuple(analysis2.outcome_function_identity()),
+                            getattr(e, "return_size1", None),
+                            getattr(e, "return_size2", None),
                         ),
                         detail=str(e),
                     )
@@ -724,136 +978,6 @@ class MonolithicStrategy(CheckStrategy):
                     )
                 ],
             )
-
-    def _completed_return_width_bridge_narrow_bits_for_monolithic(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-        mismatch: ReturnWidthMismatchError,
-    ) -> Optional[int]:
-        try:
-            return_size1 = int(getattr(mismatch, "return_size1"))
-            return_size2 = int(getattr(mismatch, "return_size2"))
-        except (TypeError, ValueError):
-            return None
-        if return_size1 <= 0 or return_size2 <= 0 or return_size1 == return_size2:
-            return None
-
-        narrow_bits = min(return_size1, return_size2)
-        if return_size1 > return_size2:
-            wide_side_label = "left"
-            wide_analysis = analysis1
-        else:
-            wide_side_label = "right"
-            wide_analysis = analysis2
-        expected_widths = (return_size1, return_size2)
-
-        required_wide_members = self._monolithic_return_case_members_for_bridge(
-            wide_analysis,
-        )
-        if not required_wide_members:
-            return None
-
-        completed_targets = self._completed_return_width_bridge_targets_by_slot(
-            analysis1,
-            analysis2,
-        )
-        covered_wide_members: Set[tuple] = set()
-        for target, slot_evidence in completed_targets.items():
-            if set(slot_evidence) != {"abi_relation", "high_bit_relation"}:
-                continue
-            if self._return_width_bridge_target_widths(target) != expected_widths:
-                continue
-            if self._return_width_bridge_target_narrow_width(target) != narrow_bits:
-                continue
-            wide_side = self._return_width_bridge_find_side(target, wide_side_label)
-            if wide_side is None:
-                continue
-            if (
-                self._return_width_bridge_find_tagged_entry(wide_side, "function_ref")
-                != self._analysis_entry_key(wide_analysis)
-            ):
-                continue
-            if (
-                self._return_width_bridge_find_tagged_entry(wide_side, "return_storage")
-                != self._return_storage_object_key(wide_analysis)
-            ):
-                continue
-            member = self._return_width_bridge_find_tagged_entry(
-                wide_side,
-                "return_case_partition_member",
-            )
-            if member in required_wide_members:
-                covered_wide_members.add(member)
-            high_bit_evidence = slot_evidence.get("high_bit_relation")
-            if (
-                self._evidence_text(high_bit_evidence, "discharge_proof_kind")
-                == "semantic_return_width_narrowing_proof"
-            ):
-                profile = self._evidence_get(
-                    self._evidence_get(high_bit_evidence, "proof_content") or {},
-                    "wide_surface_profile",
-                )
-                semantic_members = self._normalize_nested_tuple(
-                    self._evidence_get(profile or {}, "required_wide_members")
-                )
-                if isinstance(semantic_members, tuple):
-                    covered_wide_members.update(
-                        member
-                        for member in semantic_members
-                        if member in required_wide_members
-                    )
-
-        if required_wide_members.issubset(covered_wide_members):
-            return narrow_bits
-        return None
-
-    def _monolithic_return_case_members_for_bridge(
-        self,
-        analysis: FunctionReturnAnalysis,
-    ) -> Set[tuple]:
-        try:
-            cases = extract_return_cases(analysis, self.normalization_settings)
-        except Exception:
-            return set()
-        members: Set[tuple] = set()
-        for case in cases:
-            return_info = getattr(case, "return_info", None)
-            member = self._return_case_partition_member_object_key(case, return_info)
-            if member is not None:
-                members.add(self._normalize_nested_tuple(member))
-        return members
-
-    def _completed_return_width_bridge_targets_by_slot(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-    ) -> Dict[tuple, Dict[str, Mapping[str, object]]]:
-        completed: Dict[tuple, Dict[str, Mapping[str, object]]] = {}
-        for evidence in self._completed_recovery_proof_evidence(analysis1, analysis2):
-            if self._return_width_bridge_slot_id_from_evidence(evidence) is None:
-                continue
-            if not self._return_width_bridge_slot_evidence_matches_current_analyses(
-                evidence,
-                analysis1,
-                analysis2,
-            ):
-                continue
-            target = self._normalize_nested_tuple(
-                self._evidence_get(evidence, "object_target_key")
-            )
-            if not self._return_width_bridge_target_is_specific(target):
-                continue
-            slot_stage = self._evidence_text(evidence, "slot_stage") or self._evidence_text(
-                evidence,
-                "proof_stage",
-            )
-            if slot_stage not in {"abi_relation", "high_bit_relation"}:
-                continue
-            completed.setdefault(target, {})[slot_stage] = evidence
-        return completed
-
-
 from ..call_effect_preflight import _register_builtin_receipt_executor
 
 _register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)

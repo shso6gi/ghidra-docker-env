@@ -42,10 +42,6 @@ def _impl__recovery_proof_is_complete(
         reason_record,
         analysis1,
         analysis2,
-    ) or self._return_width_bridge_proof_is_complete(
-        reason_record,
-        analysis1,
-        analysis2,
     ) or self._readonly_identity_proof_is_complete(
         reason_record,
         analysis1,
@@ -135,10 +131,6 @@ def _impl__produced_recovery_proof_ids(
             proof_ids.append(proof_id)
     for evidence in evidence_records:
         proof_id = cls._sat_unsafety_resolution_proof_id_from_evidence(evidence)
-        if proof_id is not None:
-            proof_ids.append(proof_id)
-    for evidence in evidence_records:
-        proof_id = cls._return_width_bridge_proof_id_from_evidence(evidence)
         if proof_id is not None:
             proof_ids.append(proof_id)
     for evidence in evidence_records:

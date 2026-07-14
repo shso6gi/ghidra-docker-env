@@ -1,0 +1,288 @@
+{
+  "manifest_kind": "return_width_canonicalization_current_head",
+  "schema_version": 3,
+  "generated_at": "2026-07-14T13:52:20+09:00",
+  "base_head": "e41e8fe533ce20a1fcf254644183e119b4c5a607",
+  "worktree_state": "uncommitted_review_worktree",
+  "scope": {
+    "included": [
+      "top_level_return",
+      "call_site_return",
+      "pairwise_query",
+      "monolithic_query",
+      "counterexample_replay",
+      "reason_completion_applicability"
+    ],
+    "excluded": ["cate1"],
+    "scope_note": "fc_apply_indirect is retained as frozen before evidence only; no cate1 current run was executed"
+  },
+  "cutover": {
+    "production_gate": "removed_after_single_path_cutover",
+    "legacy_pair_width_query_path_present": false,
+    "legacy_pair_width_proof_gate_present": false,
+    "legacy_width_bridge_queries_observed": 0
+  },
+  "unit_validation": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit",
+    "collected": 3286,
+    "passed": 3255,
+    "skipped": 31,
+    "failed": 0,
+    "elapsed_seconds": 481.47
+  },
+  "p1_closure": {
+    "call_site_final_assertion_binding": {
+      "status": "implemented",
+      "receipt_fields": [
+        "raw terms",
+        "projection direction",
+        "wide side",
+        "projection ranges",
+        "projected terms",
+        "assertion text",
+        "assertion sha256"
+      ],
+      "query_execution_validation": "receipt-carried expected assertion sha256 must match both the marker and the immediately following assertion",
+      "negative_tests": [
+        "wide side reversal",
+        "projection high-bit range mutation",
+        "assertion term replacement",
+        "assertion and marker digest replacement"
+      ]
+    },
+    "monolithic_original_receipt_replay": {
+      "status": "implemented",
+      "bundle_fields": [
+        "original PreparedPairReturnObservation objects",
+        "ordered receipt digests",
+        "ordered binding markers",
+        "left and right case identities",
+        "production query sha256",
+        "production query text"
+      ],
+      "replay_authorization": [
+        "bundle digest",
+        "production query sha256",
+        "binding and projection order",
+        "exact model assertions sha256"
+      ],
+      "reconstruction_policy": "no receipt reconstruction on the decisive replay path"
+    }
+  },
+  "before_after": [
+    {
+      "sample": "function_call/fc_apply_indirect",
+      "pair": "B10_B13",
+      "role": "frozen historical return_width_bridge_missing representative",
+      "before": {
+        "head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
+        "result": "UNKNOWN",
+        "return_width_bridge_missing_occurrences": 2,
+        "affected_case_pairs": ["(0,0)", "(1,1)"],
+        "reason_tuple": {
+          "reason_id": "return_width_bridge_missing",
+          "decision_effect": "blocks_equivalence",
+          "reason_scope": "query",
+          "recovery_proof_kind": "abi_relation_high_bit_proof"
+        },
+        "log": "artifacts/baselines/observed-v0@0a53352/raw/logs/function_call/fc_apply_indirect/fc_apply_indirect_B10_B13.log",
+        "log_sha256": "df782bf0a48e58ff692db4bdd675862151a8edab6f07e107e8511cae16319608"
+      },
+      "current": {
+        "status": "not_run_scope_excluded",
+        "evidence_substitute": "call-site final assertion and replay negative tests"
+      }
+    },
+    {
+      "sample": "EqBench/REVE/triangularMod/Eq/newV/tr",
+      "pair": "B9_B10",
+      "role": "legacy bridge migration and high-bit near miss",
+      "before": {
+        "result": "EQUIVALENT",
+        "legacy_query_marker": "Return width bridge narrow value inequality",
+        "log": "logs/EqBench/all_eq_matrix_current/REVE/triangularMod/Eq/newV/tr/tr_B9_B10.log",
+        "log_sha256": "267ebee095d7dfeb88c30f73d4340f306f37be9593151e44047c06b8aa79b2fc"
+      },
+      "current": {
+        "result": "EQUIVALENT",
+        "recovery_phase": "P4A_MIPS64_ABI",
+        "width_target_count": 2,
+        "width_seed_complete_count": 2,
+        "width_observation_proven": 1,
+        "width_binding_receipts": 1,
+        "pair_width_projection_queries": 1,
+        "width_canonical_consumer_queries": 1,
+        "legacy_width_bridge_queries": 0,
+        "soundness_interpretation": "the unsupported legacy EQ first failed closed; after source observation provenance and exact object/query input correspondence survived retry, the canonical projected query independently proved UNSAT",
+        "log": "runs/triangularMod_tr_B9_B10_recovery.log",
+        "log_sha256": "6b005668edaf00d35a4c4ec6e42feb96d432c77aeead7a88325402029d4741b6",
+        "result_artifact": "triangularMod_tr_B9_B10_result.json",
+        "result_artifact_sha256": "73a7d34d8a2a9a7a38ed61b70a4877663a321b38f7a9e0f42f3d3767af40a5a4"
+      }
+    },
+    {
+      "sample": "EqBench/bess/SIGN/Eq/newV/snippet",
+      "pair": "B4_B16",
+      "role": "legacy bridge removal with preserved EQ",
+      "before": {
+        "result": "EQUIVALENT",
+        "legacy_query_marker": "Return width bridge narrow value inequality",
+        "log": "logs/EqBench/all_eq_matrix_current/bess/SIGN/Eq/newV/snippet/snippet_B4_B16.log",
+        "log_sha256": "ba6739e27f4a6911a2d83640fcb613a058847b95c86c35816da8e9b670f85ad5"
+      },
+      "current": {
+        "result": "EQUIVALENT",
+        "legacy_width_bridge_queries": 0,
+        "pair_width_projection_queries": 0,
+        "interpretation": "the current normalized surface proves EQ without invoking either the deleted legacy bridge or a width projection query",
+        "log": "runs/SIGN_snippet_B4_B16.log",
+        "log_sha256": "e138f57e4d3582f88e1085d4a5ee661f6680cb355190e89fdb3d72392ef5eabc"
+      }
+    }
+  ],
+  "eqbench_current_head": [
+    {
+      "sample": "REVE/triangularMod/Eq/newV/tr",
+      "pair": "B9_B10",
+      "result": "UNKNOWN",
+      "mode": "recovery_phases_disabled",
+      "width_target_count": 2,
+      "width_seed_complete_count": 2,
+      "width_binding_blocked": 1,
+      "pair_width_projection_queries": 0,
+      "legacy_width_bridge_queries": 0,
+      "interpretation": "fail-closed before validated input correspondence is available",
+      "log": "runs/triangularMod_tr_B9_B10.log",
+      "log_sha256": "c67ec4dc824a3a8f6f699931333f7e7c9fd939bfa270a72bb8186df7733b3a0f"
+    },
+    {
+      "sample": "REVE/triangularMod/Eq/newV/tr",
+      "pair": "B9_B10",
+      "result": "EQUIVALENT",
+      "mode": "recovery_phases_enabled",
+      "pairwise_total": 1,
+      "pairwise_unsat": 1,
+      "width_target_count": 2,
+      "width_observation_proven": 1,
+      "width_binding_receipts": 1,
+      "pair_width_projection_queries": 1,
+      "width_canonical_consumer_queries": 1,
+      "legacy_width_bridge_queries": 0,
+      "interpretation": "canonical projected assertion was executed and proved UNSAT",
+      "log": "runs/triangularMod_tr_B9_B10_recovery.log",
+      "log_sha256": "6b005668edaf00d35a4c4ec6e42feb96d432c77aeead7a88325402029d4741b6"
+    },
+    {
+      "sample": "bess/SIGN/Eq/newV/snippet",
+      "pair": "B4_B16",
+      "result": "EQUIVALENT",
+      "pair_width_projection_queries": 0,
+      "legacy_width_bridge_queries": 0,
+      "interpretation": "legacy-bridge historical EQ remains EQ without either width path",
+      "log": "runs/SIGN_snippet_B4_B16.log",
+      "log_sha256": "e138f57e4d3582f88e1085d4a5ee661f6680cb355190e89fdb3d72392ef5eabc"
+    },
+    {
+      "sample": "REVE/limit2/Eq/newV/f",
+      "pair": "B6_B8",
+      "result": "UNKNOWN",
+      "pairwise_total": 30,
+      "pairwise_unsat": 20,
+      "pairwise_unknown": 10,
+      "legacy_width_bridge_queries": 0,
+      "interpretation": "representative fail-closed multi-case width analysis",
+      "log": "runs/limit2_f_B6_B8.log",
+      "log_sha256": "cc957e5faa40fe9c5c1b0691a3b3e7eaf08aee07224fa2bb1ad7ebbffa82a657"
+    }
+  ],
+  "root_blocker_census": {
+    "sample": "EqBench/REVE/triangularMod/Eq/newV/tr B9_B10 current",
+    "active_root_blocker_count": 1,
+    "required_unique_proof_count": 2,
+    "root": {
+      "cause_kind": "return_width_bridge_missing",
+      "identity_scope": "relational",
+      "affected_unknown_result_count": 1,
+      "affected_case_pair_count": 0,
+      "required_proof_count": 2
+    },
+    "typed_cause_coverage": 1.0,
+    "artifact": "root_blocker_census.json",
+    "artifact_sha256": "31ffea2d1b9999320cb243bd56415008050a539f9f68251fc17436614a20a9d7"
+  },
+  "canonical_query_execution_evidence": {
+    "top_level": {
+      "status": "eqbench_activation_executed",
+      "test": "test_canonical_query_and_replay_consume_exact_binding_receipt",
+      "negative_binding_order_test": true,
+      "eqbench_width_mismatch_status": "canonical_projection_query_unsat",
+      "sample": "REVE/triangularMod/tr B9_B10",
+      "query_execution_receipt": "query_execution_receipt.json",
+      "query_execution_receipt_sha256": "012545f98044b399fa0dba68159187eb9f5feeda0b4f79715c93c72b08fcfcba",
+      "stats_breakdown": "stats_breakdown.json",
+      "stats_breakdown_sha256": "eb1ab23a5787c367c79fc7127ed39aed2c78e27891446991f69a9c470413de12"
+    },
+    "call_site": {
+      "status": "unit_integration_executed",
+      "tests": [
+        "test_call_site_receipt_requires_exact_return_proof_and_width_contract",
+        "test_query_execution_record_rejects_call_site_assertion_or_projection_mutation"
+      ]
+    },
+    "monolithic_replay": {
+      "status": "unit_integration_executed",
+      "test": "test_monolithic_replay_reuses_original_query_bundle_and_fails_closed"
+    },
+    "eqbench_activation_audit": {
+      "status": "safe_activation_witness_observed",
+      "interpretation": "the same pair fails closed without input correspondence evidence and executes exactly one canonical projection query after the validated MIPS64 parameter-width recovery",
+      "samples": [
+        {
+          "sample": "REVE/triangularMod/tr",
+          "pair": "B9_B10 no-retry",
+          "result": "UNKNOWN",
+          "blocker": "nontrivial_parameter_binding_proof",
+          "pair_width_projection_queries": 0,
+          "log": "runs/triangularMod_tr_B9_B10.log",
+          "log_sha256": "c67ec4dc824a3a8f6f699931333f7e7c9fd939bfa270a72bb8186df7733b3a0f"
+        },
+        {
+          "sample": "REVE/triangularMod/tr",
+          "pair": "B9_B10 recovery",
+          "result": "EQUIVALENT",
+          "pair_width_projection_queries": 1,
+          "width_binding_receipts": 1,
+          "legacy_width_bridge_queries": 0,
+          "log": "runs/triangularMod_tr_B9_B10_recovery.log",
+          "log_sha256": "6b005668edaf00d35a4c4ec6e42feb96d432c77aeead7a88325402029d4741b6"
+        }
+      ]
+    }
+  },
+  "code_identity": {
+    "tracked_patch_digest": "74479c1f57f557eea4e52e730399db9583046c9646d76577d3c0d2620fba4afb",
+    "files": {
+      "return_width_surface.py": "b02513a7062fc598c08b578a550f3d6c486500f3b119e1888b2caf05de017ae6",
+      "return_width_pipeline.py": "90541cb55b928cce856310a8d6d4673c86339494c7550179b3f70452a232f0bc",
+      "reanalysis.py": "00ea0c50802102321f4a81338616143968469e56730019830d8dcd2f9486d5b8",
+      "checker.py": "65469a1e0f4659df564cbcb5e5ba7f9eca86958ac8d0f869d0e635408d6525df",
+      "call_effect_preflight.py": "03c868d399867be9cffb988646db5b143afddeea81f0556849946cd8a1edc0de",
+      "monolithic.py": "669d93749a8b3282bc9c9449ebdf421021080423f5db014a9d3c0454222c8bcd"
+    }
+  },
+  "soundness_near_misses": [
+    "detached extension op",
+    "extension output is not the RETURN storage producer",
+    "wide side reversal",
+    "projection bit-range mutation",
+    "receipt assertion replacement",
+    "stale reason completion",
+    "query parameter substitution mismatch",
+    "monolithic replay receipt reconstruction",
+    "production query hash mismatch",
+    "replay case identity mismatch",
+    "opaque runtime DataType wrapper in parameter identity",
+    "source observation provenance lost across fresh reanalysis",
+    "nontrivial parameter binding with mismatched query widths"
+  ]
+}

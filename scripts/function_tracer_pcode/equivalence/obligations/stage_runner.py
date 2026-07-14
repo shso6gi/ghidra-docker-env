@@ -40,9 +40,6 @@ _RECOVERY_TO_GATE = {
     "return_coverage_completion": "return_coverage",
     "guard_partition_completion": "return_coverage",
     "return_partition_overlap_proof": "return_coverage",
-    "abi_relation_proof": "return_width",
-    "abi_relation_high_bit_proof": "return_width",
-    "high_bit_proof": "return_width",
     "call_effect_summary_proof": "call_effect",
     "effect_summary_completion": "call_effect",
     "loop_summary_completion": "loop_summary",
@@ -112,6 +109,7 @@ def run_obligation_branch_plan(
     stage_path: List[str] = []
     records: List[BranchExecutionRecord] = []
     last_call_effect_manifest = None
+    accumulated_pairwise_debug_stats: Dict[str, int] = {}
     by_id = {spec.stage_id.value: spec for spec in checker.stage_plan}
 
     def eligible(branch_id: str):
@@ -203,6 +201,13 @@ def run_obligation_branch_plan(
 
         stage_path.append(branch_id)
         result.stage_path = stage_path.copy()
+        current_debug_stats = dict(getattr(result, "pairwise_debug_stats", None) or {})
+        for key, value in current_debug_stats.items():
+            accumulated_pairwise_debug_stats[key] = (
+                accumulated_pairwise_debug_stats.get(key, 0) + int(value or 0)
+            )
+        if accumulated_pairwise_debug_stats:
+            result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
         if getattr(result, "call_effect_shadow_manifest", None) is not None:
             last_call_effect_manifest = result.call_effect_shadow_manifest
         elif last_call_effect_manifest is not None:
@@ -214,10 +219,6 @@ def run_obligation_branch_plan(
                     return FunctionProofOutcome.INCONCLUSIVE
                 if gate_kind == "return_coverage":
                     complete = active_strategy._return_coverage_proof_is_complete(
-                        reason, analysis1, analysis2
-                    )
-                elif gate_kind == "return_width":
-                    complete = active_strategy._return_width_bridge_proof_is_complete(
                         reason, analysis1, analysis2
                     )
                 elif gate_kind == "call_effect":

@@ -369,6 +369,9 @@ def rewrite_analysis_returns(
             return_value_pcode_op_refs=tuple(
                 getattr(ret_info, "return_value_pcode_op_refs", ()) or ()
             ),
+            return_value_flow_certificate=getattr(
+                ret_info, "return_value_flow_certificate", None
+            ),
         )
         new_returns.append(new_ret)
     

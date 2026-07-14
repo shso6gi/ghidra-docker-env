@@ -168,9 +168,9 @@ class ReturnAnalyzer:
         from .analyzer_services.return_extraction_1 import invoke as _invoke
         return _invoke('_return_value_producer_chain', varnode, max_depth=max_depth)
 
-    def _site_metadata_with_return_value_pcode_op_refs(self, site_metadata: Optional[Dict[str, Optional[object]]], *, return_varnode=None, producer_op=None) -> Dict[str, Optional[object]]:
+    def _site_metadata_with_return_value_pcode_op_refs(self, site_metadata: Optional[Dict[str, Optional[object]]], *, return_varnode=None, producer_op=None, tracer=None) -> Dict[str, Optional[object]]:
         from .analyzer_services.return_extraction_1 import invoke as _invoke
-        return _invoke('_site_metadata_with_return_value_pcode_op_refs', self, site_metadata, return_varnode=return_varnode, producer_op=producer_op)
+        return _invoke('_site_metadata_with_return_value_pcode_op_refs', self, site_metadata, return_varnode=return_varnode, producer_op=producer_op, tracer=tracer)
 
     def _make_return_info(self, *, address: str, value: Expression, conditions: List[Condition], branch_index: Optional[int]=None, site_metadata: Optional[Dict[str, Optional[object]]]=None) -> ReturnInfo:
         from .analyzer_services.return_extraction_1 import invoke as _invoke

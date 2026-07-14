@@ -2568,7 +2568,7 @@ def test_typed_call_to_region_proves_signed_return_observation_width_bridge():
         "proven",
         "proven",
     ]
-    payload = production.artifacts[-1].precondition_payload["return_width_bridge"]
+    payload = production.artifacts[-1].precondition_payload["return_width_relation"]
     assert payload == {
         "narrow_bits": 32,
         "wide_bits": 64,

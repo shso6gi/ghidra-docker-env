@@ -364,7 +364,7 @@ def summarize_root_blockers(
 
     for payload, stable, provenance in entries:
         final_unknown = _is_final_unknown(payload)
-        occurrences, transitions, completions = _extract_occurrences(payload)
+        occurrences, transitions, completions, reason_completions = _extract_occurrences(payload)
         transition_target_count += len(
             {
                 _freeze(item.get("target_occurrence_id"))
@@ -387,7 +387,13 @@ def summarize_root_blockers(
                 and _freeze(item.get("cause_ref")) in proof_completion_ids
             }
         )
-        transition_state = _resolve_transitions(occurrences, transitions, completions, diagnostics)
+        transition_state = _resolve_transitions(
+            occurrences,
+            transitions,
+            completions,
+            diagnostics,
+            reason_completions=reason_completions,
+        )
         final_occurrence_ids = _final_attempt_occurrence_ids(payload, occurrences)
         for occurrence in occurrences:
             record = occurrence.get("reason_record") or {}
@@ -608,7 +614,12 @@ def _extract_occurrences(payload: Mapping[str, Any]):
                 "reason_record": reason,
                 "initial_causal_status": "unclassified",
             })
-    return occurrences, list(trace.get("causal_transitions") or ()), list(trace.get("proof_completion_events") or ())
+    return (
+        occurrences,
+        list(trace.get("causal_transitions") or ()),
+        list(trace.get("proof_completion_events") or ()),
+        list(trace.get("reason_completion_events") or ()),
+    )
 
 
 def _final_attempt_occurrence_ids(payload, occurrences):
@@ -631,7 +642,14 @@ def _final_attempt_occurrence_ids(payload, occurrences):
     }
 
 
-def _resolve_transitions(occurrences, transitions, completions, diagnostics):
+def _resolve_transitions(
+    occurrences,
+    transitions,
+    completions,
+    diagnostics,
+    *,
+    reason_completions=(),
+):
     occurrence_by_id = {
         _freeze(item.get("occurrence_id")): item for item in occurrences
     }
@@ -646,6 +664,47 @@ def _resolve_transitions(occurrences, transitions, completions, diagnostics):
         )
     }
     result = {}
+    for completion in reason_completions:
+        if not isinstance(completion, Mapping):
+            continue
+        target = _freeze(completion.get("completed_occurrence_id"))
+        if str(completion.get("applicability_status")) != "APPLICABLE":
+            _inc(diagnostics, "inapplicable_reason_completion")
+            continue
+        if target not in occurrence_ids:
+            _inc(diagnostics, "dangling_reason_completion_target")
+            continue
+        record = occurrence_by_id[target].get("reason_record") or {}
+        expected_target = _freeze(record.get("object_target_key"))
+        observed_target = _freeze(completion.get("exact_target_id"))
+        expected_slots = {
+            str(item.get("proof_kind") or "")
+            for item in (record.get("proof_requirement_ids") or ())
+            if isinstance(item, Mapping)
+        }
+        observed_slot = str(
+            completion.get("exact_missing_fact_or_proof_slot") or ""
+        )
+        if (
+            (expected_target and expected_target != observed_target)
+            or (expected_slots and observed_slot not in expected_slots)
+            or not completion.get("source_snapshot_fingerprint")
+            or not completion.get("semantic_seed_or_premise_digest")
+            or not completion.get("evidence_or_artifact_digest")
+            or not completion.get("recognizing_stage")
+        ):
+            _inc(diagnostics, "invalid_reason_completion_applicability")
+            continue
+        completed_ordinal = _attempt_ordinal(completion.get("completed_at_attempt"))
+        target_ordinal = _attempt_ordinal(occurrence_by_id[target].get("attempt_identity"))
+        if (
+            completed_ordinal is None
+            or target_ordinal is None
+            or completed_ordinal <= target_ordinal
+        ):
+            _inc(diagnostics, "non_forward_reason_completion")
+            continue
+        result[target] = "discharged"
     seen = set()
     by_target = {}
     for transition in sorted(transitions, key=lambda item: repr(_freeze(item))):
@@ -672,25 +731,6 @@ def _resolve_transitions(occurrences, transitions, completions, diagnostics):
             continue
         if kind == "superseded" and cause_kind == "reason_occurrence":
             valid = cause_ref in occurrence_ids
-        elif kind == "discharged" and cause_kind == "proof_completion":
-            completion = proven_completions.get(cause_ref)
-            if completion is not None:
-                completion_ordinal = _attempt_ordinal(completion.get("completed_at_attempt"))
-                target_requirements = {
-                    _freeze(item)
-                    for item in (
-                        occurrence_by_id[target].get("reason_record", {}).get(
-                            "proof_requirement_ids"
-                        )
-                        or ()
-                    )
-                }
-                valid = (
-                    completion_ordinal is not None
-                    and completion_ordinal > target_ordinal
-                    and _freeze(completion.get("proof_requirement_id"))
-                    in target_requirements
-                )
         if not valid:
             _inc(diagnostics, "dangling_transition_cause")
             continue
@@ -700,6 +740,11 @@ def _resolve_transitions(occurrences, transitions, completions, diagnostics):
             _inc(diagnostics, "conflicting_causal_transitions")
             continue
         kind = next(iter(values))[0]
+        prior = result.get(target)
+        if prior is not None and prior != kind:
+            _inc(diagnostics, "conflicting_causal_transitions")
+            result.pop(target, None)
+            continue
         result[target] = kind
     supersession_edges = {
         target: next(iter(values))[2]

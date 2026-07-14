@@ -19,8 +19,7 @@ from ._shared import (
     StrategyResult,
     UnknownReasonId,
     are_structurally_equivalent,
-    build_return_width_bridge_high_bit_query,
-    build_return_width_bridge_narrow_query,
+    build_canonical_return_observation_query,
     expression_smt_bit_width,
     extract_return_cases,
     extract_upper_bound_facts,
@@ -330,7 +329,7 @@ def _impl__collect_unknown_expression_nodes_into(self, expr: Any, result: List[A
     for operand in getattr(expr, "operands", []) or []:
         self._collect_unknown_expression_nodes_into(operand, result)
 
-def _impl__solve_return_width_bridge_with_completed_proof(
+def _impl__solve_canonical_return_observation(
     self,
     base_ctx: Dict[str, Any],
     case1: ReturnCase,
@@ -339,331 +338,62 @@ def _impl__solve_return_width_bridge_with_completed_proof(
     param_replace_fn2,
     pair_id: str,
     *,
-    object_target_key: Tuple[Any, ...],
-    blocking_detail: str,
+    object_target_key: Optional[Tuple[Any, ...]] = None,
+    blocking_detail: str = "",
 ) -> Optional[QueryResult]:
-    self._last_return_width_bridge_pending_evidence = None
-    analysis1 = base_ctx.get("analysis1")
-    analysis2 = base_ctx.get("analysis2")
-    if analysis1 is None or analysis2 is None:
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=object_target_key,
-            subreason="analysis_context_unavailable",
-            detail="analysis context missing",
-            pair_id=pair_id,
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: analysis context missing"
-        )
-        return None
-    target = self._normalize_nested_tuple(object_target_key)
-    if not isinstance(target, tuple):
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=None,
-            subreason="object_target_unavailable",
-            detail="return-width bridge object target missing",
-            pair_id=pair_id,
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: object target missing"
-        )
-        return None
-    if not self._return_width_bridge_target_is_specific(target):
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="object_target_not_specific",
-            detail="return-width bridge object target is weak",
-            pair_id=pair_id,
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: weak object target"
-        )
-        return None
-    narrow_width = self._return_width_bridge_target_narrow_width(target)
-    if narrow_width is None:
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="target_member_profile_unavailable",
-            detail="narrow return width unavailable",
-            pair_id=pair_id,
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: narrow width unavailable"
-        )
-        return None
+    """Execute only a fully proven canonical return observation query."""
 
-    reason_record = make_unknown_reason(
-        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
-        stage="S_PAIRWISE",
-        pair_or_case=pair_id,
-        evidence_refs=("return-width-mismatch", blocking_detail),
-        object_target_key=target,
-        object_evidence=self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="proof_not_attempted",
-            detail=blocking_detail,
-            pair_id=pair_id,
-            narrow_width=narrow_width,
-        ),
-        detail=blocking_detail,
-    )
-    self._last_return_width_bridge_pending_evidence = None
-    narrow_query = build_return_width_bridge_narrow_query(
-        base_ctx,
-        case1,
-        case2,
-        param_replace_fn1,
-        param_replace_fn2,
+    self._last_canonical_return_width_pending_evidence = None
+    def block(subreason: str, detail: str) -> None:
+        self._last_canonical_return_width_pending_evidence = {
+            "reason_id": "return_width_bridge_missing",
+            "subreason": subreason,
+            "detail": detail,
+            "pair_id": pair_id,
+            "object_target_key": object_target_key,
+            "proof_system": "canonical_return_width_v1",
+        }
+    prepared = (base_ctx.get("return_width_observations_by_pair") or {}).get(pair_id)
+    if not getattr(prepared, "proven", False):
+        blockers = tuple(getattr(prepared, "blockers", ()) or ())
+        detail = "; ".join(
+            f"{item.blocker_kind}:{item.missing_slot}" for item in blockers
+        ) or "canonical return observation is unavailable"
+        block("canonical_observation_blocked", detail)
+        return None
+    try:
+        query = build_canonical_return_observation_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+            view=prepared.view,
+            receipt=prepared.binding_receipt,
+        )
+    except ValueError as exc:
+        block("canonical_binding_inapplicable", str(exc))
+        return None
+    stats = getattr(self, "_active_normalization_stats", None)
+    if stats is not None:
+        stats["pair_width_projection_queries"] = (
+            int(stats.get("pair_width_projection_queries", 0)) + 1
+        )
+        stats["width_canonical_consumer_queries"] = (
+            int(stats.get("width_canonical_consumer_queries", 0)) + 1
+        )
+    result = self._solve_query_internal(
+        query,
         pair_id,
-        target_bits=narrow_width,
-    )
-    proof_result = self._solve_query_internal(
-        narrow_query,
-        pair_id,
-        stage="return-width-bridge-narrow-ineq",
+        stage="canonical-return-observation-ineq",
         use_hard_timeout=True,
     )
-    if proof_result.is_equivalent is not True:
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="narrow_query_not_unsat",
-            detail="return-width bridge narrow query was not UNSAT",
-            pair_id=pair_id,
-            narrow_width=narrow_width,
-            query_stage="return-width-bridge-narrow-ineq",
-        )
-        self._debug_print(
-            "  Pair "
-            f"{pair_id} return-width bridge proof skipped: narrow query was not UNSAT"
-        )
-        return None
-    high_bit_query = build_return_width_bridge_high_bit_query(
-        base_ctx,
-        case1,
-        case2,
-        param_replace_fn1,
-        param_replace_fn2,
-        pair_id,
-        narrow_bits=narrow_width,
-        return_size1=base_ctx.get("return_size1", narrow_width),
-        return_size2=base_ctx.get("return_size2", narrow_width),
-    )
-    if high_bit_query is None:
-        if not self._return_width_bridge_has_summary_parameter_extension_evidence(target):
-            widths = self._return_width_bridge_target_widths(target)
-            wide_param_replace_fn = (
-                param_replace_fn1
-                if widths is not None and widths[0] > widths[1]
-                else param_replace_fn2
-            )
-            if self._record_completed_return_width_bridge_semantic_narrowing_proofs(
-                reason_record,
-                analysis1,
-                analysis2,
-                narrow_width=narrow_width,
-                base_ctx=base_ctx,
-                wide_param_replace_fn=wide_param_replace_fn,
-            ) and self._return_width_bridge_proof_is_complete(
-                reason_record,
-                analysis1,
-                analysis2,
-                base_ctx=base_ctx,
-                wide_param_replace_fn=wide_param_replace_fn,
-            ):
-                proof_result.last_query = narrow_query
-                proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-                self._debug_print(
-                    "  Pair "
-                    f"{pair_id}: return-width bridge completed by semantic return-width narrowing proof"
-                )
-                return proof_result
-            if self._record_completed_return_width_bridge_member_narrow_producer_proofs(
-                reason_record,
-                analysis1,
-                analysis2,
-                narrow_width=narrow_width,
-            ) and self._return_width_bridge_proof_is_complete(
-                reason_record,
-                analysis1,
-                analysis2,
-            ):
-                proof_result.last_query = narrow_query
-                proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-                self._debug_print(
-                    "  Pair "
-                    f"{pair_id}: return-width bridge completed by target member narrow producer proof"
-                )
-                return proof_result
-            if getattr(self, "_last_return_width_bridge_pending_evidence", None) is None:
-                self._set_return_width_bridge_pending_evidence(
-                    object_target_key=target,
-                    subreason="high_bit_query_unavailable",
-                    detail="high-bit query unavailable and no semantic/member producer proof completed",
-                    pair_id=pair_id,
-                    narrow_width=narrow_width,
-                    query_stage="return-width-bridge-high-bit-extension",
-                )
-            self._debug_print(
-                f"  Pair {pair_id} return-width bridge proof skipped: high-bit query unavailable"
-            )
-            return None
-        if not self._record_completed_return_width_bridge_proofs(
-            reason_record,
-            analysis1,
-            analysis2,
-            query_stage="summary-parameter-extension-object-evidence",
-            narrow_width=narrow_width,
-            proof_source=(
-                "return_width_bridge_narrow_query_unsat_and_summary_parameter_extension"
-            ),
-        ):
-            self._set_return_width_bridge_pending_evidence(
-                object_target_key=target,
-                subreason="summary_parameter_proof_not_recorded",
-                detail="summary parameter return-width bridge proof was not recorded",
-                pair_id=pair_id,
-                narrow_width=narrow_width,
-                query_stage="summary-parameter-extension-object-evidence",
-            )
-            self._debug_print(
-                "  Pair "
-                f"{pair_id} return-width bridge proof skipped: summary parameter proof not recorded"
-            )
-            return None
-        if not self._return_width_bridge_proof_is_complete(
-            reason_record,
-            analysis1,
-            analysis2,
-        ):
-            self._set_return_width_bridge_pending_evidence(
-                object_target_key=target,
-                subreason="summary_parameter_proof_not_accepted",
-                detail="summary parameter return-width bridge proof was not accepted",
-                pair_id=pair_id,
-                narrow_width=narrow_width,
-                query_stage="summary-parameter-extension-object-evidence",
-            )
-            self._debug_print(
-                "  Pair "
-                f"{pair_id} return-width bridge proof skipped: summary parameter proof not accepted"
-            )
-            return None
-        proof_result.last_query = narrow_query
-        proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-        self._debug_print(
-            "  Pair "
-            f"{pair_id}: return-width bridge completed by narrow-width and summary parameter extension proofs"
-        )
-        return proof_result
-    high_bit_result = self._solve_query_internal(
-        high_bit_query,
-        pair_id,
-        stage="return-width-bridge-high-bit-extension",
-        use_hard_timeout=True,
-    )
-    if high_bit_result.is_equivalent is not True:
-        widths = self._return_width_bridge_target_widths(target)
-        wide_param_replace_fn = (
-            param_replace_fn1
-            if widths is not None and widths[0] > widths[1]
-            else param_replace_fn2
-        )
-        if self._record_completed_return_width_bridge_semantic_narrowing_proofs(
-            reason_record,
-            analysis1,
-            analysis2,
-            narrow_width=narrow_width,
-            base_ctx=base_ctx,
-            wide_param_replace_fn=wide_param_replace_fn,
-        ) and self._return_width_bridge_proof_is_complete(
-            reason_record,
-            analysis1,
-            analysis2,
-            base_ctx=base_ctx,
-            wide_param_replace_fn=wide_param_replace_fn,
-        ):
-            proof_result.last_query = narrow_query
-            proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-            self._debug_print(
-                "  Pair "
-                f"{pair_id}: return-width bridge completed by semantic return-width narrowing proof"
-            )
-            return proof_result
-        if self._record_completed_return_width_bridge_member_narrow_producer_proofs(
-            reason_record,
-            analysis1,
-            analysis2,
-            narrow_width=narrow_width,
-        ) and self._return_width_bridge_proof_is_complete(
-            reason_record,
-            analysis1,
-            analysis2,
-        ):
-            proof_result.last_query = narrow_query
-            proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-            self._debug_print(
-                "  Pair "
-                f"{pair_id}: return-width bridge completed by target member narrow producer proof"
-            )
-            return proof_result
-        if getattr(self, "_last_return_width_bridge_pending_evidence", None) is None:
-            self._set_return_width_bridge_pending_evidence(
-                object_target_key=target,
-                subreason="high_bit_query_not_unsat",
-                detail="return-width bridge high-bit query was not UNSAT",
-                pair_id=pair_id,
-                narrow_width=narrow_width,
-                query_stage="return-width-bridge-high-bit-extension",
-            )
-        self._debug_print(
-            "  Pair "
-            f"{pair_id} return-width bridge proof skipped: high-bit query was not UNSAT"
-        )
-        return None
-
-    if not self._record_completed_return_width_bridge_proofs(
-        reason_record,
-        analysis1,
-        analysis2,
-        query_stage="return-width-bridge-high-bit-extension",
-        narrow_width=narrow_width,
-    ):
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="completed_proof_not_recorded",
-            detail="return-width bridge completed proof was not recorded",
-            pair_id=pair_id,
-            narrow_width=narrow_width,
-            query_stage="return-width-bridge-high-bit-extension",
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: completed proof not recorded"
-        )
-        return None
-    if not self._return_width_bridge_proof_is_complete(
-        reason_record,
-        analysis1,
-        analysis2,
-    ):
-        self._set_return_width_bridge_pending_evidence(
-            object_target_key=target,
-            subreason="completed_proof_not_accepted",
-            detail="return-width bridge completed proof was not accepted",
-            pair_id=pair_id,
-            narrow_width=narrow_width,
-            query_stage="return-width-bridge-high-bit-extension",
-        )
-        self._debug_print(
-            f"  Pair {pair_id} return-width bridge proof skipped: completed proof not accepted"
-        )
-        return None
-
-    proof_result.last_query = narrow_query
-    proof_result.pair_stage = "return-width-bridge-narrow-ineq"
-    self._debug_print(
-        f"  Pair {pair_id}: return-width bridge completed by narrow-width and high-bit proofs"
-    )
-    return proof_result
+    result.last_query = query
+    result.pair_stage = "canonical-return-observation-ineq"
+    result.return_width_observation_view_digest = prepared.view.digest
+    result.consumer_binding_receipt_digest = prepared.binding_receipt.binding_digest
+    return result
 
 def _impl__create_aggregate_result(
     self,

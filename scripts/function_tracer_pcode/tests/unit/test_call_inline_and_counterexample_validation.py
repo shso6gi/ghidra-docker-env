@@ -2,10 +2,13 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from conftest import resolve_mock_data_type
 
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
@@ -5896,7 +5899,7 @@ def test_model_validation_query_keeps_raw_width_mismatch_value_equality():
     assert "(bvand x_1 (_ bv4294967295 32))" not in query
 
 
-def test_model_validation_query_uses_completed_return_width_bridge_for_value_equality():
+def test_model_validation_query_rejects_width_mismatch_without_original_receipt():
     class _FakeCase:
         def __init__(self, value):
             self.value = value
@@ -5923,20 +5926,18 @@ def test_model_validation_query_uses_completed_return_width_bridge_for_value_equ
         "extra_vars2": [],
         "return_size1": 64,
         "return_size2": 32,
-        "return_width_bridge_narrow_bits": 32,
     }
 
-    query = _build_model_validation_query(
-        base_ctx,
-        _FakeCase("x_1"),
-        _FakeCase("x_2"),
-        param_replace_fn1=None,
-        param_replace_fn2=None,
-        model_assertions=[],
-        equality=True,
-    )
-
-    assert "(assert (= ((_ extract 31 0) x_1) x_2))" in query
+    with pytest.raises(ReturnWidthMismatchError):
+        _build_model_validation_query(
+            base_ctx,
+            _FakeCase("x_1"),
+            _FakeCase("x_2"),
+            param_replace_fn1=None,
+            param_replace_fn2=None,
+            model_assertions=[],
+            equality=True,
+        )
 
 
 def test_validate_counterexample_globally_reports_inconclusive_for_raw_width_mismatch_condition():
@@ -6152,5 +6153,5 @@ def test_validate_counterexample_globally_rejects_return_width_overlap_equality(
     )
 
     assert not is_decisive
-    assert any("return width mismatch" in message for message in strategy.messages)
+    assert any("canonical return receipt" in message for message in strategy.messages)
     assert not any("extract 31 0" in query for query in strategy.solver_runner.queries)

@@ -61,50 +61,6 @@ class CheckStrategy(ABC):
         "callee_identity_reachable",
         "unsupported_fact_evidence_complete",
     )
-    _RETURN_WIDTH_BRIDGE_ACTION_REQUIREMENTS = {
-        ("abi_relation_proof", "abi_relation"): (
-            "calling_convention",
-            ("calling_convention", "return_storage", "narrow_return_width"),
-        ),
-        ("high_bit_proof", "high_bit_relation"): (
-            "producer_width",
-            ("producer_width", "extension_semantics", "high_bits_irrelevant_or_equal"),
-        ),
-    }
-    _RETURN_WIDTH_BRIDGE_ACCEPTED_DISCHARGES = {
-        "abi_relation": {
-            "canonical_action": "abi_relation_proof",
-            "evidence_slot_kind": "calling_convention",
-            "accepted_discharge_proof_kinds": frozenset({"abi_relation_proof"}),
-        },
-        "high_bit_relation": {
-            "canonical_action": "high_bit_proof",
-            "evidence_slot_kind": "producer_width",
-            "accepted_discharge_proof_kinds": frozenset(
-                {
-                    "high_bit_proof",
-                    "semantic_return_width_narrowing_proof",
-                    "return_member_narrow_producer_high_bit_proof",
-                }
-            ),
-        },
-    }
-    _RETURN_WIDTH_BRIDGE_SEMANTIC_NARROWING_SOURCE = (
-        "return_width_bridge_narrow_query_unsat_and_semantic_return_width_narrowing"
-    )
-    _RETURN_WIDTH_BRIDGE_MEMBER_NARROW_PRODUCER_SOURCE = (
-        "return_width_bridge_narrow_query_unsat_and_return_member_narrow_producer"
-    )
-    _RETURN_WIDTH_BRIDGE_SOURCE_LEVEL_PHASES = frozenset({"P0_SOURCE_DECLARATION"})
-    _RETURN_WIDTH_BRIDGE_WEAK_RETURN_TYPE_SOURCES = frozenset(
-        {
-            "undefined_decompiler_type",
-            "default_integral_replacement",
-            "counterpart_value_width",
-            "counterpart_declared_type",
-            "counterpart_void_return_surface",
-        }
-    )
     _READONLY_IDENTITY_ACTION_REQUIREMENT = (
         "object_storage_identity",
         ("object_storage_identity", "count_identity", "guard_implication", "finite_witness"),
@@ -246,7 +202,7 @@ class CheckStrategy(ABC):
         bit_widths: Set[int],
         signedness: Set[str],
     ) -> None:
-        from .proof_gates.return_width_1 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_collect_condition_width_sign_metadata", cls, condition, bit_widths, signedness)
 
     @classmethod
@@ -307,7 +263,7 @@ class CheckStrategy(ABC):
 
     @classmethod
     def _expression_bit_width_from_object_key(cls, object_key: Any) -> Optional[int]:
-        from .proof_gates.return_width_1 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_expression_bit_width_from_object_key", cls, object_key)
 
 
@@ -474,44 +430,6 @@ class CheckStrategy(ABC):
     ) -> Tuple[Mapping[str, Any], ...]:
         from .proof_gates.recovery import invoke as _invoke
         return _invoke("_completed_recovery_proof_evidence", cls, *analyses)
-
-
-
-    @classmethod
-    def _return_width_bridge_slot_obligation_id(
-        cls,
-        slot_stage: str,
-        object_target_key: Tuple[Any, ...],
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_slot_obligation_id", cls, slot_stage, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_discharge_proof_id(
-        cls,
-        *,
-        slot_stage: str,
-        discharge_proof_kind: str,
-        evidence_kind: str,
-        object_target_key: Tuple[Any, ...],
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_discharge_proof_id", cls, slot_stage=slot_stage, discharge_proof_kind=discharge_proof_kind, evidence_kind=evidence_kind, object_target_key=object_target_key)
-
-    @classmethod
-    def _completed_return_width_bridge_slots(
-        cls,
-        *analyses: FunctionReturnAnalysis,
-        object_target_key: Optional[Tuple[Any, ...]] = None,
-    ) -> Dict[Tuple[Any, ...], Mapping[str, Any]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_completed_return_width_bridge_slots", cls, *analyses, object_target_key=object_target_key)
-
-
-
-
-
-
 
 
 
@@ -726,16 +644,6 @@ class CheckStrategy(ABC):
     def _sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
         from .proof_gates.sat_safety import invoke as _invoke
         return _invoke("_sat_unsafety_resolution_proof_id_from_evidence", cls, evidence)
-
-    @classmethod
-    def _return_width_bridge_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_proof_id_from_evidence", cls, evidence)
-
-    @classmethod
-    def _return_width_bridge_slot_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_slot_id_from_evidence", cls, evidence)
 
     @classmethod
     def _readonly_identity_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
@@ -995,262 +903,11 @@ class CheckStrategy(ABC):
         from .proof_gates.recovery import invoke as _invoke
         return _invoke("_proof_status_value_is_complete", cls, value)
 
-    @classmethod
-    def _return_width_bridge_completed_proof_content(
-        cls,
-        proof_kind: str,
-        object_target_key: Tuple[Any, ...],
-        *,
-        query_stage: str,
-        narrow_width: int,
-    ) -> Optional[Dict[str, Any]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_completed_proof_content", cls, proof_kind, object_target_key, query_stage=query_stage, narrow_width=narrow_width)
-
-    @classmethod
-    def _return_width_bridge_abi_relation_proof_content_is_complete(
-        cls,
-        content: Mapping[str, Any],
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_abi_relation_proof_content_is_complete", cls, content, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_high_bit_proof_content_is_complete(
-        cls,
-        content: Mapping[str, Any],
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_high_bit_proof_content_is_complete", cls, content, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_high_bit_proof_source_matches_content(
-        cls,
-        proof_source: str,
-        content: Mapping[str, Any],
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_high_bit_proof_source_matches_content", cls, proof_source, content, object_target_key)
-
-
-
-
-
-    @classmethod
-    def _return_width_bridge_semantic_narrowing_content_is_complete(
-        cls,
-        content: Any,
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_semantic_narrowing_content_is_complete", cls, content, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_member_narrow_producer_content_is_complete(
-        cls,
-        content: Any,
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_member_narrow_producer_content_is_complete", cls, content, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_member_local_override_is_complete(
-        cls,
-        override: Any,
-        type_provenance: Mapping[str, Any],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_member_local_override_is_complete", cls, override, type_provenance)
-
-    @classmethod
-    def _return_width_bridge_member_narrow_producer_content_fingerprint(
-        cls,
-        content: Any,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_member_narrow_producer_content_fingerprint", cls, content)
-
-    @classmethod
-    def _return_width_bridge_return_type_provenance(
-        cls,
-        analysis: FunctionReturnAnalysis,
-        counterpart_analysis: FunctionReturnAnalysis,
-        *,
-        narrow_width: int,
-    ) -> Optional[Dict[str, Any]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_return_type_provenance", cls, analysis, counterpart_analysis, narrow_width=narrow_width)
-
-    @classmethod
-    def _return_width_bridge_expression_producer_profile(
-        cls,
-        expr: Optional[Expression],
-        *,
-        narrow_width: int,
-    ) -> Dict[str, Any]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_expression_producer_profile", cls, expr, narrow_width=narrow_width)
-
-
-    @classmethod
-    def _return_width_bridge_common_proof_content_is_complete(
-        cls,
-        content: Mapping[str, Any],
-        object_target_key: Tuple[Any, ...],
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_common_proof_content_is_complete", cls, content, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_target_is_specific(cls, object_target_key: Any) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_target_is_specific", cls, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_side_is_specific(cls, side: Tuple[Any, ...], expected_width: int) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_side_is_specific", cls, side, expected_width)
-
-    @classmethod
-    def _return_width_bridge_return_value_width_entry_is_specific(
-        cls,
-        entry: Any,
-        *,
-        expected_return_width: int,
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_return_value_width_entry_is_specific", cls, entry, expected_return_width=expected_return_width)
-
     @staticmethod
     def _positive_int_like(value: Any) -> bool:
         from .proof_gates.solver_timeout import invoke as _invoke
         return _invoke("_positive_int_like", value)
 
-    @classmethod
-    def _return_width_bridge_value_width_evidence(
-        cls,
-        object_target_key: Any,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_value_width_evidence", cls, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_extension_policy_for_side(cls, side: Any) -> Optional[str]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_extension_policy_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_required_extension_mnemonic_for_side(
-        cls,
-        side: Any,
-    ) -> Optional[str]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_required_extension_mnemonic_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_extension_ops_for_side(cls, side: Any) -> Tuple[Any, ...]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_extension_ops_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_matching_extension_ops_for_side(
-        cls,
-        side: Any,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_matching_extension_ops_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_extension_evidence_for_side(
-        cls,
-        side: Any,
-    ) -> Optional[Tuple[Tuple[Any, ...], Tuple[Any, ...], Tuple[Any, ...]]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_extension_evidence_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_has_summary_parameter_extension_evidence(
-        cls,
-        object_target_key: Any,
-    ) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_has_summary_parameter_extension_evidence", cls, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_summary_parameter_extension_for_side(
-        cls,
-        side: Any,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_summary_parameter_extension_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_constant_literal_extension_for_side(
-        cls,
-        side: Any,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_constant_literal_extension_for_side", cls, side)
-
-    @classmethod
-    def _return_width_bridge_value_is_deterministic_width_expression(cls, value_entry: Any) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_value_is_deterministic_width_expression", cls, value_entry)
-
-    @classmethod
-    def _return_width_bridge_expression_key_is_deterministic_width(cls, expr: Any) -> bool:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_expression_key_is_deterministic_width", cls, expr)
-
-    @classmethod
-    def _return_width_bridge_summary_parameter_value_key(cls, value_entry: Any) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_summary_parameter_value_key", cls, value_entry)
-
-    @classmethod
-    def _return_width_bridge_normalize_optional_tuple(cls, value: Any) -> Tuple[Any, ...]:
-        from .proof_gates.return_width_1 import invoke as _invoke
-        return _invoke("_return_width_bridge_normalize_optional_tuple", cls, value)
-
-    @classmethod
-    def _return_width_bridge_extension_op_profile_matches(
-        cls,
-        profile: Any,
-        *,
-        mnemonic: str,
-        producer_bits: Any,
-        return_bits: Any,
-    ) -> bool:
-        from .proof_gates.return_width_2 import invoke as _invoke
-        return _invoke("_return_width_bridge_extension_op_profile_matches", cls, profile, mnemonic=mnemonic, producer_bits=producer_bits, return_bits=return_bits)
-
-    @classmethod
-    def _return_width_bridge_target_widths(cls, object_target_key: Any) -> Optional[Tuple[int, int]]:
-        from .proof_gates.return_width_2 import invoke as _invoke
-        return _invoke("_return_width_bridge_target_widths", cls, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_target_narrow_width(cls, object_target_key: Any) -> Optional[int]:
-        from .proof_gates.return_width_2 import invoke as _invoke
-        return _invoke("_return_width_bridge_target_narrow_width", cls, object_target_key)
-
-    @classmethod
-    def _return_width_bridge_find_side(
-        cls,
-        object_target_key: Any,
-        side_label: str,
-    ) -> Optional[Tuple[Any, ...]]:
-        from .proof_gates.return_width_2 import invoke as _invoke
-        return _invoke("_return_width_bridge_find_side", cls, object_target_key, side_label)
-
-    @classmethod
-    def _return_width_bridge_find_tagged_entry(cls, value: Any, tag: str) -> Any:
-        from .proof_gates.return_width_2 import invoke as _invoke
-        return _invoke("_return_width_bridge_find_tagged_entry", cls, value, tag)
 
     @classmethod
     def _completed_proof_section_is_clean(cls, section: Any) -> bool:
@@ -1426,7 +1083,7 @@ class CheckStrategy(ABC):
 
     @staticmethod
     def _coerce_return_width(*values: Any) -> Optional[int]:
-        from .proof_gates.return_width_2 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_coerce_return_width", *values)
 
 
@@ -1434,12 +1091,12 @@ class CheckStrategy(ABC):
 
     @staticmethod
     def _expression_smt_bit_width_for_object_key(expr: Any) -> Optional[int]:
-        from .proof_gates.return_width_2 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_expression_smt_bit_width_for_object_key", expr)
 
     @staticmethod
     def _return_pcode_value_input_width_bits(pcode_op_ref: Any) -> Optional[int]:
-        from .proof_gates.return_width_2 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_return_pcode_value_input_width_bits", pcode_op_ref)
 
 
@@ -1636,7 +1293,7 @@ class CheckStrategy(ABC):
         assertions: Sequence[str],
         header_lines: Sequence[str],
     ) -> List[str]:
-        from .proof_gates.return_width_2 import invoke as _invoke
+        from .proof_gates.return_metadata import invoke as _invoke
         return _invoke("_normalize_zero_constant_widths_for_declared_symbols", cls, assertions, header_lines)
 
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Attempt 記録と遷移理由判定のヘルパー"""
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .debug_trace import (
     Attempt,
@@ -10,6 +10,7 @@ from .debug_trace import (
     NormalizationRuleApplication,
     PairwiseDecisiveInfo,
     ProofCompletionEvent,
+    ReasonCompletionEvent,
     ReasonCausalTransition,
     TransitionReason,
 )
@@ -64,6 +65,7 @@ def record_attempt(
     final_smt: Optional[str],
     counterexample: Optional[Dict[str, Any]],
     pairwise_decisive: Optional[PairwiseDecisiveInfo],
+    pairwise_debug_stats: Optional[Mapping[str, int]],
     normalization_rules: Optional[List[Any]],
     mips64_abi_constraints: Optional[Dict[str, Any]],
     elapsed_time: float,
@@ -91,6 +93,7 @@ def record_attempt(
         final_smt=final_smt,
         counterexample=counterexample,
         pairwise_decisive=pairwise_decisive,
+        pairwise_debug_stats=dict(pairwise_debug_stats or {}),
         normalization_rules=normalization_rules or [],
         unknown_reasons=list(coerce_unknown_reason_records(unknown_reasons)),
         mips64_abi_constraints=mips64_abi_constraints,
@@ -136,6 +139,7 @@ def record_attempt_from_result(
         final_smt=result.smt_formula,
         counterexample=counterexample_dict,
         pairwise_decisive=pairwise_decisive,
+        pairwise_debug_stats=result.pairwise_debug_stats,
         normalization_rules=normalization_rules,
         mips64_abi_constraints=mips64_abi_dict,
         elapsed_time=result.total_time,
@@ -219,6 +223,11 @@ def _record_explicit_proof_completions(
         debug_trace.add_proof_completion(completion)
         seen.add(frozen_requirement)
 
+        context = _completion_applicability_context(
+            result,
+            canonical_requirement,
+            artifact_ref,
+        )
         for previous in debug_trace.attempts[:-1]:
             for occurrence in previous.reason_occurrences:
                 reason_requirements = getattr(
@@ -231,22 +240,73 @@ def _record_explicit_proof_completions(
                     for item in reason_requirements
                 ):
                     continue
-                debug_trace.add_causal_transition(
-                    ReasonCausalTransition(
-                        transition_id=(
-                            "proof_discharge",
-                            completion.completion_id,
-                            occurrence.occurrence_id.attempt_identity.attempt_ordinal,
-                            occurrence.occurrence_id.reason_ordinal,
-                        ),
-                        target_occurrence_id=occurrence.occurrence_id,
-                        transition_kind="discharged",
-                        cause_kind="proof_completion",
-                        cause_ref=completion.completion_id,
-                        emitted_at_attempt=attempt_identity,
-                        transition_ordinal=len(debug_trace.causal_transitions),
-                    )
+                snapshot_fingerprint = str(
+                    evidence.get("source_snapshot_fingerprint") or ""
                 )
+                premise_digest = str(
+                    evidence.get("semantic_seed_or_premise_digest") or ""
+                )
+                artifact_digest = str(
+                    evidence.get("evidence_or_artifact_digest") or ""
+                )
+                recognizing_stage = str(
+                    evidence.get("recognizing_stage") or ""
+                )
+                target = tuple(
+                    getattr(occurrence.reason_record, "object_target_key", ()) or ()
+                )
+                slot = str(canonical_requirement.get("proof_kind") or "")
+                if all((snapshot_fingerprint, premise_digest, artifact_digest, recognizing_stage, target, slot)):
+                    validated = debug_trace.add_reason_completion(
+                        ReasonCompletionEvent(
+                            completion_event_id=(
+                                "reason_completion",
+                                completion.completion_id,
+                                occurrence.occurrence_id.reason_ordinal,
+                            ),
+                            completed_occurrence_id=occurrence.occurrence_id,
+                            exact_target_id=target,
+                            exact_missing_fact_or_proof_slot=slot,
+                            source_snapshot_fingerprint=snapshot_fingerprint,
+                            semantic_seed_or_premise_digest=premise_digest,
+                            evidence_or_artifact_digest=artifact_digest,
+                            recognizing_stage=recognizing_stage,
+                            completed_at_attempt=attempt_identity,
+                            applicability_status="unvalidated",
+                        ),
+                        current_snapshot_fingerprint=(
+                            str(context.get("current_snapshot_fingerprint") or "")
+                            if context is not None else ""
+                        ),
+                        current_semantic_seed_or_premise_digest=(
+                            str(context.get("current_semantic_seed_or_premise_digest") or "")
+                            if context is not None else ""
+                        ),
+                        artifact_is_valid=bool(
+                            context is not None
+                            and context.get("artifact_is_valid")
+                            and str(context.get("current_evidence_or_artifact_digest") or "")
+                            == artifact_digest
+                        ),
+                    )
+
+
+def _completion_applicability_context(
+    result: EquivalenceResult,
+    requirement: Mapping[str, Any],
+    artifact_ref: Tuple[Any, ...],
+) -> Optional[Mapping[str, Any]]:
+    frozen_requirement = _freeze_identity(requirement)
+    matches = []
+    for context in getattr(result, "reason_completion_applicability_contexts", ()) or ():
+        if not isinstance(context, Mapping):
+            continue
+        if (
+            _freeze_identity(context.get("proof_requirement_id")) == frozen_requirement
+            and _freeze_identity(context.get("proof_artifact_ref")) == artifact_ref
+        ):
+            matches.append(context)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _requirement_for_completed_evidence(

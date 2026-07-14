@@ -104,6 +104,7 @@ def _payload(*, run="run-1", result=None, attempts=None, case="f", with_content=
             "attempts": attempts or [],
             "causal_transitions": [],
             "proof_completion_events": [],
+            "reason_completion_events": [],
         },
     }
     if with_content:
@@ -152,7 +153,7 @@ def test_proof_requirement_alone_cannot_discharge_occurrence():
     assert summary.diagnostics["dangling_transition_cause"] == 1
 
 
-def test_verified_proof_completion_discharges_only_target_occurrence():
+def test_legacy_proof_completion_transition_cannot_discharge_occurrence():
     attempt = _attempt(
         0,
         [_reason("unresolved_expression"), _reason("sat_unsafety")],
@@ -182,8 +183,55 @@ def test_verified_proof_completion_discharges_only_target_occurrence():
     summary = summarize_root_blockers([payload])
 
     assert summary.active_root_blocker_count == 1
-    assert len(summary.active_root_blockers[0].observed_occurrence_ids) == 1
+    assert len(summary.active_root_blockers[0].observed_occurrence_ids) == 2
     assert len(summary.observed_candidate_blockers[0].observed_occurrence_ids) == 2
+    assert summary.diagnostics["dangling_transition_cause"] == 1
+
+
+def test_applicable_reason_completion_discharges_exact_occurrence_without_transition():
+    attempt = _attempt(0, [_reason("unresolved_expression")])
+    target = attempt["reason_occurrences"][0]["occurrence_id"]
+    payload = _payload(attempts=[attempt])
+    payload["debug_trace"]["reason_completion_events"] = [{
+        "completion_event_id": ("reason-completion", 1),
+        "completed_occurrence_id": target,
+        "exact_target_id": ("legacy-call", "left", "right"),
+        "exact_missing_fact_or_proof_slot": "call_effect_summary_proof",
+        "source_snapshot_fingerprint": "snapshot-sha",
+        "semantic_seed_or_premise_digest": "premise-sha",
+        "evidence_or_artifact_digest": "artifact-sha",
+        "recognizing_stage": "call_effect_preflight",
+        "completed_at_attempt": _attempt_identity(1),
+        "applicability_status": "APPLICABLE",
+    }]
+
+    summary = summarize_root_blockers([payload])
+
+    assert summary.active_root_blocker_count == 0
+    assert summary.candidate_root_blocker_count == 1
+
+
+def test_stale_reason_completion_remains_diagnostic_and_does_not_discharge():
+    attempt = _attempt(0, [_reason("unresolved_expression")])
+    target = attempt["reason_occurrences"][0]["occurrence_id"]
+    payload = _payload(attempts=[attempt])
+    payload["debug_trace"]["reason_completion_events"] = [{
+        "completion_event_id": ("reason-completion", 2),
+        "completed_occurrence_id": target,
+        "exact_target_id": ("legacy-call", "left", "right"),
+        "exact_missing_fact_or_proof_slot": "call_effect_summary_proof",
+        "source_snapshot_fingerprint": "old-snapshot",
+        "semantic_seed_or_premise_digest": "premise-sha",
+        "evidence_or_artifact_digest": "artifact-sha",
+        "recognizing_stage": "call_effect_preflight",
+        "completed_at_attempt": _attempt_identity(1),
+        "applicability_status": "STALE_SNAPSHOT",
+    }]
+
+    summary = summarize_root_blockers([payload])
+
+    assert summary.active_root_blocker_count == 1
+    assert summary.diagnostics["inapplicable_reason_completion"] == 1
 
 
 def test_mixed_runs_require_explicit_snapshot_selection():

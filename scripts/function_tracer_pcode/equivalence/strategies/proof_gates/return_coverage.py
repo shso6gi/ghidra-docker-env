@@ -766,6 +766,23 @@ def _prove_unary_outcome_for_analysis(
         return UnaryPartitionProofResult("blocked", "outcome_pair_import_applicability_mismatch")
     return proof
 
+
+def prepare_unary_return_coverage_for_width(
+    self,
+    base_ctx: Mapping[str, Any],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    replace_fn1,
+    replace_fn2,
+) -> bool:
+    """Publish both final unary coverage artifacts before width consumers run."""
+
+    proofs = (
+        _prove_unary_outcome_for_analysis(self, base_ctx, analysis1, replace_fn1),
+        _prove_unary_outcome_for_analysis(self, base_ctx, analysis2, replace_fn2),
+    )
+    return all(proof is not None and proof.complete for proof in proofs)
+
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
     if implementation_function is None:

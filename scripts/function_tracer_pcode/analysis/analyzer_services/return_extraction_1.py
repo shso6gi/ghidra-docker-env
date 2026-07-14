@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Set, Tuple
 from ._shared import (
     Condition,
     ConditionSimplifier,
@@ -31,13 +31,17 @@ from ._shared import (
 from ._api import StructuralRecurrenceSummarizer, accept_summary_return_candidates
 from ...model import (
     FunctionOutcomeSeed,
+    ReturnValueFlowCertificate,
+    ReturnValueFlowStep,
     ReturnPathEvidence,
     SymbolicRegionCandidate,
     TerminalCandidate,
     TerminationContractRef,
     TerminationPathEffectEvidence,
+    VarnodeFlowRef,
 )
 from ...model.structural import expression_key_safe as _outcome_expression_key_safe
+from ...model.structural import expression_provenance_key
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -133,6 +137,7 @@ def _impl__site_metadata_with_return_value_pcode_op_refs(
     *,
     return_varnode=None,
     producer_op=None,
+    tracer=None,
 ) -> Dict[str, Optional[object]]:
     metadata: Dict[str, Optional[object]] = dict(site_metadata or {})
     refs: List[PcodeOpRef] = [
@@ -159,7 +164,96 @@ def _impl__site_metadata_with_return_value_pcode_op_refs(
         seen.add(key)
         deduped.append(ref)
     metadata["return_value_pcode_op_refs"] = tuple(deduped)
+    certificate = _build_return_value_flow_certificate(
+        self,
+        metadata,
+        return_varnode=return_varnode,
+        tracer=tracer,
+    )
+    if certificate is not None:
+        metadata["return_value_flow_certificate"] = certificate
     return metadata
+
+
+def _build_return_value_flow_certificate(
+    self,
+    metadata: Dict[str, Optional[object]],
+    *,
+    return_varnode,
+    tracer=None,
+) -> Optional[ReturnValueFlowCertificate]:
+    """Capture exact Varnode edges from RETURN input to an extension payload."""
+
+    return_op = metadata.get("_return_op_object")
+    return_op_ref = metadata.get("pcode_op_ref")
+    if return_op is None or not isinstance(return_op_ref, PcodeOpRef) or return_varnode is None:
+        return None
+    try:
+        if str(return_op.getMnemonic() or "").upper() != "RETURN":
+            return None
+        if int(return_op.getNumInputs()) <= 1 or return_op.getInput(1) is not return_varnode:
+            return None
+    except Exception:
+        return None
+    return_input_ref = VarnodeFlowRef.from_varnode(return_varnode)
+    if return_input_ref is None:
+        return None
+
+    steps: List[ReturnValueFlowStep] = []
+    extension_indices: List[int] = []
+    extension_payload_varnode = None
+    current = return_varnode
+    for pcode_op in self._return_value_producer_chain(return_varnode):
+        try:
+            output = pcode_op.getOutput()
+            if output is not current:
+                return None
+            input_count = int(pcode_op.getNumInputs())
+            inputs = tuple(pcode_op.getInput(index) for index in range(input_count))
+            if input_count != 1:
+                return None
+        except Exception:
+            return None
+        op_ref = PcodeOpRef.from_pcode_op(
+            pcode_op,
+            binary_id=self._binary_id,
+            program_uid=self._program_identity(),
+            function_entry=self._current_function_entry_address(),
+        )
+        output_ref = VarnodeFlowRef.from_varnode(output)
+        input_refs = tuple(VarnodeFlowRef.from_varnode(item) for item in inputs)
+        if op_ref is None or output_ref is None or any(item is None for item in input_refs):
+            return None
+        mnemonic = str(op_ref.mnemonic or "").upper()
+        if mnemonic in {"INT_ZEXT", "INT_SEXT"}:
+            extension_indices.append(len(steps))
+            extension_payload_varnode = inputs[0]
+        steps.append(ReturnValueFlowStep(
+            op_ref=op_ref,
+            output_ref=output_ref,
+            input_refs=cast(Tuple[VarnodeFlowRef, ...], input_refs),
+            traversed_input_index=0,
+        ))
+        current = inputs[0]
+
+    if len(extension_indices) > 1:
+        return None
+    payload_identity: Tuple[Any, ...] = ()
+    if extension_payload_varnode is not None and tracer is not None:
+        try:
+            payload_expr = tracer.trace_varnode(extension_payload_varnode, use_cache=False)
+            if payload_expr is not None:
+                payload_identity = tuple(expression_provenance_key(payload_expr))
+        except Exception:
+            payload_identity = ()
+    return ReturnValueFlowCertificate(
+        return_op_ref=return_op_ref,
+        return_input_index=1,
+        return_input_ref=return_input_ref,
+        steps=tuple(steps),
+        extension_step_index=(extension_indices[0] if extension_indices else None),
+        payload_expression_identity=payload_identity,
+    )
 
 def _impl__make_return_info(
     self,
@@ -204,6 +298,10 @@ def _impl__make_return_info(
             ref
             for ref in (site_metadata.get("return_value_pcode_op_refs") or ())
             if isinstance(ref, PcodeOpRef)
+        ),
+        return_value_flow_certificate=cast(
+            Optional[ReturnValueFlowCertificate],
+            site_metadata.get("return_value_flow_certificate"),
         ),
         return_path_evidence=return_path_evidence,
     )
@@ -1649,6 +1747,7 @@ def _impl__analyze_return_op(
 ) -> List[ReturnInfo]:
     """単一のRETURNを解析"""
     site_metadata = self._describe_pcode_site(return_op, "unknown")
+    site_metadata["_return_op_object"] = return_op
     address = cast(str, site_metadata.get("address") or "unknown")
 
     num_inputs = return_op.getNumInputs()
@@ -2008,6 +2107,7 @@ def _impl__analyze_return_value(
     value_site_metadata = self._site_metadata_with_return_value_pcode_op_refs(
         site_metadata,
         return_varnode=return_varnode,
+        tracer=tracer,
     )
 
     tracer.clear_cache()

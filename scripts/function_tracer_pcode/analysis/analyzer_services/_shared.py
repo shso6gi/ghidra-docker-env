@@ -10,7 +10,7 @@ from ...model.expression import Expression, ExpressionType, Condition
 from ...model.call_target import CallTargetRef, coerce_call_target_ref
 from ...model.structural import StructuralKey, expression_key_safe
 from ...model.storage import StorageInfo
-from ...model.analysis import ComparisonSurface, DeferredCallInfo, DivergenceOutcome, ReturnInfo, ReturnOutcome, UnknownOutcome, FunctionReturnAnalysis, SignednessResult
+from ...model.analysis import ComparisonSurface, DeferredCallInfo, DivergenceOutcome, ReturnInfo, ReturnOutcome, UnknownOutcome, FunctionReturnAnalysis, SignednessResult, ReturnValueFlowCertificate, ReturnValueFlowStep, VarnodeFlowRef
 from ...model.runtime_refs import AddressValueRef, DeferredCallRef, PcodeBlockRef, PcodeOpRef, PostStateValueRef, ReadonlyReductionRef, UnknownValueRef
 from ...model.signature import get_declared_type_signedness, is_void_data_type
 from ...model.render_smt import expression_contains_unsupported_smt_ops

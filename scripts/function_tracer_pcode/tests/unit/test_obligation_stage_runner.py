@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.equivalence.checker import (
 from scripts.function_tracer_pcode.equivalence.obligations import (
     ActivationState,
     ShadowComparisonReport,
+    SolverOutcomeClass,
     ProductionShadowValidator,
     project_proof_gates,
 )
@@ -164,6 +165,92 @@ def test_shadow_compares_proof_actions_not_only_reason_labels():
     assert comparison.differences == ("proof_action_surface",)
 
 
+def test_shadow_ignores_raw_model_identity_for_same_decisive_projection():
+    left = _result(False)
+    right = _result(False)
+    left.solver_status = "SAT"
+    right.solver_status = "SAT"
+    left.counterexample = {
+        "model": {"x": 1},
+        "normalized_observable_projection": ("return", 7),
+        "replay_outcome": "safe_decisive",
+    }
+    right.counterexample = {
+        "model": {"x": 99},
+        "normalized_observable_projection": ("return", 7),
+        "replay_outcome": "safe_decisive",
+    }
+
+    comparison = ShadowComparisonReport.compare(left, right)
+
+    assert comparison.compatible
+    assert comparison.legacy.decisiveness_surface.outcome_class == (
+        SolverOutcomeClass.SAT_DECISIVE_NOT_EQ.value
+    )
+
+
+def test_shadow_rejects_decisive_to_inconclusive_sat_transition():
+    decisive = _result(False)
+    inconclusive = _result(None)
+    decisive.solver_status = "SAT"
+    inconclusive.solver_status = "SAT"
+    decisive.counterexample = {
+        "normalized_observable_projection": ("return", 7),
+        "replay_outcome": "safe_decisive",
+    }
+    inconclusive.counterexample = {
+        "normalized_observable_projection": ("return", 7),
+        "replay_outcome": "unsafe_inconclusive",
+    }
+
+    comparison = ShadowComparisonReport.compare(decisive, inconclusive)
+
+    assert not comparison.compatible
+    assert "decisiveness_surface" in comparison.differences
+
+
+def test_checker_deduplicates_unary_width_completion_across_retries():
+    checker = object.__new__(EquivalenceChecker)
+    checker.enable_completed_recovery_proofs = True
+    requirement = ProofRequirementId.create(
+        "unary_return_width_relation",
+        ("return-member", 1),
+        ProofRequirementContract("return width relation"),
+    ).to_dict()
+    evidence = {
+        "proof_requirement_id": requirement,
+        "proof_status": "verified",
+        "proof_artifact_ref": ("width-artifact", 1),
+    }
+    left = SimpleNamespace(
+        function_name="f",
+        binary_id="B1",
+        completed_recovery_proof_evidence=(evidence,),
+    )
+    right = SimpleNamespace(
+        function_name="f",
+        binary_id="B2",
+        completed_recovery_proof_evidence=(),
+    )
+    duplicate = {
+        "side": "function1",
+        "function_name": "f",
+        "binary_name": "B1",
+        "binary_id": "B1",
+        "evidence": dict(evidence),
+    }
+
+    payload = checker._completed_recovery_proof_payload(
+        left,
+        right,
+        "B1",
+        "B2",
+        extra_records=(duplicate, duplicate),
+    )
+
+    assert len(payload) == 1
+
+
 def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     requirement = ProofRequirementId.create(
         "return_coverage_completion",
@@ -196,7 +283,6 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     }]
     strategy = SimpleNamespace(
         _return_coverage_proof_is_complete=lambda *_args: True,
-        _return_width_bridge_proof_is_complete=lambda *_args: False,
         _call_effect_summary_proof_is_complete=lambda *_args: False,
         _recovery_proof_is_complete=lambda *_args: False,
     )

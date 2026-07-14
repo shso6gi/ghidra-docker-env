@@ -242,6 +242,7 @@ def selective_reanalysis_and_check(
         function_name: str,
         binary_name: str,
         cached_analysis: FunctionReturnAnalysis,
+        declared_return_type: Optional[str],
     ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str], Optional[str]]:
         binary_id = ctx.binary1_id if program is ctx.program1 else ctx.binary2_id if program is ctx.program2 else None
         analyzer = ReturnAnalyzer(
@@ -273,6 +274,18 @@ def selective_reanalysis_and_check(
                     program=program,
                 )
                 replayed = replayed.with_signature_hypothesis(hypothesis)
+            # Non-void adjacent-source declarations are immutable provenance,
+            # not signature mutations, so they are intentionally absent from
+            # ``signature_hypotheses``.  Reapply the same evidence to the fresh
+            # analysis view; otherwise a parameter-only retry silently loses
+            # the return observation contract.
+            replayed = _apply_declared_return_type_hypothesis(
+                checker=checker,
+                analysis=replayed,
+                program=program,
+                binary_name=binary_name,
+                declared_return_type=declared_return_type,
+            )
             if getattr(replayed, "signature_hypotheses", None):
                 replayed = analyzer.refresh_structural_recurrence_summary(
                     replayed,
@@ -288,6 +301,7 @@ def selective_reanalysis_and_check(
             function_name=ctx.function_name1,
             binary_name=ctx.binary1_name,
             cached_analysis=analysis1,
+            declared_return_type=ctx.declared_return_type1,
         )
         if analysis1 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary1: {error_message}")
@@ -317,6 +331,7 @@ def selective_reanalysis_and_check(
             function_name=ctx.function_name2,
             binary_name=ctx.binary2_name,
             cached_analysis=analysis2,
+            declared_return_type=ctx.declared_return_type2,
         )
         if analysis2 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary2: {error_message}")

@@ -101,7 +101,7 @@ class TestExtraAssertions:
         with pytest.raises(ReturnWidthMismatchError):
             builder.build_equivalence_formula_extended(analysis1, analysis2)
 
-    def test_completed_return_width_bridge_compares_on_proven_narrow_width(self):
+    def test_canonical_return_observation_compares_on_proven_observation_width(self):
         builder = FormulaBuilder(debug=False)
         analysis1 = _analysis("func1", "x", 4)
         analysis2 = _analysis("func2", "y", 8)
@@ -109,10 +109,10 @@ class TestExtraAssertions:
         result = builder.build_equivalence_formula_extended(
             analysis1,
             analysis2,
-            return_width_bridge_narrow_bits=32,
+            canonical_return_observation_width=32,
         )
 
-        assert "Completed return-width bridge proof" in result.formula
+        assert "Canonical return observation" in result.formula
         assert "(assert (not (= return_1 ((_ extract 31 0) return_2))))" in result.formula
 
 

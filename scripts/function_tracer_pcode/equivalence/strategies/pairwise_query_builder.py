@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SMT query builders for PairwiseStrategy."""
 
+import hashlib
 import os
 from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,126 @@ from ..formula.returns import (
     require_equal_return_bit_widths,
 )
 from .pairwise_models import ReturnCase
+from ..return_width_surface import ConsumerBindingReceipt, PairReturnObservationView
+
+
+def _query_parameter_lowering_key(base_ctx: Dict[str, Any]) -> Tuple[Any, ...]:
+    def identity(item: Any) -> Tuple[Any, ...]:
+        return (
+            "query_parameter",
+            int(getattr(item, "index", -1)),
+            str(getattr(item, "original_name", "") or ""),
+            str(getattr(item, "smt_name", "") or ""),
+            int(getattr(item, "bit_width", 0) or 0),
+        )
+    return (
+        "ordered_query_parameter_lowering_v1",
+        tuple(identity(item) for item in base_ctx.get("params1", ())),
+        tuple(identity(item) for item in base_ctx.get("params2", ())),
+    )
+
+
+def validate_canonical_binding_receipt(
+    base_ctx: Dict[str, Any],
+    view: PairReturnObservationView,
+    receipt: ConsumerBindingReceipt,
+) -> None:
+    if (
+        receipt.observation_target_key != view.contract.target_id.stable_key()
+        or receipt.observation_view_digest != view.digest
+        or receipt.proof_closure_id != view.proof_bundle.validated_closure_id
+        or receipt.query_parameter_lowering_key != _query_parameter_lowering_key(base_ctx)
+        or not receipt.proof_bundle_applicability_digest
+        or not receipt.lowered_left_term
+        or not receipt.lowered_right_term
+    ):
+        raise ValueError("canonical_return_width_binding_receipt_inapplicable")
+
+
+def build_canonical_return_observation_query(
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+    *,
+    view: PairReturnObservationView,
+    receipt: ConsumerBindingReceipt,
+    equality: bool = False,
+    model_assertions: Tuple[str, ...] = (),
+) -> str:
+    """Lower the exact terms captured by the applicable binding receipt."""
+
+    validate_canonical_binding_receipt(base_ctx, view, receipt)
+    replay_marker = ""
+    if base_ctx.get("require_original_canonical_return_query_bundle"):
+        authorization = base_ctx.get("canonical_return_replay_authorization") or {}
+        order = tuple(authorization.get("binding_projection_order") or ())
+        receipt_order = tuple(authorization.get("ordered_receipt_digests") or ())
+        if (
+            len(authorization.get("bundle_digest", "")) != 64
+            or len(authorization.get("production_query_digest", "")) != 64
+            or len(order) != len(receipt_order)
+            or str(pair_id) not in order
+            or receipt_order[order.index(str(pair_id))] != receipt.binding_digest
+        ):
+            raise ValueError("canonical_return_replay_authorization_inapplicable")
+        model_assertions_digest = hashlib.sha256(
+            repr(tuple(model_assertions)).encode("utf-8")
+        ).hexdigest()
+        authorization_digest = hashlib.sha256(repr((
+            "canonical_return_replay_authorization_v1",
+            authorization["bundle_digest"],
+            authorization["production_query_digest"],
+            order,
+            receipt_order,
+            str(pair_id),
+            receipt.binding_digest,
+            tuple(model_assertions),
+        )).encode("utf-8")).hexdigest()
+        replay_marker = (
+            f"; canonical_return_replay_authorization {authorization_digest} "
+            f"production_query_sha256={authorization['production_query_digest']} "
+            f"model_assertions_sha256={model_assertions_digest}"
+        )
+    target_bits = int(view.canonical_comparison_width)
+    title = "Equality Replay" if equality else "Inequality"
+    lines = _build_query_header(
+        f"; Canonical Return Observation {title}: Pair {pair_id}",
+        f"; binding-receipt {receipt.binding_digest}",
+        f"; projection-lowering {receipt.projection_lowering_digest}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
+    )
+    if replay_marker:
+        lines.append(replay_marker)
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(str(item) for item in model_assertions)
+    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
+    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
+    relation = "=" if equality else "distinct"
+    lines.extend([
+        "",
+        "; Canonical terms are copied verbatim from the validated binding receipt",
+        f"; binding-receipt {receipt.binding_digest}",
+        f"; projection-lowering {receipt.projection_lowering_digest}",
+        f"(assert ({relation} {receipt.lowered_left_term} {receipt.lowered_right_term}))",
+        f"; canonical comparison width: {target_bits}",
+        "",
+        "(check-sat)",
+        "(get-model)",
+    ])
+    query = "\n".join(lines)
+    if (
+        f"; binding-receipt {receipt.binding_digest}" not in query
+        or f"; projection-lowering {receipt.projection_lowering_digest}" not in query
+        or receipt.lowered_left_term not in query
+        or receipt.lowered_right_term not in query
+        or (replay_marker and replay_marker not in query)
+    ):
+        raise ValueError("canonical_return_width_query_binding_mismatch")
+    return query
 
 
 def extract_return_cases(
@@ -523,262 +644,6 @@ def _build_pairwise_extra_assertions(
         "; " + "-" * 40,
         *assertions,
     ]
-
-
-def build_return_width_bridge_narrow_query(
-    base_ctx: Dict[str, Any],
-    case1: ReturnCase,
-    case2: ReturnCase,
-    param_replace_fn1,
-    param_replace_fn2,
-    pair_id: str,
-    *,
-    target_bits: int,
-) -> str:
-    """Build a value-inequality query at the proven narrow return width."""
-
-    target_bits = max(1, int(target_bits))
-    lines = _build_query_header(
-        f"; Return Width Bridge Narrow Query: Pair {pair_id}",
-        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
-        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
-        logic=base_ctx.get("smt_logic", "QF_BV"),
-    )
-    lines.extend(base_ctx["header_lines"])
-    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
-    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
-    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
-    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
-    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
-    lines.extend(
-        _build_value_inequality_section(
-            case1.get_value_smt(
-                param_replace_fn1,
-                target_bits=target_bits,
-                use_sign_extension=case1.should_sign_extend_value(),
-            ),
-            case2.get_value_smt(
-                param_replace_fn2,
-                target_bits=target_bits,
-                use_sign_extension=case2.should_sign_extend_value(),
-            ),
-            target_bits,
-            target_bits,
-            title="; Return width bridge narrow value inequality",
-            note_lines=[
-                "; Completed ABI/high-bit proof is required before this query can discharge a width mismatch",
-                f"; Narrow comparison width: {target_bits}",
-            ],
-        )
-    )
-    lines.append("")
-    lines.append("(check-sat)")
-    lines.append("(get-model)")
-    return "\n".join(lines)
-
-
-def build_return_width_bridge_high_bit_query(
-    base_ctx: Dict[str, Any],
-    case1: ReturnCase,
-    case2: ReturnCase,
-    param_replace_fn1,
-    param_replace_fn2,
-    pair_id: str,
-    *,
-    narrow_bits: int,
-    return_size1: int,
-    return_size2: int,
-) -> Optional[str]:
-    """Build a query proving the wide return is the expected extension of its low bits."""
-
-    narrow_bits = int(narrow_bits)
-    return_size1 = int(return_size1)
-    return_size2 = int(return_size2)
-    if narrow_bits <= 0 or return_size1 <= 0 or return_size2 <= 0:
-        return None
-    if return_size1 == return_size2:
-        return None
-    if return_size1 > return_size2:
-        wide_case = case1
-        wide_replace_fn = param_replace_fn1
-        wide_label = "Case1"
-        wide_bits = return_size1
-        narrow_case = case2
-    else:
-        wide_case = case2
-        wide_replace_fn = param_replace_fn2
-        wide_label = "Case2"
-        wide_bits = return_size2
-        narrow_case = case1
-    if wide_bits <= narrow_bits:
-        return None
-
-    wide_expr_bits = int(expression_smt_bit_width(wide_case.value_expr) or 0)
-    if _return_case_value_is_zero_extended_piece(
-        wide_case,
-        narrow_bits=narrow_bits,
-        wide_bits=wide_bits,
-    ):
-        extension_op = "zero_extend"
-    else:
-        extension_op = "sign_extend" if narrow_case.should_sign_extend_value() else "zero_extend"
-    if wide_expr_bits < wide_bits:
-        has_object_extension = _return_case_has_object_extension_to_width(
-            wide_case,
-            input_bits=wide_expr_bits,
-            output_bits=wide_bits,
-            extension_op=extension_op,
-        )
-        has_constant_extension = _return_case_has_constant_literal_extension_to_width(
-            wide_case,
-            input_bits=wide_expr_bits,
-            output_bits=wide_bits,
-            extension_op=extension_op,
-        )
-        if not (has_object_extension or has_constant_extension):
-            return None
-
-    wide_value_smt = wide_case.get_value_smt(
-        wide_replace_fn,
-        target_bits=wide_bits,
-        use_sign_extension=wide_case.should_sign_extend_value(),
-    )
-    low_bits = f"((_ extract {narrow_bits - 1} 0) {wide_value_smt})"
-    extend_bits = wide_bits - narrow_bits
-    expected_wide_smt = f"((_ {extension_op} {extend_bits}) {low_bits})"
-
-    lines = _build_query_header(
-        f"; Return Width Bridge High-Bit Query: Pair {pair_id}",
-        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
-        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
-        logic=base_ctx.get("smt_logic", "QF_BV"),
-    )
-    lines.extend(base_ctx["header_lines"])
-    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
-    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
-    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
-    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
-    lines.extend(
-        [
-            "; " + "-" * 40,
-            "; Return width bridge high-bit extension proof",
-            "; Completed high-bit proof requires this query to be UNSAT",
-            f"; Wide side: {wide_label}, wide width: {wide_bits}, narrow width: {narrow_bits}",
-            f"; Expected extension: {extension_op}",
-            "; " + "-" * 40,
-            f"(assert (not (= {wide_value_smt} {expected_wide_smt})))",
-            "",
-            "(check-sat)",
-            "(get-model)",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _return_case_value_is_zero_extended_piece(
-    return_case: ReturnCase,
-    *,
-    narrow_bits: int,
-    wide_bits: int,
-) -> bool:
-    expr = getattr(return_case, "value_expr", None)
-    if expr is None or getattr(expr, "expr_type", None) is None:
-        return False
-    if expr.expr_type != ExpressionType.BINARY_OP or getattr(expr, "operator", None) != "PIECE":
-        return False
-    operands = getattr(expr, "operands", None) or []
-    if len(operands) != 2:
-        return False
-    high_expr, low_expr = operands
-    if getattr(high_expr, "expr_type", None) != ExpressionType.CONSTANT:
-        return False
-    try:
-        high_value = int(getattr(high_expr, "value", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    if high_value != 0:
-        return False
-    high_bits = int(expression_smt_bit_width(high_expr) or 0)
-    low_bits = int(expression_smt_bit_width(low_expr) or 0)
-    return (
-        high_bits == int(wide_bits) - int(narrow_bits)
-        and low_bits == int(narrow_bits)
-    )
-
-
-def _return_case_has_object_extension_to_width(
-    return_case: ReturnCase,
-    *,
-    input_bits: int,
-    output_bits: int,
-    extension_op: str,
-) -> bool:
-    if input_bits <= 0 or output_bits <= 0 or input_bits >= output_bits:
-        return False
-    expected_mnemonic = {
-        "sign_extend": "INT_SEXT",
-        "zero_extend": "INT_ZEXT",
-    }.get(extension_op)
-    if expected_mnemonic is None:
-        return False
-    return_info = getattr(return_case, "return_info", None)
-    for ref in getattr(return_info, "return_value_pcode_op_refs", ()) or ():
-        if getattr(ref, "mnemonic", None) != expected_mnemonic:
-            continue
-        input_size = None
-        try:
-            input_size = ref.input_size(0)
-        except Exception:
-            input_size = None
-        output_size = getattr(ref, "output_size", None)
-        try:
-            ref_input_bits = int(input_size) * 8 if input_size else None
-            ref_output_bits = int(output_size) * 8 if output_size else None
-        except (TypeError, ValueError):
-            continue
-        if ref_input_bits == int(input_bits) and ref_output_bits == int(output_bits):
-            return True
-    return False
-
-
-def _return_case_has_constant_literal_extension_to_width(
-    return_case: ReturnCase,
-    *,
-    input_bits: int,
-    output_bits: int,
-    extension_op: str,
-) -> bool:
-    if input_bits <= 0 or output_bits <= 0 or input_bits >= output_bits:
-        return False
-    if extension_op not in {"sign_extend", "zero_extend"}:
-        return False
-    expr = getattr(return_case, "value_expr", None)
-    expr_type = getattr(expr, "expr_type", None)
-    expr_kind = getattr(expr_type, "__class__", None)
-    if expr_type is None or expr_kind is None or expr_type != expr_kind.CONSTANT:
-        return False
-    try:
-        value = int(getattr(expr, "value"))
-    except (TypeError, ValueError):
-        return False
-    source_mask = (1 << int(input_bits)) - 1
-    low_value = value & source_mask
-    has_material_high_bits = (value >> int(input_bits)) != 0
-    has_signed_negative_low_bits = (
-        extension_op == "sign_extend"
-        and bool(low_value & (1 << (int(input_bits) - 1)))
-    )
-    if not (has_material_high_bits or has_signed_negative_low_bits):
-        return False
-    if extension_op == "zero_extend":
-        extended = low_value
-    else:
-        sign_bit = 1 << (int(input_bits) - 1)
-        if low_value & sign_bit:
-            extended = low_value | (((1 << (int(output_bits) - int(input_bits))) - 1) << int(input_bits))
-        else:
-            extended = low_value
-    return (value & ((1 << int(output_bits)) - 1)) == extended
 
 
 def build_normalized_inequality_query(

@@ -33,6 +33,15 @@ class CausalStatus(str, Enum):
     UNCLASSIFIED = "unclassified"
 
 
+class CompletionApplicabilityStatus(str, Enum):
+    APPLICABLE = "APPLICABLE"
+    STALE_SNAPSHOT = "STALE_SNAPSHOT"
+    PREMISE_MISMATCH = "PREMISE_MISMATCH"
+    TARGET_OR_SLOT_MISMATCH = "TARGET_OR_SLOT_MISMATCH"
+    ARTIFACT_INVALID = "ARTIFACT_INVALID"
+    OCCURRENCE_ALREADY_COMPLETED = "OCCURRENCE_ALREADY_COMPLETED"
+
+
 @dataclass(frozen=True)
 class AttemptIdentity:
     strategy_identity: str
@@ -87,6 +96,34 @@ class ProofCompletionEvent:
             "proof_artifact_ref": self.proof_artifact_ref,
             "proof_status": self.proof_status,
             "completed_at_attempt": self.completed_at_attempt.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class ReasonCompletionEvent:
+    completion_event_id: Tuple[Any, ...]
+    completed_occurrence_id: ReasonOccurrenceId
+    exact_target_id: Tuple[Any, ...]
+    exact_missing_fact_or_proof_slot: str
+    source_snapshot_fingerprint: str
+    semantic_seed_or_premise_digest: str
+    evidence_or_artifact_digest: str
+    recognizing_stage: str
+    completed_at_attempt: AttemptIdentity
+    applicability_status: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "completion_event_id": self.completion_event_id,
+            "completed_occurrence_id": self.completed_occurrence_id.to_dict(),
+            "exact_target_id": self.exact_target_id,
+            "exact_missing_fact_or_proof_slot": self.exact_missing_fact_or_proof_slot,
+            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
+            "semantic_seed_or_premise_digest": self.semantic_seed_or_premise_digest,
+            "evidence_or_artifact_digest": self.evidence_or_artifact_digest,
+            "recognizing_stage": self.recognizing_stage,
+            "completed_at_attempt": self.completed_at_attempt.to_dict(),
+            "applicability_status": self.applicability_status,
         }
 
 
@@ -203,6 +240,7 @@ class Attempt:
     final_smt: Optional[str] = None  # ★ 新規: 完全なSMT式
     counterexample: Optional[Dict[str, Any]] = None
     pairwise_decisive: Optional[PairwiseDecisiveInfo] = None
+    pairwise_debug_stats: Dict[str, int] = field(default_factory=dict)
     normalization_rules: List[NormalizationRuleApplication] = field(default_factory=list)
     unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
     reason_occurrences: List[ReasonOccurrence] = field(default_factory=list)
@@ -243,6 +281,7 @@ class Attempt:
             "final_smt": self.final_smt,  # ★ 追加
             "counterexample": self.counterexample,
             "pairwise_decisive": self.pairwise_decisive.to_dict() if self.pairwise_decisive else None,
+            "pairwise_debug_stats": dict(self.pairwise_debug_stats),
             "normalization_rules": [rule.to_dict() for rule in self.normalization_rules],
             "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
             "reason_occurrences": [item.to_dict() for item in self.reason_occurrences],
@@ -263,6 +302,7 @@ class DebugTrace:
     error_message: Optional[str] = None
     causal_transitions: List[ReasonCausalTransition] = field(default_factory=list)
     proof_completion_events: List[ProofCompletionEvent] = field(default_factory=list)
+    reason_completion_events: List[ReasonCompletionEvent] = field(default_factory=list)
     
     def add_attempt(self, attempt: Attempt):
         """試行を追加"""
@@ -318,6 +358,78 @@ class DebugTrace:
 
     def add_proof_completion(self, completion: ProofCompletionEvent) -> None:
         self.proof_completion_events.append(completion)
+
+    def add_reason_completion(
+        self,
+        completion: ReasonCompletionEvent,
+        *,
+        current_snapshot_fingerprint: str,
+        current_semantic_seed_or_premise_digest: str,
+        artifact_is_valid: bool,
+    ) -> ReasonCompletionEvent:
+        """Validate exact occurrence applicability before closing a reason."""
+
+        occurrence = next(
+            (
+                item
+                for attempt in self.attempts
+                for item in attempt.reason_occurrences
+                if item.occurrence_id == completion.completed_occurrence_id
+            ),
+            None,
+        )
+        already_completed = any(
+            item.completed_occurrence_id == completion.completed_occurrence_id
+            and item.applicability_status == CompletionApplicabilityStatus.APPLICABLE.value
+            for item in self.reason_completion_events
+        )
+        status = CompletionApplicabilityStatus.APPLICABLE
+        if already_completed:
+            status = CompletionApplicabilityStatus.OCCURRENCE_ALREADY_COMPLETED
+        elif occurrence is None:
+            status = CompletionApplicabilityStatus.TARGET_OR_SLOT_MISMATCH
+        elif (
+            completion.completed_at_attempt.attempt_ordinal
+            <= completion.completed_occurrence_id.attempt_identity.attempt_ordinal
+        ):
+            status = CompletionApplicabilityStatus.TARGET_OR_SLOT_MISMATCH
+        elif completion.source_snapshot_fingerprint != str(current_snapshot_fingerprint):
+            status = CompletionApplicabilityStatus.STALE_SNAPSHOT
+        elif (
+            completion.semantic_seed_or_premise_digest
+            != str(current_semantic_seed_or_premise_digest)
+        ):
+            status = CompletionApplicabilityStatus.PREMISE_MISMATCH
+        elif not artifact_is_valid or not completion.evidence_or_artifact_digest:
+            status = CompletionApplicabilityStatus.ARTIFACT_INVALID
+        else:
+            reason = occurrence.reason_record
+            expected_target = tuple(getattr(reason, "object_target_key", ()) or ())
+            requirements = tuple(getattr(reason, "proof_requirement_ids", ()) or ())
+            expected_slots = {
+                str(item.get("proof_kind") or "")
+                for item in requirements
+                if isinstance(item, Mapping)
+            }
+            if expected_target and expected_target != tuple(completion.exact_target_id):
+                status = CompletionApplicabilityStatus.TARGET_OR_SLOT_MISMATCH
+            elif expected_slots and completion.exact_missing_fact_or_proof_slot not in expected_slots:
+                status = CompletionApplicabilityStatus.TARGET_OR_SLOT_MISMATCH
+
+        validated = ReasonCompletionEvent(
+            completion_event_id=completion.completion_event_id,
+            completed_occurrence_id=completion.completed_occurrence_id,
+            exact_target_id=completion.exact_target_id,
+            exact_missing_fact_or_proof_slot=completion.exact_missing_fact_or_proof_slot,
+            source_snapshot_fingerprint=completion.source_snapshot_fingerprint,
+            semantic_seed_or_premise_digest=completion.semantic_seed_or_premise_digest,
+            evidence_or_artifact_digest=completion.evidence_or_artifact_digest,
+            recognizing_stage=completion.recognizing_stage,
+            completed_at_attempt=completion.completed_at_attempt,
+            applicability_status=status.value,
+        )
+        self.reason_completion_events.append(validated)
+        return validated
 
     def get_phase_usage(self) -> List[Dict[str, Any]]:
         """Phase 利用状況を集約して返す。"""
@@ -464,6 +576,7 @@ class DebugTrace:
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "causal_transitions": [item.to_dict() for item in self.causal_transitions],
             "proof_completion_events": [item.to_dict() for item in self.proof_completion_events],
+            "reason_completion_events": [item.to_dict() for item in self.reason_completion_events],
             "planned_phases": self.planned_phases,
             "known_phases": self.known_phases,
             "used_phases": self.get_used_phases(),

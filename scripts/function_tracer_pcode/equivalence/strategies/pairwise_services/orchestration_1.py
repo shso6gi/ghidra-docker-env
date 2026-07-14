@@ -251,6 +251,22 @@ def _impl_check(
         "exact_query_attempt_cache_misses": 0,
         "obligation_pair_cache_hits": 0,
         "obligation_pair_cache_misses": 0,
+        "width_target_count": 0,
+        "width_seed_complete_count": 0,
+        "width_seed_incomplete_count": 0,
+        "width_unary_proof_attempts": 0,
+        "width_unary_proof_cache_hits": 0,
+        "width_unary_proof_successes": 0,
+        "width_unary_proof_blocked": 0,
+        "width_observation_proven": 0,
+        "width_observation_blocked": 0,
+        "width_binding_receipts": 0,
+        "width_binding_blocked": 0,
+        "width_canonical_consumer_queries": 0,
+        "unary_width_solver_queries": 0,
+        "pair_width_projection_queries": 0,
+        "pair_width_compatibility_queries": 0,
+        "legacy_width_bridge_queries": 0,
     }
     unknown_reasons = []
     self._active_normalization_stats = normalization_stats
@@ -258,9 +274,65 @@ def _impl_check(
     query_execution_records = []
     cacheable_solver_unsat_pairs = set()
 
+    from ...return_width_pipeline import (
+        prepare_function_return_widths,
+        prepare_pair_return_observation,
+        return_coverage_artifact_ids,
+    )
+    from ..proof_gates.return_coverage import (
+        prepare_unary_return_coverage_for_width,
+    )
+
+    prepare_unary_return_coverage_for_width(
+        self,
+        base_ctx,
+        solver_analysis1,
+        solver_analysis2,
+        symbol_replace_fn1,
+        symbol_replace_fn2,
+    )
+
+    prepared_widths1 = prepare_function_return_widths(
+        solver_analysis1, cases1, normalization_stats
+    )
+    prepared_widths2 = prepare_function_return_widths(
+        solver_analysis2, cases2, normalization_stats
+    )
+    width_runtime = getattr(self, "_obligation_runtime_session", None)
+    width_coverage_ids = return_coverage_artifact_ids(
+        width_runtime,
+        (
+            tuple(getattr(solver_analysis1, "outcome_function_identity")()),
+            tuple(getattr(solver_analysis2, "outcome_function_identity")()),
+        ),
+    )
+    base_ctx["return_width_observations_by_pair"] = {}
+
     for i, case1 in enumerate(cases1):
         for j, case2 in enumerate(cases2):
             pair_id = f"({i},{j})"
+            prepared_width_observation = prepare_pair_return_observation(
+                solver_analysis1,
+                solver_analysis2,
+                case1,
+                case2,
+                prepared_widths1,
+                prepared_widths2,
+                return_coverage_ids=width_coverage_ids,
+                proof_runtime=width_runtime,
+                left_query_parameters=base_ctx["params1"],
+                right_query_parameters=base_ctx["params2"],
+                left_replace_fn=symbol_replace_fn1,
+                right_replace_fn=symbol_replace_fn2,
+                stats=normalization_stats,
+            )
+            base_ctx["return_width_observations_by_pair"][pair_id] = (
+                prepared_width_observation
+            )
+            if prepared_width_observation.proven:
+                base_ctx.setdefault("return_width_binding_receipts_by_pair", {})[
+                    pair_id
+                ] = prepared_width_observation.binding_receipt
             call_projection_covers_unresolved = False
             if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
                 lowered_call_projection = lower_call_projection_for_case_pair(
@@ -296,6 +368,14 @@ def _impl_check(
                 base_ctx.setdefault("call_projection_binding_digests_by_pair", {})[
                     pair_id
                 ] = dict(lowered_call_projection.binding_assertion_digests)
+                base_ctx.setdefault("call_site_return_width_receipts_by_pair", {})[
+                    pair_id
+                ] = lowered_call_projection.return_width_receipt_digests
+                base_ctx.setdefault(
+                    "call_site_return_width_receipt_assertions_by_pair", {}
+                )[pair_id] = (
+                    lowered_call_projection.return_width_receipt_assertion_digests
+                )
                 call_projection_covers_unresolved = True
             pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
             readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
@@ -778,6 +858,34 @@ def _impl_check(
                         disposition=disposition,
                         proof_kind=str(result.pair_stage or "pairwise_solver_query"),
                         projection_binding_ids=binding_ids,
+                        return_width_observation_view_digest=getattr(
+                            result,
+                            "return_width_observation_view_digest",
+                            "",
+                        ),
+                        return_width_binding_receipt_digest=getattr(
+                            result,
+                            "consumer_binding_receipt_digest",
+                            "",
+                        ),
+                        call_site_return_width_receipt_digests=tuple(
+                            (base_ctx.get("call_site_return_width_receipts_by_pair") or {}).get(
+                                pair_id, ()
+                            )
+                        ),
+                        call_site_return_width_receipt_assertion_digests=tuple(
+                            (
+                                base_ctx.get(
+                                    "call_site_return_width_receipt_assertions_by_pair"
+                                )
+                                or {}
+                            ).get(pair_id, ())
+                        ),
+                        canonical_return_width_receipt_digests=(
+                            (str(getattr(result, "consumer_binding_receipt_digest", "")),)
+                            if getattr(result, "consumer_binding_receipt_digest", "")
+                            else ()
+                        ),
                         formula_text=query_text,
                     )
                 )
@@ -904,7 +1012,7 @@ def _impl_check(
                 continue
 
             if result.blocking_reason == UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value:
-                completed_bridge_result = self._solve_return_width_bridge_with_completed_proof(
+                completed_bridge_result = self._solve_canonical_return_observation(
                     base_ctx,
                     case1,
                     case2,
@@ -925,7 +1033,7 @@ def _impl_check(
                     continue
                 pending_bridge_evidence = getattr(
                     self,
-                    "_last_return_width_bridge_pending_evidence",
+                    "_last_canonical_return_width_pending_evidence",
                     None,
                 )
                 if pending_bridge_evidence is not None:
@@ -946,6 +1054,7 @@ def _impl_check(
                         None,
                     ),
                     proof_obligation_id=getattr(result, "proof_obligation_id", None),
+                    proof_requirement_ids=getattr(result, "proof_requirement_ids", None),
                     object_evidence=getattr(result, "object_evidence", None),
                     action_status=getattr(result, "action_status", None),
                     detail=result.blocking_detail,
@@ -1127,6 +1236,20 @@ def _impl_check(
             pairwise_debug_stats=normalization_stats,
             unknown_reasons=unknown_reasons,
         )
+        final_result.completed_recovery_proof_evidence = [
+            {
+                "side": side,
+                "function_name": getattr(analysis, "function_name", None),
+                "binary_name": getattr(analysis, "binary_id", None),
+                "binary_id": getattr(analysis, "binary_id", None),
+                "evidence": dict(evidence),
+            }
+            for side, analysis, prepared in (
+                ("function1", solver_analysis1, prepared_widths1),
+                ("function2", solver_analysis2, prepared_widths2),
+            )
+            for evidence in prepared.completion_evidence
+        ]
         final_result.comparison_execution_receipt = comparison_receipt
         return final_result
     finally:

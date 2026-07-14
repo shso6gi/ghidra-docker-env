@@ -96,7 +96,7 @@ _NORMALIZATION_ALLOWED_ROOTS = (
     "comparison_surface",
     "effect_summary",
     "parameters",
-    "return_outcomes",
+    "outcomes",
     "return_type",
     "return_type_obj",
     "return_type_provenance",
@@ -108,7 +108,7 @@ _NORMALIZATION_ALLOWED_ROOTS = (
 _NORMALIZATION_OBSERVATION_ROOTS = (
     "parameters",
     "returns",
-    "return_outcomes",
+    "outcomes",
     "summary_return_candidates",
     "effect_summary",
     "comparison_surface",
@@ -433,7 +433,10 @@ def prepare_solver_surface(
         not set(roots).issubset(_NORMALIZATION_ALLOWED_ROOTS)
         for _side, roots in changed_roots
     ):
-        raise ValueError("surface_delta_outside_trusted_normalization_roots")
+        raise ValueError(
+            "surface_delta_outside_trusted_normalization_roots:"
+            + repr(changed_roots)
+        )
     audit_id = _digest(
         (
             "rule_level_surface_delta_audit_v1",
@@ -568,6 +571,7 @@ class CallSemanticProjectionBinding:
     region_return_members: Tuple[Tuple[Any, ...], ...]
     consumer_domains: Tuple[str, ...]
     status: str
+    return_width_relation_contract: Tuple[Any, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -587,6 +591,7 @@ class CallSemanticProjectionBinding:
             "region_return_members": self.region_return_members,
             "consumer_domains": self.consumer_domains,
             "status": self.status,
+            "return_width_relation_contract": self.return_width_relation_contract,
         }
 
 
@@ -802,6 +807,15 @@ def validate_call_resolution_projection(
                 for item in stage_artifacts
                 if getattr(item.record, "proof_stage", None) == "return_relation"
             )
+            width_relation_contract: Tuple[Any, ...] = ()
+            if len(return_artifacts) == 1:
+                preconditions = getattr(return_artifacts[0], "precondition_payload", {})
+                if isinstance(preconditions, Mapping) and isinstance(
+                    preconditions.get("return_width_relation"), Mapping
+                ):
+                    width_relation_contract = SnapshotFingerprintCodec.freeze(
+                        preconditions["return_width_relation"]
+                    )
             relation_kind = str(obligation.get("relation_kind") or "")
             call_on_left = None
             region_return_members: Tuple[Tuple[Any, ...], ...] = ()
@@ -832,6 +846,13 @@ def validate_call_resolution_projection(
                     active_precondition=("obligation_id", obligation_id),
                 ),
             )
+            consumer_domains = tuple(sorted({
+                use_consumer_domain(item)
+                for item in (
+                    *tuple(left_fact.get("output_use_bindings", ()) or ()),
+                    *tuple(right_fact.get("output_use_bindings", ()) or ()),
+                )
+            }))
             binding_payload = (
                 obligation_id,
                 obligation.get("observation_contract_id"),
@@ -843,16 +864,10 @@ def validate_call_resolution_projection(
                 relation_kind,
                 call_on_left,
                 region_return_members,
-                tuple(sorted({
-                    use_consumer_domain(item)
-                    for item in (
-                        *tuple(left_fact.get("output_use_bindings", ()) or ()),
-                        *tuple(right_fact.get("output_use_bindings", ()) or ()),
-                    )
-                })),
+                consumer_domains,
+                width_relation_contract,
                 requirement.to_key(),
             )
-            consumer_domains = binding_payload[-2]
             semantic_bindings.append(
                 CallSemanticProjectionBinding(
                     binding_id=_digest(("call_semantic_projection_binding_v1", binding_payload)),
@@ -905,6 +920,7 @@ def validate_call_resolution_projection(
                         )
                         else "inconclusive"
                     ),
+                    return_width_relation_contract=width_relation_contract,
                 )
             )
         semantic_safety_failures = []
@@ -1067,9 +1083,29 @@ class QueryExecutionRecord:
     proof_kind: str
     projection_binding_ids: Tuple[str, ...] = ()
     formula_text: str = field(default="", repr=False, compare=False)
+    return_width_observation_view_digest: str = ""
+    return_width_binding_receipt_digest: str = ""
+    call_site_return_width_receipt_digests: Tuple[str, ...] = ()
+    call_site_return_width_receipt_assertion_digests: Tuple[Tuple[str, str], ...] = ()
+    canonical_return_width_receipt_digests: Tuple[str, ...] = ()
 
     def validate(self) -> bool:
         evidence = projection_binding_evidence_from_query(self.formula_text)
+        call_width_receipts = call_site_return_width_evidence_from_query(
+            self.formula_text
+        )
+        canonical_width_receipts = tuple(sorted(set(
+            re.findall(
+                r"^; canonical_return_width_binding_receipt ([0-9a-f]{64})$",
+                self.formula_text,
+                flags=re.MULTILINE,
+            )
+            + re.findall(
+                r"^; binding-receipt ([0-9a-f]{64})$",
+                self.formula_text,
+                flags=re.MULTILINE,
+            )
+        )))
         return (
             bool(self.query_label)
             and len(self.premise_digest) == 64
@@ -1080,7 +1116,58 @@ class QueryExecutionRecord:
             and tuple(sorted(evidence)) == tuple(sorted(self.projection_binding_ids))
             and self.disposition in {"unsat", "sat", "unknown", "error"}
             and bool(self.proof_kind)
+            and (
+                not self.return_width_observation_view_digest
+                or len(self.return_width_observation_view_digest) == 64
+            )
+            and (
+                not self.return_width_binding_receipt_digest
+                or len(self.return_width_binding_receipt_digest) == 64
+            )
+            and bool(self.return_width_observation_view_digest)
+            == bool(self.return_width_binding_receipt_digest)
+            and tuple(sorted(call_width_receipts))
+            == tuple(sorted(set(self.call_site_return_width_receipt_digests)))
+            and tuple(sorted(call_width_receipts.items()))
+            == tuple(sorted(set(
+                self.call_site_return_width_receipt_assertion_digests
+            )))
+            and canonical_width_receipts
+            == tuple(sorted(set(self.canonical_return_width_receipt_digests)))
+            and (
+                not self.return_width_binding_receipt_digest
+                or bool(canonical_width_receipts)
+            )
         )
+
+
+_CALL_SITE_RETURN_WIDTH_MARKER = re.compile(
+    r"^; call_site_return_width_receipt ([0-9a-f]{64}) "
+    r"assertion_sha256=([0-9a-f]{64})$"
+)
+
+
+def call_site_return_width_evidence_from_query(query_text: str) -> Dict[str, str]:
+    """Validate that every receipt marker binds the immediately asserted term."""
+
+    lines = str(query_text or "").splitlines()
+    evidence: Dict[str, str] = {}
+    for index, line in enumerate(lines):
+        match = _CALL_SITE_RETURN_WIDTH_MARKER.fullmatch(line)
+        if match is None:
+            continue
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("(assert "):
+            return {}
+        receipt_digest, expected_assertion_digest = match.groups()
+        actual_assertion_digest = hashlib.sha256(
+            lines[index + 1].encode("utf-8")
+        ).hexdigest()
+        if actual_assertion_digest != expected_assertion_digest:
+            return {}
+        if receipt_digest in evidence and evidence[receipt_digest] != actual_assertion_digest:
+            return {}
+        evidence[receipt_digest] = actual_assertion_digest
+    return evidence
 
 
 _PROJECTION_BINDING_START = re.compile(
@@ -1389,6 +1476,8 @@ class LoweredCallProjection:
     status: str
     failure_cause: Optional[str] = None
     binding_assertion_digests: Tuple[Tuple[str, str], ...] = ()
+    return_width_receipt_digests: Tuple[str, ...] = ()
+    return_width_receipt_assertion_digests: Tuple[Tuple[str, str], ...] = ()
 
 
 def lower_call_projection_for_case_pair(
@@ -1594,6 +1683,8 @@ def lower_call_projection_for_case_pair(
     consumed = []
     evidence = []
     binding_assertion_digests = []
+    return_width_receipt_digests = []
+    return_width_receipt_assertion_digests = []
     expected_left_unresolved_keys = []
     expected_right_unresolved_keys = []
     known_uncovered_left_keys = []
@@ -1728,7 +1819,21 @@ def lower_call_projection_for_case_pair(
             for left_expr, right_expr in expression_pairs:
                 left_bits = int(getattr(left_expr, "get_bit_width", lambda: 0)() or 0)
                 right_bits = int(getattr(right_expr, "get_bit_width", lambda: 0)() or 0)
-                if left_bits <= 0 or left_bits != right_bits:
+                from .return_width_surface import (
+                    BlockedObservation,
+                    build_call_site_return_width_receipt,
+                )
+                left_term = rendered(left_expr, render_fn1)
+                right_term = rendered(right_expr, render_fn2)
+                receipt = build_call_site_return_width_receipt(
+                    binding=binding,
+                    pair_id=pair_id,
+                    left_expr=left_expr,
+                    right_expr=right_expr,
+                    lowered_left_term=left_term,
+                    lowered_right_term=right_term,
+                )
+                if isinstance(receipt, BlockedObservation):
                     return LoweredCallProjection(
                         (),
                         (),
@@ -1737,11 +1842,13 @@ def lower_call_projection_for_case_pair(
                         "call_projection_width_mismatch",
                     )
                 assertions.append(
-                    "(assert (= "
-                    + rendered(left_expr, render_fn1)
-                    + " "
-                    + rendered(right_expr, render_fn2)
-                    + "))"
+                    f"; call_site_return_width_receipt {receipt.binding_digest} "
+                    f"assertion_sha256={receipt.assertion_digest}"
+                )
+                assertions.append(receipt.assertion_text)
+                return_width_receipt_digests.append(receipt.binding_digest)
+                return_width_receipt_assertion_digests.append(
+                    (receipt.binding_digest, receipt.assertion_digest)
                 )
         elif (
             binding.relation_kind == "call_to_region"
@@ -1785,21 +1892,41 @@ def lower_call_projection_for_case_pair(
                 )
             call_bits = int(getattr(call_exprs[0], "get_bit_width", lambda: 0)() or 0)
             region_bits = int(getattr(region_value, "get_bit_width", lambda: 0)() or 0)
-            if call_bits <= 0 or region_bits <= 0 or call_bits != region_bits:
-                return LoweredCallProjection(
-                    (),
-                    (),
-                    _digest(("call_projection_lowering_v2", pair_id, binding.binding_id, call_bits, region_bits)),
-                    "inconclusive",
-                    "call_projection_width_mismatch",
-                )
             for call_expr in call_exprs:
+                left_expr = call_expr if call_is_left else region_value
+                right_expr = region_value if call_is_left else call_expr
+                left_render = call_render_fn if call_is_left else region_render_fn
+                right_render = region_render_fn if call_is_left else call_render_fn
+                from .return_width_surface import (
+                    BlockedObservation,
+                    build_call_site_return_width_receipt,
+                )
+                left_term = rendered(left_expr, left_render)
+                right_term = rendered(right_expr, right_render)
+                receipt = build_call_site_return_width_receipt(
+                    binding=binding,
+                    pair_id=pair_id,
+                    left_expr=left_expr,
+                    right_expr=right_expr,
+                    lowered_left_term=left_term,
+                    lowered_right_term=right_term,
+                )
+                if isinstance(receipt, BlockedObservation):
+                    return LoweredCallProjection(
+                        (),
+                        (),
+                        _digest(("call_projection_lowering_v2", pair_id, binding.binding_id, call_bits, region_bits)),
+                        "inconclusive",
+                        "call_projection_width_mismatch",
+                    )
                 assertions.append(
-                    "(assert (= "
-                    + rendered(call_expr, call_render_fn)
-                    + " "
-                    + rendered(region_value, region_render_fn)
-                    + "))"
+                    f"; call_site_return_width_receipt {receipt.binding_digest} "
+                    f"assertion_sha256={receipt.assertion_digest}"
+                )
+                assertions.append(receipt.assertion_text)
+                return_width_receipt_digests.append(receipt.binding_digest)
+                return_width_receipt_assertion_digests.append(
+                    (receipt.binding_digest, receipt.assertion_digest)
                 )
         elif (
             binding.relation_kind == "call_to_call"
@@ -1886,6 +2013,10 @@ def lower_call_projection_for_case_pair(
         _digest(("call_projection_lowering_v1", pair_id, tuple(evidence), tuple(assertions))),
         "proven",
         binding_assertion_digests=tuple(sorted(binding_assertion_digests)),
+        return_width_receipt_digests=tuple(sorted(set(return_width_receipt_digests))),
+        return_width_receipt_assertion_digests=tuple(sorted(set(
+            return_width_receipt_assertion_digests
+        ))),
     )
 
 

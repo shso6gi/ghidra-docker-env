@@ -321,7 +321,7 @@ _METHOD_MODULES = {
     '_solve_reduction_count_affine_equality': 'readonly_reduction_1',
     '_solve_reduction_count_affine_equality_between_expressions': 'readonly_reduction_1',
     '_solve_reduction_count_masked_equality': 'readonly_reduction_1',
-    '_solve_return_width_bridge_with_completed_proof': 'orchestration_2',
+    '_solve_canonical_return_observation': 'orchestration_2',
     '_solver_rewrite_candidate_object_target_key': 'auxiliary_smt',
     '_solver_rewrite_proof_object_target_key': 'auxiliary_smt',
     '_solver_rewrite_side_object_key': 'auxiliary_smt',

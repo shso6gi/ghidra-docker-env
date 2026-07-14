@@ -35,6 +35,19 @@ class FunctionProofOutcome(str, Enum):
     INCONCLUSIVE = "inconclusive"
 
 
+class UnaryArtifactDomain(str, Enum):
+    """Semantic domain of a function-scoped, pair-independent artifact."""
+
+    RETURN_OUTCOME_V1 = "return_outcome_v1"
+    RETURN_WIDTH_V1 = "return_width_v1"
+
+    @classmethod
+    def normalize(cls, value: object) -> str:
+        if isinstance(value, cls):
+            return value.value
+        return cls(str(value)).value
+
+
 @dataclass(frozen=True)
 class ObligationInstanceId:
     requirement_id: ProofRequirementId

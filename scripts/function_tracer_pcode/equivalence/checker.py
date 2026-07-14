@@ -24,6 +24,7 @@ from .strategies.monolithic import MonolithicStrategy
 from .normalize import NormalizationSettings
 from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
+from .obligations.snapshot import SnapshotFingerprintCodec
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
 from .workflow import run_check_from_binaries
 from .unknown_reason import build_unknown_recovery_actions, make_unknown_reason
@@ -422,6 +423,7 @@ class EquivalenceChecker:
             final_smt=final_smt,
             counterexample=counterexample,
             pairwise_decisive=pairwise_decisive,
+            pairwise_debug_stats=None,
             normalization_rules=normalization_rules,
             mips64_abi_constraints=mips64_abi_constraints,
             elapsed_time=elapsed_time,
@@ -774,6 +776,7 @@ class EquivalenceChecker:
         result = None
         last_result = None
         stage_path = []
+        accumulated_pairwise_debug_stats: Dict[str, int] = {}
         
         for stage_spec in self.stage_plan:
             stage_id = stage_spec.stage_id
@@ -845,6 +848,14 @@ class EquivalenceChecker:
             
             # stage_path を記録
             result.stage_path = stage_path.copy()
+            current_debug_stats = dict(result.pairwise_debug_stats or {})
+            if current_debug_stats:
+                for key, value in current_debug_stats.items():
+                    accumulated_pairwise_debug_stats[key] = (
+                        accumulated_pairwise_debug_stats.get(key, 0) + int(value or 0)
+                    )
+            if accumulated_pairwise_debug_stats:
+                result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
             self._merge_completed_recovery_proofs_from_result(
                 analysis1,
                 analysis2,
@@ -1166,6 +1177,21 @@ class EquivalenceChecker:
                     strategy_result.return_var1 or "return_1",
                     strategy_result.return_var2 or "return_2"
                 )
+
+            completed_proofs = self._completed_recovery_proof_payload(
+                analysis1,
+                analysis2,
+                binary1_name,
+                binary2_name,
+                extra_records=getattr(
+                    strategy_result, "completed_recovery_proof_evidence", ()
+                ),
+            )
+            completion_contexts = self._reason_completion_applicability_contexts(
+                completed_proofs,
+                analysis1,
+                analysis2,
+            )
             
             return EquivalenceResult(
                 is_equivalent=strategy_result.is_equivalent,
@@ -1200,12 +1226,8 @@ class EquivalenceChecker:
                 unknown_reasons=strategy_result.unknown_reasons,
                 sat_pair_info=strategy_result.sat_pair_info,
                 normalization_rules=strategy_result.normalization_rules,
-                completed_recovery_proof_evidence=self._completed_recovery_proof_payload(
-                    analysis1,
-                    analysis2,
-                    binary1_name,
-                    binary2_name,
-                ),
+                completed_recovery_proof_evidence=completed_proofs,
+                reason_completion_applicability_contexts=completion_contexts,
                 call_effect_shadow_manifest=call_effect_shadow_manifest,
                 call_proof_terminal_provenance=(
                     {
@@ -1227,6 +1249,31 @@ class EquivalenceChecker:
                             if dispatch_frame is not None and dispatch_frame.receipt is not None
                             else None
                         ),
+                        "query_execution_receipts": [
+                            {
+                                "query_label": record.query_label,
+                                "premise_digest": record.premise_digest,
+                                "formula_digest": record.formula_digest,
+                                "disposition": record.disposition,
+                                "proof_kind": record.proof_kind,
+                                "return_width_observation_view_digest": (
+                                    record.return_width_observation_view_digest
+                                ),
+                                "return_width_binding_receipt_digest": (
+                                    record.return_width_binding_receipt_digest
+                                ),
+                                "canonical_return_width_receipt_digests": list(
+                                    record.canonical_return_width_receipt_digests
+                                ),
+                                "formula_text": record.formula_text,
+                                "validated": record.validate(),
+                            }
+                            for record in tuple(getattr(
+                                getattr(dispatch_frame, "receipt", None),
+                                "query_records",
+                                (),
+                            ) or ())
+                        ],
                         "dispatch_cleanup_complete": (
                             dispatch_frame.cleanup_complete if dispatch_frame is not None else True
                         ),
@@ -2118,6 +2165,8 @@ class EquivalenceChecker:
         analysis2: FunctionReturnAnalysis,
         binary1_name: str,
         binary2_name: str,
+        *,
+        extra_records=(),
     ) -> List[Dict[str, Any]]:
         if not self.enable_completed_recovery_proofs:
             return []
@@ -2138,7 +2187,80 @@ class EquivalenceChecker:
                         "evidence": dict(evidence),
                     }
                 )
-        return records
+        records.extend(
+            dict(item) for item in tuple(extra_records or ())
+            if isinstance(item, Mapping)
+        )
+        unique = {}
+        for item in records:
+            evidence = item.get("evidence") or {}
+            identity = (
+                item.get("side"),
+                SnapshotFingerprintCodec.freeze(
+                    evidence.get("proof_requirement_id")
+                    or evidence.get("proof_obligation_id")
+                    or evidence
+                ),
+            )
+            unique.setdefault(identity, item)
+        return list(unique.values())
+
+    @staticmethod
+    def _reason_completion_applicability_contexts(
+        completed_proofs,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> List[Dict[str, Any]]:
+        """Validate completion artifacts against the live analysis snapshots.
+
+        This is the runtime trust boundary used by attempt recording.  Evidence
+        fields are never reused as their own current applicability values.
+        """
+
+        from .obligations.runtime import (
+            GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE,
+            ObligationRuntimeSession,
+        )
+
+        by_side = {"function1": analysis1, "function2": analysis2}
+        contexts: List[Dict[str, Any]] = []
+        for wrapper in tuple(completed_proofs or ()):
+            if not isinstance(wrapper, Mapping):
+                continue
+            analysis = by_side.get(str(wrapper.get("side") or ""))
+            evidence = wrapper.get("evidence")
+            if analysis is None or not isinstance(evidence, Mapping):
+                continue
+            artifact_id = evidence.get("proof_artifact_ref")
+            requirement = evidence.get("proof_requirement_id")
+            if artifact_id is None or not isinstance(requirement, Mapping):
+                continue
+            try:
+                artifact_id = tuple(SnapshotFingerprintCodec.freeze(artifact_id))
+                current_snapshot = ObligationRuntimeSession._snapshot(
+                    analysis, "completion_applicability"
+                ).semantic_fingerprint
+            except (TypeError, ValueError):
+                continue
+            entry = GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE.find_applicable_artifact(
+                artifact_id,
+                function_snapshot_fingerprint=current_snapshot,
+            )
+            if entry is None:
+                continue
+            artifact_digest = SnapshotFingerprintCodec.digest((
+                entry.artifact.artifact_id,
+                entry.artifact.payload,
+            ))
+            contexts.append({
+                "proof_requirement_id": dict(requirement),
+                "proof_artifact_ref": entry.artifact.artifact_id,
+                "current_snapshot_fingerprint": current_snapshot,
+                "current_semantic_seed_or_premise_digest": entry.function_premise_digest,
+                "current_evidence_or_artifact_digest": artifact_digest,
+                "artifact_is_valid": True,
+            })
+        return contexts
 
     def _merge_completed_recovery_proofs_from_result(
         self,

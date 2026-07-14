@@ -5,7 +5,9 @@ import pytest
 import json
 from types import SimpleNamespace
 from scripts.function_tracer_pcode.equivalence.debug_trace import (
-    DebugTrace, Attempt, TransitionReason, PairwiseDecisiveInfo, NormalizationRuleApplication
+    DebugTrace, Attempt, AttemptIdentity, CompletionApplicabilityStatus,
+    ReasonCompletionEvent, TransitionReason, PairwiseDecisiveInfo,
+    NormalizationRuleApplication,
 )
 from scripts.function_tracer_pcode.equivalence.attempts import _record_explicit_proof_completions
 from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
@@ -28,6 +30,61 @@ def test_normalization_rule_application():
     assert rule_dict["rule_name"] == "double_negation"
     assert rule_dict["before"] == "(NOT (NOT x))"
     assert rule_dict["after"] == "x"
+
+
+def test_reason_completion_validates_exact_occurrence_and_premise():
+    requirement = {
+        "schema_version": 1,
+        "proof_kind": "unary_return_width_relation",
+        "proof_target_key": ("return-member", 1),
+        "proof_contract_key": (1, "return width"),
+    }
+    trace = DebugTrace()
+    trace.add_attempt(Attempt(
+        attempt_id=0,
+        retry_count=0,
+        phase="P0_BASE",
+        stage_path=["S_PAIRWISE"],
+        strategy="pairwise",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[make_unknown_reason(
+            "return_width_bridge_missing",
+            object_target_key=("return-member", 1),
+            proof_requirement_ids=(requirement,),
+        )],
+    ))
+    occurrence = trace.attempts[0].reason_occurrences[0].occurrence_id
+    proposed = ReasonCompletionEvent(
+        completion_event_id=("width-completion", 1),
+        completed_occurrence_id=occurrence,
+        exact_target_id=("return-member", 1),
+        exact_missing_fact_or_proof_slot="unary_return_width_relation",
+        source_snapshot_fingerprint="snapshot-sha",
+        semantic_seed_or_premise_digest="premise-sha",
+        evidence_or_artifact_digest="artifact-sha",
+        recognizing_stage="return_width_canonicalization",
+        completed_at_attempt=AttemptIdentity("pairwise", 1),
+        applicability_status="unvalidated",
+    )
+
+    completed = trace.add_reason_completion(
+        proposed,
+        current_snapshot_fingerprint="snapshot-sha",
+        current_semantic_seed_or_premise_digest="premise-sha",
+        artifact_is_valid=True,
+    )
+    duplicate = trace.add_reason_completion(
+        proposed,
+        current_snapshot_fingerprint="snapshot-sha",
+        current_semantic_seed_or_premise_digest="premise-sha",
+        artifact_is_valid=True,
+    )
+
+    assert completed.applicability_status == CompletionApplicabilityStatus.APPLICABLE.value
+    assert duplicate.applicability_status == (
+        CompletionApplicabilityStatus.OCCURRENCE_ALREADY_COMPLETED.value
+    )
 
 
 def test_pairwise_decisive_info():
@@ -155,7 +212,7 @@ def test_explicit_reason_replacement_emits_supersession_transition():
     assert transition.transition_kind == "superseded"
 
 
-def test_explicit_matching_proof_completion_discharges_prior_occurrence():
+def test_explicit_matching_proof_completion_requires_runtime_applicability():
     requirement = {
         "schema_version": 1,
         "proof_kind": "return_coverage_completion",
@@ -175,6 +232,7 @@ def test_explicit_matching_proof_completion_discharges_prior_occurrence():
             unknown_reasons=[
                 make_unknown_reason(
                     "return_coverage_gap",
+                    object_target_key=("function", "f"),
                     proof_requirement_ids=(requirement,),
                 )
             ],
@@ -199,20 +257,86 @@ def test_explicit_matching_proof_completion_discharges_prior_occurrence():
                     "proof_requirement_id": requirement,
                     "proof_status": "verified",
                     "proof_artifact_ref": ("return_partition", "f", "v1"),
+                    "source_snapshot_fingerprint": "snapshot-current",
+                    "semantic_seed_or_premise_digest": "premise-current",
+                    "evidence_or_artifact_digest": "artifact-current",
+                    "recognizing_stage": "return_coverage",
                 },
             }
-        ]
+        ],
+        reason_completion_applicability_contexts=[{
+            "proof_requirement_id": requirement,
+            "proof_artifact_ref": ("return_partition", "f", "v1"),
+            "current_snapshot_fingerprint": "snapshot-current",
+            "current_semantic_seed_or_premise_digest": "premise-current",
+            "current_evidence_or_artifact_digest": "artifact-current",
+            "artifact_is_valid": True,
+        }],
     )
 
     _record_explicit_proof_completions(trace, result)
 
     assert len(trace.proof_completion_events) == 1
-    discharges = [
-        item for item in trace.causal_transitions
-        if item.transition_kind == "discharged"
-    ]
-    assert len(discharges) == 1
-    assert discharges[0].target_occurrence_id == trace.attempts[0].reason_occurrences[0].occurrence_id
+    assert trace.causal_transitions == []
+    assert len(trace.reason_completion_events) == 1
+    assert trace.reason_completion_events[0].applicability_status == "APPLICABLE"
+
+
+def test_stale_runtime_completion_is_diagnostic_and_cannot_use_legacy_transition():
+    requirement = {
+        "schema_version": 1,
+        "proof_kind": "return_coverage_completion",
+        "proof_target_key": ("function", "f"),
+        "proof_contract_key": (1, "all inputs classified"),
+    }
+    trace = DebugTrace()
+    trace.add_attempt(Attempt(
+        attempt_id=0,
+        retry_count=0,
+        phase="P0_BASE",
+        stage_path=["S_PAIRWISE"],
+        strategy="pairwise",
+        result=None,
+        transition_reason=TransitionReason.UNKNOWN.value,
+        unknown_reasons=[make_unknown_reason(
+            "return_coverage_gap",
+            object_target_key=("function", "f"),
+            proof_requirement_ids=(requirement,),
+        )],
+    ))
+    trace.add_attempt(Attempt(
+        attempt_id=1,
+        retry_count=1,
+        phase="P1_COVERAGE",
+        stage_path=["S_PAIRWISE"],
+        strategy="pairwise",
+        result=True,
+        transition_reason=TransitionReason.UNSAT.value,
+    ))
+    result = SimpleNamespace(
+        completed_recovery_proof_evidence=[{"evidence": {
+            "proof_requirement_id": requirement,
+            "proof_status": "verified",
+            "proof_artifact_ref": ("return_partition", "f", "v1"),
+            "source_snapshot_fingerprint": "snapshot-old",
+            "semantic_seed_or_premise_digest": "premise-current",
+            "evidence_or_artifact_digest": "artifact-current",
+            "recognizing_stage": "return_coverage",
+        }}],
+        reason_completion_applicability_contexts=[{
+            "proof_requirement_id": requirement,
+            "proof_artifact_ref": ("return_partition", "f", "v1"),
+            "current_snapshot_fingerprint": "snapshot-current",
+            "current_semantic_seed_or_premise_digest": "premise-current",
+            "current_evidence_or_artifact_digest": "artifact-current",
+            "artifact_is_valid": True,
+        }],
+    )
+
+    _record_explicit_proof_completions(trace, result)
+
+    assert trace.causal_transitions == []
+    assert trace.reason_completion_events[0].applicability_status == "STALE_SNAPSHOT"
 
 
 def test_proof_evidence_without_exact_requirement_does_not_discharge():
@@ -301,7 +425,8 @@ def test_production_proof_obligation_links_unique_typed_requirement():
     assert len(trace.proof_completion_events) == 1
     assert trace.proof_completion_events[0].proof_requirement_id == requirement
     assert trace.proof_completion_events[0].proof_status == "proven"
-    assert [item.transition_kind for item in trace.causal_transitions] == ["discharged"]
+    assert trace.causal_transitions == []
+    assert trace.reason_completion_events == []
 
 
 def test_ambiguous_legacy_obligation_does_not_guess_typed_requirement():

@@ -3,9 +3,87 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Mapping, Tuple
 
 from .snapshot import SnapshotFingerprintCodec
+
+
+class SolverOutcomeClass(str, Enum):
+    UNSAT = "UNSAT"
+    SAT_DECISIVE_NOT_EQ = "SAT_DECISIVE_NOT_EQ"
+    SAT_INCONCLUSIVE = "SAT_INCONCLUSIVE"
+    UNKNOWN = "UNKNOWN"
+    TIMEOUT = "TIMEOUT"
+
+
+@dataclass(frozen=True)
+class DecisivenessSnapshot:
+    outcome_class: str
+    solver_status: str
+    reason_surface: Tuple[Tuple[Any, ...], ...]
+    stage_path: Tuple[str, ...]
+    query_hash: Any
+    replay_outcome: Any
+    normalized_observable_projection: Any
+    final_decision: Any
+
+    @classmethod
+    def from_result(cls, result: Any, reasons: Tuple[Tuple[Any, ...], ...]):
+        timeout_fn = getattr(result, "is_timeout", None)
+        timed_out = bool(timeout_fn()) if callable(timeout_fn) else False
+        semantic = getattr(result, "is_equivalent", None)
+        solver_status = _solver_status(result)
+        if timed_out:
+            outcome = SolverOutcomeClass.TIMEOUT
+        elif semantic is True:
+            outcome = SolverOutcomeClass.UNSAT
+        elif semantic is False:
+            outcome = SolverOutcomeClass.SAT_DECISIVE_NOT_EQ
+        elif solver_status == "SAT":
+            outcome = SolverOutcomeClass.SAT_INCONCLUSIVE
+        else:
+            outcome = SolverOutcomeClass.UNKNOWN
+        counterexample = getattr(result, "counterexample", None)
+        projection = None
+        replay = None
+        if isinstance(counterexample, Mapping):
+            projection = counterexample.get("normalized_observable_projection")
+            replay = counterexample.get("replay_outcome")
+        query_hash = getattr(result, "query_hash", None)
+        if query_hash is None:
+            formula = str(getattr(result, "smt_formula", "") or "")
+            query_hash = SnapshotFingerprintCodec.digest(formula) if formula else None
+        return cls(
+            outcome.value,
+            solver_status,
+            reasons,
+            tuple(getattr(result, "stage_path", ()) or ()),
+            query_hash,
+            replay,
+            SnapshotFingerprintCodec.freeze(projection),
+            semantic,
+        )
+
+
+def _solver_status(result: Any) -> str:
+    candidates = (
+        getattr(result, "solver_status", None),
+        getattr(result, "solver_results", None),
+    )
+    for value in candidates:
+        if isinstance(value, Mapping):
+            value = value.get("status") or value.get("solver_status")
+        raw = str(getattr(value, "value", value) or "").upper()
+        if "UNSAT" in raw:
+            return "UNSAT"
+        if raw == "SAT" or raw.endswith(".SAT"):
+            return "SAT"
+        if "TIMEOUT" in raw:
+            return "TIMEOUT"
+        if "UNKNOWN" in raw:
+            return "UNKNOWN"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -19,6 +97,7 @@ class LegacyExecutionSnapshot:
     public_schema: Tuple[str, ...]
     proof_action_surface: Any
     proof_event_surface: Any
+    decisiveness_surface: DecisivenessSnapshot
 
     @classmethod
     def from_result(cls, result: Any) -> "LegacyExecutionSnapshot":
@@ -53,6 +132,9 @@ class LegacyExecutionSnapshot:
             "proof_completion_events": tuple(
                 event.to_dict() for event in getattr(debug_trace, "proof_completion_events", ()) or ()
             ),
+            "reason_completion_events": tuple(
+                event.to_dict() for event in getattr(debug_trace, "reason_completion_events", ()) or ()
+            ),
             "causal_transitions": tuple(
                 event.to_dict() for event in getattr(debug_trace, "causal_transitions", ()) or ()
             ),
@@ -67,6 +149,7 @@ class LegacyExecutionSnapshot:
             schema,
             action_surface,
             event_surface,
+            DecisivenessSnapshot.from_result(result, tuple(reasons)),
         )
 
 
@@ -85,8 +168,13 @@ class ShadowComparisonReport:
         for field_name in (
             "semantic_result", "legacy_timeout", "stage_path", "unknown_reason_keys",
             "root_blocker_keys", "decisive_counterexample", "public_schema",
-            "proof_action_surface", "proof_event_surface",
+            "proof_action_surface", "proof_event_surface", "decisiveness_surface",
         ):
+            if field_name == "decisive_counterexample":
+                # Raw SAT models are intentionally non-canonical.  The typed
+                # decisiveness surface compares replay classification and the
+                # normalized observable projection instead.
+                continue
             if getattr(legacy, field_name) != getattr(obligation, field_name):
                 differences.append(field_name)
         return cls(not differences, tuple(differences), legacy, obligation)

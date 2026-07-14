@@ -1031,16 +1031,16 @@ def _render_call_region_return_stage(
     call_observed = int(left_observed if proof_input.call_on_left else right_observed)
     region_observed = int(right_observed if proof_input.call_on_left else left_observed)
     if call_observed > region_observed:
-        raise ValueError("call_region_return_width_bridge_direction_unsupported")
+        raise ValueError("call_region_return_width_relation_direction_unsupported")
     observation_bits = call_observed
-    width_bridge = None
+    width_relation = None
     if call_observed != region_observed:
         if proof_input.region_return_signed is None:
-            raise ValueError("call_region_return_width_bridge_signedness_missing")
+            raise ValueError("call_region_return_width_relation_signedness_missing")
         semantic_bits = proof_input.call_effect.return_semantic_bit_width
         if semantic_bits is None or int(semantic_bits) < call_observed:
-            raise ValueError("call_region_return_width_bridge_semantic_width_missing")
-        width_bridge = {
+            raise ValueError("call_region_return_width_relation_semantic_width_missing")
+        width_relation = {
             "narrow_bits": call_observed,
             "wide_bits": region_observed,
             "wide_side": "right" if proof_input.call_on_left else "left",
@@ -1143,7 +1143,7 @@ def _render_call_region_return_stage(
         precondition_payload={
             "structural_certificate_id": proof_input.structural_certificate_id,
             "dependency_proof_ids": dependency_ids,
-            "return_width_bridge": width_bridge,
+            "return_width_relation": width_relation,
         },
         renderer_token=_TYPED_RENDERER_TOKEN,
     )

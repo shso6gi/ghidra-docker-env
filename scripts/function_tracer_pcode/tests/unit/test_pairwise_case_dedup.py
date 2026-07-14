@@ -1019,10 +1019,7 @@ def test_pairwise_executor_returns_unknown_for_width_mismatch_without_overlap_qu
     assert result.pair_stage == "return-width-mismatch"
     assert result.blocking_reason == "return_width_bridge_missing"
     assert result.object_target_key is not None
-    assert result.object_target_key[0] == "return_width_bridge"
-    assert ("return_widths", 64, 32) in result.object_target_key
-    assert result.object_target_key[3][0] == "return_width_side"
-    assert result.object_target_key[4][0] == "return_width_side"
+    assert result.object_target_key == ("canonical_return_observation", "(0,1)")
     assert _Strategy._active_normalization_stats["unknown_results"] == 1
     assert _Strategy._active_normalization_stats["return_width_bridge_missing"] == 1
 
@@ -1047,93 +1044,6 @@ def test_pairwise_executor_returns_unknown_for_width_mismatch_without_overlap_qu
     assert all(action.object_target_key == result.object_target_key for action in actions)
     assert all(action.proof_obligation_id is not None for action in actions)
     assert all(action.proof_obligation_id[-1] == result.object_target_key for action in actions)
-
-
-def test_pairwise_main_loop_uses_completed_return_width_bridge_proof(monkeypatch):
-    left_value = Expression(ExpressionType.CONSTANT, value=1, size=4)
-    right_value = Expression(ExpressionType.CONSTANT, value=1, size=8)
-    analysis1 = FunctionReturnAnalysis(
-        function_name="left",
-        entry_point="0x1000",
-        parameters=[],
-        returns=[ReturnInfo(address="0x1001", value=left_value, conditions=[])],
-        return_type="int",
-    )
-    analysis2 = FunctionReturnAnalysis(
-        function_name="right",
-        entry_point="0x2000",
-        parameters=[],
-        returns=[ReturnInfo(address="0x2001", value=right_value, conditions=[])],
-        return_type="long",
-    )
-    target = ("return_width_bridge", ("pair", "(0,0)"), ("return_widths", 32, 64))
-    query_result = QueryResult(is_equivalent=None)
-    query_result.pair_stage = "return-width-mismatch"
-    query_result.blocking_reason = "return_width_bridge_missing"
-    query_result.blocking_detail = "pairwise value inequality: return width mismatch (32 vs 64)"
-    query_result.object_target_key = target
-    completed_result = QueryResult(is_equivalent=True)
-    completed_result.last_query = "(set-logic QF_BV)\n; completed bridge proof"
-
-    solver_runner = Mock()
-    solver_runner.timeout = 5
-    strategy = PairwiseStrategy(FormulaBuilder(), solver_runner, debug=False)
-    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(strategy, "_solve_query_twostage", Mock(return_value=query_result))
-    bridge_proof = Mock(return_value=completed_result)
-    monkeypatch.setattr(strategy, "_solve_return_width_bridge_with_completed_proof", bridge_proof)
-
-    result = strategy.check(analysis1, analysis2)
-
-    assert result.is_equivalent is True
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
-    bridge_proof.assert_called_once()
-    assert bridge_proof.call_args.kwargs["object_target_key"] == target
-
-
-def test_pairwise_main_loop_keeps_return_width_unknown_when_completed_proof_fails(monkeypatch):
-    left_value = Expression(ExpressionType.CONSTANT, value=1, size=4)
-    right_value = Expression(ExpressionType.CONSTANT, value=1, size=8)
-    analysis1 = FunctionReturnAnalysis(
-        function_name="left",
-        entry_point="0x1000",
-        parameters=[],
-        returns=[ReturnInfo(address="0x1001", value=left_value, conditions=[])],
-        return_type="int",
-    )
-    analysis2 = FunctionReturnAnalysis(
-        function_name="right",
-        entry_point="0x2000",
-        parameters=[],
-        returns=[ReturnInfo(address="0x2001", value=right_value, conditions=[])],
-        return_type="long",
-    )
-    target = ("return_width_bridge", ("pair", "(0,0)"), ("return_widths", 32, 64))
-    query_result = QueryResult(is_equivalent=None)
-    query_result.pair_stage = "return-width-mismatch"
-    query_result.blocking_reason = "return_width_bridge_missing"
-    query_result.blocking_detail = "pairwise value inequality: return width mismatch (32 vs 64)"
-    query_result.object_target_key = target
-
-    solver_runner = Mock()
-    solver_runner.timeout = 5
-    strategy = PairwiseStrategy(FormulaBuilder(), solver_runner, debug=False)
-    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(strategy, "_solve_query_twostage", Mock(return_value=query_result))
-    bridge_proof = Mock(return_value=None)
-    monkeypatch.setattr(strategy, "_solve_return_width_bridge_with_completed_proof", bridge_proof)
-
-    result = strategy.check(analysis1, analysis2)
-
-    assert result.is_equivalent is None
-    assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == "return_width_bridge_missing"
-    bridge_proof.assert_called_once()
 
 
 def test_pairwise_executor_uses_semantic_abi_guard_unsat_before_return_width_backlog():

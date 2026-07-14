@@ -108,6 +108,7 @@ class EquivalenceResult:
     # ★ 新規追加: 正規化ルール適用履歴
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
     completed_recovery_proof_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    reason_completion_applicability_contexts: List[Dict[str, Any]] = field(default_factory=list)
     call_effect_shadow_manifest: Optional[Dict[str, Any]] = None
     call_proof_terminal_provenance: Optional[Dict[str, Any]] = None
     binary1_content_identity: Optional[Tuple[Any, ...]] = None
@@ -209,6 +210,10 @@ class EquivalenceResult:
         }
         if self.completed_recovery_proof_evidence:
             result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
+        if self.reason_completion_applicability_contexts:
+            result["reason_completion_applicability_contexts"] = list(
+                self.reason_completion_applicability_contexts
+            )
         if self.call_effect_shadow_manifest is not None:
             result["call_effect_shadow_manifest"] = dict(self.call_effect_shadow_manifest)
         if self.call_proof_terminal_provenance is not None:

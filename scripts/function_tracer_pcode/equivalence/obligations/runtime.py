@@ -13,6 +13,7 @@ from .model import (
     ObligationInstanceId,
     ProofArtifact,
     SemanticFactProvenance,
+    UnaryArtifactDomain,
 )
 from .proof import ViewPremiseRecord, validate_proof_closure
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
@@ -104,15 +105,21 @@ class ObligationRuntimeSession:
         cls,
         analysis: Any,
         *,
+        domain: str = UnaryArtifactDomain.RETURN_OUTCOME_V1.value,
+        semantic_seed: Any = None,
         domain_contract: Any,
         normalization_policy_digest: str,
     ) -> "ObligationRuntimeSession":
+        normalized_domain = UnaryArtifactDomain.normalize(domain)
         snapshot = cls._snapshot(analysis, "unary")
-        seed = getattr(analysis, "outcome_seed", None)
+        seed = semantic_seed
+        if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
+            seed = getattr(analysis, "outcome_seed", None)
         seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
         seed_digest = SnapshotFingerprintCodec.digest(seed_key)
         premise = SnapshotFingerprintCodec.digest((
-            "function_unary_premise_v1",
+            "function_unary_premise_v2",
+            normalized_domain,
             snapshot.semantic_fingerprint,
             SnapshotFingerprintCodec.freeze(domain_contract),
             str(normalization_policy_digest),
@@ -126,8 +133,9 @@ class ObligationRuntimeSession:
             view_builder_version="unary-obligation-runtime-v1",
             semantic_surface={
                 "function_snapshot": snapshot.semantic_fingerprint,
+                "unary_artifact_domain": normalized_domain,
                 "domain_contract": SnapshotFingerprintCodec.freeze(domain_contract),
-                "outcome_seed_digest": seed_digest,
+                "semantic_seed_digest": seed_digest,
                 "premise_digest": premise,
                 "applied_artifact_ids": (),
             },
@@ -140,9 +148,12 @@ class ObligationRuntimeSession:
         self,
         artifact: ProofArtifact,
         *,
+        domain: str = UnaryArtifactDomain.RETURN_OUTCOME_V1.value,
+        semantic_seed_digest: Optional[str] = None,
         function_snapshot_fingerprint: str,
-        outcome_seed_digest: str,
+        outcome_seed_digest: Optional[str] = None,
         function_premise_digest: str,
+        normalization_policy_digest: Optional[str] = None,
         attempt_candidate_independent: bool,
         pair_independent: bool,
     ) -> None:
@@ -154,11 +165,17 @@ class ObligationRuntimeSession:
             (artifact.artifact_id,),
             self.view_records,
         )
+        seed_digest = semantic_seed_digest or outcome_seed_digest
+        if not seed_digest:
+            raise ValueError("publishing a unary artifact requires a semantic seed digest")
+        policy_digest = normalization_policy_digest or self.current_view.normalization_policy_digest
         self.unary_artifact_cache.put(ValidatedUnaryArtifactEntry(
             artifact=artifact,
+            domain=UnaryArtifactDomain.normalize(domain),
             function_premise_digest=str(function_premise_digest),
             function_snapshot_fingerprint=function_snapshot_fingerprint,
-            outcome_seed_digest=outcome_seed_digest,
+            semantic_seed_digest=str(seed_digest),
+            normalization_policy_digest=str(policy_digest),
             attempt_candidate_independent=bool(attempt_candidate_independent),
             pair_independent=bool(pair_independent),
             closure_artifacts=tuple(
@@ -173,10 +190,13 @@ class ObligationRuntimeSession:
         entry: ValidatedUnaryArtifactEntry,
         *,
         analysis: Any,
+        domain: str = UnaryArtifactDomain.RETURN_OUTCOME_V1.value,
+        semantic_seed: Any = None,
         pair_side: str,
         domain_contract: Any,
         normalization_policy_digest: str,
     ) -> DerivedAnalysisView:
+        normalized_domain = UnaryArtifactDomain.normalize(domain)
         if pair_side not in {"left", "right"}:
             raise ValueError("pair side must be left or right")
         current_snapshot = self._snapshot(analysis, pair_side)
@@ -185,11 +205,15 @@ class ObligationRuntimeSession:
         )
         if pair_snapshot_fingerprint != current_snapshot.semantic_fingerprint:
             raise ValueError("unary artifact pair-side snapshot mismatch")
-        seed = getattr(analysis, "outcome_seed", None)
+        seed = semantic_seed
+        if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
+            seed = getattr(analysis, "outcome_seed", None)
         seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
         expected_outcome_seed_digest = SnapshotFingerprintCodec.digest(seed_key)
         unary_view = self.create_unary(
             analysis,
+            domain=domain,
+            semantic_seed=seed,
             domain_contract=domain_contract,
             normalization_policy_digest=normalization_policy_digest,
         )
@@ -201,8 +225,12 @@ class ObligationRuntimeSession:
             raise ValueError("unary artifact function premise mismatch")
         if entry.function_snapshot_fingerprint != expected_snapshot_fingerprint:
             raise ValueError("unary artifact function snapshot mismatch")
-        if entry.outcome_seed_digest != expected_outcome_seed_digest:
-            raise ValueError("unary artifact outcome seed mismatch")
+        if entry.domain != normalized_domain:
+            raise ValueError("unary artifact domain mismatch")
+        if entry.semantic_seed_digest != expected_outcome_seed_digest:
+            raise ValueError("unary artifact semantic seed mismatch")
+        if entry.normalization_policy_digest != str(normalization_policy_digest):
+            raise ValueError("unary artifact normalization policy mismatch")
         validate_proof_closure(
             entry.closure_artifacts,
             (entry.artifact.artifact_id,),

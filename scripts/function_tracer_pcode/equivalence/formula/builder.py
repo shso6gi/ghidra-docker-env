@@ -326,7 +326,7 @@ class FormulaBuilder:
         func1_suffix: str = "_1",
         func2_suffix: str = "_2",
         extra_assertions: Optional[List[str]] = None,  # ★ NEW
-        return_width_bridge_narrow_bits: Optional[int] = None,
+        canonical_return_observation_width: Optional[int] = None,
     ) -> Tuple[str, str, str]:
         """
         2つの関数の等価性検証用SMT式を構築
@@ -342,7 +342,7 @@ class FormulaBuilder:
         result = self.build_equivalence_formula_extended(
             analysis1, analysis2, func1_suffix, func2_suffix,
             extra_assertions=extra_assertions,  # ★ NEW
-            return_width_bridge_narrow_bits=return_width_bridge_narrow_bits,
+            canonical_return_observation_width=canonical_return_observation_width,
         )
         return result.formula, result.return_var1, result.return_var2
     
@@ -353,7 +353,7 @@ class FormulaBuilder:
         func1_suffix: str = "_1",
         func2_suffix: str = "_2",
         extra_assertions: Optional[List[str]] = None,  # ★ NEW
-        return_width_bridge_narrow_bits: Optional[int] = None,
+        canonical_return_observation_width: Optional[int] = None,
     ) -> FormulaBuilderResult:
         """
         2つの関数の等価性検証用SMT式を構築（拡張版）
@@ -423,7 +423,7 @@ class FormulaBuilder:
                 return_var2,
                 context.return_size1,
                 context.return_size2,
-                return_width_bridge_narrow_bits=return_width_bridge_narrow_bits,
+                canonical_return_observation_width=canonical_return_observation_width,
             )
         )
         
@@ -1848,7 +1848,7 @@ class FormulaBuilder:
         return_size1: int,
         return_size2: int,
         *,
-        return_width_bridge_narrow_bits: Optional[int] = None,
+        canonical_return_observation_width: Optional[int] = None,
     ) -> List[str]:
         """等価性アサートを構築"""
         lines = []
@@ -1865,27 +1865,27 @@ class FormulaBuilder:
                 context="monolithic return equivalence assertion",
             )
         except ReturnWidthMismatchError:
-            narrow_bits = self._validated_return_width_bridge_narrow_bits(
+            narrow_bits = self._validated_canonical_return_observation_width(
                 return_size1,
                 return_size2,
-                return_width_bridge_narrow_bits,
+                canonical_return_observation_width,
             )
             if narrow_bits is None:
                 raise
-            left = self._return_width_bridge_comparison_term(
+            left = self._canonical_return_observation_term(
                 return_var1,
                 return_size1,
                 narrow_bits,
             )
-            right = self._return_width_bridge_comparison_term(
+            right = self._canonical_return_observation_term(
                 return_var2,
                 return_size2,
                 narrow_bits,
             )
             lines.append(
-                "; Completed return-width bridge proof: compare on proven narrow width"
+                "; Canonical return observation: compare on proven observation width"
             )
-            lines.append(f"; Narrow return width: {narrow_bits}")
+            lines.append(f"; Canonical observation width: {narrow_bits}")
             lines.append(f"(assert (not (= {left} {right})))")
             return lines
 
@@ -1894,7 +1894,7 @@ class FormulaBuilder:
         return lines
 
     @staticmethod
-    def _validated_return_width_bridge_narrow_bits(
+    def _validated_canonical_return_observation_width(
         return_size1: int,
         return_size2: int,
         narrow_bits: Optional[int],
@@ -1912,7 +1912,7 @@ class FormulaBuilder:
         return candidate
 
     @staticmethod
-    def _return_width_bridge_comparison_term(
+    def _canonical_return_observation_term(
         return_var: str,
         return_bits: int,
         narrow_bits: int,

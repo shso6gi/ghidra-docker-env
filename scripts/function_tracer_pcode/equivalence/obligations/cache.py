@@ -7,7 +7,7 @@ from collections import OrderedDict
 from threading import RLock
 from typing import Any, Dict, Generic, Iterable, Mapping, Optional, Tuple, TypeVar
 
-from .model import AttemptKey, ProofArtifact
+from .model import AttemptKey, ProofArtifact, UnaryArtifactDomain
 from .proof import (
     ArtifactApplicabilityRecord,
     ValidatedProofClosure,
@@ -141,15 +141,23 @@ class ProofCache:
 @dataclass(frozen=True)
 class ValidatedUnaryArtifactEntry:
     artifact: ProofArtifact
+    domain: str
     function_premise_digest: str
     function_snapshot_fingerprint: str
-    outcome_seed_digest: str
+    semantic_seed_digest: str
+    normalization_policy_digest: str
     attempt_candidate_independent: bool
     pair_independent: bool
     closure_artifacts: Tuple[ProofArtifact, ...] = ()
     source_view_records: Mapping[Tuple[Any, ...], ViewPremiseRecord] = field(
         default_factory=dict, compare=False, hash=False
     )
+
+    @property
+    def outcome_seed_digest(self) -> str:
+        """Compatibility alias for the original return-outcome-only API."""
+
+        return self.semantic_seed_digest
 
 
 class ValidatedUnaryArtifactCache:
@@ -163,8 +171,17 @@ class ValidatedUnaryArtifactCache:
         self._lock = RLock()
 
     @staticmethod
-    def key(requirement_key: Tuple[Any, ...], function_premise_digest: str) -> Tuple[Any, ...]:
-        return ("validated_unary_artifact_v1", requirement_key, function_premise_digest)
+    def key(
+        domain: str,
+        requirement_key: Tuple[Any, ...],
+        function_premise_digest: str,
+    ) -> Tuple[Any, ...]:
+        return (
+            "validated_unary_artifact_v2",
+            UnaryArtifactDomain.normalize(domain),
+            requirement_key,
+            function_premise_digest,
+        )
 
     def put(self, entry: ValidatedUnaryArtifactEntry) -> None:
         if not entry.artifact.is_validated:
@@ -173,7 +190,15 @@ class ValidatedUnaryArtifactCache:
             raise ValueError("unary artifact depends on an attempt/counterexample candidate")
         if not entry.pair_independent:
             raise ValueError("unary artifact depends on a pair peer or side label")
-        key = self.key(entry.artifact.requirement_id.to_key(), entry.function_premise_digest)
+        try:
+            UnaryArtifactDomain(UnaryArtifactDomain.normalize(entry.domain))
+        except ValueError as exc:
+            raise ValueError("unary artifact has an unsupported semantic domain") from exc
+        key = self.key(
+            entry.domain,
+            entry.artifact.requirement_id.to_key(),
+            entry.function_premise_digest,
+        )
         with self._lock:
             self._entries[key] = entry
             self._entries.move_to_end(key)
@@ -185,22 +210,55 @@ class ValidatedUnaryArtifactCache:
         requirement_key: Tuple[Any, ...],
         function_premise_digest: str,
         *,
+        domain: str = UnaryArtifactDomain.RETURN_OUTCOME_V1.value,
         function_snapshot_fingerprint: str,
-        outcome_seed_digest: str,
+        semantic_seed_digest: Optional[str] = None,
+        outcome_seed_digest: Optional[str] = None,
+        normalization_policy_digest: Optional[str] = None,
         producer_version: str,
         encoding_version: str,
     ) -> Optional[ValidatedUnaryArtifactEntry]:
-        key = self.key(requirement_key, function_premise_digest)
+        expected_seed_digest = semantic_seed_digest or outcome_seed_digest
+        if not expected_seed_digest:
+            raise ValueError("unary cache lookup requires a semantic seed digest")
+        normalized_domain = UnaryArtifactDomain.normalize(domain)
+        key = self.key(normalized_domain, requirement_key, function_premise_digest)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
                 return None
             if (
                 entry.function_snapshot_fingerprint != function_snapshot_fingerprint
-                or entry.outcome_seed_digest != outcome_seed_digest
+                or entry.semantic_seed_digest != expected_seed_digest
+                or entry.domain != normalized_domain
+                or (
+                    normalization_policy_digest is not None
+                    and entry.normalization_policy_digest != str(normalization_policy_digest)
+                )
                 or entry.artifact.producer_version != producer_version
                 or entry.artifact.encoding_version != encoding_version
             ):
                 return None
             self._entries.move_to_end(key)
             return entry
+
+    def find_applicable_artifact(
+        self,
+        artifact_id: Tuple[Any, ...],
+        *,
+        function_snapshot_fingerprint: str,
+    ) -> Optional[ValidatedUnaryArtifactEntry]:
+        """Return the exact currently-applicable unary artifact, never a digest peer."""
+
+        with self._lock:
+            matches = [
+                entry
+                for entry in self._entries.values()
+                if (
+                    entry.artifact.artifact_id == tuple(artifact_id)
+                    and entry.function_snapshot_fingerprint
+                    == str(function_snapshot_fingerprint)
+                    and entry.artifact.is_validated
+                )
+            ]
+            return matches[0] if len(matches) == 1 else None

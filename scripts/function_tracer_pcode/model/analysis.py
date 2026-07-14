@@ -84,6 +84,90 @@ class ReturnPathEvidence:
         }
 
 
+@dataclass(frozen=True)
+class VarnodeFlowRef:
+    """Object-derived identity of one Varnode in a RETURN value flow."""
+
+    space_id: Optional[int]
+    space_name: str
+    offset: int
+    size: int
+
+    @classmethod
+    def from_varnode(cls, varnode: Any) -> Optional["VarnodeFlowRef"]:
+        if varnode is None:
+            return None
+        try:
+            address = varnode.getAddress()
+            space = address.getAddressSpace() if address is not None else None
+            return cls(
+                space_id=(int(space.getSpaceID()) if space is not None else None),
+                space_name=(str(space.getName()) if space is not None else "unknown"),
+                offset=int(varnode.getOffset()),
+                size=int(varnode.getSize()),
+            )
+        except Exception:
+            return None
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "varnode_flow_ref",
+            self.space_id,
+            self.space_name,
+            self.offset,
+            self.size,
+        )
+
+
+@dataclass(frozen=True)
+class ReturnValueFlowStep:
+    """One validated producer edge on the concrete RETURN input def-chain."""
+
+    op_ref: PcodeOpRef
+    output_ref: VarnodeFlowRef
+    input_refs: Tuple[VarnodeFlowRef, ...]
+    traversed_input_index: int
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "return_value_flow_step",
+            self.op_ref.stable_key(),
+            self.output_ref.stable_key(),
+            tuple(item.stable_key() for item in self.input_refs),
+            self.traversed_input_index,
+        )
+
+
+@dataclass(frozen=True)
+class ReturnValueFlowCertificate:
+    """Certificate from an actual RETURN input through its producer chain.
+
+    ``payload_expression_identity`` is obtained by tracing the concrete input
+    Varnode of the certified extension op.  It binds the object flow to the
+    semantic expression subsequently used by the SMT consumer.
+    """
+
+    return_op_ref: PcodeOpRef
+    return_input_index: int
+    return_input_ref: VarnodeFlowRef
+    steps: Tuple[ReturnValueFlowStep, ...]
+    extension_step_index: Optional[int]
+    payload_expression_identity: Tuple[Any, ...] = ()
+    schema_version: int = 1
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "return_value_flow_certificate",
+            self.schema_version,
+            self.return_op_ref.stable_key(),
+            self.return_input_index,
+            self.return_input_ref.stable_key(),
+            tuple(item.stable_key() for item in self.steps),
+            self.extension_step_index,
+            self.payload_expression_identity,
+        )
+
+
 @dataclass
 class ReturnInfo:
     """単一のreturn文の情報"""
@@ -96,6 +180,7 @@ class ReturnInfo:
     pcode_time: Optional[int] = None
     pcode_op_ref: Optional[PcodeOpRef] = None
     return_value_pcode_op_refs: Tuple[PcodeOpRef, ...] = field(default_factory=tuple)
+    return_value_flow_certificate: Optional[ReturnValueFlowCertificate] = None
     return_kind: str = "exact"
     acceptance_status: Optional[str] = None
     summary_candidate_id: Optional[Tuple[Any, ...]] = None
@@ -127,6 +212,10 @@ class ReturnInfo:
             result["return_value_pcode_op_refs"] = [
                 ref.to_dict() for ref in self.return_value_pcode_op_refs
             ]
+        if self.return_value_flow_certificate is not None:
+            result["return_value_flow_certificate"] = _jsonable_nested_tuple(
+                self.return_value_flow_certificate.stable_key()
+            )
         if self.return_kind != "exact":
             result["return_kind"] = self.return_kind
         if self.acceptance_status is not None:
