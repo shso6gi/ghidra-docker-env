@@ -329,6 +329,26 @@ class EquivalenceResult:
                         misses=stats.get("obligation_pair_cache_misses", 0),
                     )
                 )
+            if "guard_overlap_graph_hits" in stats or "guard_overlap_graph_misses" in stats:
+                lines.append(
+                    "  guard_overlap_graph_hits={hits}, guard_overlap_graph_misses={misses}".format(
+                        hits=stats.get("guard_overlap_graph_hits", 0),
+                        misses=stats.get("guard_overlap_graph_misses", 0),
+                    )
+                )
+            if "guard_overlap_prepass_node_hits" in stats:
+                lines.append(
+                    "  guard_overlap_prepass_node_hits={hits}, value_candidates={candidates}".format(
+                        hits=stats.get("guard_overlap_prepass_node_hits", 0),
+                        candidates=stats.get("guard_overlap_value_candidates", 0),
+                    )
+                )
+            if stats.get("pair_ledger_sealed"):
+                lines.append(
+                    "  pair_ledger=sealed, skipped_after_terminal={skipped}".format(
+                        skipped=stats.get("pair_ledger_skipped_after_terminal", 0),
+                    )
+                )
 
         if self.unknown_reasons:
             lines.append("")

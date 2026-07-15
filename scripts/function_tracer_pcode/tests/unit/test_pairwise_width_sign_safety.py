@@ -64,7 +64,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_without_surface_
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis(
@@ -104,7 +104,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_artifact_not_equivalent_w
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis(
@@ -148,7 +148,7 @@ def test_pairwise_keeps_subsurface_constant_sign_artifact_decisive_for_wider_sur
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis(
@@ -192,7 +192,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_one_sided_s
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis(
@@ -234,7 +234,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_detached_su
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis(
@@ -276,7 +276,7 @@ def test_pairwise_keeps_true_constant_sat_decisive():
         result.last_query = "(check-sat)"
         return result
 
-    strategy._solve_query_twostage = MethodType(_sat_query, strategy)
+    strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
     result = strategy.check(
         _analysis("a", Expression.constant(1, size=8)),

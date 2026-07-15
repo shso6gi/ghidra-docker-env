@@ -22,7 +22,9 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     build_proof_obligation_id,
     build_unknown_recovery_actions,
 )
-from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt import (
+    ParallelResult, ParallelSolverRunner, SolverResult, SolverStatus,
+)
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
@@ -1193,7 +1195,9 @@ def _branch_returns(value: Expression):
 
 
 def _pairwise_strategy() -> PairwiseStrategy:
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    runner = ParallelSolverRunner(timeout=5)
+    runner.run_sequential = Mock(wraps=runner.run_sequential)
+    strategy = PairwiseStrategy(Mock(), runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -1208,8 +1212,11 @@ def _pairwise_strategy() -> PairwiseStrategy:
 
 
 def _stub_pair_solver_unsat(strategy: PairwiseStrategy) -> None:
-    result = SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.0)
-    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([result]))
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+    result = QueryResult(True)
+    result.last_query = "(assert false)\n(check-sat)"
+    result.pair_stage = "value"
+    strategy._solve_query_after_guard = Mock(return_value=result)
 
 
 def _shared_input_base_context() -> dict:
@@ -1249,6 +1256,7 @@ def test_ptr_sum_window_branch_fixture_uses_method_b_for_n_1_2_3_and_ge_4():
         )
     )
     strategy = _pairwise_strategy()
+    strategy.formula_builder.build_base_context.return_value = _shared_input_base_context()
 
     left_analysis = _analysis("ptr_sum_window_full", _branch_returns(full))
     right_analysis = _analysis("ptr_sum_window_tail", _branch_returns(tail))
@@ -1260,7 +1268,7 @@ def test_ptr_sum_window_branch_fixture_uses_method_b_for_n_1_2_3_and_ge_4():
     assert result.unknown_pairs == 0
     assert "return_case_coverage_gap" in left_analysis.analysis_notes
     assert "return_case_coverage_gap" in right_analysis.analysis_notes
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_readonly_runtime_shortcut_requires_case_guard_equivalence():
@@ -1276,7 +1284,7 @@ def test_readonly_runtime_shortcut_requires_case_guard_equivalence():
     assert result.is_equivalent is None
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_loop_shape_mismatch_unreachable_under_shared_inputs_is_not_unknown():
@@ -1304,7 +1312,7 @@ def test_loop_shape_mismatch_unreachable_under_shared_inputs_is_not_unknown():
         reason.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
         for reason in result.unknown_reasons
     )
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_summary_guard_delta_is_closed_by_exact_return_partition():
@@ -1380,7 +1388,7 @@ def test_summary_guard_delta_is_closed_by_exact_return_partition():
     assert result.total_pairs == 2
     assert result.unsat_pairs == 2
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_summary_guard_delta_uses_proof_backed_term_contract_without_exact_partition():
@@ -1445,7 +1453,7 @@ def test_summary_guard_delta_uses_proof_backed_term_contract_without_exact_parti
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_prefix_return_matches_readonly_reduction_accumulator_proof():
@@ -1485,7 +1493,7 @@ def test_exact_prefix_return_matches_readonly_reduction_accumulator_proof():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_prefix_return_matches_storage_backed_count_identity():
@@ -1585,7 +1593,7 @@ def test_exact_prefix_return_matches_loop_summary_without_accumulator_proof():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_prefix_return_does_not_close_path_sensitive_loop_summary_without_proof():
@@ -1624,7 +1632,7 @@ def test_exact_prefix_return_does_not_close_path_sensitive_loop_summary_without_
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_readonly_identity_mismatch_emits_typed_recovery_reason():
@@ -1664,7 +1672,7 @@ def test_readonly_identity_mismatch_emits_typed_recovery_reason():
     assert actions[0].status == "planned"
     assert actions[0].object_target_key == reason.object_target_key
     assert actions[0].proof_obligation_id == reason.proof_obligation_id
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_readonly_identity_proof_target_distinguishes_count_identity():
@@ -1728,7 +1736,7 @@ def test_exact_prefix_return_matches_wide_abi_summary_count_by_active_parameter_
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_prefix_return_matches_seed_term_count_readonly_reduction_proof():
@@ -1771,7 +1779,7 @@ def test_exact_prefix_return_matches_seed_term_count_readonly_reduction_proof():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_tail_entry_return_matches_materialized_readonly_reduction_proof():
@@ -1811,7 +1819,7 @@ def test_exact_tail_entry_return_matches_materialized_readonly_reduction_proof()
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_affine_exact_tail_entry_condition_matches_non_prefix_readonly_reduction_proof():
@@ -1857,7 +1865,7 @@ def test_affine_exact_tail_entry_condition_matches_non_prefix_readonly_reduction
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_ptradd_guarded_exact_wrong_tail_matches_seeded_readonly_summary():
@@ -1903,7 +1911,7 @@ def test_ptradd_guarded_exact_wrong_tail_matches_seeded_readonly_summary():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_vectorized_readonly_proof_with_prefix_witnesses_matches_scalar_summary():
@@ -1973,7 +1981,7 @@ def test_vectorized_readonly_proof_with_prefix_witnesses_matches_scalar_summary(
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_proof_backed_scalar_and_vectorized_readonly_summaries_compare_equivalent():
@@ -2038,7 +2046,7 @@ def test_proof_backed_scalar_and_vectorized_readonly_summaries_compare_equivalen
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_tail_entry_return_requires_condition_to_prove_count():
@@ -2558,7 +2566,7 @@ def test_exact_load_sum_matches_synthesized_readonly_reduction_witness():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_exact_load_sum_does_not_treat_narrow_count_view_as_full_reduction_count():
@@ -3380,7 +3388,7 @@ def test_exact_load_can_match_any_readonly_reduction_ref_not_only_readonly_sum_n
     assert _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
 
 
-def test_readonly_loop_contract_uses_object_semantics_before_intrinsic_surface():
+def test_object_contract_closes_malformed_surface_only_via_typed_aggregate_proof():
     proof = ReductionAccumulatorProof(
         reduction_kind="memory_sum",
         pointer_base_ref=LocationBaseRef.parameter("base", index=0),
@@ -3433,7 +3441,7 @@ def test_readonly_loop_contract_uses_object_semantics_before_intrinsic_surface()
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_readonly_loop_contract_uses_guard_coverage_when_surface_differs():
@@ -3456,7 +3464,7 @@ def test_readonly_loop_contract_uses_guard_coverage_when_surface_differs():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_path_sensitive_readonly_loop_contract_uses_accumulator_proof_terms():
@@ -3534,7 +3542,7 @@ def test_path_sensitive_readonly_loop_contract_uses_accumulator_proof_terms():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_path_sensitive_readonly_loop_contract_keeps_seed_mismatch_unknown():
@@ -3612,7 +3620,7 @@ def test_path_sensitive_readonly_loop_contract_keeps_seed_mismatch_unknown():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_readonly_loop_contract_rejects_mismatched_return_width_without_bridge():
@@ -3680,7 +3688,7 @@ def test_readonly_loop_contract_rejects_mismatched_return_width_without_bridge()
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_ptr_sum_window_prior_missed_fixture_allows_nonzero_start_with_nonunit_step_seed():
@@ -3691,6 +3699,7 @@ def test_ptr_sum_window_prior_missed_fixture_allows_nonzero_start_with_nonunit_s
         seed_terms=(_term(4),),
     )
     strategy = _pairwise_strategy()
+    strategy.formula_builder.build_base_context.return_value = _shared_input_base_context()
 
     assert loop_summary_method_b_key(start_one_step_two) == loop_summary_method_b_key(
         start_three_step_two
@@ -3705,7 +3714,7 @@ def test_ptr_sum_window_prior_missed_fixture_allows_nonzero_start_with_nonunit_s
     assert result.total_pairs == 16
     assert result.unsat_pairs == 16
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_branch_inside_loop_fixture_stays_unknown_until_path_proof_exists():
@@ -3721,7 +3730,7 @@ def test_branch_inside_loop_fixture_stays_unknown_until_path_proof_exists():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_write_heavy_loop_fixture_stays_unknown_until_effect_proof_exists():
@@ -3737,7 +3746,7 @@ def test_write_heavy_loop_fixture_stays_unknown_until_effect_proof_exists():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pure_counted_loop_without_runtime_summary_guards_can_be_closed_by_method_b():
@@ -3754,7 +3763,7 @@ def test_pure_counted_loop_without_runtime_summary_guards_can_be_closed_by_metho
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_counted_loop_summary_vs_closed_form_is_discharged_by_smt():
@@ -4215,7 +4224,7 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
     assert result.unknown_pairs == 0
 
 
-def test_counted_loop_summary_dual_solver_proof_completes_method_b_closure():
+def test_monkeypatched_method_b_producer_falls_back_to_canonical_solver():
     n = Expression.parameter("param_1", index=0, data_type="int", size=4)
     c = Expression.parameter("param_2", index=1, data_type="int", size=4)
     zero = Expression.constant(0, size=4)
@@ -4307,14 +4316,11 @@ def test_counted_loop_summary_dual_solver_proof_completes_method_b_closure():
     assert result.is_equivalent is True
     assert result.total_pairs == 1
     assert result.unknown_pairs == 0
-    assert [item["proof_stage"] for item in analysis_left.completed_recovery_proof_evidence] == [
-        "method_b_covering_case",
-        "method_b_guard_partition",
-    ]
-    assert {
-        item["proof_content"]["relation_kind"]
-        for item in analysis_left.completed_recovery_proof_evidence
-    } == {"dual_summary"}
+    # The test seam replaces private proof methods.  Such replacements may
+    # guide candidate discovery, but cannot mint producer authority; the
+    # canonical UNSAT query remains the sound closure path.
+    assert not analysis_left.completed_recovery_proof_evidence
+    assert result.solver_results.is_equivalent is True
 
 
 def test_loop_summary_solver_comparator_proves_equivalent_seed_expressions():
@@ -4937,7 +4943,7 @@ def test_counted_loop_summary_vs_mips64_long_limit_without_semantic_width_stays_
     assert result.unknown_pairs == 1
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
     assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_counted_loop_summary_vs_mips64_long_limit_with_semantic_width_uses_smt():
@@ -4966,7 +4972,7 @@ def test_counted_loop_summary_vs_mips64_long_limit_with_semantic_width_uses_smt(
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_auxiliary_counted_loop_runtime_bias_terms_are_cloned_for_smt():
@@ -5048,7 +5054,7 @@ def test_counted_loop_summary_vs_closed_form_near_miss_stays_proof_missing():
     assert result.unknown_pairs == 1
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
     assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_counted_loop_summary_vs_closed_form_near_miss_with_total_partition_stays_unknown():
@@ -5056,8 +5062,7 @@ def test_counted_loop_summary_vs_closed_form_near_miss_with_total_partition_stay
     off_by_n_closed_form = _triangular_closed_form(inclusive=True)
     non_positive = _count_gt(0).negate()
     strategy = _pairwise_strategy()
-    unsat = SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.0)
-    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([unsat]))
+    _stub_pair_solver_unsat(strategy)
 
     result = strategy.check(
         _analysis(
@@ -5089,6 +5094,7 @@ def test_pure_counted_loop_with_total_return_coverage_can_be_closed_by_method_b(
     right_value = _counted_loop(_pure_counted_summary())
     non_positive = _count_gt(0).negate()
     strategy = _pairwise_strategy()
+    strategy.formula_builder.build_base_context.return_value = _shared_input_base_context()
 
     result = strategy.check(
         _analysis(
@@ -5111,7 +5117,7 @@ def test_pure_counted_loop_with_total_return_coverage_can_be_closed_by_method_b(
     assert result.total_pairs == 4
     assert result.unsat_pairs == 4
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pure_counted_loop_without_runtime_summary_guards_needs_summary_partition():
@@ -5128,7 +5134,7 @@ def test_pure_counted_loop_without_runtime_summary_guards_needs_summary_partitio
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pure_and_path_sensitive_loop_shape_mismatch_stays_unknown():
@@ -5145,7 +5151,7 @@ def test_pure_and_path_sensitive_loop_shape_mismatch_stays_unknown():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_phi_circular_lowering_rejects_seq_time_only_origin_drift_without_completed_proof():

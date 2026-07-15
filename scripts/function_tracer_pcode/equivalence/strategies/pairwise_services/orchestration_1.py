@@ -6,6 +6,31 @@ import hashlib
 from typing import Any
 from ...cause_identity import ProofRequirementContract, ProofRequirementId
 from ...obligations.model import FunctionProofOutcome
+from ...obligations import (
+    PairClosureEvidence,
+    PairClosureKind,
+    PairDisposition,
+    PairDispositionLedger,
+    PairLedgerBinding,
+    CounterexampleSafetyReceipt,
+    GuardOverlapGraph,
+    GuardUnsatClosureArtifact,
+    SolverUnsatClosureArtifact,
+)
+from ...obligations.pair_closure_producers import (
+    AggregatePartitionCandidate,
+    CountedLoopClosedExpressionCandidate,
+    CountedLoopValueRelationCandidate,
+    MethodBClosureCandidate,
+    ReadonlyIdentityCandidate,
+    RuntimeReductionCandidate,
+    validate_aggregate_partition_candidate,
+    validate_counted_loop_closed_expression_candidate,
+    validate_counted_loop_value_candidate,
+    validate_method_b_candidate,
+    validate_readonly_identity_candidate,
+    validate_runtime_reduction_candidate,
+)
 from .. import pairwise as _pairwise_facade
 from ._shared import (
     Condition,
@@ -184,6 +209,30 @@ def _impl_check(
         if "return_case_coverage_inconclusive" not in analysis2.analysis_notes:
             analysis2.analysis_notes.append("return_case_coverage_inconclusive")
     total_pairs = len(cases1) * len(cases2)
+    active_runtime = getattr(self, "_obligation_runtime_session", None)
+    successor_plan = (
+        active_runtime.pair_ledger_manager.pending_successor
+        if active_runtime is not None else None
+    )
+    graph_generation = max(
+        1, int(getattr(dispatch_frame, "generation", 1) or 1)
+    )
+    if (
+        successor_plan is not None
+        and successor_plan.derived_view_id
+        == tuple(getattr(active_runtime.current_view, "view_id", ()) or ())
+        and successor_plan.premise_digest == active_runtime.premise_digest
+    ):
+        graph_generation = successor_plan.graph_generation
+    self._guard_overlap_graph = GuardOverlapGraph(
+        tuple(getattr(getattr(active_runtime, "current_view", None), "view_id", ()) or ()),
+        str(getattr(
+            active_runtime,
+            "premise_digest",
+            hashlib.sha256(b"direct-pairwise-premise").hexdigest(),
+        )),
+        generation=graph_generation,
+    )
 
     self._debug_print("=" * 60)
     self._debug_print("Pairwise strategy (two-stage check):")
@@ -231,10 +280,11 @@ def _impl_check(
     unknown_count = 0
     error_count = 0
     sat_pair_info = None
+    sat_safety_receipt = None
     counterexample_raw = None
     last_formula = None
     resolved_pairs: set[tuple[int, int]] = set()
-    pending_loop_summary_pairs: List[_PendingLoopSummaryPair] = []
+    pending_loop_summary_pairs: list[_PendingLoopSummaryPair] = []
     all_normalization_rules = []
     normalization_stats = {
         "solver_proven_rewrite_attempts": 0,
@@ -249,8 +299,6 @@ def _impl_check(
         "return_width_bridge_missing": 0,
         "exact_query_attempt_cache_hits": 0,
         "exact_query_attempt_cache_misses": 0,
-        "obligation_pair_cache_hits": 0,
-        "obligation_pair_cache_misses": 0,
         "width_target_count": 0,
         "width_seed_complete_count": 0,
         "width_seed_incomplete_count": 0,
@@ -270,9 +318,7 @@ def _impl_check(
     }
     unknown_reasons = []
     self._active_normalization_stats = normalization_stats
-    pair_obligation_keys = {}
     query_execution_records = []
-    cacheable_solver_unsat_pairs = set()
 
     from ...return_width_pipeline import (
         prepare_function_return_widths,
@@ -308,9 +354,129 @@ def _impl_check(
     )
     base_ctx["return_width_observations_by_pair"] = {}
 
+    # Stage 1 is a real prepass: every logical guard edge is materialized
+    # before return-width/value preparation or any legacy value shortcut.
+    from ..pairwise_query_executor import (
+        execute_guard_overlap,
+    )
+
+    runtime = getattr(self, "_obligation_runtime_session", None)
+    graph = self._guard_overlap_graph
+    ledger_binding = PairLedgerBinding(
+        str(getattr(dispatch_frame, "comparison_session_id", "direct-pairwise")),
+        str(getattr(dispatch_frame, "branch_id", "pairwise")),
+        str(getattr(getattr(dispatch_frame, "prepared", None), "surface_digest", "direct-surface")),
+        str(getattr(getattr(dispatch_frame, "projection", None), "projection_id", "direct-projection")),
+        int(getattr(dispatch_frame, "generation", 0) or 0),
+        tuple(getattr(getattr(runtime, "current_view", None), "view_id", ()) or ()),
+        graph.premise_digest,
+        graph.generation,
+    )
+    if (
+        runtime is not None
+        and runtime.pair_ledger_manager.current is not None
+        and (
+            runtime.pair_ledger_manager.current.closures
+            or runtime.pair_ledger_manager.current.provisional
+        )
+    ):
+        # A repeated direct strategy invocation owns a fresh ledger.  Only the
+        # empty successor created by a derived-view transition is reusable.
+        runtime.pair_ledger_manager.supersede_current()
+    pair_ledger = (
+        runtime.open_pair_ledger(ledger_binding, total_pairs)
+        if runtime is not None
+        else PairDispositionLedger(ledger_binding, total_pairs)
+    )
+    if dispatch_frame is not None and dispatch_frame.replan_successor_plan is not None:
+        dispatch_frame.replan_successor_ledger = pair_ledger
+        dispatch_frame.successor_ledger_reused = bool(
+            dispatch_frame.replan_successor_plan.accepts(
+                pair_ledger.binding, pair_ledger.expected_pairs
+            )
+            and runtime is not None
+            and runtime.pair_ledger_manager.current is pair_ledger
+        )
+        if not dispatch_frame.successor_ledger_reused:
+            raise RuntimeError("pair_replan_successor_binding_failed")
+    guard_prepass = {}
+    for guard_i, guard_case1 in enumerate(cases1):
+        for guard_j, guard_case2 in enumerate(cases2):
+            guard_pair_id = f"({guard_i},{guard_j})"
+            if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
+                lowered = lower_call_projection_for_case_pair(
+                    dispatch_frame, guard_case1, guard_case2,
+                    pair_id=guard_pair_id,
+                    render_fn1=symbol_replace_fn1,
+                    render_fn2=symbol_replace_fn2,
+                )
+                if lowered.status != "proven":
+                    guard_prepass[(guard_i, guard_j)] = (None, lowered)
+                    continue
+                base_ctx.setdefault("call_projection_assertions_by_pair", {})[guard_pair_id] = lowered.assertions
+                base_ctx.setdefault("call_projection_binding_ids_by_pair", {})[guard_pair_id] = lowered.binding_ids
+                base_ctx.setdefault("call_projection_guard_binding_ids_by_pair", {})[guard_pair_id] = lowered.guard_binding_ids
+                base_ctx.setdefault("call_projection_assertion_bundles_by_pair", {})[guard_pair_id] = lowered.assertion_bundles
+                base_ctx.setdefault("call_projection_binding_digests_by_pair", {})[guard_pair_id] = dict(lowered.binding_assertion_digests)
+                base_ctx.setdefault("call_site_return_width_receipts_by_pair", {})[guard_pair_id] = lowered.return_width_receipt_digests
+                base_ctx.setdefault("call_site_return_width_receipt_assertions_by_pair", {})[guard_pair_id] = lowered.return_width_receipt_assertion_digests
+            else:
+                lowered = None
+            node = execute_guard_overlap(
+                self, base_ctx, guard_case1, guard_case2,
+                symbol_replace_fn1, symbol_replace_fn2, guard_pair_id,
+            )
+            guard_prepass[(guard_i, guard_j)] = (node, lowered)
+    normalization_stats["guard_overlap_logical_edges"] = total_pairs
+    normalization_stats["guard_overlap_source_logical_edges"] = (
+        original_case_count1 * original_case_count2
+    )
+    normalization_stats["guard_overlap_pruned_unreachable_edges"] = (
+        normalization_stats["guard_overlap_source_logical_edges"] - total_pairs
+    )
+    normalization_stats["guard_overlap_prepass_node_hits"] = 0
+    normalization_stats["guard_overlap_unsat_edges"] = sum(
+        1 for node, _lowered in guard_prepass.values()
+        if node is not None and node.disjoint_artifact is not None
+    )
+    normalization_stats["guard_overlap_value_candidates"] = (
+        total_pairs - normalization_stats["guard_overlap_unsat_edges"]
+    )
+
     for i, case1 in enumerate(cases1):
         for j, case2 in enumerate(cases2):
             pair_id = f"({i},{j})"
+            guard_node, prepass_lowered = guard_prepass[(i, j)]
+            if guard_node is not None:
+                normalization_stats["guard_overlap_prepass_node_hits"] += 1
+            if guard_node is None:
+                unknown_count += 1
+                pair_ledger.record_inconclusive(
+                    (i, j), "call_projection_lowering_failed",
+                    getattr(prepass_lowered, "evidence_digest", "missing"),
+                )
+                unknown_reasons.append(make_unknown_reason(
+                    "equivalence_blocking_unsafety", stage="CALL_EFFECT_PREFLIGHT",
+                    pair_or_case=pair_id,
+                    evidence_refs=(getattr(prepass_lowered, "failure_cause", None),),
+                    detail="Certified guard projection could not be lowered.",
+                ))
+                continue
+            if guard_node.disjoint_artifact is not None:
+                closure = PairClosureEvidence.validated(
+                    (i, j), PairClosureKind.GUARD_QUERY, ledger_binding,
+                    GuardUnsatClosureArtifact(guard_node.disjoint_artifact),
+                    required_binding_uses=tuple(
+                        getattr(prepass_lowered, "binding_ids", ()) or ()
+                    ),
+                    consumed_binding_uses=tuple(
+                        getattr(prepass_lowered, "guard_binding_ids", ()) or ()
+                    ),
+                )
+                pair_ledger.close(closure)
+                unsat_count += 1
+                resolved_pairs.add((i, j))
+                continue
             prepared_width_observation = prepare_pair_return_observation(
                 solver_analysis1,
                 solver_analysis2,
@@ -345,7 +511,6 @@ def _impl_check(
                 )
                 if lowered_call_projection.status != "proven":
                     unknown_count += 1
-                    pair_obligation_keys[(i, j)] = None
                     unknown_reasons.append(
                         make_unknown_reason(
                             "equivalence_blocking_unsafety",
@@ -365,6 +530,12 @@ def _impl_check(
                 base_ctx.setdefault("call_projection_binding_ids_by_pair", {})[
                     pair_id
                 ] = lowered_call_projection.binding_ids
+                base_ctx.setdefault("call_projection_guard_binding_ids_by_pair", {})[
+                    pair_id
+                ] = lowered_call_projection.guard_binding_ids
+                base_ctx.setdefault("call_projection_assertion_bundles_by_pair", {})[
+                    pair_id
+                ] = lowered_call_projection.assertion_bundles
                 base_ctx.setdefault("call_projection_binding_digests_by_pair", {})[
                     pair_id
                 ] = dict(lowered_call_projection.binding_assertion_digests)
@@ -377,58 +548,12 @@ def _impl_check(
                     lowered_call_projection.return_width_receipt_assertion_digests
                 )
                 call_projection_covers_unresolved = True
-            pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
             readonly_contract_assertions = self._readonly_contract_pairwise_extra_assertions(
                 case1,
                 case2,
                 symbol_replace_fn1,
                 symbol_replace_fn2,
             )
-            pair_cache_eligible = _pair_can_use_proof_independent_cache(
-                case1,
-                case2,
-                analysis1,
-                analysis2,
-                base_ctx,
-                readonly_contract_assertions,
-            )
-            pair_obligation_key = None
-            if pair_cache_eligible:
-                try:
-                    pair_obligation_key = _pair_obligation_query_key(
-                        self,
-                        case1,
-                        case2,
-                        base_ctx,
-                        symbol_replace_fn1,
-                        symbol_replace_fn2,
-                        pair_id,
-                    )
-                except Exception:
-                    pair_cache_eligible = False
-            pair_obligation_keys[(i, j)] = pair_obligation_key
-            if (
-                pair_cache_eligible
-                and pair_cache is not None
-                and pair_obligation_key in pair_cache
-            ):
-                unsat_count += 1
-                resolved_pairs.add((i, j))
-                normalization_stats["obligation_pair_cache_hits"] += 1
-                self._debug_print(
-                    f"  Pair {pair_id}: OBLIGATION CACHE HIT -> UNSAT "
-                    f"({unsat_count}/{total_pairs})"
-                )
-                continue
-            normalization_stats["obligation_pair_cache_misses"] += 1
-            if self._cases_are_contradictory(case1, case2):
-                unsat_count += 1
-                resolved_pairs.add((i, j))
-                if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
-                    self._debug_print(
-                        f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
-                    )
-                continue
             if readonly_contract_assertions:
                 self._register_pairwise_extra_assertions(
                     base_ctx,
@@ -437,160 +562,51 @@ def _impl_check(
                 )
             else:
                 self._clear_pairwise_extra_assertions(base_ctx, pair_id)
-            if self._cases_have_equivalent_runtime_reductions(
+            runtime_candidate = RuntimeReductionCandidate.create(
+                ledger_binding,
+                pair_id,
+                (case1.value_expr, case2.value_expr),
+                ("equivalent_runtime_reductions", semantic_parameter_sources),
+            )
+            runtime_relation_artifact = validate_runtime_reduction_candidate(
+                self,
+                ledger_binding,
+                runtime_candidate,
                 case1,
                 case2,
-                semantic_parameter_sources=semantic_parameter_sources,
-            ):
+                semantic_parameter_sources,
+            )
+            if runtime_relation_artifact is not None:
+                pair_ledger.close(PairClosureEvidence.validated(
+                    (i, j), PairClosureKind.RECOVERY, ledger_binding,
+                    runtime_relation_artifact,
+                ))
                 unsat_count += 1
                 resolved_pairs.add((i, j))
-                if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
-                    self._debug_print(
-                        f"  Pair {pair_id}: object-centric runtime summary match -> UNSAT "
-                        f"({unsat_count}/{total_pairs})"
-                    )
                 continue
-            if self._case_pair_counted_loop_summary_matches_closed_expression(case1, case2, base_ctx=base_ctx):
-                unsat_count += 1
-                resolved_pairs.add((i, j))
-                if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
-                    self._debug_print(
-                        f"  Pair {pair_id}: counted loop summary closed by SMT expression proof "
-                        f"-> UNSAT ({unsat_count}/{total_pairs})"
-                    )
-                continue
-            loop_fallback_reason = self._case_pair_loop_summary_safe_fallback_reason(case1, case2)
-            if loop_fallback_reason is not None:
-                if self._case_pair_conditions_unsat_under_shared_inputs(
-                    base_ctx,
-                    case1,
-                    case2,
-                    symbol_replace_fn1,
-                    symbol_replace_fn2,
-                    pair_id,
-                    loop_fallback_reason,
-                ):
-                    unsat_count += 1
-                    resolved_pairs.add((i, j))
-                    if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
-                        self._debug_print(
-                            f"  Pair {pair_id}: loop fallback conditions unreachable -> UNSAT "
-                            f"({unsat_count}/{total_pairs})"
-                        )
-                    continue
-                if self._case_pair_can_defer_loop_summary_proof(
-                    case1,
-                    case2,
-                    loop_fallback_reason,
-                ):
-                    pending_loop_summary_pairs.append(
-                        _PendingLoopSummaryPair(i, j, case1, case2, loop_fallback_reason)
-                    )
-                    self._debug_print(
-                        f"  Pair {pair_id}: loop summary proof deferred to aggregate partition "
-                        f"({loop_fallback_reason})"
-                    )
-                    continue
-                reason_id = self._unknown_reason_id_for_loop_fallback(loop_fallback_reason)
-                object_target_key = None
-                evidence_kind = None
-                if reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
-                    object_target_key = self._readonly_identity_object_target_key(
-                        base_ctx=base_ctx,
-                        case1=case1,
-                        case2=case2,
-                        pair_id=pair_id,
-                    )
-                    evidence_kind = "object_storage_identity"
-                elif reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
-                    object_target_key = self._method_b_closure_object_target_key(
-                        base_ctx=base_ctx,
-                        case1=case1,
-                        case2=case2,
-                        pair_id=pair_id,
-                    )
-                reason_record = make_unknown_reason(
-                    reason_id,
-                    stage="S_PAIRWISE",
-                    pair_or_case=pair_id,
-                    evidence_refs=(loop_fallback_reason,),
-                    evidence_kind=evidence_kind,
-                    object_target_key=object_target_key,
-                    detail=loop_fallback_reason,
-                )
-                if reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
-                    self._record_completed_method_b_covering_case_proof_if_safe(
-                        reason_record,
-                        analysis1,
-                        case1,
-                        case2,
-                    )
-                    self._record_completed_method_b_dual_summary_solver_proof_if_safe(
-                        reason_record,
-                        analysis1,
-                        case1,
-                        case2,
-                    )
-                    if self._method_b_closure_proof_is_complete(reason_record, analysis1, analysis2):
-                        unsat_count += 1
-                        resolved_pairs.add((i, j))
-                        self._debug_print(
-                            f"  Pair {pair_id}: Method-B closure proof completed in current run "
-                            f"-> UNSAT ({unsat_count}/{total_pairs})"
-                        )
-                        continue
-                elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
-                    self._record_completed_readonly_identity_projection_proof_if_safe(
-                        reason_record,
-                        analysis1,
-                        analysis2,
-                        case1,
-                        case2,
-                    )
-                    if self._readonly_identity_proof_is_complete(reason_record, analysis1, analysis2):
-                        unsat_count += 1
-                        resolved_pairs.add((i, j))
-                        self._debug_print(
-                            f"  Pair {pair_id}: readonly identity projection proof completed in current run "
-                            f"-> UNSAT ({unsat_count}/{total_pairs})"
-                        )
-                        continue
-                if self._case_pair_counted_loop_summaries_match_by_closed_values(
-                    case1,
-                    case2,
-                    base_ctx=base_ctx,
-                ) or self._counted_loop_values_are_provably_equivalent(
-                    case1.value_expr,
-                    case2.value_expr,
-                    left_case=case1,
-                    right_case=case2,
-                    semantic_parameter_sources=semantic_parameter_sources,
-                ):
-                    unsat_count += 1
-                    resolved_pairs.add((i, j))
-                    if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
-                        self._debug_print(
-                            f"  Pair {pair_id}: counted loop summaries closed by SMT value proof "
-                            f"-> UNSAT ({unsat_count}/{total_pairs})"
-                        )
-                    continue
-                _register_loop_pair_replanner(
+            closed_expression_candidate = CountedLoopClosedExpressionCandidate.create(
+                ledger_binding,
+                pair_id,
+                (case1.value_expr, case2.value_expr),
+                ("counted_loop_summary_closed_expression", "v2"),
+            )
+            closed_expression_artifact = (
+                validate_counted_loop_closed_expression_candidate(
                     self,
-                    pair_id,
-                    reason_record,
-                    analysis1,
-                    analysis2,
+                    ledger_binding,
+                    closed_expression_candidate,
                     case1,
                     case2,
                     base_ctx,
-                    semantic_parameter_sources,
                 )
-                unknown_count += 1
-                unknown_reasons.append(reason_record)
-                self._debug_print(
-                    f"  Pair {pair_id}: loop summary requires semantic proof "
-                    f"({loop_fallback_reason}) -> UNKNOWN"
-                )
+            )
+            if closed_expression_artifact is not None:
+                pair_ledger.close(PairClosureEvidence.validated(
+                    (i, j), PairClosureKind.RECOVERY, ledger_binding,
+                    closed_expression_artifact,
+                ))
+                unsat_count += 1
+                resolved_pairs.add((i, j))
                 continue
             case1_has_unresolved = self._case_contains_unresolved_expression(
                 case1,
@@ -712,6 +728,127 @@ def _impl_check(
                 if not readonly_contract_assertions:
                     self._clear_pairwise_extra_assertions(base_ctx, pair_id)
 
+            # Loop/readonly recognizers may identify which semantic proof is
+            # required, but they no longer close a pair themselves.  A
+            # completed proof only authorizes the canonical value query below;
+            # the ledger receives authority exclusively from its UNSAT result.
+            loop_fallback_reason = self._case_pair_loop_summary_safe_fallback_reason(
+                case1, case2
+            )
+            if loop_fallback_reason is not None:
+                reason_id = self._unknown_reason_id_for_loop_fallback(
+                    loop_fallback_reason
+                )
+                object_target_key = None
+                evidence_kind = None
+                if reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
+                    object_target_key = self._readonly_identity_object_target_key(
+                        base_ctx=base_ctx, case1=case1, case2=case2,
+                        pair_id=pair_id,
+                    )
+                    evidence_kind = "object_storage_identity"
+                elif reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                    object_target_key = self._method_b_closure_object_target_key(
+                        base_ctx=base_ctx, case1=case1, case2=case2,
+                        pair_id=pair_id,
+                    )
+                reason_record = make_unknown_reason(
+                    reason_id, stage="S_PAIRWISE", pair_or_case=pair_id,
+                    evidence_refs=(loop_fallback_reason,),
+                    evidence_kind=evidence_kind,
+                    object_target_key=object_target_key,
+                    detail=loop_fallback_reason,
+                )
+                semantic_artifact = None
+                if reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                    self._record_completed_method_b_covering_case_proof_if_safe(
+                        reason_record, analysis1, case1, case2
+                    )
+                    self._record_completed_method_b_dual_summary_solver_proof_if_safe(
+                        reason_record, analysis1, case1, case2
+                    )
+                    completed = tuple(self._completed_recovery_proof_evidence(
+                        analysis1, analysis2
+                    ))
+                    candidate = MethodBClosureCandidate.create(
+                        ledger_binding,
+                        pair_id,
+                        (object_target_key, loop_fallback_reason),
+                        completed,
+                    )
+                    semantic_artifact = validate_method_b_candidate(
+                        self,
+                        ledger_binding,
+                        candidate,
+                        reason_record,
+                        analysis1,
+                        analysis2,
+                    )
+                elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
+                    self._record_completed_readonly_identity_projection_proof_if_safe(
+                        reason_record, analysis1, analysis2, case1, case2
+                    )
+                    completed = tuple(self._completed_recovery_proof_evidence(
+                        analysis1, analysis2
+                    ))
+                    candidate = ReadonlyIdentityCandidate.create(
+                        ledger_binding,
+                        pair_id,
+                        (object_target_key, loop_fallback_reason),
+                        completed,
+                    )
+                    semantic_artifact = validate_readonly_identity_candidate(
+                        self,
+                        ledger_binding,
+                        candidate,
+                        reason_record,
+                        analysis1,
+                        analysis2,
+                    )
+                if semantic_artifact is None:
+                    candidate = CountedLoopValueRelationCandidate.create(
+                        ledger_binding,
+                        pair_id,
+                        (case1.value_expr, case2.value_expr),
+                        ("closed_values_or_semantic_equivalence", loop_fallback_reason),
+                    )
+                    semantic_artifact = validate_counted_loop_value_candidate(
+                        self,
+                        ledger_binding,
+                        candidate,
+                        case1,
+                        case2,
+                        base_ctx,
+                        semantic_parameter_sources,
+                    )
+                if semantic_artifact is not None:
+                    pair_ledger.close(PairClosureEvidence.validated(
+                        (i, j), PairClosureKind.RECOVERY, ledger_binding,
+                        semantic_artifact,
+                    ))
+                    unsat_count += 1
+                    resolved_pairs.add((i, j))
+                    continue
+                if self._case_pair_can_defer_loop_summary_proof(
+                    case1, case2, loop_fallback_reason
+                ):
+                    pending_loop_summary_pairs.append(
+                        _PendingLoopSummaryPair(
+                            i, j, case1, case2, loop_fallback_reason
+                        )
+                    )
+                    continue
+                # A deferred proof is work, not closure authority.  Keep the
+                # pair provisional and reschedule it after the proof derives a
+                # new view.
+                _register_loop_pair_replanner(
+                    self, pair_id, reason_record, analysis1, analysis2,
+                    case1, case2, base_ctx, semantic_parameter_sources,
+                )
+                unknown_count += 1
+                unknown_reasons.append(reason_record)
+                continue
+
             obligation_runtime = getattr(self, "_obligation_runtime_session", None)
             if obligation_runtime is not None:
                 def plan_counterexample_safety(
@@ -812,7 +949,7 @@ def _impl_check(
                     plan_counterexample_safety,
                 )
 
-            result = self._solve_query_twostage(
+            result = self._solve_query_after_guard(
                 base_ctx,
                 case1,
                 case2,
@@ -821,16 +958,11 @@ def _impl_check(
                 pair_id,
             )
 
+            binding_ids = ()
             query_text = str(result.last_query or "")
             if query_text:
                 formula_digest = hashlib.sha256(query_text.encode("utf-8")).hexdigest()
-                premise_digest = (
-                    str(pair_obligation_key[-2])
-                    if isinstance(pair_obligation_key, tuple)
-                    and len(pair_obligation_key) >= 2
-                    and len(str(pair_obligation_key[-2])) == 64
-                    else formula_digest
-                )
+                premise_digest = ledger_binding.premise_digest
                 disposition = (
                     "unsat" if result.is_equivalent is True
                     else "sat" if result.is_equivalent is False
@@ -896,6 +1028,7 @@ def _impl_check(
                 all_normalization_rules.extend(result.normalization_rules)
 
             if result.is_equivalent is False:
+                analysis_safety_validated = not sat_unsafety_reasons
                 if sat_unsafety_reasons:
                     sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
                         sat_unsafety_reasons,
@@ -920,6 +1053,7 @@ def _impl_check(
                             f"summary ({', '.join(sat_unsafety_reasons)})"
                         )
                         continue
+                    analysis_safety_validated = True
 
                 is_decisive = validate_counterexample_across_cases(
                     self,
@@ -948,11 +1082,13 @@ def _impl_check(
                         f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
                     )
                     continue
+                global_case_replay_validated = True
 
                 same_function_replay_reasons = self._same_function_counterexample_replay_reasons(
                     analysis1,
                     analysis2,
                 )
+                same_function_replay_validated = not same_function_replay_reasons
                 if same_function_replay_reasons:
                     sat_replay_reason = self._make_sat_unsafety_unknown_reason(
                         same_function_replay_reasons,
@@ -977,6 +1113,21 @@ def _impl_check(
                             "counterexample replay is completed"
                         )
                         continue
+                    same_function_replay_validated = True
+
+                sat_terminal_query = str(
+                    result.last_query or repr(((i, j), PairDisposition.SAT.value))
+                )
+                safety_receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
+                    query=sat_terminal_query,
+                    model=result.counterexample_raw,
+                    premise_digest=ledger_binding.premise_digest,
+                    pair_key=(i, j),
+                    analysis_safe=analysis_safety_validated,
+                    global_case_replay_safe=global_case_replay_validated,
+                    same_function_replay_safe=same_function_replay_validated,
+                )
+                sat_safety_receipt = safety_receipt
 
                 sat_count += 1
                 sat_pair_info = {
@@ -987,7 +1138,7 @@ def _impl_check(
                     "value1": case1.get_value_smt(symbol_replace_fn1),
                     "value2": case2.get_value_smt(symbol_replace_fn2),
                     "pair_stage": result.pair_stage or "unknown",
-                    "final_query": result.last_query,
+                    "final_query": sat_terminal_query,
                 }
                 counterexample_raw = result.counterexample_raw
 
@@ -1001,12 +1152,20 @@ def _impl_check(
             if result.is_equivalent is True:
                 unsat_count += 1
                 resolved_pairs.add((i, j))
-                if (
-                    pair_cache_eligible
-                    and not readonly_contract_assertions
-                    and result.pair_stage in {"conds-only", "with-ineq"}
-                ):
-                    cacheable_solver_unsat_pairs.add((i, j))
+                pair_ledger.close(PairClosureEvidence.validated(
+                    (i, j), PairClosureKind.VALUE_QUERY, ledger_binding,
+                    SolverUnsatClosureArtifact.from_validated_result(
+                        str(result.last_query or ""),
+                        getattr(runtime, "premise_digest", ledger_binding.premise_digest),
+                        pair_id, "value_query", result,
+                    ),
+                    required_binding_uses=tuple(
+                        (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                            pair_id, ()
+                        )
+                    ),
+                    consumed_binding_uses=binding_ids,
+                ))
                 if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                     self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                 continue
@@ -1025,6 +1184,24 @@ def _impl_check(
                 if completed_bridge_result is not None and completed_bridge_result.is_equivalent is True:
                     unsat_count += 1
                     resolved_pairs.add((i, j))
+                    pair_ledger.close(PairClosureEvidence.validated(
+                        (i, j), PairClosureKind.RETURN_WIDTH, ledger_binding,
+                        SolverUnsatClosureArtifact.from_validated_result(
+                            str(completed_bridge_result.last_query or ""),
+                            getattr(runtime, "premise_digest", ledger_binding.premise_digest),
+                            pair_id, "return_width", completed_bridge_result,
+                        ),
+                        required_binding_uses=tuple(
+                            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                                pair_id, ()
+                            )
+                        ),
+                        consumed_binding_uses=tuple(
+                            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                                pair_id, ()
+                            )
+                        ),
+                    ))
                     last_formula = completed_bridge_result.last_query or last_formula
                     self._debug_print(
                         f"  Pair {pair_id}: return-width bridge proof -> UNSAT "
@@ -1066,43 +1243,56 @@ def _impl_check(
             break
 
     if sat_count == 0 and pending_loop_summary_pairs:
-        resolved_pending = self._resolve_pending_loop_summary_pairs_with_partition_proof(
-            pending_loop_summary_pairs,
-            cases1,
-            cases2,
-            resolved_pairs,
-        )
         for pending in pending_loop_summary_pairs:
-            pair_id = f"({pending.i},{pending.j})"
-            if (pending.i, pending.j) in resolved_pending:
+            pending_pair = (pending.i, pending.j)
+            partition_witness = tuple(
+                self._resolve_pending_loop_summary_pairs_with_partition_proof(
+                    pending_loop_summary_pairs,
+                    cases1,
+                    cases2,
+                    resolved_pairs,
+                )
+            )
+            normalized_partition_witness = tuple(sorted(set(partition_witness)))
+            candidate = AggregatePartitionCandidate.create(
+                ledger_binding,
+                f"({pending.i},{pending.j})",
+                (pending_pair, pending.reason),
+                normalized_partition_witness,
+            )
+            aggregate_artifact = validate_aggregate_partition_candidate(
+                self,
+                ledger_binding,
+                candidate,
+                pending_pair,
+                normalized_partition_witness,
+                pending_loop_summary_pairs,
+                cases1,
+                cases2,
+                resolved_pairs,
+            )
+            if aggregate_artifact is not None:
+                pair_ledger.close(PairClosureEvidence.validated(
+                    pending_pair, PairClosureKind.AGGREGATE, ledger_binding,
+                    aggregate_artifact,
+                ))
                 unsat_count += 1
-                resolved_pairs.add((pending.i, pending.j))
-                self._debug_print(
-                    f"  Pair {pair_id}: aggregate return-partition proof -> UNSAT"
-                )
-            else:
-                unknown_count += 1
-                unknown_reasons.append(
-                    make_unknown_reason(
-                        self._unknown_reason_id_for_loop_fallback(pending.reason),
-                        stage="S_PAIRWISE",
-                        pair_or_case=pair_id,
-                        evidence_refs=(pending.reason,),
-                        detail=pending.reason,
-                    )
-                )
-                self._debug_print(
-                    f"  Pair {pair_id}: loop summary requires semantic proof "
-                    f"({pending.reason}) -> UNKNOWN"
-                )
+                resolved_pairs.add(pending_pair)
+                continue
+            unknown_count += 1
+            unknown_reasons.append(make_unknown_reason(
+                self._unknown_reason_id_for_loop_fallback(pending.reason),
+                stage="S_PAIRWISE",
+                pair_or_case=f"({pending.i},{pending.j})",
+                evidence_refs=(
+                    pending.reason,
+                    "canonical_solver_required",
+                    repr(normalized_partition_witness),
+                ),
+                detail=pending.reason,
+            ))
 
     elapsed_time = time.time() - start_time
-    pair_cache = getattr(self, "_obligation_pair_unsat_cache", None)
-    if pair_cache is not None:
-        for resolved_pair in cacheable_solver_unsat_pairs:
-            cache_key = pair_obligation_keys.get(resolved_pair)
-            if cache_key is not None:
-                pair_cache[cache_key] = True
     coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
         coverage_unsafety_reasons,
         analysis1,
@@ -1122,6 +1312,59 @@ def _impl_check(
             coverage_unknown_reasons,
             equivalence_unknown_reasons,
         )
+    )
+
+    sat_pair_key = (
+        (int(sat_pair_info["i"]), int(sat_pair_info["j"]))
+        if sat_pair_info is not None else None
+    )
+    for ledger_i in range(len(cases1)):
+        for ledger_j in range(len(cases2)):
+            pair_key = (ledger_i, ledger_j)
+            if pair_key in pair_ledger.closures or pair_key in pair_ledger.provisional:
+                continue
+            if pair_key == sat_pair_key:
+                pair_ledger.record_terminal_query(
+                    pair_key, PairDisposition.SAT,
+                    str((sat_pair_info or {}).get("final_query") or ""), "value_query",
+                    safety_receipt=sat_safety_receipt,
+                )
+            elif sat_count > 0:
+                pair_ledger.record_terminal_query(
+                    pair_key, PairDisposition.SKIPPED, "", "aggregate",
+                )
+            else:
+                pair_ledger.record_inconclusive(
+                    pair_key, "proof_incomplete", tuple(reason.reason_id for reason in unknown_reasons),
+                )
+    pair_ledger.finalize_inconclusive()
+    if runtime is not None:
+        terminal_outcomes = runtime.drain_pair_terminal_work()
+        if any(
+            outcome != FunctionProofOutcome.NOT_EQUIVALENT
+            for outcome in terminal_outcomes
+        ) and sat_count > 0:
+            raise RuntimeError("counterexample safety receipt is not decisive")
+    else:
+        from ...obligations import RuntimeQuiescenceCertificate
+        certificate = RuntimeQuiescenceCertificate(
+            ledger_binding.stable_key(), total_pairs, len(pair_ledger.closures),
+            0, len(pair_ledger.provisional), ledger_binding.derived_view_id,
+            ledger_binding.premise_digest,
+        )
+        pair_ledger.seal(certificate)
+    if dispatch_frame is not None:
+        dispatch_frame.pair_disposition_ledger = pair_ledger
+        if runtime is None:
+            dispatch_frame.pair_quiescence_certificate = certificate
+    ledger_counts = pair_ledger.counts()
+    unsat_count = int(ledger_counts["unsat"])
+    sat_count = int(ledger_counts["sat"])
+    unknown_count = int(ledger_counts["unknown"])
+    error_count = int(ledger_counts["error"])
+    normalization_stats["pair_ledger_sealed"] = int(runtime is None)
+    normalization_stats["pair_ledger_skipped_after_terminal"] = int(
+        ledger_counts[PairDisposition.SKIPPED.value]
     )
 
     if sat_count > 0:
@@ -1202,22 +1445,34 @@ def _impl_check(
             for record in query_execution_records
             for binding_id in record.projection_binding_ids
         }))
-        comparison_receipt = (
-            issue_builtin_comparison_receipt(
-                dispatch_frame,
-                query_records=query_execution_records,
-                consumed_projection_binding_ids=consumed_projection_binding_ids,
-                disposition_counts={
-                    "total": total_pairs,
-                    "unsat": unsat_count,
-                    "sat": sat_count,
-                    "unknown": unknown_count,
-                    "error": error_count,
-                },
+        disposition_counts = {
+            "total": total_pairs,
+            "unsat": unsat_count,
+            "sat": sat_count,
+            "unknown": unknown_count,
+            "error": error_count,
+            "skipped_after_terminal_decision": int(
+                ledger_counts[PairDisposition.SKIPPED.value]
+            ),
+        }
+        if dispatch_frame is not None and runtime is not None:
+            dispatch_frame.pending_query_records = tuple(query_execution_records)
+            dispatch_frame.pending_consumed_projection_binding_ids = (
+                consumed_projection_binding_ids
             )
-            if dispatch_frame is not None
-            else None
-        )
+            dispatch_frame.pending_disposition_counts = dict(disposition_counts)
+            comparison_receipt = None
+        else:
+            comparison_receipt = (
+                issue_builtin_comparison_receipt(
+                    dispatch_frame,
+                    query_records=query_execution_records,
+                    consumed_projection_binding_ids=consumed_projection_binding_ids,
+                    disposition_counts=disposition_counts,
+                )
+                if dispatch_frame is not None
+                else None
+            )
         final_result = StrategyResult(
             is_equivalent=final_is_equiv,
             solver_results=aggregate_result,
@@ -1255,78 +1510,6 @@ def _impl_check(
     finally:
         self._active_safety_checker = None
         self._active_normalization_stats = None
-
-
-def _pair_obligation_query_key(
-    self,
-    case1,
-    case2,
-    base_ctx,
-    symbol_replace_fn1,
-    symbol_replace_fn2,
-    pair_id,
-):
-    """Use the complete guard/value SMT premise as reusable UNSAT identity."""
-
-    guard_query = self._build_condition_only_query(
-        base_ctx,
-        case1,
-        case2,
-        symbol_replace_fn1,
-        symbol_replace_fn2,
-        pair_id,
-    )
-    value_query = self._build_pair_query(
-        base_ctx,
-        case1,
-        case2,
-        symbol_replace_fn1,
-        symbol_replace_fn2,
-        pair_id,
-    )
-    return (
-        "proof_independent_pair_queries_v2",
-        base_ctx.get("prepared_surface_digest", "legacy_direct_strategy_surface"),
-        base_ctx.get("normalization_certificate_semantic_id", "legacy_no_certificate"),
-        base_ctx.get("observation_contract_digest", "legacy_observation_contract"),
-        hashlib.sha256(guard_query.encode("utf-8")).hexdigest(),
-        hashlib.sha256(value_query.encode("utf-8")).hexdigest(),
-    )
-
-
-def _pair_can_use_proof_independent_cache(
-    case1,
-    case2,
-    analysis1,
-    analysis2,
-    base_ctx,
-    readonly_contract_assertions,
-):
-    """Admit only plain solver obligations whose premise has no proof state."""
-
-    def has_observable_effects(case):
-        summary = getattr(case, "effect_summary", None)
-        if summary is None:
-            return False
-        return any((
-            getattr(summary, "effects", None),
-            getattr(summary, "synthetic_expr", None),
-            getattr(summary, "has_unsupported_call", False),
-            getattr(summary, "incomplete_reasons", None),
-            getattr(summary, "call_argument_evidence", None),
-            getattr(summary, "unsupported_call_sites", None),
-            getattr(summary, "call_target_resolution_evidence", None),
-            getattr(summary, "call_site_effect_summary_evidence", None),
-        ))
-
-    return (
-        not has_observable_effects(case1)
-        and not has_observable_effects(case2)
-        and not tuple(getattr(analysis1, "completed_recovery_proof_evidence", ()) or ())
-        and not tuple(getattr(analysis2, "completed_recovery_proof_evidence", ()) or ())
-        and not tuple(base_ctx.get("extra_assertions", ()) or ())
-        and not tuple(readonly_contract_assertions or ())
-    )
 
 
 def _register_loop_pair_replanner(
@@ -2976,6 +3159,11 @@ def _impl__accumulator_proof_count_surface_expressions(self, accumulator_proof):
             yield expr
 
 
-from ...call_effect_preflight import _register_builtin_receipt_executor
+from ...call_effect_preflight import register_builtin_receipt_executor
+from ...obligations.pair_closure_producers import (
+    seal_producer_proof_implementations,
+)
+from . import snapshot_implementations
 
-_register_builtin_receipt_executor("pairwise", _impl_check)
+seal_producer_proof_implementations(snapshot_implementations())
+register_builtin_receipt_executor("pairwise", _impl_check)

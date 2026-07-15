@@ -12,6 +12,7 @@ if str(workspace_root) not in sys.path:
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.model import (
@@ -32,7 +33,15 @@ from scripts.function_tracer_pcode.transform.rewrite import (
     ExpressionRewriter,
     rewrite_analysis_returns,
 )
-from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt import (
+    ParallelResult, ParallelSolverRunner, SolverResult, SolverStatus,
+)
+
+
+def _solver_runner():
+    runner = ParallelSolverRunner(timeout=5)
+    runner.run_sequential = Mock(wraps=runner.run_sequential)
+    return runner
 
 
 def _param(name: str) -> Expression:
@@ -223,13 +232,26 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
 
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = {
-        "header_lines": [],
-        "params1": [],
-        "params2": [],
+        "header_lines": [
+            "(declare-const param_1_1 (_ BitVec 64))",
+            "(declare-const param_2_1 (_ BitVec 64))",
+            "(declare-const param_1_2 (_ BitVec 64))",
+            "(declare-const param_2_2 (_ BitVec 64))",
+            "(assert (= param_1_1 param_1_2))",
+            "(assert (= param_2_1 param_2_2))",
+        ],
+        "params1": [
+            ParameterInfo("param_1", "param_1_1", 64, 0),
+            ParameterInfo("param_2", "param_2_1", 64, 1),
+        ],
+        "params2": [
+            ParameterInfo("param_1", "param_1_2", 64, 0),
+            ParameterInfo("param_2", "param_2_2", 64, 1),
+        ],
         "extra_vars1": [],
         "extra_vars2": [],
     }
-    solver_runner = Mock()
+    solver_runner = _solver_runner()
     solver_runner.timeout = 5
 
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
@@ -247,7 +269,7 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
         note in rewritten2.analysis_notes
         for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
     )
-    solver_runner.run_sequential.assert_not_called()
+    solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solver():
@@ -279,7 +301,7 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
         "extra_vars1": [],
         "extra_vars2": [],
     }
-    solver_runner = Mock()
+    solver_runner = _solver_runner()
     solver_runner.timeout = 5
 
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
@@ -290,7 +312,7 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
     assert result.unknown_pairs == 1
     assert result.unsat_pairs == 0
     assert result.sat_pairs == 0
-    solver_runner.run_sequential.assert_not_called()
+    solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
@@ -317,7 +339,7 @@ def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
         "extra_vars1": [],
         "extra_vars2": [],
     }
-    solver_runner = Mock()
+    solver_runner = _solver_runner()
     solver_runner.timeout = 5
 
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
@@ -326,7 +348,7 @@ def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
     assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unknown_pairs == 1
-    solver_runner.run_sequential.assert_not_called()
+    solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
@@ -375,7 +397,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
         "extra_vars1": [],
         "extra_vars2": [],
     }
-    solver_runner = Mock()
+    solver_runner = _solver_runner()
     solver_runner.timeout = 5
 
     def _run_sequential(query: str):
@@ -525,7 +547,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
         return_type="int",
     )
 
-    solver_runner = Mock()
+    solver_runner = _solver_runner()
     solver_runner.timeout = 5
 
     def _run_sequential(query: str, timeout=None):

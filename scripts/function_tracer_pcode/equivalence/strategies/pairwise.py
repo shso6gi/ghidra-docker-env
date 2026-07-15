@@ -46,7 +46,6 @@ class PairwiseStrategy(CheckStrategy):
         # Sound process-local reuse of already proven UNSAT pair obligations.
         # Keys contain the complete pair semantic surface and ABI context;
         # UNKNOWN/SAT outcomes are never reused across views.
-        self._obligation_pair_unsat_cache = {}
 
     def __getattr__(self, name: str):
         from .pairwise_services import resolve_method
@@ -64,6 +63,22 @@ class PairwiseStrategy(CheckStrategy):
     ) -> StrategyResult:
         from .pairwise_services.orchestration_1 import invoke as _invoke
         return _invoke("check", self, analysis1, analysis2, save_formula)
+
+    def _solve_query_after_guard(
+        self,
+        base_ctx,
+        case1,
+        case2,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id,
+    ):
+        """Explicit value-stage seam; guard execution remains in the prepass."""
+        from .pairwise_query_executor import solve_query_after_guard
+        return solve_query_after_guard(
+            self, base_ctx, case1, case2,
+            param_replace_fn1, param_replace_fn2, pair_id,
+        )
 
     @staticmethod
     def _merge_completed_recovery_proofs_from_solver_analyses(
@@ -679,3 +694,8 @@ class PairwiseStrategy(CheckStrategy):
     ) -> Tuple[Optional[str], Optional[str]]:
         from .pairwise_services.auxiliary_smt import invoke as _invoke
         return _invoke("_pair_id_and_side_from_value_query_label", query_label)
+
+
+from .pairwise_query_executor import register_canonical_guard_strategy_type
+
+register_canonical_guard_strategy_type(PairwiseStrategy)

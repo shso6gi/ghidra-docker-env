@@ -58,12 +58,13 @@ class ConditionSMTOracle:
         conditions: Sequence,
         *,
         cache_key: Optional[Tuple[object, ...]] = None,
+        use_cache: bool = True,
     ) -> Optional[bool]:
         usable, script = cls._build_script(conditions)
         if not usable or script is None:
             return None
 
-        query_key = cache_key or cls._build_cache_key(conditions)
+        query_key = (cache_key or cls._build_cache_key(conditions)) if use_cache else None
         if query_key is not None:
             cached = cls._unsat_cache.get(query_key)
             if cached is not None:

@@ -157,7 +157,7 @@ def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
 def _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2):
     case1 = ReturnCase(
@@ -227,7 +227,7 @@ def _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, a
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
 def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
     site = UnsupportedCallEffectRef(

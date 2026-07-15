@@ -125,7 +125,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=query_result)
+    strategy._solve_query_after_guard = Mock(return_value=query_result)
 
     result = strategy.check(analysis1, analysis2)
 
@@ -196,6 +196,9 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 0, "x_2": 0})]
+    )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
     analysis2 = FunctionReturnAnalysis(
@@ -595,7 +598,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
         binary_id="B14",
     )
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -603,7 +606,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
     assert [reason.reason_id for reason in result.unknown_reasons] == [
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_unresolved_expression_action_status_marks_planned_without_stage_evidence():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
@@ -654,7 +657,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
         entry=0x1000,
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
     strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=None))
 
     result = strategy.check(analysis1, analysis2)
@@ -691,7 +694,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
         for action in actions
         if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
     } == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
     strategy._solve_query_internal.assert_not_called()
 
 def test_pairwise_mixed_float_phi_unresolved_uses_generic_pending_lane():
@@ -828,7 +831,7 @@ def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed
             QueryResult(is_equivalent=True),
         ]
     )
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -842,7 +845,7 @@ def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed
     assert _nested_contains(result.unknown_reasons[0].object_evidence, "object_derived_query_plan")
     assert analysis1.completed_recovery_proof_evidence == ()
     strategy._solve_query_internal.assert_not_called()
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -864,7 +867,7 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
         guard_negated=True,
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
     strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=None))
 
     result = strategy.check(analysis1, analysis2)
@@ -874,7 +877,7 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_proof(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -897,7 +900,7 @@ def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_pro
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
     strategy._solve_query_internal = Mock(return_value=QueryResult(is_equivalent=True))
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=False))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=False))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -907,7 +910,7 @@ def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_pro
     ]
     assert strategy._solve_query_internal.call_count == 0
     assert analysis1.completed_recovery_proof_evidence == ()
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -929,7 +932,7 @@ def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
         seq_time=99,
     )
     _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -938,7 +941,7 @@ def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_expression_provenance_key_handles_very_deep_target_expression_without_recursion_error():
     left_key = expression_provenance_key(_deep_zext_target("fp", 0, depth=900))

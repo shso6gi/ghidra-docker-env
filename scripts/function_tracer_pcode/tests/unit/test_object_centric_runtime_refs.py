@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from unittest.mock import Mock
+from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
@@ -2621,7 +2622,9 @@ def _analysis_with_return(function_name: str, value: Expression, conditions=()) 
 
 
 def _pairwise_strategy_for_full_path() -> PairwiseStrategy:
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    runner = ParallelSolverRunner(timeout=5)
+    runner.run_sequential = Mock(wraps=runner.run_sequential)
+    strategy = PairwiseStrategy(Mock(), runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -2851,7 +2854,7 @@ def test_pairwise_full_path_prefers_method_b_loop_meaning_signature():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_full_path_falls_back_unknown_for_unproven_loop_summary():
@@ -2876,7 +2879,7 @@ def test_pairwise_full_path_falls_back_unknown_for_unproven_loop_summary():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
@@ -2916,7 +2919,7 @@ def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
         assert action.proof_obligation_id[-1] == record.object_target_key
 
 
-def test_pairwise_method_b_completed_in_current_run_resolves_pair():
+def test_monkeypatched_method_b_full_path_uses_canonical_solver_authority():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     count = Expression.parameter("count", index=1, data_type="int", size=4)
     count_is_two = Condition(
@@ -2945,11 +2948,8 @@ def test_pairwise_method_b_completed_in_current_run_resolves_pair():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    assert [item["proof_stage"] for item in exact_analysis.completed_recovery_proof_evidence] == [
-        "method_b_covering_case",
-        "method_b_guard_partition",
-    ]
-    strategy.solver_runner.run_sequential.assert_not_called()
+    assert not exact_analysis.completed_recovery_proof_evidence
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_full_path_recursively_falls_back_unknown_for_nested_unproven_loop_summary():
@@ -2982,7 +2982,7 @@ def test_pairwise_full_path_recursively_falls_back_unknown_for_nested_unproven_l
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_full_path_does_not_bypass_loop_guard_mismatch():
@@ -3011,7 +3011,7 @@ def test_pairwise_full_path_does_not_bypass_loop_guard_mismatch():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_method_b_smt_identity_uses_seed_compensated_loop_summary():

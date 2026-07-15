@@ -285,3 +285,16 @@ def resolve_method(name: str) -> Optional[Callable[..., Any]]:
         return module.invoke(name, *args, **kwargs)
 
     return delegated
+
+
+def snapshot_implementations() -> dict[str, Callable[..., Any]]:
+    """Collect raw proof-gate functions for namespace detachment."""
+
+    snapshot: dict[str, Callable[..., Any]] = {}
+    for name, module_name in _METHOD_MODULES.items():
+        module = importlib.import_module(f".{module_name}", __package__)
+        implementation = module.implementation(name)
+        if implementation is None:
+            raise AttributeError(name)
+        snapshot[name] = implementation
+    return snapshot

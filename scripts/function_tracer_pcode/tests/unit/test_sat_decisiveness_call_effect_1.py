@@ -398,7 +398,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summ
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -471,7 +471,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -1208,7 +1208,7 @@ def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(mon
         return_deferred_unknown=True,
     )
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -1224,7 +1224,7 @@ def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(mon
         "function2:effect_call_argument_evidence_incomplete",
     }
     assert "pairwise_extra_assertions_by_pair" not in formula_builder.build_base_context.return_value
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypatch):
     formula_builder = Mock()
@@ -1247,7 +1247,7 @@ def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypa
         unknown_size=8,
     )
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -1255,7 +1255,7 @@ def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypa
     assert [reason.reason_id for reason in result.unknown_reasons] == [
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_deferred_call_missing_target_expr_does_not_auto_proof(monkeypatch):
     formula_builder = Mock()
@@ -1383,7 +1383,7 @@ def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeyp
         call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
     )
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -1391,7 +1391,7 @@ def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeyp
     assert [reason.reason_id for reason in result.unknown_reasons] == [
         UnknownReasonId.UNRESOLVED_EXPRESSION.value
     ]
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -1421,13 +1421,13 @@ def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatc
         )
     ]
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_unresolved_deferred_call_incomplete_summary_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -1450,13 +1450,13 @@ def test_pairwise_unresolved_deferred_call_incomplete_summary_stays_unknown(monk
     )
     analysis2.effect_summary.incomplete_reasons = ("effect_summary_path_coverage_incomplete",)
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_deferred_call_duplicate_candidate_does_not_auto_proof(monkeypatch):
     formula_builder = Mock()

@@ -978,6 +978,6 @@ class MonolithicStrategy(CheckStrategy):
                     )
                 ],
             )
-from ..call_effect_preflight import _register_builtin_receipt_executor
+from ..call_effect_preflight import register_builtin_receipt_executor
 
-_register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)
+register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)

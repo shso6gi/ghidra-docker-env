@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import inspect
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...smt import SolverStatus
@@ -13,8 +14,47 @@ from ..formula.returns import (
     require_equal_return_bit_widths,
 )
 from .pairwise_models import QueryResult
-from ..obligations import AttemptCacheEntry, AttemptKey
+from ..obligations import (
+    AttemptCacheEntry,
+    AttemptKey,
+    GuardOverlapAttempt,
+    GuardOverlapExecutionResult,
+    GuardOverlapGraph,
+    canonical_guard_query_digest,
+    guard_seed,
+    status_from_query_result,
+)
+from ..obligations.guard_overlap import (
+    issue_guard_query_execution_artifact,
+    register_guard_query_executor,
+)
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
+
+
+def register_canonical_guard_strategy_type(strategy_type: type) -> None:
+    """Register the production PairwiseStrategy exact type once."""
+
+    global _bind_canonical_guard_strategy_type
+    frame = inspect.currentframe()
+    caller = frame.f_back if frame is not None else None
+    try:
+        caller_path = Path(caller.f_code.co_filename) if caller is not None else None
+        if (
+            caller is None
+            or caller.f_code.co_name != "<module>"
+            or caller_path is None
+            or caller_path.name != "pairwise.py"
+            or caller_path.parent.name != "strategies"
+        ):
+            raise RuntimeError("canonical guard strategy registrar is not trusted")
+    finally:
+        del caller
+        del frame
+    binder = _bind_canonical_guard_strategy_type
+    if binder is None:
+        raise RuntimeError("canonical guard strategy already registered")
+    binder(strategy_type)
+    _bind_canonical_guard_strategy_type = None
 
 
 def _is_void_return_placeholder(expr: Any) -> bool:
@@ -174,27 +214,33 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
                 ) + 1
             return result
     parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    semantic = getattr(parallel_result, "is_equivalent", None)
+    if semantic not in {True, False, None}:
+        semantic = None
+    raw_results = getattr(parallel_result, "results", ())
+    if not isinstance(raw_results, (tuple, list)):
+        raw_results = ()
     counterexample_raw = None
-    if parallel_result.is_equivalent is False:
+    if semantic is False:
         counterexample_raw = parallel_result.get_counterexample()
 
-    if parallel_result.is_equivalent is True:
+    if semantic is True:
         result_str = "UNSAT"
-    elif parallel_result.is_equivalent is False:
+    elif semantic is False:
         result_str = "SAT"
     else:
         result_str = "UNKNOWN/TIMEOUT"
 
-    elapsed = parallel_result.results[0].elapsed_time if parallel_result.results else 0.0
+    elapsed = raw_results[0].elapsed_time if raw_results else 0.0
     strategy._debug_print(f"  Pair {pair_id} {stage}: {result_str} (t={elapsed:.3f}s)")
 
-    _log_solver_errors(strategy, query, parallel_result.results)
+    _log_solver_errors(strategy, query, raw_results)
 
-    if strategy.save_unknown_queries and parallel_result.is_equivalent is None:
+    if strategy.save_unknown_queries and semantic is None:
         strategy._save_unknown_query(query, pair_id, stage)
 
     result = QueryResult(
-        is_equivalent=parallel_result.is_equivalent,
+        is_equivalent=semantic,
         counterexample_raw=counterexample_raw,
         solver_results=parallel_result,
     )
@@ -206,7 +252,7 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
                 query_digest=query_digest,
                 query_size=len(query),
                 elapsed_time=elapsed,
-                retry_eligible=parallel_result.is_equivalent is None,
+                retry_eligible=semantic is None,
             ),
         )
         stats = getattr(strategy, "_active_normalization_stats", None)
@@ -217,16 +263,87 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
     return result
 
 
-def solve_query_twostage(
+def _build_canonical_guard_query_executor(solver: Any):
+    """Close guard authority over the exact canonical solver implementation."""
+
+    trusted_strategy_types: list[type] = []
+
+    def bind_strategy_type(strategy_type: type) -> None:
+        if trusted_strategy_types:
+            raise RuntimeError("canonical guard strategy already bound")
+        trusted_strategy_types.append(strategy_type)
+
+    def execute(strategy, requirement, query: str, pair_id: str):
+        trusted_strategy_type = (
+            trusted_strategy_types[0] if trusted_strategy_types else None
+        )
+        if (
+            trusted_strategy_type is None
+            or trusted_strategy_type not in type(strategy).__mro__
+        ):
+            raise RuntimeError("canonical guard strategy is not trusted")
+        runner = getattr(strategy, "solver_runner", None)
+        if runner is None:
+            raise RuntimeError("canonical guard solver runner is unavailable")
+        if canonical_guard_query_digest(query) != requirement.canonical_query_digest:
+            raise ValueError("canonical guard query does not match requirement")
+        raw = solver(
+            strategy,
+            query,
+            pair_id,
+            stage="conds-only",
+            use_hard_timeout=False,
+        )
+        configured_solvers = getattr(runner, "_solvers", ())
+        if not isinstance(configured_solvers, (tuple, list)):
+            configured_solvers = ()
+        solver_identity = (
+            runner.__class__.__module__,
+            runner.__class__.__qualname__,
+            tuple(
+                (
+                    solver.__class__.__module__,
+                    solver.__class__.__qualname__,
+                    getattr(solver, "name", solver.__class__.__qualname__),
+                )
+                for solver in configured_solvers
+            ),
+        )
+        attempt = GuardOverlapAttempt(
+            requirement.stable_key(),
+            status_from_query_result(raw),
+            solver_identity,
+            float(getattr(strategy, "per_query_timeout", 0.0) or 0.0),
+            requirement.canonical_query_digest,
+        )
+        query_artifact = issue_guard_query_execution_artifact(
+            requirement, attempt, raw
+        )
+        return GuardOverlapExecutionResult(attempt, raw, query_artifact)
+
+    return execute, bind_strategy_type
+
+
+(
+    execute_canonical_guard_query,
+    _bind_canonical_guard_strategy_type,
+) = _build_canonical_guard_query_executor(
+    solve_query_internal
+)
+register_guard_query_executor(execute_canonical_guard_query)
+del _build_canonical_guard_query_executor
+
+
+def execute_guard_overlap(
     strategy,
     base_ctx: Dict[str, Any],
     case1,
     case2,
     param_replace_fn1,
     param_replace_fn2,
-    pair_id: str
-) -> QueryResult:
-    """二段階チェックを実行する"""
+    pair_id: str,
+) -> Any:
+    """Execute or reuse one graph node without running value comparison."""
     cond_query = strategy._build_condition_only_query(
         base_ctx,
         case1,
@@ -235,6 +352,23 @@ def solve_query_twostage(
         param_replace_fn2,
         pair_id,
     )
+    graph = getattr(strategy, "_guard_overlap_graph", None)
+    runtime = getattr(strategy, "_obligation_runtime_session", None)
+    if runtime is None and isinstance(graph, GuardOverlapGraph):
+        view_id = graph.derived_view_id
+        premise_digest = graph.premise_digest
+    else:
+        view_id = tuple(getattr(getattr(runtime, "current_view", None), "view_id", ()) or ())
+        premise_digest = str(getattr(runtime, "premise_digest", "direct-pairwise-premise"))
+    if not isinstance(graph, GuardOverlapGraph) or (
+        graph.derived_view_id != view_id or graph.premise_digest != premise_digest
+    ):
+        graph = GuardOverlapGraph(view_id, premise_digest)
+        strategy._guard_overlap_graph = graph
+    left_seed = guard_seed("left", case1, param_replace_fn1)
+    right_seed = guard_seed("right", case2, param_replace_fn2)
+    graph_requirement = graph.requirement(left_seed, right_seed, cond_query)
+
     def plan_guard_query():
         rebuilt = strategy._build_condition_only_query(
             base_ctx,
@@ -247,25 +381,49 @@ def solve_query_twostage(
         requirement = _query_requirement(
             "guard_overlap", rebuilt, pair_id, "conds-only"
         )
-        return requirement, "guard_overlap", lambda: strategy._solve_query_internal(
-            rebuilt,
-            pair_id,
-            stage="conds-only",
-            use_hard_timeout=False,
-        )
+        def produce_guard_result():
+            return execute_canonical_guard_query(
+                strategy, graph_requirement, rebuilt, pair_id
+            )
+        return requirement, "guard_overlap", produce_guard_result
 
-    stage1_requirement, _kind, stage1_producer = plan_guard_query()
-    _register_query_replanner(strategy, pair_id, "guard_overlap", plan_guard_query)
-    stage1_result = _execute_query_obligation(
-        strategy,
-        stage1_requirement,
-        "guard_overlap",
-        stage1_producer,
+    existing_node = graph.lookup(graph_requirement)
+    if existing_node is not None:
+        node = existing_node
+        stats = getattr(strategy, "_active_normalization_stats", None)
+        if stats is not None:
+            stats["guard_overlap_graph_hits"] = int(stats.get("guard_overlap_graph_hits", 0) or 0) + 1
+    else:
+        stage1_requirement, _kind, stage1_producer = plan_guard_query()
+        _register_query_replanner(strategy, pair_id, "guard_overlap", plan_guard_query)
+        execution_result = _execute_query_obligation(
+            strategy,
+            stage1_requirement,
+            "guard_overlap",
+            stage1_producer,
+        )
+        node = graph.record(execution_result)
+        stats = getattr(strategy, "_active_normalization_stats", None)
+        if stats is not None:
+            stats["guard_overlap_graph_misses"] = int(stats.get("guard_overlap_graph_misses", 0) or 0) + 1
+    node.result.raw_result.last_query = cond_query
+    node.result.raw_result.pair_stage = "conds-only"
+    return node
+
+
+def solve_query_after_guard(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+) -> QueryResult:
+    """Run only the value stage after a precomputed SAT/UNKNOWN guard edge."""
+    cond_query = strategy._build_condition_only_query(
+        base_ctx, case1, case2, param_replace_fn1, param_replace_fn2, pair_id,
     )
-    if stage1_result.is_equivalent is True:
-        stage1_result.last_query = cond_query
-        stage1_result.pair_stage = "conds-only"
-        return stage1_result
 
     contextual_unresolved = getattr(strategy, "_case_value_contains_unresolved", None)
     if contextual_unresolved is not None:
@@ -460,7 +618,7 @@ def solve_query_twostage(
         stage2_requirement,
         "value_relation",
         stage2_producer,
-        depends_on=(stage1_requirement,),
+        depends_on=(),
     )
     stage2_result.last_query = full_query
     stage2_result.pair_stage = "with-ineq"
@@ -541,6 +699,54 @@ def solve_query_twostage(
             )
 
     return stage2_result
+
+
+def solve_query_twostage(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+) -> QueryResult:
+    """Legacy non-authority facade; production uses ``execute_guard_overlap``."""
+    cond_query = strategy._build_condition_only_query(
+        base_ctx, case1, case2,
+        param_replace_fn1, param_replace_fn2, pair_id,
+    )
+
+    def plan_guard_query():
+        rebuilt = strategy._build_condition_only_query(
+            base_ctx, case1, case2,
+            param_replace_fn1, param_replace_fn2, pair_id,
+        )
+        requirement = _query_requirement(
+            "guard_overlap", rebuilt, pair_id, "conds-only"
+        )
+        return requirement, "guard_overlap", lambda: strategy._solve_query_internal(
+            rebuilt,
+            pair_id,
+            stage="conds-only",
+            use_hard_timeout=False,
+        )
+
+    stage1_requirement, _kind, stage1_producer = plan_guard_query()
+    _register_query_replanner(strategy, pair_id, "guard_overlap", plan_guard_query)
+    stage1_result = _execute_query_obligation(
+        strategy,
+        stage1_requirement,
+        "guard_overlap",
+        stage1_producer,
+    )
+    if stage1_result.is_equivalent is True:
+        stage1_result.last_query = cond_query
+        stage1_result.pair_stage = "conds-only"
+        return stage1_result
+    return solve_query_after_guard(
+        strategy, base_ctx, case1, case2,
+        param_replace_fn1, param_replace_fn2, pair_id,
+    )
 
 
 def _query_requirement(

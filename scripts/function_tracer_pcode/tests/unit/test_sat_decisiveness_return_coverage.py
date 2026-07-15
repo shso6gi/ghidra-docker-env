@@ -70,7 +70,7 @@ def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(m
             AssertionError("pairwise counterexample validation should not run when coverage is incomplete")
         ),
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 7, "x_2": 7},
@@ -149,7 +149,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -725,7 +725,7 @@ def test_pairwise_keeps_global_coverage_gap_with_sat_unsafety(monkeypatch):
     analysis1, analysis2 = _return_coverage_gap_analyses()
     analysis1.effect_summary = _analysis_with_unsupported_call_effect().effect_summary
     _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},

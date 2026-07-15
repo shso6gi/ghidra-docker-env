@@ -49,6 +49,7 @@ from .call_effect_preflight import (
     StrategySourceAnalysisPair,
     close_prepared_dispatch_frame,
     diagnostic_projection,
+    finalize_pairwise_comparison_receipt,
     prepare_solver_surface,
     push_prepared_dispatch_frame,
     validate_call_resolution_projection,
@@ -543,7 +544,7 @@ class EquivalenceChecker:
             
             # ★ 修正: save_formula に関わらず smt_formula を保持（debug trace 用）
             # user-facing 出力は EquivalenceResult.to_string() / to_dict() で制御される
-            return EquivalenceResult(
+            equivalence_result = EquivalenceResult(
                 is_equivalent=parallel_result.is_equivalent,
                 function1_name=ctx.function_name1,
                 function2_name=ctx.function_name2,
@@ -591,13 +592,14 @@ class EquivalenceChecker:
                     else []
                 ),
             )
+            return equivalence_result
 
         except ReturnWidthMismatchError as e:
             reason_id = getattr(e, "reason_id", "return_width_bridge_missing")
             self._debug_print(f"ABI retry blocked: {reason_id}: {e}")
             blocked_analysis1 = locals().get("analysis1", ctx.analysis1)
             blocked_analysis2 = locals().get("analysis2", ctx.analysis2)
-            return EquivalenceResult(
+            equivalence_result = EquivalenceResult(
                 is_equivalent=None,
                 function1_name=ctx.function_name1,
                 function2_name=ctx.function_name2,
@@ -628,6 +630,7 @@ class EquivalenceChecker:
                     )
                 ],
             )
+            return equivalence_result
         
         except Exception as e:
             self._debug_print(f"Exception in ABI retry: {e}")
@@ -1014,13 +1017,21 @@ class EquivalenceChecker:
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
 
-            self._call_proof_generation += 1
-            generation = self._call_proof_generation
-            comparison_session_id = uuid4().hex
-            branch_id = str(
-                getattr(self, "_active_call_proof_branch_id", None)
-                or strategy.__class__.__name__
-            )
+            replan_plan = getattr(self, "_active_pair_replan_plan", None)
+            if replan_plan is None:
+                self._call_proof_generation += 1
+                generation = self._call_proof_generation
+                comparison_session_id = uuid4().hex
+                branch_id = str(
+                    getattr(self, "_active_call_proof_branch_id", None)
+                    or strategy.__class__.__name__
+                )
+            else:
+                generation = int(replan_plan.frame_generation)
+                comparison_session_id = str(
+                    replan_plan.comparison_session_id
+                )
+                branch_id = str(replan_plan.branch_id)
             decision_mode = self.call_proof_decision_mode
             dispatch_frame = None
             cleanup_complete = True
@@ -1068,6 +1079,28 @@ class EquivalenceChecker:
                     ),
                     decision_mode=decision_mode,
                 )
+                obligation_runtime = getattr(
+                    self, "_obligation_runtime_session", None
+                )
+                if obligation_runtime is None:
+                    from .obligations.runtime import ObligationRuntimeSession
+
+                    obligation_runtime = ObligationRuntimeSession.create(
+                        analysis1, analysis2
+                    )
+                    self._obligation_runtime_session = obligation_runtime
+                try:
+                    strategy._obligation_runtime_session = obligation_runtime
+                except (AttributeError, TypeError):
+                    pass
+                dispatch_frame.obligation_runtime = obligation_runtime
+                if replan_plan is not None:
+                    current_plan = (
+                        obligation_runtime.pair_ledger_manager.pending_successor
+                    )
+                    if current_plan is not replan_plan:
+                        raise RuntimeError("pair_replan_successor_plan_missing")
+                    dispatch_frame.replan_successor_plan = replan_plan
 
                 self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
                 if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
@@ -1095,11 +1128,21 @@ class EquivalenceChecker:
                         dispatch_frame.close()
                         dispatch_frame.cleanup_complete = True
                 ordinary_outcome = strategy_result.is_equivalent
-                self._apply_preflight_final_gate(
-                    strategy_result,
-                    dispatch_frame,
-                    cleanup_complete=cleanup_complete,
-                )
+                stage_runner_owns_finalization = str(branch_id).startswith("S_")
+                if (
+                    isinstance(strategy, PairwiseStrategy)
+                    and dispatch_frame.pair_disposition_ledger is not None
+                    and not stage_runner_owns_finalization
+                ):
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_pairwise_comparison_receipt(dispatch_frame)
+                    )
+                if not stage_runner_owns_finalization:
+                    self._apply_preflight_final_gate(
+                        strategy_result,
+                        dispatch_frame,
+                        cleanup_complete=cleanup_complete,
+                    )
                 call_effect_shadow_manifest = diagnostic_projection(
                     call_effect_shadow_manifest,
                     dispatch_frame,
@@ -1193,7 +1236,7 @@ class EquivalenceChecker:
                 analysis2,
             )
             
-            return EquivalenceResult(
+            equivalence_result = EquivalenceResult(
                 is_equivalent=strategy_result.is_equivalent,
                 function1_name=analysis1.function_name,
                 function2_name=analysis2.function_name,
@@ -1285,6 +1328,12 @@ class EquivalenceChecker:
                 function1_identity=function1_identity,
                 function2_identity=function2_identity,
             )
+            # The obligation runner performs the final runtime-generation
+            # validation after proof gates and evidence application.  Keep the
+            # capability objects private; they are never serialized.
+            equivalence_result._prepared_dispatch_frame = dispatch_frame
+            equivalence_result._strategy_result = strategy_result
+            return equivalence_result
         
         except Exception as e:
             self._debug_print(f"Exception in check: {e}")
@@ -1369,7 +1418,10 @@ class EquivalenceChecker:
             is True
         )
         ordinary_complete = (
-            pairwise_complete and receipt_matches_pair_dispositions
+            pairwise_complete
+            and receipt_matches_pair_dispositions
+            and getattr(receipt, "branch_payload_kind", None) == "pairwise_ledger"
+            and len(tuple(getattr(receipt, "closure_snapshot", ()) or ())) == total
         ) or monolithic_complete
         required_projection_binding_ids = tuple(sorted(
             binding.binding_id for binding in frame.projection.semantic_bindings
@@ -1377,11 +1429,26 @@ class EquivalenceChecker:
         consumed_projection_binding_ids = tuple(
             getattr(receipt, "consumed_projection_binding_ids", ()) or ()
         )
+        excluded_projection_binding_ids = tuple(
+            getattr(receipt, "excluded_projection_binding_ids", ()) or ()
+        )
+        receipt_required_projection_binding_ids = tuple(
+            getattr(receipt, "required_projection_binding_ids", ()) or ()
+        )
         projection_bindings_consumed = (
             not frame.projection.required
             or (
                 bool(required_projection_binding_ids)
-                and consumed_projection_binding_ids == required_projection_binding_ids
+                and receipt_required_projection_binding_ids
+                == required_projection_binding_ids
+                and not (
+                    set(consumed_projection_binding_ids)
+                    & set(excluded_projection_binding_ids)
+                )
+                and tuple(sorted(
+                    set(consumed_projection_binding_ids)
+                    | set(excluded_projection_binding_ids)
+                )) == required_projection_binding_ids
             )
         )
         projection_active_total = int(

@@ -9,6 +9,7 @@ import pytest
 import scripts.function_tracer_pcode.equivalence.call_effect_preflight as preflight_module
 
 from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    CallSemanticProjectionBinding,
     CallProofDecisionMode,
     PreparedDispatchFrame,
     QueryExecutionRecord,
@@ -21,12 +22,58 @@ from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
     projection_binding_evidence_from_query,
     push_prepared_dispatch_frame,
     validate_call_resolution_projection,
+    finalize_pairwise_comparison_receipt,
+)
+from scripts.function_tracer_pcode.equivalence.cause_identity import (
+    ProofRequirementContract,
+    ProofRequirementId,
+)
+from scripts.function_tracer_pcode.equivalence.obligations import (
+    GuardOverlapGraph,
+    GuardRegionSeed,
+    GuardUnsatClosureArtifact,
+    ObligationRuntimeSession,
+    PairClosureEvidence,
+    PairClosureKind,
+    PairLedgerBinding,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared import StrategyResult
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    execute_canonical_guard_query,
+)
 from scripts.function_tracer_pcode.model import Expression, ReturnInfo
-from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.smt import ParallelResult, ParallelSolverRunner
+
+
+_GUARD_UNSAT_QUERY = "(set-logic QF_BV)\n(assert false)\n(check-sat)"
+
+
+def _canonical_guard_disjoint_artifact(binding: PairLedgerBinding):
+    strategy = getattr(_canonical_guard_disjoint_artifact, "strategy", None)
+    if strategy is None:
+        strategy = PairwiseStrategy(
+            object(), ParallelSolverRunner(timeout=2)
+        )
+        _canonical_guard_disjoint_artifact.strategy = strategy
+    graph = GuardOverlapGraph(
+        binding.derived_view_id,
+        binding.premise_digest,
+        binding.graph_generation,
+    )
+    requirement = graph.requirement(
+        GuardRegionSeed("left", 0, (("guard", "left"),), "left"),
+        GuardRegionSeed("right", 0, (("guard", "right"),), "right"),
+        _GUARD_UNSAT_QUERY,
+    )
+    result = execute_canonical_guard_query(
+        strategy, requirement, _GUARD_UNSAT_QUERY, "receipt-test"
+    )
+    artifact = graph.record(result).disjoint_artifact
+    assert artifact is not None
+    return artifact
 
 
 def _prepared(source, *, session="session", branch="S_PAIRWISE", generation=1):
@@ -234,6 +281,181 @@ def test_dispatch_frame_is_single_use_and_cleanup_revokes_copied_capability(monk
         consume_prepared_dispatch_frame(source.analysis1, source.analysis2)
 
 
+def test_receipt_merges_guard_closure_binding_consumption_and_exclusion():
+    source = StrategySourceAnalysisPair.create(
+        create_mock_analysis("left"),
+        create_mock_analysis("right"),
+    )
+    prepared = _prepared(source)
+    projection = validate_call_resolution_projection({}, prepared, generation=1)
+    requirement_id = ProofRequirementId.create(
+        "call_effect",
+        ("call", 1),
+        ProofRequirementContract("call relation"),
+    )
+    semantic_bindings = tuple(
+        CallSemanticProjectionBinding(
+            binding_id=binding_id,
+            obligation_id=f"obligation-{index}",
+            requirement_id=requirement_id,
+            observation_contract_id="observation-contract",
+            left_fact_id=None,
+            right_fact_id=None,
+            left_pcode_op_key=None,
+            right_pcode_op_key=None,
+            left_use_bindings=(),
+            right_use_bindings=(),
+            proof_stage_records=(),
+            relation_kind="test",
+            call_on_left=None,
+            region_return_members=(),
+            consumer_domains=(domain,),
+            status="proven",
+        )
+        for index, (binding_id, domain) in enumerate((
+            ("guard-binding", "guard"),
+            ("value-binding", "value"),
+        ))
+    )
+    projection = replace(
+        projection,
+        status="proven",
+        required=True,
+        semantic_bindings=semantic_bindings,
+    )
+    frame = PreparedDispatchFrame(
+        "session", "S_PAIRWISE", 1, source, prepared, projection, {}, (),
+        CallProofDecisionMode.PREFLIGHT_PROJECTION,
+    )
+    runtime = ObligationRuntimeSession.create(source.analysis1, source.analysis2)
+    frame.obligation_runtime = runtime
+    ledger_binding = PairLedgerBinding(
+        frame.comparison_session_id,
+        frame.branch_id,
+        prepared.surface_digest,
+        projection.projection_id,
+        frame.generation,
+        runtime.current_view.view_id,
+        runtime.premise_digest,
+        1,
+    )
+    ledger = runtime.open_pair_ledger(ledger_binding, 1)
+    ledger.close(PairClosureEvidence.validated(
+        (0, 0), PairClosureKind.GUARD_QUERY, ledger_binding,
+        GuardUnsatClosureArtifact(
+            _canonical_guard_disjoint_artifact(ledger_binding)
+        ),
+        required_binding_uses=("guard-binding", "value-binding"),
+        consumed_binding_uses=("guard-binding",),
+    ))
+    frame.pair_disposition_ledger = ledger
+    frame.pending_query_records = ()
+    frame.pending_consumed_projection_binding_ids = ()
+    frame.pending_disposition_counts = {
+        "total": 1, "unsat": 1, "sat": 0, "unknown": 0, "error": 0,
+    }
+    token = push_prepared_dispatch_frame(frame)
+    consume_prepared_dispatch_frame(source.analysis1, source.analysis2)
+    close_prepared_dispatch_frame(frame, token)
+
+    receipt = finalize_pairwise_comparison_receipt(frame)
+
+    assert receipt.required_projection_binding_ids == (
+        "guard-binding", "value-binding"
+    )
+    assert receipt.consumed_projection_binding_ids == ("guard-binding",)
+    assert receipt.excluded_projection_binding_ids == ("value-binding",)
+    assert receipt.is_trusted_for(frame)
+
+
+def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
+    source = StrategySourceAnalysisPair.create(
+        create_mock_analysis("left"), create_mock_analysis("right")
+    )
+    old_prepared = _prepared(source, session="successor-session")
+    old_manifest = {"legacy_blocker_mapping": [{"blocker": "call-effect"}]}
+    old_projection = validate_call_resolution_projection(
+        old_manifest, old_prepared, generation=1
+    )
+    runtime = ObligationRuntimeSession.create(source.analysis1, source.analysis2)
+    old_binding = PairLedgerBinding(
+        "successor-session", "S_PAIRWISE", old_prepared.surface_digest,
+        old_projection.projection_id, 1,
+        runtime.current_view.view_id, runtime.premise_digest, 1,
+    )
+    old_ledger = runtime.open_pair_ledger(old_binding, 1)
+    proof_requirement = ProofRequirementId.create(
+        "call_effect",
+        ("call", "left", "right"),
+        ProofRequirementContract("call effect relation"),
+    )
+    runtime._apply_artifact(proof_requirement, {"proof_source": "unit-test"})
+    successor_plan = runtime.pair_ledger_manager.pending_successor
+    assert successor_plan is not None
+    assert runtime.pair_ledger_manager.current is None
+
+    new_prepared = _prepared(source, session="successor-session")
+    new_projection = validate_call_resolution_projection(
+        {}, new_prepared, generation=1
+    )
+    assert new_projection.projection_id != old_projection.projection_id
+    frame = PreparedDispatchFrame(
+        "successor-session", "S_PAIRWISE", 1, source, new_prepared,
+        new_projection, {}, (), CallProofDecisionMode.PREFLIGHT_PROJECTION,
+    )
+    frame.obligation_runtime = runtime
+    frame.replan_successor_plan = successor_plan
+    stale_projection_binding = PairLedgerBinding(
+        frame.comparison_session_id,
+        frame.branch_id,
+        new_prepared.surface_digest,
+        old_projection.projection_id,
+        frame.generation,
+        successor_plan.derived_view_id,
+        successor_plan.premise_digest,
+        successor_plan.graph_generation,
+    )
+    with pytest.raises(RuntimeError, match="does not match successor plan"):
+        runtime.open_pair_ledger(stale_projection_binding, 1)
+    replacement_binding = PairLedgerBinding(
+        frame.comparison_session_id,
+        frame.branch_id,
+        new_prepared.surface_digest,
+        new_projection.projection_id,
+        frame.generation,
+        successor_plan.derived_view_id,
+        successor_plan.premise_digest,
+        successor_plan.graph_generation,
+    )
+    successor = runtime.open_pair_ledger(replacement_binding, 1)
+    assert successor is not old_ledger
+    assert successor.binding.graph_generation == 2
+    assert successor.binding.projection_id == new_projection.projection_id
+    successor.close(PairClosureEvidence.validated(
+        (0, 0), PairClosureKind.GUARD_QUERY, successor.binding,
+        GuardUnsatClosureArtifact(
+            _canonical_guard_disjoint_artifact(successor.binding)
+        ),
+    ))
+    frame.pair_disposition_ledger = successor
+    frame.replan_successor_ledger = successor
+    frame.successor_ledger_reused = True
+    frame.pending_disposition_counts = {
+        "total": 1, "unsat": 1, "sat": 0, "unknown": 0, "error": 0,
+    }
+    token = push_prepared_dispatch_frame(frame)
+    consume_prepared_dispatch_frame(source.analysis1, source.analysis2)
+    close_prepared_dispatch_frame(frame, token)
+
+    receipt = finalize_pairwise_comparison_receipt(frame)
+
+    assert frame.pair_disposition_ledger is successor
+    assert runtime.pair_ledger_manager.current is successor
+    assert frame.projection.projection_id != old_projection.projection_id
+    assert receipt.is_trusted_for(frame)
+    assert receipt.ledger_binding_digest
+
+
 def test_dispatch_rejects_equal_content_from_different_source_objects():
     source = StrategySourceAnalysisPair.create(
         create_mock_analysis("left"),
@@ -300,6 +522,33 @@ def test_preflight_does_not_self_certify_monkeypatched_normalizer(monkeypatch):
 
     assert invoked == []
     assert result.is_equivalent is not True
+
+
+def test_receipt_v3_rejects_nonempty_pairwise_result_without_ledger():
+    source = StrategySourceAnalysisPair.create(
+        create_mock_analysis("left"), create_mock_analysis("right")
+    )
+    prepared = _prepared(source)
+    projection = validate_call_resolution_projection({}, prepared, generation=1)
+    frame = PreparedDispatchFrame(
+        "session", "S_PAIRWISE", 1, source, prepared, projection, {}, (),
+        CallProofDecisionMode.PREFLIGHT_PROJECTION,
+    )
+    frame.consume(source.analysis1, source.analysis2)
+    formula = "(check-sat)"
+    record = QueryExecutionRecord(
+        "(0,0)", "0" * 64, hashlib.sha256(formula.encode()).hexdigest(),
+        "unsat", "value_query", formula_text=formula,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="pair_ledger_missing"):
+            frame._complete_from_builtin_executor(
+                (record,), (),
+                {"total": 1, "unsat": 1, "sat": 0, "unknown": 0, "error": 0},
+                authority_token=preflight_module._BUILTIN_RECEIPT_AUTHORITY_TOKEN,
+            )
+    finally:
+        frame.close()
 
 
 def test_override_cannot_forge_receipt_after_consuming_dispatch(monkeypatch):

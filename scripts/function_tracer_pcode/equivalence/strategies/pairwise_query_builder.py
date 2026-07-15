@@ -549,15 +549,21 @@ def build_condition_only_query(
     pair_id: str
 ) -> str:
     """条件のみの SMT クエリを構築する"""
+    header_lines = tuple(base_ctx["header_lines"])
+    header_has_logic = any(
+        str(line).lstrip().startswith("(set-logic ")
+        for line in header_lines
+    )
     lines = _build_query_header(
         f"; Pairwise Query (Conditions Only): Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
-        logic=base_ctx.get("smt_logic", "QF_BV"),
+        logic="" if header_has_logic else base_ctx.get("smt_logic", "QF_BV"),
     )
-    lines.extend(base_ctx["header_lines"])
+    lines.extend(header_lines)
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id, guard_only=True))
     lines.append("(check-sat)")
     return "\n".join(lines)
 
@@ -628,12 +634,29 @@ def build_pair_query(
 def _build_pairwise_extra_assertions(
     base_ctx: Dict[str, Any],
     pair_id: str,
+    *,
+    guard_only: bool = False,
 ) -> List[str]:
     assertions_by_pair = base_ctx.get("pairwise_extra_assertions_by_pair") or {}
-    call_projection_by_pair = base_ctx.get("call_projection_assertions_by_pair") or {}
-    raw_assertions = tuple(call_projection_by_pair.get(pair_id) or ()) + tuple(
-        assertions_by_pair.get(pair_id) or ()
-    )
+    if guard_only:
+        bundles = tuple(
+            (base_ctx.get("call_projection_assertion_bundles_by_pair") or {}).get(pair_id, ())
+            or ()
+        )
+        call_assertions = tuple(
+            assertion
+            for bundle in bundles
+            if callable(getattr(bundle, "is_guard_bound", None)) and bundle.is_guard_bound()
+            for assertion in bundle.assertions
+        )
+        extra = tuple(
+            (base_ctx.get("guard_extra_assertions_by_pair") or {}).get(pair_id, ()) or ()
+        )
+    else:
+        call_projection_by_pair = base_ctx.get("call_projection_assertions_by_pair") or {}
+        call_assertions = tuple(call_projection_by_pair.get(pair_id) or ())
+        extra = tuple(assertions_by_pair.get(pair_id) or ())
+    raw_assertions = call_assertions + extra
     assertions = [str(item) for item in raw_assertions if str(item).strip()]
     if not assertions:
         return []
@@ -750,8 +773,9 @@ def _build_query_header(*comment_lines: str, logic: str = "QF_BV") -> List[str]:
     lines.extend(comment_lines)
     lines.append("; " + "=" * 60)
     lines.append("")
-    lines.append(f"(set-logic {logic})")
-    lines.append("")
+    if logic:
+        lines.append(f"(set-logic {logic})")
+        lines.append("")
     return lines
 
 

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 
 from unittest.mock import Mock, patch
+from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
 from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.formula.variable import (
     ExtensionType,
     ExtraVariableAnalysis,
@@ -22,6 +24,12 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
+
+
+def _solver_runner():
+    runner = ParallelSolverRunner(timeout=5)
+    runner.run_sequential = Mock(wraps=runner.run_sequential)
+    return runner
 
 
 def _param(name: str) -> Expression:
@@ -107,7 +115,7 @@ def _fragment_info(fragment_name: str, parent_name: str, parent_index: int) -> E
 
 
 def test_pairwise_rewrites_mips64_parameter_fragments_before_contradiction_check():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
 
     selector_is_zero = _binary(
         "INT_EQUAL",
@@ -172,7 +180,7 @@ def test_pairwise_rewrites_mips64_parameter_fragments_before_contradiction_check
 
 
 def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
 
     analysis1 = FunctionReturnAnalysis(
         function_name="fc_widen_then_bias_like",
@@ -217,9 +225,13 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
     )
 
     strategy.formula_builder.build_base_context.return_value = {
-        "header_lines": [],
-        "params1": [],
-        "params2": [],
+        "header_lines": [
+            "(declare-const param_2_1 (_ BitVec 32))",
+            "(declare-const param_2_2 (_ BitVec 32))",
+            "(assert (= param_2_1 param_2_2))",
+        ],
+        "params1": [ParameterInfo("param_2", "param_2_1", 32, 1)],
+        "params2": [ParameterInfo("param_2", "param_2_2", 32, 1)],
         "extra_vars1": [],
         "extra_vars2": [_fragment_info("in_a1_hi", "param_2", 1)],
     }
@@ -232,11 +244,11 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
     assert result.unknown_pairs == 0
     assert "return_case_coverage_gap" in analysis1.analysis_notes
     assert "return_case_coverage_gap" in analysis2.analysis_notes
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_extracts_cases_from_solver_view_consistently():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
 
     raw_left = FunctionReturnAnalysis(
         function_name="left",
@@ -290,7 +302,7 @@ def test_pairwise_extracts_cases_from_solver_view_consistently():
 
 
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
 
     analysis1 = FunctionReturnAnalysis(
         function_name="left",
@@ -330,11 +342,11 @@ def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_sequential.assert_called()
 
 
 def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
     left = _readonly_sum_value("param_1", stride=4, element_size=4, signed_counter=True)
     right = _readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False)
 
@@ -342,7 +354,7 @@ def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
 
 
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions_via_witnesses():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
     left_witnesses = (
         ReadonlyReductionWitness(
             exact_count=1,

@@ -247,20 +247,184 @@ def run_obligation_branch_plan(
                 )
             return produce
 
-        runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
+        replan_generation = 0
         while True:
-            gate_item, _gate_value = runtime.run_next()
-            if gate_item is None:
+            runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
+            while True:
+                gate_item, _gate_value = runtime.run_next()
+                if gate_item is None:
+                    break
+            # Evidence may derive a new analysis view only for an
+            # inconclusive branch.  The old ledger is superseded and the same
+            # pairwise branch is then executed against the successor view.
+            produced_views = ()
+            if _outcome(result) == FunctionProofOutcome.INCONCLUSIVE:
+                produced_views = runtime.apply_completed_evidence(
+                    getattr(result, "completed_recovery_proof_evidence", ()) or (),
+                    reasons=getattr(result, "unknown_reasons", ()) or (),
+                )
+                while True:
+                    affected_item, _affected_value = runtime.run_next()
+                    if affected_item is None:
+                        break
+            if not produced_views:
                 break
-        runtime.apply_completed_evidence(
-            getattr(result, "completed_recovery_proof_evidence", ()) or (),
-            reasons=getattr(result, "unknown_reasons", ()) or (),
-        )
-        while True:
-            affected_item, _affected_value = runtime.run_next()
-            if affected_item is None:
+            if spec.strategy not in {"pairwise", "loop_template_pairwise"}:
                 break
+            prior_dispatch_frame = getattr(
+                result, "_prepared_dispatch_frame", None
+            )
+            if (
+                prior_dispatch_frame is None
+                or prior_dispatch_frame.pair_disposition_ledger is None
+            ):
+                # Compatibility/test branches without a production ledger
+                # have no pair surface to replan.
+                break
+            replan_generation += 1
+            successor_plan = runtime.pair_ledger_manager.pending_successor
+            if successor_plan is None:
+                break
+            checker._active_pair_replan_plan = successor_plan
+            try:
+                replanned = execute_branch()
+            finally:
+                try:
+                    del checker._active_pair_replan_plan
+                except AttributeError:
+                    pass
+            if replanned is None:
+                break
+            result = replanned
+            result.stage_path = stage_path.copy()
+            replanned_stats = dict(
+                getattr(result, "pairwise_debug_stats", None) or {}
+            )
+            replanned_stats["derived_view_pair_replans"] = (
+                int(replanned_stats.get("derived_view_pair_replans", 0) or 0)
+                + 1
+            )
+            for key, value in replanned_stats.items():
+                accumulated_pairwise_debug_stats[key] = (
+                    accumulated_pairwise_debug_stats.get(key, 0)
+                    + int(value or 0)
+                )
+            result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
+            if getattr(result, "call_effect_shadow_manifest", None) is not None:
+                last_call_effect_manifest = result.call_effect_shadow_manifest
+            elif last_call_effect_manifest is not None:
+                result.call_effect_shadow_manifest = last_call_effect_manifest
+            checker._merge_completed_recovery_proofs_from_result(
+                analysis1, analysis2, result
+            )
         DecisionAggregator.apply(result, runtime)
+        dispatch_frame = getattr(result, "_prepared_dispatch_frame", None)
+        strategy_result = getattr(result, "_strategy_result", None)
+        if dispatch_frame is not None and strategy_result is not None:
+            if (
+                dispatch_frame.pair_disposition_ledger is not None
+                and dispatch_frame.receipt is None
+            ):
+                try:
+                    from ..call_effect_preflight import (
+                        diagnostic_projection,
+                        finalize_pairwise_comparison_receipt,
+                    )
+
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_pairwise_comparison_receipt(dispatch_frame)
+                    )
+                    debug_stats = dict(
+                        getattr(result, "pairwise_debug_stats", None) or {}
+                    )
+                    debug_stats["pair_ledger_sealed"] = 1
+                    result.pairwise_debug_stats = debug_stats
+                    manifest = getattr(result, "call_effect_shadow_manifest", None)
+                    if isinstance(manifest, dict):
+                        result.call_effect_shadow_manifest = diagnostic_projection(
+                            manifest, dispatch_frame
+                        )
+                except RuntimeError:
+                    # A proof gate derived a newer view or left work pending.
+                    # The final gate below converts the missing receipt into a
+                    # typed UNKNOWN blocker; it is never surfaced as ERROR.
+                    strategy_result.comparison_execution_receipt = None
+            checker._apply_preflight_final_gate(
+                strategy_result,
+                dispatch_frame,
+                cleanup_complete=bool(dispatch_frame.cleanup_complete),
+            )
+            result.is_equivalent = strategy_result.is_equivalent
+            result.unknown_reasons = list(strategy_result.unknown_reasons)
+            provenance = getattr(result, "call_proof_terminal_provenance", None)
+            receipt = getattr(dispatch_frame, "receipt", None)
+            if isinstance(provenance, dict):
+                trusted = bool(
+                    receipt is not None and receipt.is_trusted_for(dispatch_frame)
+                )
+                provenance["comparison_receipt_id"] = (
+                    receipt.receipt_id if trusted else None
+                )
+                provenance["query_execution_receipts"] = [
+                    {
+                        "query_label": record.query_label,
+                        "premise_digest": record.premise_digest,
+                        "formula_digest": record.formula_digest,
+                        "disposition": record.disposition,
+                        "proof_kind": record.proof_kind,
+                        "projection_binding_ids": list(
+                            record.projection_binding_ids
+                        ),
+                        "return_width_observation_view_digest": (
+                            record.return_width_observation_view_digest
+                        ),
+                        "return_width_binding_receipt_digest": (
+                            record.return_width_binding_receipt_digest
+                        ),
+                        "canonical_return_width_receipt_digests": list(
+                            record.canonical_return_width_receipt_digests
+                        ),
+                        "validated": record.validate(),
+                    }
+                    for record in tuple(
+                        getattr(receipt, "query_records", ()) or ()
+                    )
+                ] if trusted else []
+                provenance["pair_closure_snapshot"] = (
+                    receipt.closure_snapshot if trusted else ()
+                )
+                provenance["pair_closure_snapshot_digest"] = (
+                    receipt.closure_snapshot_digest if trusted else None
+                )
+                provenance["receipt_ledger_binding_digest"] = (
+                    receipt.ledger_binding_digest if trusted else None
+                )
+                provenance["receipt_quiescence_certificate_digest"] = (
+                    receipt.quiescence_certificate_digest if trusted else None
+                )
+                provenance["receipt_disposition_counts"] = (
+                    dict(receipt.disposition_counts) if trusted else None
+                )
+                provenance["receipt_required_projection_binding_ids"] = (
+                    list(receipt.required_projection_binding_ids)
+                    if trusted else None
+                )
+                provenance["receipt_consumed_projection_binding_ids"] = (
+                    list(receipt.consumed_projection_binding_ids)
+                    if trusted else None
+                )
+                provenance["receipt_excluded_projection_binding_ids"] = (
+                    list(receipt.excluded_projection_binding_ids)
+                    if trusted else None
+                )
+                provenance["terminal_runtime_view_id"] = runtime.current_view.view_id
+                provenance["terminal_runtime_premise_digest"] = runtime.premise_digest
+                provenance["receipt_final_runtime_binding_valid"] = trusted
+                provenance["receipt_successor_ledger_reused"] = (
+                    bool(trusted and dispatch_frame.successor_ledger_reused)
+                    if dispatch_frame.replan_successor_plan is not None
+                    else None
+                )
         last_result = result
         outcome = _outcome(result)
         controller.record(branch_id, outcome)

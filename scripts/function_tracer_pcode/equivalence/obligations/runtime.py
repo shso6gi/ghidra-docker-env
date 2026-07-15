@@ -18,6 +18,8 @@ from .model import (
 from .proof import ViewPremiseRecord, validate_proof_closure
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
 from .worklist import ProofWorklist, WorkItem
+from .guard_overlap import WorkResultRole
+from .pair_disposition import PairDispositionLedger, PairLedgerBinding, PairLedgerManager, RuntimeQuiescenceCertificate
 
 
 GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE = ValidatedUnaryArtifactCache()
@@ -74,6 +76,7 @@ class ObligationRuntimeSession:
     unary_artifact_cache: ValidatedUnaryArtifactCache = field(
         default_factory=lambda: GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE
     )
+    pair_ledger_manager: PairLedgerManager = field(default_factory=PairLedgerManager)
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
@@ -335,6 +338,65 @@ class ObligationRuntimeSession:
             raise RuntimeError("obligation producer execution order was violated")
         return value
 
+    def open_pair_ledger(self, binding: PairLedgerBinding, expected_pairs: int) -> PairDispositionLedger:
+        if binding.derived_view_id != self.current_view.view_id or binding.premise_digest != self.premise_digest:
+            raise ValueError("pair ledger binding is not current runtime generation")
+        return self.pair_ledger_manager.open(binding, expected_pairs)
+
+    def pair_quiescence_certificate(self, ledger: PairDispositionLedger) -> RuntimeQuiescenceCertificate:
+        owner_items = tuple(
+            item for item in self.worklist.items()
+            if item.state == ExecutionState.RUNNING
+            and item.kind == "function_branch"
+            and item.obligation_id.derived_view_id == self.current_view.view_id
+            and tuple(item.obligation_id.requirement_id.proof_target_key)
+            == ("branch", ledger.binding.branch_id)
+        )
+        if len(owner_items) > 1:
+            raise RuntimeError("multiple active function-branch owners for pair ledger")
+        pending_items = tuple(
+            item for item in self.worklist.items()
+            if item.state in {ExecutionState.READY, ExecutionState.RUNNING}
+            and item.obligation_id.derived_view_id == self.current_view.view_id
+            and item not in owner_items
+        )
+        return RuntimeQuiescenceCertificate(
+            ledger.binding.stable_key(), ledger.expected_pairs, len(ledger.closures),
+            len(pending_items), len(ledger.provisional), self.current_view.view_id,
+            self.premise_digest,
+            tuple((item.kind, item.state.value) for item in pending_items),
+            (
+                owner_items[0].obligation_id.to_key()
+                if owner_items else ()
+            ),
+        )
+
+    def drain_pair_terminal_work(self) -> Tuple[Any, ...]:
+        """Execute terminal safety checks; refuse to hide other pending proof work."""
+
+        pending = tuple(
+            item for item in self.worklist.items()
+            if item.state == ExecutionState.READY
+            and item.obligation_id.derived_view_id == self.current_view.view_id
+        )
+        unsupported = tuple(item.kind for item in pending if item.kind != "counterexample_safety")
+        if unsupported:
+            raise RuntimeError(
+                "pair ledger has non-terminal pending proof work: "
+                + ",".join(sorted(unsupported))
+            )
+        outcomes = []
+        while any(
+            item.state == ExecutionState.READY
+            and item.obligation_id.derived_view_id == self.current_view.view_id
+            for item in self.worklist.items()
+        ):
+            item, value = self.run_next()
+            if item is None or item.kind != "counterexample_safety":
+                raise RuntimeError("terminal safety work execution order was violated")
+            outcomes.append(value)
+        return tuple(outcomes)
+
     def run_next(self) -> Tuple[Optional[WorkItem], Any]:
         item = self.worklist.pop()
         if item is None:
@@ -344,13 +406,14 @@ class ObligationRuntimeSession:
         value = callback() if callback is not None else item.payload
         self.results[key] = value
         pending_safety: Optional[PendingCounterexampleSafety] = None
-        if isinstance(value, FunctionProofOutcome):
+        result_role = getattr(value, "result_role", WorkResultRole.PROOF_DECISION)
+        if result_role == WorkResultRole.NON_DECISIONAL_EXECUTION:
+            pass
+        elif isinstance(value, FunctionProofOutcome):
             self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = value
         elif hasattr(value, "is_equivalent"):
             semantic = getattr(value, "is_equivalent", None)
-            if item.kind == "guard_overlap" and semantic is not None:
-                outcome = FunctionProofOutcome.EQUIVALENT
-            elif semantic is True:
+            if semantic is True:
                 outcome = FunctionProofOutcome.EQUIVALENT
             elif semantic is False and item.kind == "value_relation":
                 # A replanned SAT query is only a candidate counterexample.
@@ -546,6 +609,14 @@ class ObligationRuntimeSession:
                 requirement = ProofRequirementId.from_dict(requirement_payload)
             except (TypeError, ValueError):
                 continue
+            if any(
+                artifact.requirement_id.to_key() == requirement.to_key()
+                for artifact in self.artifacts
+            ):
+                # One requirement denotes one proposition.  Re-emitting the
+                # same completed evidence must not create an unbounded chain
+                # of derived views or pair replans.
+                continue
             producer_outcome = self.proof_outcomes.get(
                 requirement.to_key(),
                 FunctionProofOutcome.INCONCLUSIVE,
@@ -645,6 +716,20 @@ class ObligationRuntimeSession:
             available_artifact_ids=applied,
             parent_view_id=source.view_id,
         )
+        successor_ledger = self.pair_ledger_manager.plan_successor(
+            derived.view_id,
+            derived_premise,
+            projection_refresh_required=str(requirement.proof_kind).startswith(
+                "call_effect"
+            ),
+        )
+        if successor_ledger is not None:
+            self.events.append(ObligationExecutionEvent(
+                "pair_ledger_replan_required",
+                successor_ledger.stable_key(),
+                derived.view_id,
+                "guard_overlap",
+            ))
         self.events.append(ObligationExecutionEvent("view_created", requirement.to_key(), derived.view_id, requirement.proof_kind))
         self._reschedule_dependents(requirement)
         return derived

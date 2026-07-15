@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     SolverOutcomeClass,
     ProductionShadowValidator,
     project_proof_gates,
+    PairLedgerBinding,
 )
 from scripts.function_tracer_pcode.equivalence.cause_identity import (
     ProofRequirementContract,
@@ -297,6 +298,92 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     runtime = checker._obligation_runtime_session
     assert runtime.artifacts[0].requirement_id == requirement
     assert any(event.kind == "return_coverage" for event in runtime.events)
+
+
+def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion",
+        ("coverage", "f"),
+        ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap",
+        recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),),
+        object_target_key=("coverage", "f"),
+        pair_or_case="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    first = _result(None, (reason,))
+    first.completed_recovery_proof_evidence = [{
+        "evidence": {
+            "proof_requirement_id": requirement.to_dict(),
+            "status": "complete",
+            "proof_source": "coverage_test_producer",
+        },
+    }]
+    second = _result(True)
+    second.completed_recovery_proof_evidence = []
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=lambda *_args: True,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+    calls = []
+    replanned_ledgers = []
+
+    def execute(*_args, **_kwargs):
+        runtime = checker._obligation_runtime_session
+        calls.append(runtime.current_view.view_id)
+        if len(calls) == 1:
+            binding = PairLedgerBinding(
+                "session", "S_PAIRWISE", "surface", "projection", 1,
+                runtime.current_view.view_id, runtime.premise_digest, 1,
+            )
+            ledger = runtime.open_pair_ledger(binding, 1)
+            first._prepared_dispatch_frame = SimpleNamespace(
+                pair_disposition_ledger=ledger
+            )
+            return first
+        successor_plan = runtime.pair_ledger_manager.pending_successor
+        assert successor_plan is not None
+        assert checker._active_pair_replan_plan is successor_plan
+        replacement_binding = PairLedgerBinding(
+            successor_plan.comparison_session_id,
+            successor_plan.branch_id,
+            "new-surface",
+            "new-projection",
+            successor_plan.frame_generation,
+            successor_plan.derived_view_id,
+            successor_plan.premise_digest,
+            successor_plan.graph_generation,
+        )
+        replanned_ledgers.append(
+            runtime.open_pair_ledger(
+                replacement_binding,
+                successor_plan.expected_pairs,
+            )
+        )
+        return second
+
+    checker.check = Mock(side_effect=execute)
+
+    final = _run(checker, "_run_stage_plan")
+
+    runtime = checker._obligation_runtime_session
+    assert final.is_equivalent is True
+    assert len(calls) == 2
+    assert replanned_ledgers == [runtime.pair_ledger_manager.current]
+    assert calls[0] != calls[1]
+    assert runtime.pair_ledger_manager.history
+    assert runtime.pair_ledger_manager.history[0].binding.derived_view_id == calls[0]
+    assert any(
+        event.event == "pair_ledger_replan_required"
+        for event in runtime.events
+    )
 
 
 def test_production_shadow_validator_runs_final_workflows_and_hashes_surfaces():

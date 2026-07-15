@@ -18,7 +18,12 @@ import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from ..model import Expression, FunctionReturnAnalysis, expression_provenance_key
+from ..model import (
+    Expression,
+    FunctionReturnAnalysis,
+    StorageInfo,
+    expression_provenance_key,
+)
 
 
 SCHEMA_VERSION = 1
@@ -103,6 +108,12 @@ def _condition_key(value: Any) -> Optional[Tuple[Any, ...]]:
     if expression_key is None:
         return None
     return ("condition", bool(getattr(value, "negated", False)), expression_key)
+
+
+def condition_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    """Return the canonical object-derived condition identity."""
+
+    return _condition_key(value)
 
 
 @dataclass(frozen=True)
@@ -269,6 +280,13 @@ class CallOutputUseBinding:
     reaching_definition_status: str
     execution_before_use_status: str
     invocation_contract: CallInvocationContract
+    schema_version: str = "call_output_use_binding_v2"
+    producer_pcode_op_key: Tuple[Any, ...] = ()
+    consumer_pcode_op_key: Tuple[Any, ...] = ()
+    operand_ordinal: int = -1
+    storage_identity: Tuple[Any, ...] = ()
+    storage_availability: str = "unavailable"
+    proof_use_key: str = ""
 
     @property
     def proven(self) -> bool:
@@ -288,11 +306,18 @@ class CallOutputUseBinding:
             "reaching_definition_status": self.reaching_definition_status,
             "execution_before_use_status": self.execution_before_use_status,
             "invocation_contract": self.invocation_contract.to_dict(),
+            "schema_version": self.schema_version,
+            "producer_pcode_op_key": _jsonable(self.producer_pcode_op_key),
+            "consumer_pcode_op_key": _jsonable(self.consumer_pcode_op_key),
+            "operand_ordinal": self.operand_ordinal,
+            "storage_identity": _jsonable(self.storage_identity),
+            "storage_availability": self.storage_availability,
+            "proof_use_key": self.proof_use_key,
             "proven": self.proven,
         }
 
 
-USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION = "prepared_call_use_mapping_v1"
+USE_DOMAIN_COVERAGE_MAPPING_BUILDER_VERSION = "prepared_call_use_mapping_v2"
 _USE_DOMAIN_COVERAGE_MAPPING_ISSUER = object()
 
 
@@ -1336,6 +1361,7 @@ def _extract_side_facts(
             use_ref: Any,
             use_site_kind: str,
             phi_branch: bool,
+            operand_ordinal: int,
             active: set[int],
         ) -> None:
             if not isinstance(expr, Expression) or id(expr) in active:
@@ -1359,7 +1385,26 @@ def _extract_side_facts(
                     use_site_kind=use_site_kind,
                     runtime_ref_exact=runtime_ref_exact,
                 )
-                use_id = _digest(("call_output_use_v1", pcode_key, location, runtime_key, inherited_guards))
+                consumer_key = tuple(contract.use_pcode_op_key or ())
+                storage = getattr(expr, "storage_info", None)
+                storage_key_fn = (
+                    getattr(storage, "storage_identity_key", None)
+                    if isinstance(storage, StorageInfo)
+                    else None
+                )
+                storage_identity = tuple(
+                    storage_key_fn() if callable(storage_key_fn) else ()
+                )
+                proof_use_key = _digest((
+                    "call_output_use_binding_v2",
+                    pcode_key,
+                    consumer_key,
+                    operand_ordinal,
+                    storage_identity,
+                    location,
+                    inherited_guards,
+                ))
+                use_id = proof_use_key
                 bindings.append(
                     CallOutputUseBinding(
                         use_id=use_id,
@@ -1374,6 +1419,12 @@ def _extract_side_facts(
                             else contract.execution_order_proof
                         ),
                         invocation_contract=contract,
+                        producer_pcode_op_key=tuple(pcode_key or ()),
+                        consumer_pcode_op_key=consumer_key,
+                        operand_ordinal=operand_ordinal,
+                        storage_identity=storage_identity,
+                        storage_availability=("available" if storage_identity else "unavailable"),
+                        proof_use_key=proof_use_key,
                     )
                 )
             value = getattr(expr, "value", None)
@@ -1392,6 +1443,7 @@ def _extract_side_facts(
                             None,
                             "condition",
                             True,
+                            -1,
                             active,
                         )
                     visit_expression(
@@ -1401,6 +1453,7 @@ def _extract_side_facts(
                         use_ref,
                         use_site_kind,
                         True,
+                        -1,
                         active,
                     )
             for operand_index, operand in enumerate(tuple(getattr(expr, "operands", ()) or ())):
@@ -1411,6 +1464,7 @@ def _extract_side_facts(
                     use_ref,
                     use_site_kind,
                     phi_branch,
+                    operand_index,
                     active,
                 )
 
@@ -1422,6 +1476,7 @@ def _extract_side_facts(
                 use_ref,
                 use_site_kind,
                 False,
+                -1,
                 set(),
             )
 

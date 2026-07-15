@@ -831,7 +831,7 @@ def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_incon
         "_case_contains_unresolved_expression",
         lambda *_args, **_kwargs: False,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(is_equivalent=True)
     )
 
@@ -917,7 +917,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 

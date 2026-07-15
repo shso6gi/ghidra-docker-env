@@ -111,7 +111,7 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
             AssertionError("ambiguous-model validation should not run for SAT-unsafe analyses")
         ),
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"trace_1": 1, "trace_2": 1},
@@ -488,7 +488,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
         return_type="int",
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
@@ -574,7 +574,7 @@ def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
@@ -648,7 +648,7 @@ def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monk
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
@@ -723,7 +723,7 @@ def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexamp
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
@@ -791,7 +791,7 @@ def test_pairwise_same_function_sat_without_model_still_requires_counterexample_
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw=None,
@@ -857,7 +857,7 @@ def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexa
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"return_1": 1, "return_2": 2},
@@ -1039,7 +1039,7 @@ def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(mo
         return_type="int",
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
-    strategy._solve_query_twostage = Mock(
+    strategy._solve_query_after_guard = Mock(
         return_value=QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
@@ -1102,7 +1102,7 @@ def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch
             QueryResult(is_equivalent=False),
         ]
     )
-    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
 
     result = strategy.check(analysis1, analysis2)
 
@@ -1112,5 +1112,5 @@ def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     assert analysis1.completed_recovery_proof_evidence == ()
-    strategy._solve_query_twostage.assert_not_called()
+    strategy._solve_query_after_guard.assert_not_called()
     strategy._solve_query_internal.assert_not_called()

@@ -68,6 +68,35 @@ from .stage_runner import (
     run_obligation_branch_plan,
 )
 from .worklist import ProofWorklist, WorkItem
+from .guard_overlap import (
+    GuardDisjointArtifact,
+    GuardOverlapAttempt,
+    GuardOverlapExecutionResult,
+    GuardOverlapGraph,
+    GuardQueryExecutionArtifact,
+    GuardOverlapRequirement,
+    GuardOverlapStatus,
+    GuardRegionSeed,
+    WorkResultRole,
+    canonical_guard_query_digest,
+    guard_seed,
+    status_from_query_result,
+)
+from .pair_disposition import (
+    LedgerLifecycle,
+    PairClosureEvidence,
+    PairClosureKind,
+    PairDisposition,
+    PairDispositionLedger,
+    PairLedgerBinding,
+    PairLedgerSuccessorPlan,
+    CounterexampleSafetyReceipt,
+    RuntimeQuiescenceCertificate,
+    GuardUnsatClosureArtifact,
+    SolverUnsatClosureArtifact,
+    TerminalPairArtifact,
+    PairLedgerManager,
+)
 
 __all__ = (
     "ActivationState", "AnalysisSnapshot", "ArtifactApplicabilityRecord", "AttemptCache", "AttemptCacheEntry",
@@ -80,4 +109,11 @@ __all__ = (
     "UnaryPartitionProofResult", "UnaryProducerResult", "outcome_seed_digest", "prove_unary_partition", "requirement_for_stage",
     "UnaryWidthProofResult", "prove_function_return_width", "return_width_requirement",
     "RETURN_WIDTH_PRODUCER_VERSION", "RETURN_WIDTH_ENCODING_VERSION",
+    "GuardDisjointArtifact", "GuardOverlapAttempt", "GuardOverlapExecutionResult",
+    "GuardOverlapGraph", "GuardOverlapRequirement", "GuardOverlapStatus", "GuardQueryExecutionArtifact",
+    "GuardRegionSeed", "WorkResultRole", "canonical_guard_query_digest", "guard_seed", "status_from_query_result",
+    "LedgerLifecycle", "PairClosureEvidence", "PairClosureKind", "PairDisposition",
+    "PairDispositionLedger", "PairLedgerBinding", "PairLedgerSuccessorPlan", "RuntimeQuiescenceCertificate",
+    "GuardUnsatClosureArtifact", "CounterexampleSafetyReceipt",
+    "SolverUnsatClosureArtifact", "TerminalPairArtifact", "PairLedgerManager",
 )

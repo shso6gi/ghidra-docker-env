@@ -30,7 +30,7 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     build_call_effect_shadow_manifest,
     build_structural_coverage_certificate,
     evaluate_obligation_proof_readiness,
-    _condition_key,
+    condition_key,
 )
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
@@ -1335,11 +1335,15 @@ def test_prepared_use_domain_mapping_rebuild_rejects_manifest_tampering(tamper_k
         trusted_proof_artifacts=checker._last_internal_call_effect_artifacts,
     )
     assert original.proven
-    assert original.use_mapping_builder_version == "prepared_call_use_mapping_v1"
+    assert original.use_mapping_builder_version == "prepared_call_use_mapping_v2"
 
     tampered = deepcopy(manifest)
     fact = tampered["left_facts"][0]
     binding = fact["output_use_bindings"][0]
+    assert binding["schema_version"] == "call_output_use_binding_v2"
+    assert binding["producer_pcode_op_key"]
+    assert binding["proof_use_key"] == binding["use_id"]
+    assert binding["storage_availability"] in {"available", "unavailable"}
     if tamper_kind == "consuming_use_id":
         binding["use_id"] = "reassigned-use"
     elif tamper_kind == "consumer_domain":
@@ -1456,8 +1460,14 @@ def test_observed_call_result_projection_is_lowered_and_receipted():
     assert projection["status"] == "proven"
     assert len(projection["semantic_bindings"]) == 1
     binding = projection["semantic_bindings"][0]
+    assert binding["consumer_domains"] == ("value",)
     assert len(binding["left_use_bindings"]) == 1
     assert len(binding["right_use_bindings"]) == 1
+    for use in (*binding["left_use_bindings"], *binding["right_use_bindings"]):
+        use = dict(use)
+        assert use["operand_ordinal"] == -1
+        assert use["storage_identity"] == ()
+        assert use["storage_availability"] == "unavailable"
     assert result.call_proof_terminal_provenance["comparison_receipt_id"]
     assert "certified call projection" in (result.smt_formula or "")
 
@@ -1577,7 +1587,7 @@ def test_conditional_call_projection_is_distributed_to_consuming_cases_only():
         )
         object.__setattr__(argument_evidence, "path_conditions", ((guard,),))
         effect_evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
-        object.__setattr__(effect_evidence, "path_condition_keys", (_condition_key(guard),))
+        object.__setattr__(effect_evidence, "path_condition_keys", (condition_key(guard),))
 
     result = EquivalenceChecker(
         timeout=5,
@@ -1586,6 +1596,9 @@ def test_conditional_call_projection_is_distributed_to_consuming_cases_only():
     ).check(left, right, "left", "right")
 
     assert result.is_equivalent is True
+    assert result.pairwise_debug_stats["guard_overlap_logical_edges"] == 4
+    assert result.pairwise_debug_stats["guard_overlap_unsat_edges"] == 2
+    assert result.pairwise_debug_stats["guard_overlap_value_candidates"] == 2
     assert not any(
         "call_projection_use_binding_mismatch" in str(reason.detail)
         for reason in result.unknown_reasons
@@ -1636,7 +1649,7 @@ def test_call_output_use_requires_guarded_execution_before_use(
     )
     object.__setattr__(argument_evidence, "path_conditions", ((guard,),))
     effect_evidence = analysis.effect_summary.call_site_effect_summary_evidence[0]
-    object.__setattr__(effect_evidence, "path_condition_keys", (_condition_key(guard),))
+    object.__setattr__(effect_evidence, "path_condition_keys", (condition_key(guard),))
     if return_guarded:
         analysis.returns[0].conditions = [guard]
 

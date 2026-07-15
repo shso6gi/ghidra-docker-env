@@ -781,7 +781,21 @@ def validate_call_resolution_projection(
             try:
                 payload = item if isinstance(item, Mapping) else dict(item)
                 location = payload.get("semantic_location") or ("unknown",)
-                return str(location[0]) if isinstance(location, (tuple, list)) else "unknown"
+                if not isinstance(location, (tuple, list)):
+                    return "unknown"
+                tokens = {str(token) for token in location if isinstance(token, str)}
+                if tokens.intersection({"condition", "guard", "phi_condition"}):
+                    return "guard"
+                root = str(location[0]) if location else "unknown"
+                if root == "effects":
+                    return "effect"
+                if root in {
+                    "returns", "return_outcomes", "summary_return_candidates",
+                    "call_argument_evidence", "unsupported_call_sites",
+                    "deferred_calls",
+                }:
+                    return "value"
+                return "unknown"
             except (TypeError, ValueError, IndexError):
                 return "unknown"
 
@@ -905,10 +919,7 @@ def validate_call_resolution_projection(
                             artifact_coverage
                             and fact_census_closed
                             and set(consumer_domains).issubset({
-                                "returns",
-                                "effects",
-                                "return_outcomes",
-                                "summary_return_candidates",
+                                "value", "guard", "effect",
                             })
                             and (
                                 relation_kind != "call_to_region"
@@ -1240,9 +1251,41 @@ class ComparisonExecutionReceipt:
     disposition_counts: Tuple[Tuple[str, int], ...]
     issuer_kind: str
     status: str
+    schema_version: str = "comparison_execution_receipt_v3"
+    branch_payload_kind: str = "query_execution_records"
+    ledger_binding_digest: str = ""
+    quiescence_certificate_digest: str = ""
+    closure_snapshot: Tuple[Tuple[Any, ...], ...] = ()
+    closure_snapshot_digest: str = ""
+    required_projection_binding_ids: Tuple[str, ...] = ()
+    excluded_projection_binding_ids: Tuple[str, ...] = ()
 
     def is_trusted_for(self, frame: "PreparedDispatchFrame") -> bool:
         count_map = dict(self.disposition_counts)
+        runtime = frame.obligation_runtime
+        ledger = frame.pair_disposition_ledger
+        runtime_binding_valid = bool(
+            self.branch_payload_kind != "pairwise_ledger"
+            or (
+                runtime is not None
+                and ledger is not None
+                and runtime.pair_ledger_manager.current is ledger
+                and runtime.current_view.view_id == ledger.binding.derived_view_id
+                and runtime.premise_digest == ledger.binding.premise_digest
+            )
+        )
+        successor_plan = frame.replan_successor_plan
+        successor_binding_valid = bool(
+            successor_plan is None
+            or (
+                ledger is not None
+                and frame.successor_ledger_reused
+                and frame.replan_successor_ledger is ledger
+                and successor_plan.accepts(
+                    ledger.binding, ledger.expected_pairs
+                )
+            )
+        )
         return (
             self.status == "complete"
             and self.comparison_session_id == frame.comparison_session_id
@@ -1251,9 +1294,35 @@ class ComparisonExecutionReceipt:
             and self.projection_id == frame.projection.projection_id
             and self.generation == frame.generation
             and self.issuer_kind == "builtin_query_executor_v1"
+            and self.schema_version == "comparison_execution_receipt_v3"
+            and self.branch_payload_kind in {"pairwise_ledger", "monolithic_query", "query_execution_records"}
+            and runtime_binding_valid
+            and successor_binding_valid
+            and (
+                self.branch_payload_kind != "pairwise_ledger"
+                or (
+                    frame.pair_disposition_ledger is not None
+                    and getattr(getattr(frame.pair_disposition_ledger, "lifecycle", None), "value", None) == "sealed"
+                    and frame.pair_disposition_ledger.validates_complete_snapshot()
+                    and frame.pair_disposition_ledger.closure_snapshot() == self.closure_snapshot
+                    and _digest(self.closure_snapshot) == self.closure_snapshot_digest
+                )
+            )
             and all(record.validate() for record in self.query_records)
             and tuple(sorted(self.consumed_projection_binding_ids))
             == self.consumed_projection_binding_ids
+            and tuple(sorted(self.required_projection_binding_ids))
+            == self.required_projection_binding_ids
+            and tuple(sorted(self.excluded_projection_binding_ids))
+            == self.excluded_projection_binding_ids
+            and not (
+                set(self.consumed_projection_binding_ids)
+                & set(self.excluded_projection_binding_ids)
+            )
+            and (
+                set(self.consumed_projection_binding_ids)
+                | set(self.excluded_projection_binding_ids)
+            ).issubset(set(self.required_projection_binding_ids))
             and count_map.get("projection_no_active_pair_proven")
             == int(_no_active_pair_certificate_proven(frame, self.query_records))
         )
@@ -1276,6 +1345,24 @@ class PreparedDispatchFrame:
     dispatch_nonce: str = field(default_factory=lambda: uuid4().hex)
     lifecycle_state: str = field(default="unclaimed", init=False)
     receipt: Optional[ComparisonExecutionReceipt] = field(default=None, init=False)
+    authoritative_receipt: Optional[ComparisonExecutionReceipt] = field(default=None, init=False)
+    shadow_receipt: Optional[ComparisonExecutionReceipt] = field(default=None, init=False)
+    receipt_authority_policy: str = field(default="v3_authoritative_v2_shadow", init=False)
+    pair_disposition_ledger: Any = field(default=None, init=False, repr=False)
+    pair_quiescence_certificate: Any = field(default=None, init=False, repr=False)
+    obligation_runtime: Any = field(default=None, init=False, repr=False)
+    replan_successor_ledger: Any = field(default=None, init=False, repr=False)
+    replan_successor_plan: Any = field(default=None, init=False, repr=False)
+    successor_ledger_reused: bool = field(default=False, init=False)
+    pending_query_records: Tuple[QueryExecutionRecord, ...] = field(
+        default=(), init=False, repr=False
+    )
+    pending_consumed_projection_binding_ids: Tuple[str, ...] = field(
+        default=(), init=False, repr=False
+    )
+    pending_disposition_counts: Mapping[str, int] = field(
+        default_factory=dict, init=False, repr=False
+    )
     cleanup_complete: bool = field(default=False, init=False)
     decision_lease: CallProofDecisionLease = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
@@ -1313,12 +1400,21 @@ class PreparedDispatchFrame:
         with self._lock:
             if authority_token is not _BUILTIN_RECEIPT_AUTHORITY_TOKEN:
                 raise RuntimeError("comparison_receipt_untrusted_issuer")
-            if self.lifecycle_state != "claimed":
+            if self.lifecycle_state not in {"claimed", "closed"}:
                 raise RuntimeError("prepared_dispatch_context_scope_closed")
+            if self.lifecycle_state == "closed" and not self.cleanup_complete:
+                raise RuntimeError("prepared_dispatch_cleanup_incomplete")
             records = tuple(query_records)
             if not all(isinstance(item, QueryExecutionRecord) and item.validate() for item in records):
                 raise RuntimeError("comparison_receipt_query_evidence_invalid")
-            consumed = tuple(sorted(set(str(item) for item in consumed_projection_binding_ids)))
+            consumed_set = {
+                str(item) for item in consumed_projection_binding_ids
+            }
+            required_set = {
+                str(binding.binding_id)
+                for binding in self.projection.semantic_bindings
+            }
+            excluded_set = set()
             count_map = {
                 str(name): int(count) for name, count in disposition_counts.items()
             }
@@ -1332,9 +1428,84 @@ class PreparedDispatchFrame:
                 _no_active_pair_certificate_proven(self, records)
             )
             counts = tuple(sorted(count_map.items()))
+            ledger = self.pair_disposition_ledger
+            branch_payload_kind = (
+                "monolithic_query" if "MONOLITHIC" in self.branch_id.upper()
+                else "pairwise_ledger" if ledger is not None
+                else "query_execution_records"
+            )
+            if (
+                branch_payload_kind == "query_execution_records"
+                and int(count_map.get("total", 0) or 0) > 0
+            ):
+                raise RuntimeError("comparison_receipt_pair_ledger_missing")
+            closure_snapshot = ()
+            closure_snapshot_digest = ""
+            if ledger is not None:
+                lifecycle = getattr(getattr(ledger, "lifecycle", None), "value", None)
+                if lifecycle != "sealed":
+                    raise RuntimeError("comparison_receipt_pair_ledger_unsealed")
+                ledger_counts = dict(ledger.counts())
+                for name in ("total", "unsat", "sat", "unknown", "error"):
+                    if int(ledger_counts.get(name, 0)) != int(count_map.get(name, 0)):
+                        raise RuntimeError("comparison_receipt_pair_ledger_count_mismatch")
+                binding_key = ledger.binding.stable_key()
+                certificate = self.pair_quiescence_certificate
+                if certificate is None:
+                    raise RuntimeError("comparison_receipt_quiescence_certificate_missing")
+                if not certificate.is_quiescent:
+                    raise RuntimeError("comparison_receipt_runtime_not_quiescent")
+                ledger_binding_digest = _digest(binding_key)
+                quiescence_certificate_digest = _digest((
+                    "runtime_quiescence_certificate_v1",
+                    certificate.binding_key,
+                    certificate.expected_pairs,
+                    certificate.closed_pairs,
+                    certificate.pending_work_items,
+                    certificate.provisional_pairs,
+                    certificate.pending_work,
+                    certificate.active_owner_work,
+                ))
+                if not ledger.validates_complete_snapshot():
+                    raise RuntimeError("comparison_receipt_pair_closure_snapshot_invalid")
+                (
+                    closure_required,
+                    closure_consumed,
+                    closure_excluded,
+                ) = ledger.binding_use_partitions()
+                closure_required_set = set(closure_required)
+                if not closure_required_set.issubset(required_set):
+                    raise RuntimeError(
+                        "comparison_receipt_closure_binding_requirement_invalid"
+                    )
+                consumed_set.update(closure_consumed)
+                excluded_set.update(closure_excluded)
+                closure_snapshot = ledger.closure_snapshot()
+                closure_snapshot_digest = _digest(closure_snapshot)
+            else:
+                if branch_payload_kind == "pairwise_ledger" and count_map.get("total", 0) > 0:
+                    raise RuntimeError("comparison_receipt_pair_ledger_missing")
+                ledger_binding_digest = _digest((
+                    "pair_ledger_binding_compatibility_v1",
+                    self.comparison_session_id,
+                    self.branch_id,
+                    self.prepared.surface_digest,
+                    self.projection.projection_id,
+                    self.generation,
+                ))
+                quiescence_certificate_digest = _digest((
+                    "runtime_quiescence_certificate_compatibility_v1",
+                    ledger_binding_digest,
+                    counts,
+                ))
+            consumed = tuple(sorted(consumed_set))
+            excluded = tuple(sorted(excluded_set - consumed_set))
+            required = tuple(sorted(required_set))
+            if not (set(consumed) | set(excluded)).issubset(required_set):
+                raise RuntimeError("comparison_receipt_binding_partition_invalid")
             receipt_id = _digest(
                 (
-                    "comparison_execution_receipt_v2",
+                    "comparison_execution_receipt_v3",
                     self.comparison_session_id,
                     self.branch_id,
                     self.prepared.surface_digest,
@@ -1344,9 +1515,15 @@ class PreparedDispatchFrame:
                     consumed,
                     counts,
                     "builtin_query_executor_v1",
+                    branch_payload_kind,
+                    ledger_binding_digest,
+                    quiescence_certificate_digest,
+                    closure_snapshot_digest,
+                    required,
+                    excluded,
                 )
             )
-            self.receipt = ComparisonExecutionReceipt(
+            receipt = ComparisonExecutionReceipt(
                 receipt_id,
                 self.comparison_session_id,
                 self.branch_id,
@@ -1358,8 +1535,18 @@ class PreparedDispatchFrame:
                 counts,
                 "builtin_query_executor_v1",
                 "complete",
+                "comparison_execution_receipt_v3",
+                branch_payload_kind,
+                ledger_binding_digest,
+                quiescence_certificate_digest,
+                closure_snapshot,
+                closure_snapshot_digest,
+                required,
+                excluded,
             )
-            return self.receipt
+            self.authoritative_receipt = receipt
+            self.receipt = receipt
+            return receipt
 
     def close(self) -> None:
         """No-fail, idempotent capability revocation."""
@@ -1406,7 +1593,7 @@ _BUILTIN_RECEIPT_AUTHORITY_TOKEN = object()
 _TRUSTED_BUILTIN_EXECUTOR_CODES: Dict[str, Any] = {}
 
 
-def _register_builtin_receipt_executor(role: str, executor: Any) -> None:
+def register_builtin_receipt_executor(role: str, executor: Any) -> None:
     """Pin one import-time code object per built-in executor role.
 
     The registry deliberately stores the code object rather than resolving a
@@ -1442,6 +1629,10 @@ def _register_builtin_receipt_executor(role: str, executor: Any) -> None:
     _TRUSTED_BUILTIN_EXECUTOR_CODES[role] = code
 
 
+# Compatibility for callers outside the production registration path.
+_register_builtin_receipt_executor = register_builtin_receipt_executor
+
+
 def issue_builtin_comparison_receipt(
     frame: PreparedDispatchFrame,
     *,
@@ -1468,6 +1659,60 @@ def issue_builtin_comparison_receipt(
         del current
 
 
+def finalize_pairwise_comparison_receipt(
+    frame: PreparedDispatchFrame,
+) -> ComparisonExecutionReceipt:
+    """Seal and receipt the pair ledger against the final runtime generation."""
+
+    runtime = frame.obligation_runtime
+    ledger = frame.pair_disposition_ledger
+    if runtime is None or ledger is None:
+        raise RuntimeError("pairwise_receipt_runtime_or_ledger_missing")
+    if runtime.pair_ledger_manager.current is not ledger:
+        raise RuntimeError("pairwise_receipt_ledger_not_current")
+    if (
+        runtime.current_view.view_id != ledger.binding.derived_view_id
+        or runtime.premise_digest != ledger.binding.premise_digest
+    ):
+        raise RuntimeError("pairwise_receipt_runtime_generation_changed")
+    lifecycle = getattr(getattr(ledger, "lifecycle", None), "value", None)
+    if lifecycle == "open":
+        certificate = runtime.pair_quiescence_certificate(ledger)
+        ledger.seal(certificate)
+        frame.pair_quiescence_certificate = certificate
+    elif lifecycle != "sealed":
+        raise RuntimeError("pairwise_receipt_ledger_not_sealable")
+    if frame.receipt is None:
+        frame._complete_from_builtin_executor(
+            frame.pending_query_records,
+            frame.pending_consumed_projection_binding_ids,
+            frame.pending_disposition_counts,
+            authority_token=_BUILTIN_RECEIPT_AUTHORITY_TOKEN,
+        )
+    if frame.receipt is None or not frame.receipt.is_trusted_for(frame):
+        raise RuntimeError("pairwise_receipt_final_runtime_validation_failed")
+    return frame.receipt
+
+
+@dataclass(frozen=True)
+class TypedProjectionAssertionBundle:
+    binding_id: str
+    consumer_domains: Tuple[str, ...]
+    assertions: Tuple[str, ...]
+    assertion_digest: str
+
+    def validates(self) -> bool:
+        return (
+            bool(self.binding_id)
+            and bool(self.assertions)
+            and self.assertion_digest
+            == hashlib.sha256("\n".join(self.assertions).encode("utf-8")).hexdigest()
+        )
+
+    def is_guard_bound(self) -> bool:
+        return self.validates() and "guard" in self.consumer_domains
+
+
 @dataclass(frozen=True)
 class LoweredCallProjection:
     assertions: Tuple[str, ...]
@@ -1478,6 +1723,8 @@ class LoweredCallProjection:
     binding_assertion_digests: Tuple[Tuple[str, str], ...] = ()
     return_width_receipt_digests: Tuple[str, ...] = ()
     return_width_receipt_assertion_digests: Tuple[Tuple[str, str], ...] = ()
+    guard_binding_ids: Tuple[str, ...] = ()
+    assertion_bundles: Tuple[TypedProjectionAssertionBundle, ...] = ()
 
 
 def lower_call_projection_for_case_pair(
@@ -1683,6 +1930,8 @@ def lower_call_projection_for_case_pair(
     consumed = []
     evidence = []
     binding_assertion_digests = []
+    guard_binding_ids = []
+    assertion_bundles = []
     return_width_receipt_digests = []
     return_width_receipt_assertion_digests = []
     expected_left_unresolved_keys = []
@@ -1962,6 +2211,8 @@ def lower_call_projection_for_case_pair(
                 "call_projection_use_binding_mismatch",
             )
         consumed.append(binding.binding_id)
+        if "guard" in set(binding.consumer_domains):
+            guard_binding_ids.append(binding.binding_id)
         binding_assertions = tuple(assertions[assertion_start:])
         assertion_text = "\n".join(binding_assertions)
         assertion_digest = hashlib.sha256(
@@ -1973,6 +2224,12 @@ def lower_call_projection_for_case_pair(
         )
         assertions.append(f"; call_projection_binding_end {binding.binding_id}")
         binding_assertion_digests.append((binding.binding_id, assertion_digest))
+        assertion_bundles.append(TypedProjectionAssertionBundle(
+            binding.binding_id,
+            tuple(sorted(binding.consumer_domains)),
+            binding_assertions,
+            assertion_digest,
+        ))
         evidence.append(
             (
                 binding.binding_id,
@@ -2017,6 +2274,8 @@ def lower_call_projection_for_case_pair(
         return_width_receipt_assertion_digests=tuple(sorted(set(
             return_width_receipt_assertion_digests
         ))),
+        guard_binding_ids=tuple(sorted(set(guard_binding_ids))),
+        assertion_bundles=tuple(sorted(assertion_bundles, key=lambda item: item.binding_id)),
     )
 
 
@@ -2063,10 +2322,41 @@ def diagnostic_projection(
         "use_census_digest": frame.projection.use_census_digest,
         "coverage_mapping_digest": frame.projection.coverage_mapping_digest,
         "comparison_receipt_id": frame.receipt.receipt_id if frame.receipt else None,
+        "comparison_receipt_schema_version": (
+            frame.receipt.schema_version if frame.receipt else None
+        ),
+        "comparison_receipt_branch_payload_kind": (
+            frame.receipt.branch_payload_kind if frame.receipt else None
+        ),
+        "comparison_receipt_ledger_binding_digest": (
+            frame.receipt.ledger_binding_digest if frame.receipt else None
+        ),
+        "comparison_receipt_quiescence_certificate_digest": (
+            frame.receipt.quiescence_certificate_digest if frame.receipt else None
+        ),
+        "comparison_receipt_closure_snapshot_digest": (
+            frame.receipt.closure_snapshot_digest if frame.receipt else None
+        ),
+        "comparison_receipt_required_projection_binding_ids": (
+            list(frame.receipt.required_projection_binding_ids)
+            if frame.receipt else None
+        ),
+        "comparison_receipt_consumed_projection_binding_ids": (
+            list(frame.receipt.consumed_projection_binding_ids)
+            if frame.receipt else None
+        ),
+        "comparison_receipt_excluded_projection_binding_ids": (
+            list(frame.receipt.excluded_projection_binding_ids)
+            if frame.receipt else None
+        ),
         "comparison_receipt_disposition_counts": (
             dict(frame.receipt.disposition_counts) if frame.receipt else None
         ),
         "dispatch_cleanup_complete": frame.cleanup_complete,
+        "comparison_receipt_successor_ledger_reused": (
+            frame.successor_ledger_reused
+            if frame.replan_successor_plan is not None else None
+        ),
         "decision_effect": "diagnostic_projection_only",
     }
     disabled = "completed_recovery_proofs_disabled" in frame.projection.root_blockers

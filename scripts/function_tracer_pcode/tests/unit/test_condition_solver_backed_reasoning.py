@@ -118,6 +118,20 @@ def test_smt_oracle_does_not_assume_ordered_float_complement():
     assert ConditionSMTOracle.conjunction_is_unsat(conditions) is False
 
 
+def test_smt_oracle_authority_mode_bypasses_boolean_cache(monkeypatch):
+    class AlwaysUnsatCache(dict):
+        def get(self, _key, _default=None):
+            return True
+
+    monkeypatch.setattr(ConditionSMTOracle, "_unsat_cache", AlwaysUnsatCache())
+    satisfiable = [Condition(Expression.constant(1, size=1), False)]
+
+    assert ConditionSMTOracle.conjunction_is_unsat(satisfiable) is True
+    assert ConditionSMTOracle.conjunction_is_unsat(
+        satisfiable, use_cache=False
+    ) is False
+
+
 def test_solver_backed_implication_handles_phi_with_unknown_branch():
     selector = Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(0))
     selected_branch = _deep_selected_branch()

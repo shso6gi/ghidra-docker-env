@@ -790,7 +790,7 @@ def test_decision_aggregator_does_not_reclassify_proof_closed_reason_as_pair_uns
     assert result.pairwise_stats["unsat_pairs"] == 1
 
 
-def test_pair_obligation_cache_reexecutes_only_changed_semantic_pair():
+def test_typed_query_reuse_reexecutes_only_changed_semantic_pair():
     from unittest.mock import Mock
 
     from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
@@ -800,9 +800,11 @@ def test_pair_obligation_cache_reexecutes_only_changed_semantic_pair():
     from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
     solver = Mock()
-    solver.run_sequential.return_value = ParallelResult(results=[
-        SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001)
-    ])
+    solver.run_sequential.side_effect = [
+        ParallelResult(results=[SolverResult("z3", SolverStatus.SAT, elapsed_time=0.001)]),
+        ParallelResult(results=[SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001)]),
+        ParallelResult(results=[SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001)]),
+    ]
     strategy = PairwiseStrategy(
         FormulaBuilder(),
         solver,
@@ -823,21 +825,23 @@ def test_pair_obligation_cache_reexecutes_only_changed_semantic_pair():
     assert first.is_equivalent is True
     assert second.is_equivalent is True
     assert solver.run_sequential.call_count == calls_after_first
-    assert second.pairwise_debug_stats["obligation_pair_cache_hits"] == 1
+    assert second.pairwise_debug_stats["guard_overlap_logical_edges"] == 1
+    assert second.pairwise_debug_stats["guard_overlap_value_candidates"] == 1
+    assert any(event.event == "result_reused" for event in runtime.events)
     assert any(event.kind == "guard_overlap" for event in runtime.events)
     query_completions = len([
         event for event in runtime.events
         if event.kind in {"guard_overlap", "value_relation"}
         and event.event == "completed"
     ])
-    assert query_completions == 1
+    assert query_completions == 2
 
     changed = create_mock_analysis(
         "right", returns=[ReturnInfo("0x2000", Expression.constant(2, 4), [])]
     )
     changed_result = strategy.check(left, changed)
-    assert changed_result.pairwise_debug_stats["obligation_pair_cache_hits"] == 0
-    assert changed_result.pairwise_debug_stats["obligation_pair_cache_misses"] == 1
+    assert changed_result.pairwise_debug_stats["guard_overlap_logical_edges"] == 1
+    assert solver.run_sequential.call_count > calls_after_first
 
 
 def test_gate_completion_requires_real_replanned_query_outcome():
