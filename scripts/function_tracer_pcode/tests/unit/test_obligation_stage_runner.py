@@ -356,15 +356,15 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
             successor_plan.branch_id,
             "new-surface",
             "new-projection",
-            successor_plan.frame_generation,
+            2,
             successor_plan.derived_view_id,
             successor_plan.premise_digest,
-            successor_plan.graph_generation,
+            2,
         )
         replanned_ledgers.append(
             runtime.open_pair_ledger(
                 replacement_binding,
-                successor_plan.expected_pairs,
+                2,
             )
         )
         return second

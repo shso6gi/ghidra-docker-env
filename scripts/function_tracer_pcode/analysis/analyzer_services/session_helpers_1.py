@@ -22,7 +22,7 @@ from ._shared import (
     _UNSIGNED_COMPARE_TO_SIGNED,
     _expressions_equivalent,
     _iter_expression_nodes,
-    attach_summary_return_acceptance_proof,
+    attach_quarantined_recurrence_proposal,
     cast,
     expression_contains_unsupported_smt_ops,
     expression_key_safe,
@@ -641,14 +641,31 @@ def _impl_analyze_function(
         result.deferred_calls = dict(self._current_deferred_calls)
         self._apply_effect_call_argument_evidence_to_deferred_calls(result)
 
+        # Close direct structural recurrences before bounded refinement peels
+        # them into several overlapping finite-unroll members.  Rejected
+        # proposals remain diagnostics-only and continue through the legacy
+        # refinement path unchanged.
+        pre_refinement_summary = self._apply_structural_recurrence_summary(
+            function,
+            high_function,
+            result,
+            tracer,
+        )
+        if pre_refinement_summary is not None:
+            result = pre_refinement_summary
+
         if current_active_key is not None:
             self._analysis_in_progress[current_active_key] = result
         try:
-            self._apply_bounded_call_refinement(
-                result,
-                active_functions,
-                CallTargetRef.from_function(function),
-            )
+            if (
+                result.deferred_calls
+                and not result.quarantined_recurrence_proposals
+            ):
+                self._apply_bounded_call_refinement(
+                    result,
+                    active_functions,
+                    CallTargetRef.from_function(function),
+                )
         finally:
             if current_active_key is not None:
                 self._analysis_in_progress.pop(current_active_key, None)
@@ -656,19 +673,24 @@ def _impl_analyze_function(
 
         self._synchronize_parameters_with_referenced_parameter_expressions(result)
         self._repair_mixed_scalar_signedness(result)
-        self._normalize_return_partition(result)
+        recurrence_proposal_open = bool(
+            result.quarantined_recurrence_proposals
+        )
+        if not recurrence_proposal_open:
+            self._normalize_return_partition(result)
         self._mark_incomplete_control_flow(result)
 
-        summary_view = self._apply_structural_recurrence_summary(
-            function,
-            high_function,
-            result,
-            tracer,
-        )
-        if summary_view is not None:
-            result = summary_view
-            self._normalize_return_partition(result)
-            self._mark_incomplete_control_flow(result)
+        if not recurrence_proposal_open:
+            summary_view = self._apply_structural_recurrence_summary(
+                function,
+                high_function,
+                result,
+                tracer,
+            )
+            if summary_view is not None:
+                result = summary_view
+                self._normalize_return_partition(result)
+                self._mark_incomplete_control_flow(result)
             if result.deferred_calls:
                 if current_active_key is not None:
                     self._analysis_in_progress[current_active_key] = result
@@ -752,48 +774,26 @@ def _impl__apply_structural_recurrence_summary(
             print("Summary return diagnostic: no_summary_candidate")
         return None
     summary_returns, summary_note = summary
-    accepted = accept_summary_return_candidates(
-        analysis,
-        summary_returns,
-        summary_note=summary_note,
-        enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
-    )
-    if accepted.blockers:
+    try:
+        proposal = attach_quarantined_recurrence_proposal(
+            analysis,
+            proposed_returns=summary_returns,
+            summary_note=summary_note,
+        )
+    except (TypeError, ValueError) as exc:
         if self.debug:
-            for candidate in accepted.candidates:
-                ret = getattr(candidate, "return_info", None)
-                conditions = [
-                    getattr(cond, "to_string", lambda: repr(cond))()
-                    for cond in (getattr(ret, "conditions", None) or [])
-                ]
-                value = getattr(getattr(ret, "value", None), "to_string", lambda: repr(getattr(ret, "value", None)))()
-                print(
-                    "Summary return candidate rejected/status="
-                    f"{getattr(candidate, 'acceptance_status', None)} "
-                    f"blockers={list(getattr(candidate, 'validation_blockers', ()) or ())} "
-                    f"conditions={conditions} value={value}"
-                )
+            print(
+                "Recurrence proposal quarantine declined: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return analysis.with_summary_return_diagnostics(
-            summary_return_candidates=accepted.candidates,
-            blockers=tuple(accepted.blockers),
+            blockers=(
+                "recurrence_proposal_encoding_failed:"
+                f"{type(exc).__name__}:{exc}",
+            ),
             reason=summary_note,
         )
-    if not accepted.accepted_returns:
-        return None
-    accepted_view = analysis.with_accepted_return_partition(
-        list(accepted.accepted_returns),
-        summary_return_candidates=accepted.candidates,
-        reason=summary_note,
-    )
-    attach_summary_return_acceptance_proof(
-        accepted_view,
-        candidates=accepted.candidates,
-        accepted_returns=accepted.accepted_returns,
-        summary_note=summary_note,
-    )
-    if summary_note not in accepted_view.analysis_notes:
-        accepted_view.analysis_notes.append(summary_note)
-    return accepted_view
+    return analysis if proposal is not None else None
 
 def _impl__phase1_body_contains_address(body, target) -> bool:
     if body is None or target is None:

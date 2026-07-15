@@ -20,7 +20,7 @@ from ._shared import (
     _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expressions_equivalent,
-    attach_summary_return_acceptance_proof,
+    attach_quarantined_recurrence_proposal,
     cast,
     cmp_to_key,
     expression_contains_post_state_reads,
@@ -432,25 +432,17 @@ def _impl__try_pre_return_counted_loop_summary(
         return None
 
     summary_returns, summary_note = summary
-    accepted = accept_summary_return_candidates(
-        skeleton,
-        summary_returns,
-        summary_note=summary_note,
-        enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
-    )
-    if accepted.blockers or not accepted.accepted_returns:
+    try:
+        proposal = attach_quarantined_recurrence_proposal(
+            skeleton,
+            proposed_returns=summary_returns,
+            summary_note=summary_note,
+        )
+    except (TypeError, ValueError):
         return None
-    result = skeleton.with_accepted_return_partition(
-        list(accepted.accepted_returns),
-        summary_return_candidates=accepted.candidates,
-        reason=summary_note,
-    )
-    attach_summary_return_acceptance_proof(
-        result,
-        candidates=accepted.candidates,
-        accepted_returns=accepted.accepted_returns,
-        summary_note=summary_note,
-    )
+    if proposal is None:
+        return None
+    result = skeleton
     if summary_note not in result.analysis_notes:
         result.analysis_notes.append(summary_note)
     if "pre_return_counted_loop_summary" not in result.analysis_notes:

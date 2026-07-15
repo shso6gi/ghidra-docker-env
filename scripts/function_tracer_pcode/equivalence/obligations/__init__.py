@@ -89,6 +89,8 @@ from .pair_disposition import (
     PairDisposition,
     PairDispositionLedger,
     PairLedgerBinding,
+    PairLedgerPromotionState,
+    PairLedgerSuccessorIntent,
     PairLedgerSuccessorPlan,
     CounterexampleSafetyReceipt,
     RuntimeQuiescenceCertificate,
@@ -113,7 +115,7 @@ __all__ = (
     "GuardOverlapGraph", "GuardOverlapRequirement", "GuardOverlapStatus", "GuardQueryExecutionArtifact",
     "GuardRegionSeed", "WorkResultRole", "canonical_guard_query_digest", "guard_seed", "status_from_query_result",
     "LedgerLifecycle", "PairClosureEvidence", "PairClosureKind", "PairDisposition",
-    "PairDispositionLedger", "PairLedgerBinding", "PairLedgerSuccessorPlan", "RuntimeQuiescenceCertificate",
+    "PairDispositionLedger", "PairLedgerBinding", "PairLedgerPromotionState", "PairLedgerSuccessorIntent", "PairLedgerSuccessorPlan", "RuntimeQuiescenceCertificate",
     "GuardUnsatClosureArtifact", "CounterexampleSafetyReceipt",
     "SolverUnsatClosureArtifact", "TerminalPairArtifact", "PairLedgerManager",
 )

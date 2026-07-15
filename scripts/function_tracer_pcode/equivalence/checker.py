@@ -54,6 +54,12 @@ from .call_effect_preflight import (
     push_prepared_dispatch_frame,
     validate_call_resolution_projection,
 )
+from .recurrence_promotion import (
+    PairPromotionState,
+    PairRecurrencePromotionAuthority,
+    promote_recurrence_pair,
+)
+from ..model.recurrence_contracts import RecurrenceDigestCodec
 
 
 # ============================================================================
@@ -1082,6 +1088,19 @@ class EquivalenceChecker:
                 obligation_runtime = getattr(
                     self, "_obligation_runtime_session", None
                 )
+                if (
+                    obligation_runtime is not None
+                    and replan_plan is None
+                    and obligation_runtime.pair_ledger_manager.pending_successor
+                    is not None
+                ):
+                    # A successor intent is branch-local authority.  Recursive
+                    # abstraction or another strategy must not consume it.
+                    from .obligations.runtime import ObligationRuntimeSession
+
+                    obligation_runtime = ObligationRuntimeSession.create(
+                        analysis1, analysis2
+                    )
                 if obligation_runtime is None:
                     from .obligations.runtime import ObligationRuntimeSession
 
@@ -1190,6 +1209,12 @@ class EquivalenceChecker:
                 analysis2,
                 call_effect_shadow_manifest,
             )
+            strategy_result.unknown_reasons = self._attach_recurrence_proposal_blockers(
+                strategy_result,
+                analysis1,
+                analysis2,
+                branch_id=branch_id,
+            )
             strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(
                 list(getattr(strategy_result, "unknown_reasons", ()) or ()),
                 call_effect_shadow_manifest,
@@ -1199,6 +1224,54 @@ class EquivalenceChecker:
                 strategy_result.unknown_reasons,
                 comparison_identity,
             )
+
+            # Recurrence is a recovery proof for this already-inconclusive
+            # branch, never an alternative surface evaluated before the
+            # branch decision.  The pair-local authority names the exact
+            # blockers observed above and is intentionally absent from the
+            # function-local unary artifact.
+            if getattr(self, "_active_recurrence_promotion_authority", None) is None:
+                authority = self._recurrence_promotion_authority(
+                    strategy_result,
+                    comparison_session_id=comparison_session_id,
+                    branch_id=branch_id,
+                )
+                if authority is not None:
+                    (
+                        promoted1,
+                        promoted2,
+                        recurrence_runtime,
+                        recurrence_attempt,
+                    ) = promote_recurrence_pair(analysis1, analysis2, authority)
+                    self._last_recurrence_promotion_attempt = recurrence_attempt
+                    if recurrence_attempt.state == PairPromotionState.ABORTED:
+                        self._debug_print(
+                            "Recurrence promotion declined: "
+                            + str(recurrence_attempt.failure or "unknown")
+                        )
+                    elif recurrence_attempt.state == PairPromotionState.COMPOSED and (
+                        recurrence_attempt.left is not None
+                        and recurrence_attempt.left.proposal is not None
+                        or recurrence_attempt.right is not None
+                        and recurrence_attempt.right.proposal is not None
+                    ):
+                        self._obligation_runtime_session = recurrence_runtime
+                        self._active_recurrence_promotion_authority = authority
+                        try:
+                            return self.check(
+                                promoted1,
+                                promoted2,
+                                binary1_name,
+                                binary2_name,
+                                save_formula,
+                                type_fix_result=type_fix_result,
+                                retry_count=retry_count,
+                                original_signature1=original_signature1,
+                                original_signature2=original_signature2,
+                                force_strategy=strategy,
+                            )
+                        finally:
+                            del self._active_recurrence_promotion_authority
             function1_identity = self._deterministic_analysis_identity(strategy, analysis1)
             function2_identity = self._deterministic_analysis_identity(strategy, analysis2)
             
@@ -1272,6 +1345,9 @@ class EquivalenceChecker:
                 completed_recovery_proof_evidence=completed_proofs,
                 reason_completion_applicability_contexts=completion_contexts,
                 call_effect_shadow_manifest=call_effect_shadow_manifest,
+                recurrence_promotion_receipt=self._recurrence_promotion_result_receipt(
+                    strategy_result
+                ),
                 call_proof_terminal_provenance=(
                     {
                         "comparison_session_id": comparison_session_id,
@@ -1347,6 +1423,145 @@ class EquivalenceChecker:
                 type_fix_result, retry_count,
                 original_signature1, original_signature2
             )
+
+    def _recurrence_promotion_result_receipt(self, strategy_result: Any) -> Optional[Dict[str, Any]]:
+        attempt = getattr(self, "_last_recurrence_promotion_attempt", None)
+        active_authority = getattr(self, "_active_recurrence_promotion_authority", None)
+        if (
+            attempt is None
+            or active_authority is None
+            or attempt.authority is None
+            or attempt.authority.digest != active_authority.digest
+            or attempt.state != PairPromotionState.COMPOSED
+        ):
+            return None
+        receipt = dict(attempt.to_dict())
+        comparison_receipt = getattr(strategy_result, "comparison_execution_receipt", None)
+        receipt.update({
+            "final_decision_used_promoted_successor": True,
+            "promoted_successor_final_outcome": (
+                "EQ" if strategy_result.is_equivalent is True
+                else "NOT_EQ" if strategy_result.is_equivalent is False
+                else "UNKNOWN"
+            ),
+            "promoted_successor_comparison_receipt_id": getattr(
+                comparison_receipt, "receipt_id", None
+            ),
+        })
+        return receipt
+
+    @staticmethod
+    def _recurrence_promotion_authority(
+        strategy_result: Any,
+        *,
+        comparison_session_id: str,
+        branch_id: str,
+    ) -> Optional[PairRecurrencePromotionAuthority]:
+        if getattr(strategy_result, "is_equivalent", None) is not None:
+            return None
+        reasons = tuple(getattr(strategy_result, "unknown_reasons", ()) or ())
+        if not reasons:
+            return None
+        sat_reason_ids = {
+            "sat_unsafety", "sat_counterexample_ambiguous",
+        }
+        if (
+            int(getattr(strategy_result, "sat_pairs", 0) or 0) > 0
+            or getattr(strategy_result, "counterexample_raw", None) is not None
+            or any(
+                str(getattr(reason, "reason_id", "") or "") in sat_reason_ids
+                or str(getattr(reason, "recovery_proof_kind", "") or "")
+                == "sat_unsafety_resolution"
+                for reason in reasons
+            )
+        ):
+            return None
+        recurrence_proof_kinds = {
+            "loop_summary_completion", "loop_recurrence_proof",
+            "call_effect_summary_proof", "effect_summary_completion",
+            "guard_partition_completion", "return_partition_overlap_proof",
+            "precondition_completion",
+        }
+        targeted = []
+        for reason in reasons:
+            proof_kind = str(getattr(reason, "recovery_proof_kind", "") or "")
+            if proof_kind not in recurrence_proof_kinds:
+                continue
+            payload = {
+                "reason_id": str(getattr(reason, "reason_id", "unknown") or "unknown"),
+                "recovery_proof_kind": proof_kind,
+                "proof_stage": str(getattr(reason, "proof_stage", "") or ""),
+                "object_target_key": getattr(reason, "object_target_key", None),
+                "proof_obligation_id": getattr(reason, "proof_obligation_id", None),
+                "typed_cause_key": getattr(reason, "typed_cause_key", None),
+                "proof_requirement_ids": tuple(
+                    getattr(reason, "proof_requirement_ids", ()) or ()
+                ),
+            }
+            try:
+                blocker_digest = RecurrenceDigestCodec.digest(
+                    "recurrence_targeted_branch_blocker_v1", payload
+                )
+            except TypeError:
+                continue
+            targeted.append((
+                "recurrence_targeted_branch_blocker_v1",
+                payload["reason_id"],
+                proof_kind,
+                payload["object_target_key"],
+                blocker_digest,
+            ))
+        if not targeted:
+            return None
+        return PairRecurrencePromotionAuthority(
+            str(comparison_session_id),
+            str(branch_id),
+            tuple(dict.fromkeys(targeted)),
+        )
+
+    @staticmethod
+    def _attach_recurrence_proposal_blockers(
+        strategy_result: Any,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        branch_id: str,
+    ) -> List[Any]:
+        reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
+        if (
+            getattr(strategy_result, "is_equivalent", None) is not None
+            or int(getattr(strategy_result, "sat_pairs", 0) or 0) > 0
+            or getattr(strategy_result, "counterexample_raw", None) is not None
+        ):
+            return reasons
+        known_targets = {
+            tuple(getattr(reason, "object_target_key", ()) or ())
+            for reason in reasons
+        }
+        for side, analysis in (("function1", analysis1), ("function2", analysis2)):
+            for proposal in tuple(
+                getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
+            ):
+                target = (
+                    "quarantined_recurrence_proposal_blocker_v1",
+                    side,
+                    analysis.outcome_function_identity(),
+                    proposal.digest,
+                )
+                if target in known_targets:
+                    continue
+                reasons.append(make_unknown_reason(
+                    "loop_summary_proof_missing",
+                    stage=str(branch_id),
+                    recovery_proof_kind="loop_recurrence_proof",
+                    proof_stage="recurrence_validation_complete",
+                    evidence_kind="quarantined_recurrence_proposal",
+                    object_target_key=target,
+                    evidence_refs=(proposal.digest,),
+                    detail="proof-free recurrence proposal awaits branch-local validation",
+                ))
+                known_targets.add(target)
+        return reasons
 
     @staticmethod
     def _apply_preflight_final_gate(

@@ -489,7 +489,7 @@ def test_ledger_has_no_self_issued_quiescence_certificate():
     assert not hasattr(ledger, "issue_certificate")
 
 
-def test_runtime_view_transition_supersedes_open_ledger_and_rejects_stale_seal():
+def test_runtime_view_transition_retains_old_ledger_until_exact_successor_composes():
     runtime = ObligationRuntimeSession.create(
         SimpleNamespace(binary_id="b1", function_name="f", entry_point=1),
         SimpleNamespace(binary_id="b2", function_name="f", entry_point=2),
@@ -510,14 +510,16 @@ def test_runtime_view_transition_supersedes_open_ledger_and_rejects_stale_seal()
         ),
     )
     runtime._apply_artifact(requirement, {"proof_source": "unit-test"})
-    assert ledger.lifecycle == LedgerLifecycle.SUPERSEDED
+    assert ledger.lifecycle == LedgerLifecycle.OPEN
     successor_plan = runtime.pair_ledger_manager.pending_successor
-    assert runtime.pair_ledger_manager.current is None
+    assert runtime.pair_ledger_manager.current is ledger
     assert successor_plan is not None
-    assert successor_plan.expected_pairs == ledger.expected_pairs
+    assert successor_plan.comparison_session_id == "session"
+    assert successor_plan.branch_id == "pairwise"
     assert successor_plan.derived_view_id == runtime.current_view.view_id
     assert successor_plan.premise_digest == runtime.premise_digest
-    assert successor_plan.graph_generation == binding.graph_generation + 1
+    assert successor_plan.frame_generation == 2
+    assert successor_plan.graph_generation == 2
     call_requirement = ProofRequirementId.create(
         "call_effect_summary_proof",
         ("call", "left", "right"),
@@ -528,22 +530,27 @@ def test_runtime_view_transition_supersedes_open_ledger_and_rejects_stale_seal()
     assert successor_plan is not None
     assert successor_plan.derived_view_id == runtime.current_view.view_id
     assert successor_plan.premise_digest == runtime.premise_digest
-    assert successor_plan.graph_generation == binding.graph_generation + 1
+    assert successor_plan.frame_generation == 2
+    assert successor_plan.graph_generation == 2
     assert successor_plan.projection_refresh_required
     replacement_binding = PairLedgerBinding(
         successor_plan.comparison_session_id,
         successor_plan.branch_id,
         "replacement-surface",
         "replacement-projection",
-        successor_plan.frame_generation,
+        binding.frame_generation + 1,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        successor_plan.graph_generation,
+        binding.graph_generation + 1,
     )
     successor = runtime.open_pair_ledger(replacement_binding, 0)
+    assert ledger.lifecycle == LedgerLifecycle.SUPERSEDED
     assert successor.binding.prepared_surface_digest == "replacement-surface"
     assert successor.binding.projection_id == "replacement-projection"
     assert runtime.pair_ledger_manager.pending_successor is None
+    assert runtime.pair_ledger_manager.last_composed_successor.accepts(
+        successor.binding, successor.expected_pairs
+    )
     with pytest.raises(RuntimeError, match="not open"):
         ledger.seal(stale_certificate)
 

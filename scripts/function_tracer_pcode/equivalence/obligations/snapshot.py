@@ -44,6 +44,7 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
     "partition_revision": "semantic",
     "outcome_seed": "semantic",
     "termination_path_effect_evidence": "semantic",
+    "quarantined_recurrence_proposals": "semantic",
 })
 
 

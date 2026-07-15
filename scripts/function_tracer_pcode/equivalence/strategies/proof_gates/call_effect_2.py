@@ -35,6 +35,29 @@ def _impl__unsupported_call_effect_proof_content_is_complete(
             return False
         if proof_content.get("recursive_call_effect") != "no_memory_effects_by_induction":
             return False
+        recurrence_validation = proof_content.get("recurrence_validation")
+        if not isinstance(recurrence_validation, Mapping):
+            return False
+        if not all(
+            isinstance(recurrence_validation.get(key), str)
+            and recurrence_validation.get(key)
+            for key in (
+                "proposal_digest",
+                "function_recurrence_binding_digest",
+                "semantic_closure_digest",
+            )
+        ):
+            return False
+        artifact_id = recurrence_validation.get("validated_unary_artifact_id")
+        if not (
+            isinstance(artifact_id, (tuple, list))
+            and tuple(artifact_id)
+            == (
+                "validated_recurrence_artifact_v1",
+                recurrence_validation["semantic_closure_digest"],
+            )
+        ):
+            return False
         return True
     if proof_rule in {"matched_unknown_indirect_no_store_call_effect", "matched_unsupported_call_parameter_exposure_no_store_call_effect"}:
         unsupported_reason_signature = cls._unsupported_call_effect_reason_signature(

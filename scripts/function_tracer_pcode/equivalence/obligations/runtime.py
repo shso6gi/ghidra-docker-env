@@ -17,9 +17,19 @@ from .model import (
 )
 from .proof import ViewPremiseRecord, validate_proof_closure
 from .snapshot import AnalysisSnapshot, DerivedAnalysisView, SnapshotFingerprintCodec
+from .unary_premise import build_function_unary_premise
 from .worklist import ProofWorklist, WorkItem
 from .guard_overlap import WorkResultRole
 from .pair_disposition import PairDispositionLedger, PairLedgerBinding, PairLedgerManager, RuntimeQuiescenceCertificate
+from ...model.recurrence_contracts import (
+    QuarantinedRecurrenceProposal,
+    RecurrenceSeedCore,
+    function_recurrence_binding_digest,
+)
+from .recurrence import (
+    validate_recurrence_artifact_content,
+    validate_recurrence_requirement_target,
+)
 
 
 GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE = ValidatedUnaryArtifactCache()
@@ -118,16 +128,15 @@ class ObligationRuntimeSession:
         seed = semantic_seed
         if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
             seed = getattr(analysis, "outcome_seed", None)
-        seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
-        seed_digest = SnapshotFingerprintCodec.digest(seed_key)
-        premise = SnapshotFingerprintCodec.digest((
-            "function_unary_premise_v2",
+        unary_premise = build_function_unary_premise(
             normalized_domain,
             snapshot.semantic_fingerprint,
-            SnapshotFingerprintCodec.freeze(domain_contract),
-            str(normalization_policy_digest),
-            seed_digest,
-        ))
+            seed,
+            domain_contract,
+            normalization_policy_digest,
+        )
+        seed_digest = unary_premise.semantic_seed_digest
+        premise = unary_premise.function_premise_digest
         view = DerivedAnalysisView.create(
             snapshot_id=("function_analysis", snapshot.snapshot_id),
             parent_view_id=None,
@@ -140,6 +149,8 @@ class ObligationRuntimeSession:
                 "domain_contract": SnapshotFingerprintCodec.freeze(domain_contract),
                 "semantic_seed_digest": seed_digest,
                 "premise_digest": premise,
+                "premise_schema_id": unary_premise.premise_schema_id,
+                "premise_codec_id": unary_premise.premise_codec_id,
                 "applied_artifact_ids": (),
             },
         )
@@ -159,7 +170,9 @@ class ObligationRuntimeSession:
         normalization_policy_digest: Optional[str] = None,
         attempt_candidate_independent: bool,
         pair_independent: bool,
-    ) -> None:
+        proposal_digest: Optional[str] = None,
+        function_recurrence_binding_digest: Optional[str] = None,
+    ) -> ValidatedUnaryArtifactEntry:
         source_record = self.view_records.get(artifact.produced_from_view_id)
         if source_record is None:
             raise ValueError("unary artifact source view is unavailable")
@@ -172,9 +185,21 @@ class ObligationRuntimeSession:
         if not seed_digest:
             raise ValueError("publishing a unary artifact requires a semantic seed digest")
         policy_digest = normalization_policy_digest or self.current_view.normalization_policy_digest
-        self.unary_artifact_cache.put(ValidatedUnaryArtifactEntry(
+        surface = self.current_view.semantic_surface
+        if str(function_premise_digest) != str(
+            self.current_view.semantic_surface.get("premise_digest") or ""
+        ):
+            raise ValueError("published unary artifact premise is not the runtime premise")
+        if str(seed_digest) != str(surface.get("semantic_seed_digest") or ""):
+            raise ValueError("published unary artifact seed is not the runtime seed")
+        normalized_domain = UnaryArtifactDomain.normalize(domain)
+        if normalized_domain == UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value:
+            raise ValueError(
+                "recurrence artifacts must be published with a selected proposal"
+            )
+        entry = ValidatedUnaryArtifactEntry(
             artifact=artifact,
-            domain=UnaryArtifactDomain.normalize(domain),
+            domain=normalized_domain,
             function_premise_digest=str(function_premise_digest),
             function_snapshot_fingerprint=function_snapshot_fingerprint,
             semantic_seed_digest=str(seed_digest),
@@ -186,7 +211,87 @@ class ObligationRuntimeSession:
                 for item in self.artifacts if item.artifact_id == artifact_id
             ),
             source_view_records=dict(self.view_records),
-        ))
+            premise_schema_id=str(surface.get("premise_schema_id") or ""),
+            premise_codec_id=str(surface.get("premise_codec_id") or ""),
+            proposal_digest=proposal_digest,
+            function_recurrence_binding_digest=function_recurrence_binding_digest,
+        )
+        self.unary_artifact_cache.put(entry)
+        return entry
+
+    def publish_recurrence_artifact(
+        self,
+        artifact: ProofArtifact,
+        semantic_seed: RecurrenceSeedCore,
+        selected_proposal: QuarantinedRecurrenceProposal,
+    ) -> ValidatedUnaryArtifactEntry:
+        """Publish only after recomputing the proposal-specific function binding."""
+
+        if not isinstance(semantic_seed, RecurrenceSeedCore):
+            raise TypeError("recurrence publication requires a RecurrenceSeedCore")
+        if not isinstance(selected_proposal, QuarantinedRecurrenceProposal):
+            raise TypeError("recurrence publication requires a selected proposal")
+        surface = self.current_view.semantic_surface
+        premise = str(surface.get("premise_digest") or "")
+        snapshot = str(surface.get("function_snapshot") or "")
+        if not premise or not snapshot:
+            raise ValueError("recurrence publication requires a unary function runtime")
+        if semantic_seed.digest != str(surface.get("semantic_seed_digest") or ""):
+            raise ValueError("selected recurrence seed is not the runtime seed")
+        if selected_proposal.seed_core_digest != semantic_seed.digest:
+            raise ValueError("selected recurrence proposal is bound to another seed")
+        proposal_digest = selected_proposal.digest
+        binding_digest = function_recurrence_binding_digest(
+            semantic_seed.digest, proposal_digest, premise
+        )
+        target = artifact.requirement_id.proof_target_key
+        try:
+            fields = dict(target[1:])
+            validate_recurrence_requirement_target(
+                artifact.requirement_id,
+                seed_core_digest=semantic_seed.digest,
+                proposal_digest=proposal_digest,
+                function_recurrence_binding_digest=binding_digest,
+                proof_stage=str(fields["proof_stage"]),
+                proof_target_semantic_key=tuple(fields["proof_target"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "recurrence artifact requirement is not bound to the selected proposal"
+            ) from exc
+        validate_recurrence_artifact_content(
+            artifact,
+            seed_core_digest=semantic_seed.digest,
+            proposal_digest=proposal_digest,
+            function_recurrence_binding_digest=binding_digest,
+        )
+        source_record = self.view_records.get(artifact.produced_from_view_id)
+        if source_record is None:
+            raise ValueError("unary artifact source view is unavailable")
+        closure = validate_proof_closure(
+            tuple(self.artifacts), (artifact.artifact_id,), self.view_records
+        )
+        entry = ValidatedUnaryArtifactEntry(
+            artifact=artifact,
+            domain=UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value,
+            function_premise_digest=premise,
+            function_snapshot_fingerprint=snapshot,
+            semantic_seed_digest=semantic_seed.digest,
+            normalization_policy_digest=self.current_view.normalization_policy_digest,
+            attempt_candidate_independent=True,
+            pair_independent=True,
+            closure_artifacts=tuple(
+                item for artifact_id in closure.topological_order
+                for item in self.artifacts if item.artifact_id == artifact_id
+            ),
+            source_view_records=dict(self.view_records),
+            premise_schema_id=str(surface.get("premise_schema_id") or ""),
+            premise_codec_id=str(surface.get("premise_codec_id") or ""),
+            proposal_digest=proposal_digest,
+            function_recurrence_binding_digest=binding_digest,
+        )
+        self.unary_artifact_cache.put_recurrence(entry)
+        return entry
 
     def import_unary_artifact_for_analysis(
         self,
@@ -195,6 +300,7 @@ class ObligationRuntimeSession:
         analysis: Any,
         domain: str = UnaryArtifactDomain.RETURN_OUTCOME_V1.value,
         semantic_seed: Any = None,
+        selected_recurrence_proposal: Optional[QuarantinedRecurrenceProposal] = None,
         pair_side: str,
         domain_contract: Any,
         normalization_policy_digest: str,
@@ -211,8 +317,6 @@ class ObligationRuntimeSession:
         seed = semantic_seed
         if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
             seed = getattr(analysis, "outcome_seed", None)
-        seed_key = seed.stable_key() if callable(getattr(seed, "stable_key", None)) else seed
-        expected_outcome_seed_digest = SnapshotFingerprintCodec.digest(seed_key)
         unary_view = self.create_unary(
             analysis,
             domain=domain,
@@ -221,6 +325,9 @@ class ObligationRuntimeSession:
             normalization_policy_digest=normalization_policy_digest,
         )
         expected_function_premise_digest = unary_view.premise_digest
+        expected_outcome_seed_digest = str(
+            unary_view.current_view.semantic_surface["semantic_seed_digest"]
+        )
         expected_snapshot_fingerprint = str(
             unary_view.current_view.semantic_surface["function_snapshot"]
         )
@@ -234,6 +341,65 @@ class ObligationRuntimeSession:
             raise ValueError("unary artifact semantic seed mismatch")
         if entry.normalization_policy_digest != str(normalization_policy_digest):
             raise ValueError("unary artifact normalization policy mismatch")
+        if entry.premise_schema_id != str(
+            unary_view.current_view.semantic_surface.get("premise_schema_id") or ""
+        ):
+            raise ValueError("unary artifact premise schema mismatch")
+        if entry.premise_codec_id != str(
+            unary_view.current_view.semantic_surface.get("premise_codec_id") or ""
+        ):
+            raise ValueError("unary artifact premise codec mismatch")
+        if normalized_domain == UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value:
+            if not isinstance(seed, RecurrenceSeedCore):
+                raise TypeError("recurrence import requires a RecurrenceSeedCore")
+            if not isinstance(
+                selected_recurrence_proposal, QuarantinedRecurrenceProposal
+            ):
+                raise TypeError("recurrence import requires a selected proposal")
+            if selected_recurrence_proposal.seed_core_digest != seed.digest:
+                raise ValueError("recurrence import proposal seed mismatch")
+            proposal_digest = selected_recurrence_proposal.digest
+            binding_digest = function_recurrence_binding_digest(
+                seed.digest, proposal_digest, expected_function_premise_digest
+            )
+            target = entry.artifact.requirement_id.proof_target_key
+            try:
+                fields = dict(target[1:])
+                validate_recurrence_requirement_target(
+                    entry.artifact.requirement_id,
+                    seed_core_digest=seed.digest,
+                    proposal_digest=proposal_digest,
+                    function_recurrence_binding_digest=binding_digest,
+                    proof_stage=str(fields["proof_stage"]),
+                    proof_target_semantic_key=tuple(fields["proof_target"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("recurrence import requirement mismatch") from exc
+            validate_recurrence_artifact_content(
+                entry.artifact,
+                seed_core_digest=seed.digest,
+                proposal_digest=proposal_digest,
+                function_recurrence_binding_digest=binding_digest,
+            )
+            cached = self.unary_artifact_cache.get_recurrence(
+                entry.artifact.requirement_id.to_key(),
+                expected_function_premise_digest,
+                function_snapshot_fingerprint=expected_snapshot_fingerprint,
+                semantic_seed_digest=seed.digest,
+                normalization_policy_digest=normalization_policy_digest,
+                producer_version=entry.artifact.producer_version,
+                encoding_version=entry.artifact.encoding_version,
+                premise_schema_id=entry.premise_schema_id,
+                premise_codec_id=entry.premise_codec_id,
+                proposal_digest=proposal_digest,
+                function_recurrence_binding_digest=binding_digest,
+            )
+            if cached is not entry:
+                raise ValueError(
+                    "recurrence artifact was not resolved by exact production cache lookup"
+                )
+        elif selected_recurrence_proposal is not None:
+            raise ValueError("selected recurrence proposal used outside recurrence domain")
         validate_proof_closure(
             entry.closure_artifacts,
             (entry.artifact.artifact_id,),

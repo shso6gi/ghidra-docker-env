@@ -371,8 +371,11 @@ def _impl__build_counted_scalar_loop_summary(
     pcode_order = getattr(anchor, "pcode_order", None)
     pcode_time = getattr(anchor, "pcode_time", None)
     pcode_op_ref = getattr(anchor, "pcode_op_ref", None)
-    base_summary_source_key = loop_summary_source_key if pre_return_ops is not None else None
-    base_transition_evidence_key = transition_evidence_key if pre_return_ops is not None else None
+    # Zero-trip is part of the same counted-loop partition.  Keeping it outside
+    # the proposal made the active precondition permanently incomplete when
+    # the raw return still contained the loop PHI.
+    base_summary_source_key = loop_summary_source_key
+    base_transition_evidence_key = transition_evidence_key
 
     summarized = [
         ReturnInfo(

@@ -15,6 +15,7 @@ from .proof import (
     validate_artifact_applicability,
     validate_proof_closure,
 )
+from .recurrence import validate_recurrence_artifact_content
 
 T = TypeVar("T")
 
@@ -152,6 +153,10 @@ class ValidatedUnaryArtifactEntry:
     source_view_records: Mapping[Tuple[Any, ...], ViewPremiseRecord] = field(
         default_factory=dict, compare=False, hash=False
     )
+    premise_schema_id: str = "function_unary_premise_v2"
+    premise_codec_id: str = "snapshot_fingerprint_codec_v1"
+    proposal_digest: Optional[str] = None
+    function_recurrence_binding_digest: Optional[str] = None
 
     @property
     def outcome_seed_digest(self) -> str:
@@ -191,9 +196,34 @@ class ValidatedUnaryArtifactCache:
         if not entry.pair_independent:
             raise ValueError("unary artifact depends on a pair peer or side label")
         try:
-            UnaryArtifactDomain(UnaryArtifactDomain.normalize(entry.domain))
+            normalized_domain = UnaryArtifactDomain.normalize(entry.domain)
+            UnaryArtifactDomain(normalized_domain)
         except ValueError as exc:
             raise ValueError("unary artifact has an unsupported semantic domain") from exc
+        is_recurrence = normalized_domain == UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value
+        proposal_fields_present = bool(
+            entry.proposal_digest and entry.function_recurrence_binding_digest
+        )
+        if is_recurrence != proposal_fields_present:
+            raise ValueError("unary artifact proposal binding does not match its domain")
+        if is_recurrence:
+            from .recurrence import validate_recurrence_requirement_target
+
+            target = entry.artifact.requirement_id.proof_target_key
+            try:
+                fields = dict(target[1:])
+                validate_recurrence_requirement_target(
+                    entry.artifact.requirement_id,
+                    seed_core_digest=str(fields["seed_core_digest"]),
+                    proposal_digest=str(entry.proposal_digest),
+                    function_recurrence_binding_digest=str(
+                        entry.function_recurrence_binding_digest
+                    ),
+                    proof_stage=str(fields["proof_stage"]),
+                    proof_target_semantic_key=tuple(fields["proof_target"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid recurrence requirement target") from exc
         key = self.key(
             entry.domain,
             entry.artifact.requirement_id.to_key(),
@@ -217,6 +247,10 @@ class ValidatedUnaryArtifactCache:
         normalization_policy_digest: Optional[str] = None,
         producer_version: str,
         encoding_version: str,
+        premise_schema_id: Optional[str] = None,
+        premise_codec_id: Optional[str] = None,
+        proposal_digest: Optional[str] = None,
+        function_recurrence_binding_digest: Optional[str] = None,
     ) -> Optional[ValidatedUnaryArtifactEntry]:
         expected_seed_digest = semantic_seed_digest or outcome_seed_digest
         if not expected_seed_digest:
@@ -237,10 +271,51 @@ class ValidatedUnaryArtifactCache:
                 )
                 or entry.artifact.producer_version != producer_version
                 or entry.artifact.encoding_version != encoding_version
+                or (
+                    premise_schema_id is not None
+                    and entry.premise_schema_id != premise_schema_id
+                )
+                or (
+                    premise_codec_id is not None
+                    and entry.premise_codec_id != premise_codec_id
+                )
+                or entry.proposal_digest != proposal_digest
+                or entry.function_recurrence_binding_digest
+                != function_recurrence_binding_digest
             ):
                 return None
             self._entries.move_to_end(key)
             return entry
+
+    def put_recurrence(self, entry: ValidatedUnaryArtifactEntry) -> None:
+        if entry.domain != UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value:
+            raise ValueError("put_recurrence requires the recurrence domain")
+        validate_recurrence_artifact_content(
+            entry.artifact,
+            seed_core_digest=entry.semantic_seed_digest,
+            proposal_digest=str(entry.proposal_digest or ""),
+            function_recurrence_binding_digest=str(
+                entry.function_recurrence_binding_digest or ""
+            ),
+        )
+        self.put(entry)
+
+    def get_recurrence(
+        self,
+        requirement_key: Tuple[Any, ...],
+        function_premise_digest: str,
+        **kwargs: Any,
+    ) -> Optional[ValidatedUnaryArtifactEntry]:
+        proposal_digest = kwargs.get("proposal_digest")
+        binding_digest = kwargs.get("function_recurrence_binding_digest")
+        if not proposal_digest or not binding_digest:
+            raise ValueError("recurrence lookup requires proposal and function binding digests")
+        return self.get(
+            requirement_key,
+            function_premise_digest,
+            domain=UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value,
+            **kwargs,
+        )
 
     def find_applicable_artifact(
         self,

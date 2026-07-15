@@ -250,6 +250,14 @@ class Expression:
                 display_hint=description,
             )
         return cls(expr_type=ExpressionType.UNKNOWN, name=description, runtime_ref=runtime_ref)
+
+    def semantic_key(self):
+        """Return an explicitly attached canonical semantic identity when present."""
+
+        canonical = getattr(self, "_recurrence_semantic_key", None)
+        if canonical is not None:
+            return canonical
+        return None
     
     def get_bit_width(self) -> int:
         """

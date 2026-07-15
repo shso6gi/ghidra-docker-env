@@ -637,7 +637,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
 
-def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch):
+def test_pairwise_self_recursive_no_store_requires_validated_recurrence_artifact(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -655,8 +655,8 @@ def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
     evidence = [
@@ -664,9 +664,7 @@ def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch
         for item in analysis1.completed_recovery_proof_evidence
         if item.get("evidence_kind") == "call_effect_summary"
     ]
-    assert len(evidence) == 1
-    assert evidence[0]["proof_source"] == "self_recursive_no_store_call_effect_summary"
-    assert evidence[0]["proof_content"]["proof_rule"] == "self_recursive_no_store_effect_summary"
+    assert evidence == []
 
 def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_proof(monkeypatch):
     formula_builder = Mock()

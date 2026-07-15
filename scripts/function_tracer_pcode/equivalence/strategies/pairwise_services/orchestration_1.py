@@ -217,13 +217,6 @@ def _impl_check(
     graph_generation = max(
         1, int(getattr(dispatch_frame, "generation", 1) or 1)
     )
-    if (
-        successor_plan is not None
-        and successor_plan.derived_view_id
-        == tuple(getattr(active_runtime.current_view, "view_id", ()) or ())
-        and successor_plan.premise_digest == active_runtime.premise_digest
-    ):
-        graph_generation = successor_plan.graph_generation
     self._guard_overlap_graph = GuardOverlapGraph(
         tuple(getattr(getattr(active_runtime, "current_view", None), "view_id", ()) or ()),
         str(getattr(
@@ -375,6 +368,7 @@ def _impl_check(
     if (
         runtime is not None
         and runtime.pair_ledger_manager.current is not None
+        and runtime.pair_ledger_manager.pending_successor is None
         and (
             runtime.pair_ledger_manager.current.closures
             or runtime.pair_ledger_manager.current.provisional
@@ -389,9 +383,16 @@ def _impl_check(
         else PairDispositionLedger(ledger_binding, total_pairs)
     )
     if dispatch_frame is not None and dispatch_frame.replan_successor_plan is not None:
+        composed_plan = (
+            runtime.pair_ledger_manager.last_composed_successor
+            if runtime is not None else None
+        )
+        if composed_plan is None:
+            raise RuntimeError("pair_replan_successor_composition_missing")
+        dispatch_frame.replan_successor_plan = composed_plan
         dispatch_frame.replan_successor_ledger = pair_ledger
         dispatch_frame.successor_ledger_reused = bool(
-            dispatch_frame.replan_successor_plan.accepts(
+            composed_plan.accepts(
                 pair_ledger.binding, pair_ledger.expected_pairs
             )
             and runtime is not None

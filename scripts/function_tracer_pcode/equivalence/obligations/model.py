@@ -40,6 +40,7 @@ class UnaryArtifactDomain(str, Enum):
 
     RETURN_OUTCOME_V1 = "return_outcome_v1"
     RETURN_WIDTH_V1 = "return_width_v1"
+    RECURRENCE_SUMMARY_V1 = "recurrence_summary_v1"
 
     @classmethod
     def normalize(cls, value: object) -> str:

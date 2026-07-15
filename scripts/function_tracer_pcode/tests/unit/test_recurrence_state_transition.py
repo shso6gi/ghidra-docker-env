@@ -1,4 +1,51 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
+from scripts.function_tracer_pcode.analysis.recurrence import state_transition_1
+from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
+
+
+def test_small_modulus_state_transition_lowers_bitand_delta_to_residue_summary():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    accumulator = Expression.variable("__loop_acc", size=4)
+    model = StateTransitionLoopModel(
+        None, None, None, None, None, _const(0), state,
+        Expression.binary_op("INT_SLESS", state, _param()),
+        Expression.binary_op("INT_ADD", state, _const(1)),
+        None, None, _const(0),
+        Expression.binary_op(
+            "INT_ADD", Expression.binary_op("INT_AND", state, _const(1)), _const(1)
+        ),
+        accumulator, True, (),
+    )
+    value = state_transition_1._build_small_residue_state_transition_value(
+        summarizer,
+        model=model,
+        side_effect_profile=LoopSideEffectProfileRef(),
+        result_size=4,
+    )
+    assert value is not None
+    assert tuple(value.runtime_ref.residue_cases) == (
+        (2, 0, 0, 1),
+        (2, 1, 0, 2),
+    )
+
+
+def test_small_modulus_state_transition_rejects_modulus_eight():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    state = Expression.variable("__loop_state", size=4)
+    model = StateTransitionLoopModel(
+        None, None, None, None, None, _const(0), state,
+        Expression.binary_op("INT_SLESS", state, _param()),
+        Expression.binary_op("INT_ADD", state, _const(1)),
+        None, None, _const(0), Expression.binary_op("INT_AND", state, _const(7)),
+        Expression.variable("__loop_acc", size=4), True, (),
+    )
+    assert state_transition_1._build_small_residue_state_transition_value(
+        summarizer,
+        model=model,
+        side_effect_profile=LoopSideEffectProfileRef(),
+        result_size=4,
+    ) is None
 
 def test_state_transition_runtime_ref_supplies_summary_transition_evidence():
     state = Expression.variable("__loop_state", size=4)

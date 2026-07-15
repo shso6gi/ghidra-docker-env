@@ -68,14 +68,15 @@ class PairLedgerBinding:
         )
 
 
-@dataclass(frozen=True)
-class PairLedgerSuccessorPlan:
-    """Replan identity known before the replacement projection is prepared.
+class PairLedgerPromotionState(str, Enum):
+    OPEN = "open"
+    COMPOSED = "composed"
+    ABORTED = "aborted"
 
-    The prepared-surface and projection identities are deliberately absent.
-    They are authority-bearing properties of the replacement dispatch and can
-    only be bound after that dispatch has rebuilt its call-effect projection.
-    """
+
+@dataclass(frozen=True)
+class PairLedgerSuccessorIntent:
+    """Exact predecessor-derived identity, before pair surface enumeration."""
 
     comparison_session_id: str
     branch_id: str
@@ -83,10 +84,10 @@ class PairLedgerSuccessorPlan:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
-    expected_pairs: int
     predecessor_projection_id: str
     projection_refresh_required: bool = False
-    schema_version: str = "pair_ledger_successor_plan_v1"
+    state: PairLedgerPromotionState = PairLedgerPromotionState.OPEN
+    schema_version: str = "pair_ledger_successor_intent_v2"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -97,24 +98,48 @@ class PairLedgerSuccessorPlan:
             self.derived_view_id,
             self.premise_digest,
             self.graph_generation,
-            self.expected_pairs,
             self.predecessor_projection_id,
             self.projection_refresh_required,
+            self.state.value,
         )
 
-    def accepts(self, binding: PairLedgerBinding, expected_pairs: int) -> bool:
+    def accepts_binding(self, binding: PairLedgerBinding) -> bool:
         return (
-            binding.comparison_session_id == self.comparison_session_id
+            self.state == PairLedgerPromotionState.OPEN
+            and binding.comparison_session_id == self.comparison_session_id
             and binding.branch_id == self.branch_id
             and binding.frame_generation == self.frame_generation
             and binding.derived_view_id == self.derived_view_id
             and binding.premise_digest == self.premise_digest
             and binding.graph_generation == self.graph_generation
-            and int(expected_pairs) == self.expected_pairs
             and (
                 not self.projection_refresh_required
                 or binding.projection_id != self.predecessor_projection_id
             )
+        )
+
+
+@dataclass(frozen=True)
+class PairLedgerSuccessorPlan:
+    """Fully composed successor authority; contains no wildcard fields."""
+
+    binding_key: Tuple[Any, ...]
+    expected_pairs: int
+    predecessor_projection_id: str
+    state: PairLedgerPromotionState = PairLedgerPromotionState.COMPOSED
+    schema_version: str = "pair_ledger_successor_plan_v2"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            self.schema_version, self.binding_key, int(self.expected_pairs),
+            self.predecessor_projection_id, self.state.value,
+        )
+
+    def accepts(self, binding: PairLedgerBinding, expected_pairs: int) -> bool:
+        return (
+            self.state == PairLedgerPromotionState.COMPOSED
+            and binding.stable_key() == self.binding_key
+            and int(expected_pairs) == int(self.expected_pairs)
         )
 
 
@@ -695,7 +720,7 @@ class PairDispositionLedger:
 
     def supersede(self) -> None:
         with self._lock:
-            if self.lifecycle == LedgerLifecycle.OPEN:
+            if self.lifecycle != LedgerLifecycle.SUPERSEDED:
                 self.lifecycle = LedgerLifecycle.SUPERSEDED
 
 
@@ -703,17 +728,38 @@ class PairDispositionLedger:
 class PairLedgerManager:
     current: Optional[PairDispositionLedger] = None
     history: list[PairDispositionLedger] = field(default_factory=list)
-    pending_successor: Optional[PairLedgerSuccessorPlan] = None
+    pending_successor: Optional[PairLedgerSuccessorIntent] = None
+    last_composed_successor: Optional[PairLedgerSuccessorPlan] = None
+    promotion_state: Optional[PairLedgerPromotionState] = None
 
     def open(self, binding: PairLedgerBinding, expected_pairs: int) -> PairDispositionLedger:
         if self.pending_successor is not None:
-            plan = self.pending_successor
-            if self.current is not None:
-                raise RuntimeError("pending successor conflicts with current ledger")
-            if not plan.accepts(binding, expected_pairs):
-                raise RuntimeError("replacement ledger does not match successor plan")
-            self.current = PairDispositionLedger(binding, expected_pairs)
+            intent = self.pending_successor
+            predecessor = self.current
+            if predecessor is None:
+                self.pending_successor = None
+                self.promotion_state = PairLedgerPromotionState.ABORTED
+                raise RuntimeError("successor promotion lost its predecessor ledger")
+            if not intent.accepts_binding(binding):
+                self.pending_successor = None
+                self.promotion_state = PairLedgerPromotionState.ABORTED
+                raise RuntimeError(
+                    "replacement ledger does not match successor intent: "
+                    f"intent={intent.stable_key()!r}, "
+                    f"binding={binding.stable_key()!r}, "
+                    f"expected_pairs={int(expected_pairs)}"
+                )
+            replacement = PairDispositionLedger(binding, expected_pairs)
+            plan = PairLedgerSuccessorPlan(
+                binding.stable_key(), int(expected_pairs),
+                intent.predecessor_projection_id,
+            )
+            predecessor.supersede()
+            self.history.append(predecessor)
+            self.current = replacement
             self.pending_successor = None
+            self.last_composed_successor = plan
+            self.promotion_state = PairLedgerPromotionState.COMPOSED
             return self.current
         if self.current is not None and (
             self.current.binding.stable_key() != binding.stable_key()
@@ -740,42 +786,26 @@ class PairLedgerManager:
         premise_digest: str,
         *,
         projection_refresh_required: bool = False,
-    ) -> Optional[PairLedgerSuccessorPlan]:
-        """Supersede the old ledger and defer final binding until projection rebuild."""
+    ) -> Optional[PairLedgerSuccessorIntent]:
+        """Open a successor attempt while retaining predecessor authority."""
 
         previous = self.current
         if previous is None:
-            pending = self.pending_successor
-            if pending is None:
-                return None
-            successor = PairLedgerSuccessorPlan(
-                pending.comparison_session_id,
-                pending.branch_id,
-                pending.frame_generation,
-                tuple(derived_view_id),
-                str(premise_digest),
-                pending.graph_generation,
-                pending.expected_pairs,
-                pending.predecessor_projection_id,
-                bool(
-                    pending.projection_refresh_required
-                    or projection_refresh_required
-                ),
-            )
-            self.pending_successor = successor
-            return successor
-        self.supersede_current()
+            return self.pending_successor
+        if previous.lifecycle not in {LedgerLifecycle.OPEN, LedgerLifecycle.SEALED}:
+            raise RuntimeError("only a live terminal branch may plan a successor")
         old = previous.binding
-        successor = PairLedgerSuccessorPlan(
+        successor = PairLedgerSuccessorIntent(
             old.comparison_session_id,
             old.branch_id,
-            old.frame_generation,
+            int(old.frame_generation) + 1,
             tuple(derived_view_id),
             str(premise_digest),
-            old.graph_generation + 1,
-            previous.expected_pairs,
+            int(old.graph_generation) + 1,
             old.projection_id,
             bool(projection_refresh_required),
         )
         self.pending_successor = successor
+        self.last_composed_successor = None
+        self.promotion_state = PairLedgerPromotionState.OPEN
         return successor

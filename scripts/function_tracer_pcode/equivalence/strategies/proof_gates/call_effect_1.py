@@ -623,6 +623,50 @@ def _impl__self_recursive_no_store_call_effect_proof_content(
         return None
     if object_target_key[-1] != "callee_effect_summary_missing":
         return None
+    recurrence_receipts = tuple(
+        item
+        for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+        if isinstance(item, Mapping)
+        and item.get("status") == "complete"
+        and item.get("proof_stage") == "recurrence_validation_complete"
+        and item.get("evidence_kind") == "validated_unary_recurrence_artifact"
+    )
+    if len(recurrence_receipts) != 1:
+        return None
+    recurrence_receipt = recurrence_receipts[0]
+    proposal_digest = str(recurrence_receipt.get("proposal_digest") or "")
+    binding_digest = str(
+        recurrence_receipt.get("function_recurrence_binding_digest") or ""
+    )
+    seed_digest = str(recurrence_receipt.get("seed_core_digest") or "")
+    if not proposal_digest or not binding_digest or not seed_digest:
+        return None
+    proposals = tuple(
+        proposal
+        for proposal in getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
+        if str(getattr(proposal, "digest", "") or "") == proposal_digest
+        and str(getattr(proposal, "seed_core_digest", "") or "") == seed_digest
+    )
+    if len(proposals) != 1:
+        return None
+    try:
+        from ...cause_identity import ProofRequirementId
+        from ...obligations.recurrence import validate_recurrence_requirement_target
+
+        requirement = ProofRequirementId.from_dict(
+            recurrence_receipt.get("proof_requirement") or {}
+        )
+        target_fields = dict(requirement.proof_target_key[1:])
+        validate_recurrence_requirement_target(
+            requirement,
+            seed_core_digest=seed_digest,
+            proposal_digest=proposal_digest,
+            function_recurrence_binding_digest=binding_digest,
+            proof_stage="recurrence_validation_complete",
+            proof_target_semantic_key=tuple(target_fields["proof_target"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     effect_summary = getattr(analysis, "effect_summary", None)
     if effect_summary is None:
         return None
@@ -664,6 +708,16 @@ def _impl__self_recursive_no_store_call_effect_proof_content(
         "local_store_effect_count": 0,
         "unsupported_call_site_count": 1,
         "recursive_call_effect": "no_memory_effects_by_induction",
+        "recurrence_validation": {
+            "proposal_digest": proposal_digest,
+            "function_recurrence_binding_digest": binding_digest,
+            "semantic_closure_digest": recurrence_receipt.get(
+                "semantic_closure_digest"
+            ),
+            "validated_unary_artifact_id": recurrence_receipt.get(
+                "validated_unary_artifact_id"
+            ),
+        },
         "call_effect_summary": {
             "status": "complete",
             "summary_source": ("effect_summary", "unsupported_call_effect"),

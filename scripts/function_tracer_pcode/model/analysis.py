@@ -186,6 +186,7 @@ class ReturnInfo:
     summary_candidate_id: Optional[Tuple[Any, ...]] = None
     summary_candidate_source_key: Optional[Tuple[Any, ...]] = None
     summary_transition_evidence_key: Optional[Tuple[Any, ...]] = None
+    retained_exact_return_ref: Optional[Tuple[Any, ...]] = None
     validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
     return_path_evidence: Optional[ReturnPathEvidence] = None
 
@@ -218,6 +219,10 @@ class ReturnInfo:
             )
         if self.return_kind != "exact":
             result["return_kind"] = self.return_kind
+        if self.retained_exact_return_ref is not None:
+            result["retained_exact_return_ref"] = _jsonable_nested_tuple(
+                self.retained_exact_return_ref
+            )
         if self.acceptance_status is not None:
             result["acceptance_status"] = self.acceptance_status
         if self.summary_candidate_id is not None:
@@ -1084,6 +1089,7 @@ class FunctionReturnAnalysis:
     partition_revision: int = 0
     outcome_seed: Optional[FunctionOutcomeSeed] = None
     termination_path_effect_evidence: Tuple[TerminationPathEffectEvidence, ...] = ()
+    quarantined_recurrence_proposals: Tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -1146,6 +1152,9 @@ class FunctionReturnAnalysis:
             signature_hypotheses=list(self.signature_hypotheses or []),
             return_type_provenance=dict(self.return_type_provenance or {}),
             summary_return_candidates=tuple(summary_return_candidates or ()),
+            return_outcomes=(),
+            comparison_surface=None,
+            outcome_seed=None,
             analysis_view_identity=view_identity,
             partition_revision=next_revision,
         )

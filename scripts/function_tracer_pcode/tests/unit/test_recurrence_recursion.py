@@ -45,8 +45,11 @@ def test_structural_recurrence_summarizer_recovers_linear_self_recursion():
     assert note == "linear_self_recursion_summary"
     assert len(summarized_returns) == 2
     assert all("call_out_of_scope" not in ret.value.to_string() for ret in summarized_returns)
+    base_case = next(ret for ret in summarized_returns if ret.value.to_string() == "0")
+    assert base_case.retained_exact_return_ref[0] == "retained_exact_return_v1"
     assert any(">> 1" in ret.value.to_string() for ret in summarized_returns if ret.value.to_string() != "0")
     recursive_case = next(ret for ret in summarized_returns if ret.value.to_string() != "0")
+    assert recursive_case.retained_exact_return_ref is None
     assert recursive_case.conditions[0].to_string() == "(0 < param_1)"
 
 def test_structural_recurrence_summarizer_accepts_masked_counter_recursion():

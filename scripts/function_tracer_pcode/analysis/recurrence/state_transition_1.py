@@ -13,6 +13,7 @@ from ._shared import (
     Expression,
     ExpressionType,
     LoopSideEffectProfileRef,
+    ResidueLoopCase,
     ReturnInfo,
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
     StateTransitionLoopModel,
@@ -1033,12 +1034,22 @@ def _impl__try_summarize_state_transition_loop(
         }
     progress_guard_expr = None
     progress_entry_guard_expr = None
-    loop_value = self._build_progress_guarded_unit_state_transition_value(
+    loop_value = _build_small_residue_state_transition_value(
+        self,
+        model=model,
+        side_effect_profile=side_effect_profile,
+        result_size=result_size,
+    )
+    residue_loop_value = loop_value is not None
+    if residue_loop_value:
+        self._debug("Recovered parity/small-modulus affine state-transition loop value")
+    if not residue_loop_value:
+        loop_value = self._build_progress_guarded_unit_state_transition_value(
         model=model,
         analysis=analysis,
         result_size=result_size,
-    )
-    progress_guarded_loop_value = loop_value is not None
+        )
+    progress_guarded_loop_value = loop_value is not None and not residue_loop_value
     if progress_guarded_loop_value:
         progress_guard_expr = self._progress_guarded_unit_step_expression(model)
         if progress_guard_expr is None:
@@ -1052,7 +1063,7 @@ def _impl__try_summarize_state_transition_loop(
             return None
         self._debug("Recovered progress-guarded unit state-transition loop value")
     multiplicative_loop_value = False
-    if not progress_guarded_loop_value:
+    if not progress_guarded_loop_value and not residue_loop_value:
         loop_value = self._build_multiplicative_state_transition_loop_value(
             model=model,
             analysis=analysis,
@@ -1100,7 +1111,7 @@ def _impl__try_summarize_state_transition_loop(
                     f"accumulator_delta={self._safe_expr_text(model.accumulator_delta_expr)})"
                 )
                 return None
-    if not multiplicative_loop_value:
+    if not multiplicative_loop_value and not residue_loop_value:
         loop_value = self._add_state_transition_accumulator_seed(
             accumulator_init,
             loop_value,
@@ -1117,31 +1128,190 @@ def _impl__try_summarize_state_transition_loop(
         loop_conditions,
         loop_value,
     )
-    if exact_exclusion_conditions:
-        loop_conditions.extend(exact_exclusion_conditions)
-        returns = []
-    else:
-        returns = [
-            ReturnInfo(
-                address=address,
-                value=accumulator_init,
-                conditions=[Condition(entry_guard_expr, True)],
-                branch_index=0,
-                **site_metadata,
-            )
-        ]
+    # Normalize peeled/latch exact members into the same partition without
+    # claiming value equality on their region.  Acceptance retains the exact
+    # members and independently proves that their union with this narrowed
+    # summary still covers the active precondition.
+    loop_conditions.extend(exact_exclusion_conditions)
+    # The zero-iteration region is an explicit member of the proposal even
+    # when exact-return exclusions narrow the positive-iteration member.
+    # Omitting it delegated coverage to a raw PHI return that may itself be
+    # unresolved.  The acceptance gate still checks overlap with exact returns.
+    returns = [
+        ReturnInfo(
+            address=address,
+            value=accumulator_init,
+            conditions=[Condition(entry_guard_expr, True)],
+            branch_index=0,
+            summary_candidate_source_key=summary_ref.stable_key(),
+            summary_transition_evidence_key=transition_evidence_key,
+            **site_metadata,
+        )
+    ]
     returns.append(
         ReturnInfo(
             address=address,
             value=loop_value,
             conditions=loop_conditions,
             branch_index=10_200,
+            summary_candidate_source_key=summary_ref.stable_key(),
             summary_transition_evidence_key=transition_evidence_key,
             **site_metadata,
         )
     )
     self._debug("Recovered state-transition loop summary")
     return returns, "state_transition_loop_summary"
+
+
+def _build_small_residue_state_transition_value(
+    self,
+    *,
+    model: StateTransitionLoopModel,
+    side_effect_profile: LoopSideEffectProfileRef,
+    result_size: int,
+) -> Optional[Expression]:
+    """Lower the frequent `(iv & mask)` affine delta for modulus 2/4 only."""
+
+    if side_effect_profile.requires_effect_proof():
+        return None
+    if not _is_unit_increment(self, model.state_transition_expr, model.state_placeholder):
+        return None
+    modulus = _small_residue_modulus(
+        self, model.accumulator_delta_expr, model.state_placeholder
+    )
+    if modulus not in {2, 4}:
+        return None
+    limit_expr, signed_loop = _state_transition_limit(
+        self, model.state_guard_expr, model.state_placeholder
+    )
+    if limit_expr is None:
+        return None
+    residue_cases = []
+    for residue in range(modulus):
+        affine = _affine_under_residue(
+            self,
+            model.accumulator_delta_expr,
+            model.state_placeholder,
+            modulus,
+            residue,
+        )
+        if affine is None:
+            return None
+        residue_cases.append(ResidueLoopCase(modulus, residue, affine))
+    return self._build_counted_loop_summary_intrinsic(
+        base_expr=model.accumulator_init_expr,
+        start_expr=model.state_init_expr,
+        limit_expr=limit_expr,
+        induction_step=1,
+        residue_cases=tuple(residue_cases),
+        result_size=result_size,
+        signed_loop=signed_loop,
+        side_effect_profile=side_effect_profile,
+    )
+
+
+def _is_unit_increment(self, expr: Expression, placeholder: Expression) -> bool:
+    if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or expr.operator != "INT_ADD":
+        return False
+    if len(expr.operands) != 2:
+        return False
+    left, right = expr.operands
+    return (
+        self._expr_matches_placeholder(left, placeholder)
+        and self._raw_constant_value(right) == 1
+    ) or (
+        self._expr_matches_placeholder(right, placeholder)
+        and self._raw_constant_value(left) == 1
+    )
+
+
+def _small_residue_modulus(
+    self, expr: Expression, placeholder: Expression
+) -> Optional[int]:
+    found = set()
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if (
+            getattr(node, "expr_type", None) == ExpressionType.BINARY_OP
+            and getattr(node, "operator", None) == "INT_AND"
+            and len(getattr(node, "operands", ()) or ()) == 2
+        ):
+            left, right = node.operands
+            if self._expr_matches_placeholder(left, placeholder):
+                mask = self._raw_constant_value(right)
+            elif self._expr_matches_placeholder(right, placeholder):
+                mask = self._raw_constant_value(left)
+            else:
+                mask = None
+            if mask in {1, 3}:
+                found.add(int(mask) + 1)
+            elif mask is not None:
+                return None
+        stack.extend(tuple(getattr(node, "operands", ()) or ()))
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _state_transition_limit(
+    self, guard: Expression, placeholder: Expression
+) -> Tuple[Optional[Expression], bool]:
+    if getattr(guard, "expr_type", None) != ExpressionType.BINARY_OP or len(guard.operands) != 2:
+        return None, False
+    left, right = guard.operands
+    if guard.operator in {"INT_SLESS", "INT_LESS"} and self._expr_matches_placeholder(left, placeholder):
+        return right, guard.operator == "INT_SLESS"
+    if guard.operator in {"INT_NOTEQUAL", "INT_EQUAL"}:
+        if _is_unit_increment(self, left, placeholder):
+            return right, False
+        if _is_unit_increment(self, right, placeholder):
+            return left, False
+    return None, False
+
+
+def _affine_under_residue(
+    self,
+    expr: Expression,
+    placeholder: Expression,
+    modulus: int,
+    residue: int,
+) -> Optional[Tuple[int, int]]:
+    constant = self._raw_constant_value(expr)
+    if constant is not None:
+        return 0, int(constant)
+    if self._expr_matches_placeholder(expr, placeholder):
+        return 1, 0
+    if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and len(expr.operands) == 1:
+        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+            return _affine_under_residue(
+                self, expr.operands[0], placeholder, modulus, residue
+            )
+        return None
+    if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        return None
+    left, right = expr.operands
+    if expr.operator == "INT_AND":
+        mask = None
+        if self._expr_matches_placeholder(left, placeholder):
+            mask = self._raw_constant_value(right)
+        elif self._expr_matches_placeholder(right, placeholder):
+            mask = self._raw_constant_value(left)
+        if mask == modulus - 1:
+            return 0, residue
+        return None
+    left_affine = _affine_under_residue(self, left, placeholder, modulus, residue)
+    right_affine = _affine_under_residue(self, right, placeholder, modulus, residue)
+    if left_affine is None or right_affine is None:
+        return None
+    if expr.operator == "INT_ADD":
+        return left_affine[0] + right_affine[0], left_affine[1] + right_affine[1]
+    if expr.operator == "INT_SUB":
+        return left_affine[0] - right_affine[0], left_affine[1] - right_affine[1]
+    if expr.operator == "INT_MULT":
+        if left_affine[0] == 0:
+            return right_affine[0] * left_affine[1], right_affine[1] * left_affine[1]
+        if right_affine[0] == 0:
+            return left_affine[0] * right_affine[1], left_affine[1] * right_affine[1]
+    return None
 
 def _impl__build_progress_guarded_unit_state_transition_value(
     self,

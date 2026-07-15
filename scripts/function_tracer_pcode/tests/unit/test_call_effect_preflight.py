@@ -392,15 +392,15 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
     runtime._apply_artifact(proof_requirement, {"proof_source": "unit-test"})
     successor_plan = runtime.pair_ledger_manager.pending_successor
     assert successor_plan is not None
-    assert runtime.pair_ledger_manager.current is None
+    assert runtime.pair_ledger_manager.current is old_ledger
 
     new_prepared = _prepared(source, session="successor-session")
     new_projection = validate_call_resolution_projection(
-        {}, new_prepared, generation=1
+        {}, new_prepared, generation=2
     )
     assert new_projection.projection_id != old_projection.projection_id
     frame = PreparedDispatchFrame(
-        "successor-session", "S_PAIRWISE", 1, source, new_prepared,
+        "successor-session", "S_PAIRWISE", 2, source, new_prepared,
         new_projection, {}, (), CallProofDecisionMode.PREFLIGHT_PROJECTION,
     )
     frame.obligation_runtime = runtime
@@ -413,10 +413,17 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         frame.generation,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        successor_plan.graph_generation,
+        2,
     )
-    with pytest.raises(RuntimeError, match="does not match successor plan"):
+    with pytest.raises(RuntimeError, match="does not match successor intent"):
         runtime.open_pair_ledger(stale_projection_binding, 1)
+    assert runtime.pair_ledger_manager.current is old_ledger
+    assert runtime.pair_ledger_manager.promotion_state.value == "aborted"
+    successor_plan = runtime.pair_ledger_manager.plan_successor(
+        runtime.current_view.view_id,
+        runtime.premise_digest,
+        projection_refresh_required=True,
+    )
     replacement_binding = PairLedgerBinding(
         frame.comparison_session_id,
         frame.branch_id,
@@ -425,7 +432,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         frame.generation,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        successor_plan.graph_generation,
+        2,
     )
     successor = runtime.open_pair_ledger(replacement_binding, 1)
     assert successor is not old_ledger
@@ -438,6 +445,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         ),
     ))
     frame.pair_disposition_ledger = successor
+    frame.replan_successor_plan = runtime.pair_ledger_manager.last_composed_successor
     frame.replan_successor_ledger = successor
     frame.successor_ledger_reused = True
     frame.pending_disposition_counts = {

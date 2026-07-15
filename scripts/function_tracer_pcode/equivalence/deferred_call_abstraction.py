@@ -833,6 +833,9 @@ def _rewrite_analysis_with_abstract_calls(
         program_is_big_endian=analysis.program_is_big_endian,
         completed_recovery_proof_ids=tuple(getattr(analysis, "completed_recovery_proof_ids", ()) or ()),
         completed_recovery_proof_evidence=tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ()),
+        quarantined_recurrence_proposals=tuple(
+            getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
+        ),
         binary_id=analysis.binary_id,
     )
 

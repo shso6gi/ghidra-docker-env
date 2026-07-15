@@ -1,0 +1,96 @@
+{
+  "schema_version": "loop_recurrence_summary_manifest_v4",
+  "head": "7a8ef7e7d6e40fe8d9988b8ce7807a28c6805d3a",
+  "uncommitted_code_patch_sha256_excluding_this_artifact_dir": "34a815f406c81a045276343ce6ced1fe81876cbcb1f957e553bec315da06abad",
+  "untracked_code_sha256": {
+    "equivalence/obligations/recurrence.py": "662dc44089d1494b0bbb51458a191cabd9eda678e8df344193abc58be4fafa81",
+    "equivalence/obligations/unary_premise.py": "ad5f11cba0888c3b1230a9096fe8ee5b249b01a5a0a1d0f7610264669ec25722",
+    "equivalence/recurrence_promotion.py": "715b3d8e54df694cd9142a2d78f22b93745aaf247db5fb00d58c87b3703aa8cb",
+    "model/recurrence_contracts.py": "843c4da50e6a4fb07a73047fe87a55588435e8d8666169472ce31202b77913c8",
+    "tests/unit/test_recurrence_proof_contract.py": "e6484fc027ba7f6603b03eeb58fedde4ba3e5f37430d30d9cb5506b3c6f2ed59",
+    "tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
+    "tests/fixtures/recurrence_parity.c": "d0583a7ab54fc055fdcc254c70bab60cf7081d3038401741725f23a578493e8b",
+    "tests/fixtures/recurrence_guarded_affine.c": "59254406c6f4c3c398297479ed3b6f7f8b00c415d1cdbfa2cc56f5ffef91b173"
+  },
+  "scope": {
+    "roadmap_item": "7. frequent loop and recursion summaries",
+    "included_patterns": [
+      "unit_step_affine_recurrence",
+      "affine_counted_loop",
+      "parity_and_small_modulus_2_or_4",
+      "guarded_affine_recurrence"
+    ],
+    "excluded": [
+      "cate1",
+      "general_multiplicative_recurrence",
+      "collatz_like_recurrence",
+      "multiple_mutually_recursive_scc"
+    ]
+  },
+  "soundness_contract": {
+    "promotion_authority": "post-decision UNKNOWN or INCONCLUSIVE branch with proposal-specific targeted blocker",
+    "terminal_eq_or_not_eq_promotion": false,
+    "counterexample_safety_pending_promotion": false,
+    "analysis_layer": "proof-free quarantined proposal only",
+    "validated_artifact": "proof-kind-specific method and proposition allowlist plus proof-result and dependency-subproof digests",
+    "smt_receipts": "normalized condition query digest, Z3 SAT/UNSAT result, width/sort identity, and active-precondition identity",
+    "cross_binding": "proposal digest and candidate sets agree across candidate, transition, overlap, coverage, and effect subproofs",
+    "transition_termination": "independent v2 validator restricted to the four included patterns",
+    "deserialization": "common expression validator enforces operator, arity, sort, width, opcode, and runtime-ref invariants",
+    "canonical_returns": "semantic sort with duplicate and exact-summary collision rejection",
+    "acceptance_gate_weakened": false,
+    "unsupported_transition_policy": "fail closed to UNKNOWN"
+  },
+  "pattern_evidence": [
+    {
+      "pattern": "unit_step_affine_recurrence",
+      "real_binary": "EqBench REVE/limit2/f arm64 clang-O0 vs gcc-O1",
+      "result": "EQUIVALENT",
+      "activation": "unit_step_affine_recursion_v1; branch authority; COMPOSED; validated artifact imported; promoted successor EQ",
+      "pairwise": {"unsat": 4, "sat": 0, "unknown": 0, "error": 0},
+      "terminal_log": "limit2_f_terminal.log"
+    },
+    {
+      "pattern": "affine_counted_loop",
+      "real_binary": "EqBench REVE/loop2/f arm64 clang-O0 vs clang-O1",
+      "result": "EQUIVALENT",
+      "activation": "affine_counted_loop_v1; branch authority; COMPOSED; validated artifact imported; promoted successor EQ",
+      "pairwise": {"unsat": 4, "sat": 0, "unknown": 0, "error": 0},
+      "terminal_log": "loop2_f_terminal.log"
+    },
+    {
+      "pattern": "parity_and_small_modulus",
+      "real_binary": "recurrence_parity.c gcc-O0 vs gcc-Og",
+      "result": "EQUIVALENT",
+      "activation": "affine_counted_loop_v1 modulus 2; branch authority; COMPOSED; validated artifact imported; promoted successor EQ",
+      "error_count": 0,
+      "terminal_log": "parity_real_binary_terminal.log"
+    },
+    {
+      "pattern": "guarded_affine_recurrence",
+      "real_binary": "recurrence_guarded_affine.c gcc-O0 vs gcc-Og",
+      "result": "EQUIVALENT",
+      "activation": "guarded_affine_decreasing_state_v1; branch authority; COMPOSED; validated artifact imported; promoted successor EQ",
+      "error_count": 0,
+      "terminal_log": "guarded_affine_real_binary_terminal.log"
+    }
+  ],
+  "near_miss_policy": {
+    "incomplete_residue_partition": "UNKNOWN",
+    "modulus_outside_2_or_4": "UNKNOWN",
+    "non_affine_or_shift_state_transition": "UNKNOWN",
+    "general_multiplicative_transition": "UNKNOWN",
+    "unexplained_call_or_store": "UNKNOWN"
+  },
+  "completion": {
+    "four_pattern_extractors_complete": true,
+    "four_pattern_typed_termination_validation_complete": true,
+    "four_patterns_have_real_binary_positive_witness": true,
+    "real_binary_activation_is_structurally_asserted": true,
+    "proof_semantic_allowlist_complete": true,
+    "eqbench_samples_executed_on_current_worktree": 2,
+    "real_binary_error_observed": false,
+    "soundness_regression_observed": false,
+    "roadmap_item_7": "complete"
+  }
+}

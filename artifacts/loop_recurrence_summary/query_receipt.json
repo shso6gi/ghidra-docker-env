@@ -1,0 +1,56 @@
+{
+  "schema_version": "loop_recurrence_summary_query_receipt_v4",
+  "head": "7a8ef7e7d6e40fe8d9988b8ce7807a28c6805d3a",
+  "uncommitted_code_patch_sha256_excluding_this_artifact_dir": "34a815f406c81a045276343ce6ced1fe81876cbcb1f957e553bec315da06abad",
+  "untracked_code_digest_manifest": "current_head_manifest.json#untracked_code_sha256",
+  "cate1_excluded": true,
+  "validation": {
+    "full_unit_suite": {
+      "command": "env PYTHONPATH=. ./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit --maxfail=1",
+      "passed": 3306,
+      "skipped": 33,
+      "failed": 0,
+      "elapsed_seconds": 483.92
+    },
+    "focused_recurrence_authority_suite": {"passed": 142, "failed": 0},
+    "real_binary_frequent_pattern_suite": {"passed": 2, "failed": 0},
+    "refactor_contract": "ok",
+    "git_diff_check": "ok"
+  },
+  "real_binary": [
+    {
+      "sample": "EqBench REVE/limit2/f arm64 clang-O0 vs gcc-O1",
+      "result": "EQUIVALENT",
+      "structured_activation": "unit_step_affine_recursion_v1 / COMPOSED / validated import / promoted EQ",
+      "pairwise": {"unsat": 4, "sat": 0, "unknown": 0, "error": 0},
+      "terminal_log": "limit2_f_terminal.log"
+    },
+    {
+      "sample": "EqBench REVE/loop2/f arm64 clang-O0 vs clang-O1",
+      "result": "EQUIVALENT",
+      "structured_activation": "affine_counted_loop_v1 / COMPOSED / validated import / promoted EQ",
+      "pairwise": {"unsat": 4, "sat": 0, "unknown": 0, "error": 0},
+      "terminal_log": "loop2_f_terminal.log"
+    },
+    {
+      "sample": "recurrence_parity.c gcc-O0 vs gcc-Og",
+      "result": "EQUIVALENT",
+      "structured_activation": "affine_counted_loop_v1 / COMPOSED / validated import / promoted EQ",
+      "error": 0,
+      "terminal_log": "parity_real_binary_terminal.log"
+    },
+    {
+      "sample": "recurrence_guarded_affine.c gcc-O0 vs gcc-Og",
+      "result": "EQUIVALENT",
+      "structured_activation": "guarded_affine_decreasing_state_v1 / COMPOSED / validated import / promoted EQ",
+      "error": 0,
+      "terminal_log": "guarded_affine_real_binary_terminal.log"
+    }
+  ],
+  "conservative_negative_note": {
+    "sample": "EqBench REVE/ackermann/f arm64 clang-O0 vs gcc-O1",
+    "saved_pre_v3_result": "UNKNOWN",
+    "saved_pairwise": {"unsat": 99, "sat": 0, "unknown": 11, "error": 0},
+    "current_v3_rerun": "not used as completion evidence"
+  }
+}

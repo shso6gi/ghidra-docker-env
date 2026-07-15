@@ -10,7 +10,9 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     StructuralRecurrenceSummarizer,
 )
 from scripts.function_tracer_pcode.model import (
+    COUNTED_LOOP_SUM_OPCODE,
     Condition,
+    CountedLoopSummaryRef,
     Expression,
     LoopCaseRef,
     LoopSideEffectProfileRef,
@@ -564,6 +566,8 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
                     Expression.parameter("param_1", 0, size=4),
                 ],
                 size=4,
+                runtime_ref=CountedLoopSummaryRef(1, 4, True, ()),
+                opcode=COUNTED_LOOP_SUM_OPCODE,
             ),
             conditions=[],
             branch_index=11,
@@ -589,13 +593,12 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
         )
 
     assert result is not None
-    assert result is not analysis
-    assert result.returns == summary_returns
-    assert "counted_scalar_loop_summary" in result.analysis_notes
-    assert result.summary_return_candidates == ()
-    assert result.analysis_view_identity[0] == "accepted_return_partition_view"
+    assert result is analysis
+    assert result.returns != summary_returns
+    assert result.quarantined_recurrence_proposals
+    assert all(not candidate.eq_eligible for candidate in result.summary_return_candidates)
     summary_mock.assert_called_once()
-    accept_mock.assert_called_once()
+    accept_mock.assert_not_called()
 
 
 def test_apply_structural_recurrence_summary_keeps_rejected_candidate_diagnostics():
@@ -649,12 +652,12 @@ def test_apply_structural_recurrence_summary_keeps_rejected_candidate_diagnostic
         )
 
     assert result is not None
-    assert result is not analysis
+    assert result is analysis
     assert result.returns == analysis.returns
-    assert result.summary_return_candidates == (candidate,)
-    assert result.analysis_view_identity[0] == "summary_return_diagnostics_view"
-    assert "summary_return_blocker:summary_return_candidate_invalid:value_missing" in result.analysis_notes
-    assert analysis.summary_return_candidates == ()
+    assert result.quarantined_recurrence_proposals
+    assert result.summary_return_candidates
+    assert all(not item.eq_eligible for item in result.summary_return_candidates)
+    accept_mock.assert_not_called()
 
 
 def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
@@ -713,6 +716,8 @@ def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
                         Expression.parameter("param_1", 0, size=4),
                     ],
                     size=4,
+                    runtime_ref=CountedLoopSummaryRef(1, 4, True, ()),
+                    opcode=COUNTED_LOOP_SUM_OPCODE,
                 ),
                 conditions=[
                     Condition(
@@ -743,13 +748,11 @@ def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
     )
 
     assert result is not None
-    assert result is not analysis
-    assert "counted_scalar_loop_summary" in result.analysis_notes
-    assert len(result.returns) == 2
-    assert all(ret.acceptance_status == "accepted" for ret in result.returns)
+    assert result is analysis
+    assert len(result.returns) == 1
     assert len(result.summary_return_candidates) == 2
-    assert len(analysis.summary_return_candidates) == 0
-    assert result.analysis_view_identity[0] == "accepted_return_partition_view"
+    assert result.quarantined_recurrence_proposals
+    assert all(not candidate.eq_eligible for candidate in result.summary_return_candidates)
     summary_mock.assert_called_once()
 
 
@@ -792,6 +795,8 @@ def test_analyze_function_applies_counted_loop_summary_after_return_analysis():
                     Expression.parameter("param_1", 0, size=4),
                 ],
                 size=4,
+                runtime_ref=CountedLoopSummaryRef(1, 4, True, ()),
+                opcode=COUNTED_LOOP_SUM_OPCODE,
             ),
             conditions=[
                 Condition(
@@ -874,8 +879,8 @@ def test_analyze_function_applies_counted_loop_summary_after_return_analysis():
         result = analyzer.analyze_function(function, timeout=1)
 
     assert result is not None
-    assert len(result.returns) == 2
-    assert "counted_scalar_loop_summary" in result.analysis_notes
+    assert len(result.returns) == 1
+    assert result.quarantined_recurrence_proposals
     analyze_return_mock.assert_called_once()
     summary_mock.assert_called_once()
 

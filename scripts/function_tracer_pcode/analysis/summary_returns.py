@@ -19,8 +19,19 @@ from ..model import (
     UnknownValueRef,
 )
 from ..model import ExpressionType
+from ..model.recurrence_contracts import (
+    ImmutableRecurrenceCondition,
+    ImmutableRecurrenceExpression,
+    QuarantinedRecurrenceProposal,
+    QuarantinedRecurrenceReturn,
+    RecurrenceDigestCodec,
+    RecurrenceSMTQueryReceipt,
+    RecurrenceSeedCore,
+    RetainedExactReturnRef,
+)
 from ..model.render_smt import expression_smt_bit_width
 from ..model.structural import key_contains_placeholder
+from . import effect_summary
 from .effect_summary import canonicalize_location
 from .condition.normalizer import ConditionNormalizer
 from .condition.simplifier import ConditionSimplifier
@@ -36,6 +47,8 @@ class SummaryReturnAcceptanceResult:
     candidates: Tuple[SummaryReturnCandidate, ...]
     blockers: Tuple[str, ...]
     coverage_complete: bool
+    overlap_query_receipts: Tuple[RecurrenceSMTQueryReceipt, ...] = ()
+    coverage_query_receipts: Tuple[RecurrenceSMTQueryReceipt, ...] = ()
 
 
 def accept_summary_return_candidates(
@@ -44,6 +57,7 @@ def accept_summary_return_candidates(
     *,
     summary_note: str,
     enable_completed_recovery_proofs: bool = True,
+    require_smt_receipts: bool = False,
 ) -> SummaryReturnAcceptanceResult:
     """Validate summary-derived returns before exposing them as normal returns.
 
@@ -92,6 +106,12 @@ def accept_summary_return_candidates(
     candidate_indices: set[int] = set()
     for index, ret in enumerate(proposed_returns):
         if _return_info_identity_key(ret) in exact_keys:
+            continue
+        marker = getattr(ret, "retained_exact_return_ref", None)
+        if marker is not None and any(
+            _retained_exact_marker_matches_return(marker, exact_ret)
+            for exact_ret in exact_returns
+        ):
             continue
         if not _return_has_summary_provenance(ret):
             continue
@@ -148,11 +168,14 @@ def accept_summary_return_candidates(
         for index in sorted(valid_candidates)
     )
 
+    overlap_query_receipts: List[RecurrenceSMTQueryReceipt] = []
+    coverage_query_receipts: List[RecurrenceSMTQueryReceipt] = []
     overlap_blockers = _check_candidate_overlaps(
         analysis,
         valid_candidates.values(),
         effective_exact_returns,
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        query_receipts=overlap_query_receipts if require_smt_receipts else None,
     )
     blockers.extend(overlap_blockers)
 
@@ -162,6 +185,7 @@ def accept_summary_return_candidates(
             proposed_partition,
             _active_preconditions(analysis),
             parameters=getattr(analysis, "parameters", None),
+            query_receipts=coverage_query_receipts if require_smt_receipts else None,
         )
         if not coverage_complete:
             blockers.append("summary_partition_not_total:active_precondition_not_covered")
@@ -173,7 +197,10 @@ def accept_summary_return_candidates(
                 candidate.acceptance_status = "rejected"
                 candidate.eq_eligible = False
                 candidate.validation_blockers = unique_blockers
-        return SummaryReturnAcceptanceResult((), tuple(candidates), unique_blockers, coverage_complete)
+        return SummaryReturnAcceptanceResult(
+            (), tuple(candidates), unique_blockers, coverage_complete,
+            tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+        )
 
     accepted: List[ReturnInfo] = []
     accepted.extend(effective_exact_returns)
@@ -185,81 +212,170 @@ def accept_summary_return_candidates(
         candidate.return_info = accepted_return
         accepted.append(accepted_return)
 
-    return SummaryReturnAcceptanceResult(tuple(accepted), tuple(candidates), (), True)
+    if require_smt_receipts and (
+        not overlap_query_receipts or len(coverage_query_receipts) != 1
+    ):
+        return SummaryReturnAcceptanceResult(
+            (), tuple(candidates),
+            ("summary_proof_receipt_incomplete:required_smt_receipt_missing",),
+            False, tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+        )
+    return SummaryReturnAcceptanceResult(
+        tuple(accepted), tuple(candidates), (), True,
+        tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+    )
 
 
-def attach_summary_return_acceptance_proof(
+def _retained_exact_marker_matches_return(
+    marker: Any,
+    exact_return: ReturnInfo,
+) -> bool:
+    if not (
+        isinstance(marker, tuple)
+        and len(marker) == 3
+        and marker[0] == "retained_exact_return_v1"
+    ):
+        return False
+    try:
+        condition_key = tuple(
+            ImmutableRecurrenceCondition.from_condition(condition).stable_key()
+            for condition in tuple(exact_return.conditions or ())
+        )
+        value_key = ImmutableRecurrenceExpression.from_expression(
+            exact_return.value
+        ).stable_key()
+    except (TypeError, ValueError):
+        return False
+    expected_identity = (
+        "return_info",
+        exact_return.address,
+        exact_return.pcode_identity,
+        exact_return.pcode_order,
+        exact_return.pcode_time,
+        exact_return.pcode_op_ref.stable_key()
+        if callable(getattr(exact_return.pcode_op_ref, "stable_key", None))
+        else None,
+        condition_key,
+        value_key,
+    )
+    expected_payload = (condition_key, value_key, "exact")
+    return tuple(marker[1]) == expected_identity and marker[2] == expected_payload
+
+
+def attach_quarantined_recurrence_proposal(
     analysis: FunctionReturnAnalysis,
     *,
-    candidates: Sequence[SummaryReturnCandidate],
-    accepted_returns: Sequence[ReturnInfo],
+    proposed_returns: Sequence[ReturnInfo],
     summary_note: str,
-) -> None:
-    """Record a completed local gate proof for accepted summary-derived returns.
+) -> Optional[QuarantinedRecurrenceProposal]:
+    """Attach an immutable proof-free proposal without changing normal returns."""
 
-    This proof is intentionally scoped to summary-return exposure.  It does not
-    replace pairwise final return coverage proof, but it gives callers a stable
-    ref showing that summary-derived callee returns passed candidate validation,
-    overlap checks, and candidate partition coverage before being exposed.
-    """
+    candidates = tuple(
+        build_summary_return_candidate(
+            analysis,
+            ret,
+            summary_note=summary_note,
+            candidate_index=index,
+        )
+        for index, ret in enumerate(tuple(proposed_returns or ()))
+    )
+    if not candidates:
+        return None
+    for candidate in candidates:
+        candidate.acceptance_status = "proposed"
+        candidate.eq_eligible = False
+        candidate.validation_blockers = ()
 
-    accepted_candidates = tuple(
-        candidate
-        for candidate in (candidates or ())
-        if str(getattr(candidate, "acceptance_status", "") or "") == "accepted"
+    retained_markers = tuple(
+        marker
+        for candidate in candidates
+        for marker in (getattr(candidate.return_info, "retained_exact_return_ref", None),)
+        if isinstance(marker, tuple)
+        and len(marker) == 3
+        and marker[0] == "retained_exact_return_v1"
     )
-    if not accepted_candidates:
-        return
-    accepted_partition_key = tuple(
-        _return_info_identity_key(ret)
-        for ret in (accepted_returns or ())
-    )
-    candidate_ids = tuple(candidate.candidate_id for candidate in accepted_candidates)
-    transition_keys = tuple(
-        candidate.transition_evidence_key
-        for candidate in accepted_candidates
-    )
-    object_target_key = (
-        "summary_return_acceptance_target",
-        _analysis_key(analysis),
-        str(summary_note or "structural_summary"),
-        accepted_partition_key,
-        candidate_ids,
-        transition_keys,
-        _active_precondition_key(analysis),
-    )
-    proof_id = ("proof_obligation_id", "summary_return_acceptance", object_target_key)
-    existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
-    if any(
-        isinstance(item, Mapping) and item.get("proof_obligation_id") == proof_id
-        for item in existing
-    ):
-        return
-    evidence = {
-        "proof_obligation_id": proof_id,
-        "reason_id": "summary_return_acceptance",
-        "status": "complete",
-        "proof_stage": "summary_return_acceptance",
-        "evidence_kind": "summary_return_candidate_acceptance",
-        "object_target_key": object_target_key,
-        "proof_source": str(summary_note or "structural_summary"),
-        "proof_content": {
-            "object_derived": True,
-            "status": "complete",
-            "object_target_key": object_target_key,
-            "accepted_partition_key": accepted_partition_key,
-            "candidate_ids": candidate_ids,
-            "transition_evidence_keys": transition_keys,
-            "candidate_validation": "proved",
-            "overlap_proof": "proved",
-            "candidate_partition_coverage": "proved",
-            "final_pairwise_coverage": "not_claimed",
-        },
+    retained_candidate_ids = {
+        candidate.candidate_id
+        for candidate in candidates
+        if getattr(candidate.return_info, "retained_exact_return_ref", None)
+        in retained_markers
     }
-    analysis.completed_recovery_proof_evidence = existing + (evidence,)
-    existing_ids = tuple(getattr(analysis, "completed_recovery_proof_ids", ()) or ())
-    if proof_id not in existing_ids:
-        analysis.completed_recovery_proof_ids = existing_ids + (proof_id,)
+    proposal_candidates = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id not in retained_candidate_ids
+    )
+    if not proposal_candidates:
+        return None
+    retained_refs = tuple(
+        RetainedExactReturnRef(
+            tuple(marker[1]),
+            RecurrenceDigestCodec.digest("retained_exact_return_payload_v1", marker[2]),
+        )
+        for marker in retained_markers
+    )
+    retained_refs = tuple(sorted(
+        retained_refs,
+        key=lambda item: RecurrenceDigestCodec.canonical_bytes(
+            "retained_exact_return_sort_v1", item.stable_key()
+        ),
+    ))
+    proposal_candidates = tuple(sorted(
+        proposal_candidates,
+        key=lambda candidate: RecurrenceDigestCodec.canonical_bytes(
+            "recurrence_candidate_sort_v1",
+            (
+                candidate.guard_structural_key,
+                candidate.value_structural_key,
+                candidate.transition_evidence_key,
+                candidate.effect_region_key,
+            ),
+        ),
+    ))
+    seed_core = RecurrenceSeedCore(
+        analysis.outcome_function_identity(),
+        _active_precondition_key(analysis),
+        retained_refs,
+        tuple(
+            (
+                candidate.effect_region_key,
+                candidate.memory_read_set_key,
+                candidate.memory_write_set_key,
+                candidate.call_effect_key,
+                candidate.ub_assumption_key,
+            )
+            for candidate in proposal_candidates
+        ),
+    )
+    proposal = QuarantinedRecurrenceProposal(
+        seed_core.digest,
+        str(summary_note or "structural_summary"),
+        tuple(
+            QuarantinedRecurrenceReturn(
+                tuple(
+                    ImmutableRecurrenceCondition.from_condition(condition)
+                    for condition in candidate.return_info.conditions
+                ),
+                ImmutableRecurrenceExpression.from_expression(candidate.return_info.value),
+                tuple(candidate.candidate_id),
+                tuple(candidate.transition_evidence_key or ()),
+            )
+            for candidate in proposal_candidates
+        ),
+        retained_refs,
+    )
+    proposals = tuple(getattr(analysis, "quarantined_recurrence_proposals", ()) or ())
+    if all(item.digest != proposal.digest for item in proposals):
+        analysis.quarantined_recurrence_proposals = proposals + (proposal,)
+    prior_candidates = tuple(getattr(analysis, "summary_return_candidates", ()) or ())
+    known_ids = {candidate.candidate_id for candidate in prior_candidates}
+    analysis.summary_return_candidates = prior_candidates + tuple(
+        candidate for candidate in candidates if candidate.candidate_id not in known_ids
+    )
+    note = f"recurrence_proposal_quarantined:{proposal.digest}"
+    if note not in analysis.analysis_notes:
+        analysis.analysis_notes.append(note)
+    return proposal
 
 
 def summary_return_acceptance_proof_id_from_evidence(
@@ -360,9 +476,9 @@ def build_summary_return_candidate(
         SUMMARY_RETURN_SCHEMA_VERSION,
         _analysis_key(analysis),
         str(summary_note or "structural_summary"),
-        int(candidate_index),
         guard_key,
         value_key,
+        _summary_transition_evidence_key(ret),
         effect_key,
     )
     return SummaryReturnCandidate(
@@ -600,7 +716,9 @@ def _validate_candidate(
         blockers.append("summary_return_candidate_invalid:return_width_missing")
     if _memory_read_unmodeled(candidate.memory_read_set_key):
         blockers.append("summary_effect_unmodeled:memory_read_unmodeled")
-    effect_blocker = _effect_eligibility_blocker(analysis)
+    effect_blocker = _effect_eligibility_blocker(
+        analysis, candidate.transition_evidence_key
+    )
     if effect_blocker is not None:
         blockers.append(effect_blocker)
     return tuple(dict.fromkeys(blockers))
@@ -612,6 +730,7 @@ def _check_candidate_overlaps(
     exact_returns: Sequence[ReturnInfo],
     *,
     enable_completed_recovery_proofs: bool,
+    query_receipts: Optional[List[RecurrenceSMTQueryReceipt]] = None,
 ) -> Tuple[str, ...]:
     blockers: List[str] = []
     active_preconditions = _active_preconditions(analysis)
@@ -626,6 +745,7 @@ def _check_candidate_overlaps(
                     active_preconditions,
                     analysis=analysis,
                     enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+                    query_receipts=query_receipts,
                 )
             )
     for left_index, left_candidate in enumerate(candidate_list):
@@ -637,6 +757,7 @@ def _check_candidate_overlaps(
                     active_preconditions,
                     analysis=analysis,
                     enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+                    query_receipts=query_receipts,
                 )
             )
     return tuple(dict.fromkeys(blockers))
@@ -649,6 +770,7 @@ def _check_return_overlap_value_equality(
     *,
     analysis: FunctionReturnAnalysis,
     enable_completed_recovery_proofs: bool,
+    query_receipts: Optional[List[RecurrenceSMTQueryReceipt]] = None,
 ) -> Tuple[str, ...]:
     if _return_region_summary_overlap_is_proved_by_completed_evidence(
         left,
@@ -670,7 +792,28 @@ def _check_return_overlap_value_equality(
         + list(_canonicalize_conditions_for_analysis_parameters(right.conditions or [], parameters))
         + list(_canonicalize_conditions_for_analysis_parameters(active_preconditions or [], parameters))
     )
-    overlap_unsat = _conditions_unsat(overlap_conditions)
+    comparison_id = RecurrenceDigestCodec.digest(
+        "recurrence_overlap_comparison_v1",
+        (_return_info_identity_key(left), _return_info_identity_key(right)),
+    )
+    overlap_surface = (
+        "overlap_query_surface_v1",
+        comparison_id,
+        _width_sort_identity(getattr(left, "value", None)),
+        _width_sort_identity(getattr(right, "value", None)),
+        tuple(
+            ImmutableRecurrenceCondition.from_condition(condition).stable_key()
+            for condition in _canonicalize_conditions_for_analysis_parameters(
+                active_preconditions or (), parameters
+            )
+        ),
+    )
+    overlap_unsat = _conditions_unsat(
+        overlap_conditions,
+        query_role="overlap_feasibility" if query_receipts is not None else None,
+        width_sort_precondition_key=overlap_surface,
+        query_receipts=query_receipts,
+    )
     if overlap_unsat is True:
         return ()
     if overlap_unsat is None:
@@ -678,11 +821,25 @@ def _check_return_overlap_value_equality(
     compatibility_blockers = _return_merge_compatibility_blockers(left, right)
     if compatibility_blockers:
         return compatibility_blockers
+    if query_receipts is None and _expression_key(left.value) == _expression_key(right.value):
+        return ()
+    if query_receipts is None and effect_summary._expressions_equivalent_under_conditions(
+        left.value,
+        right.value,
+        overlap_conditions,
+        getattr(analysis, "parameters", None) or (),
+    ):
+        return ()
     inequality = _value_inequality_condition(left, right)
     if inequality is None:
         return ("summary_return_overlap_unproven:value_comparison_unavailable",)
     equality_obligation = list(overlap_conditions) + [inequality]
-    equality_unsat = _conditions_unsat(equality_obligation)
+    equality_unsat = _conditions_unsat(
+        equality_obligation,
+        query_role="overlap_value_inequality" if query_receipts is not None else None,
+        width_sort_precondition_key=overlap_surface,
+        query_receipts=query_receipts,
+    )
     if equality_unsat is not True:
         return ("summary_return_overlap_unproven:value_equality_not_proved",)
     return ()
@@ -793,6 +950,7 @@ def _return_partition_covers_active_precondition(
     active_preconditions: Sequence[Condition] = (),
     *,
     parameters: Optional[Sequence[Dict[str, Any]]] = None,
+    query_receipts: Optional[List[RecurrenceSMTQueryReceipt]] = None,
 ) -> bool:
     conditions_by_return = [
         list(_canonicalize_conditions_for_analysis_parameters(ret.conditions or [], parameters))
@@ -827,7 +985,23 @@ def _return_partition_covers_active_precondition(
         if combined is None:
             return False
         miss_conditions.append(Condition(_condition_as_expression(combined), True))
-    miss_unsat = _conditions_unsat(miss_conditions)
+    coverage_surface = (
+        "coverage_query_surface_v1",
+        "active_partition",
+        tuple(_width_sort_identity(getattr(ret, "value", None)) for ret in returns or ()),
+        tuple(
+            ImmutableRecurrenceCondition.from_condition(condition).stable_key()
+            for condition in _canonicalize_conditions_for_analysis_parameters(
+                active_preconditions or (), parameters
+            )
+        ),
+    )
+    miss_unsat = _conditions_unsat(
+        miss_conditions,
+        query_role="partition_coverage_miss" if query_receipts is not None else None,
+        width_sort_precondition_key=coverage_surface,
+        query_receipts=query_receipts,
+    )
     return miss_unsat is True
 
 
@@ -1037,7 +1211,23 @@ def _accepted_candidate_return(candidate: SummaryReturnCandidate) -> ReturnInfo:
     )
 
 
-def _conditions_unsat(conditions: Sequence[Condition]) -> Optional[bool]:
+def _width_sort_identity(expression: Optional[Expression]) -> Tuple[Any, ...]:
+    immutable = ImmutableRecurrenceExpression.from_expression(expression)
+    return (
+        "width_sort_v1",
+        int(immutable.size),
+        "bitvec" if immutable.sort == "bitvector" else str(immutable.sort),
+        "neutral" if immutable.signedness == "signless" else str(immutable.signedness),
+    )
+
+
+def _conditions_unsat(
+    conditions: Sequence[Condition],
+    *,
+    query_role: Optional[str] = None,
+    width_sort_precondition_key: Tuple[Any, ...] = (),
+    query_receipts: Optional[List[RecurrenceSMTQueryReceipt]] = None,
+) -> Optional[bool]:
     condition_list = [condition for condition in conditions or () if condition is not None]
     if not condition_list:
         return False
@@ -1046,7 +1236,21 @@ def _conditions_unsat(conditions: Sequence[Condition]) -> Optional[bool]:
     except Exception:
         solver_unsat = None
     if solver_unsat is not None:
+        if query_role is not None and query_receipts is not None:
+            normalized_keys = tuple(
+                ImmutableRecurrenceCondition.from_condition(condition).stable_key()
+                for condition in condition_list
+            )
+            query_receipts.append(RecurrenceSMTQueryReceipt(
+                query_role,
+                normalized_keys,
+                width_sort_precondition_key,
+                "z3",
+                "unsat" if solver_unsat else "sat",
+            ))
         return bool(solver_unsat)
+    if query_role is not None:
+        return None
     if _conditions_have_direct_negated_pair(condition_list):
         return True
     try:
@@ -1132,10 +1336,11 @@ def _return_merge_compatibility_blockers(left: ReturnInfo, right: ReturnInfo) ->
     blockers: List[str] = []
     if _return_storage_width_key(left) != _return_storage_width_key(right):
         blockers.append("summary_return_overlap_unproven:return_width_mismatch")
-    left_signedness = _expression_signedness_key(getattr(left, "value", None))
-    right_signedness = _expression_signedness_key(getattr(right, "value", None))
-    if left_signedness != right_signedness:
-        blockers.append("summary_return_overlap_unproven:signedness_mismatch")
+    # Return overlap is discharged below with same-width bit-vector equality.
+    # Declared signedness does not change that equality relation; it matters
+    # only inside typed comparisons/extensions already encoded in each value.
+    # Keeping a metadata-only mismatch here prevented the actual UNSAT value
+    # proof from running for otherwise identical return bit patterns.
     if _memory_read_set_key(left) != _memory_read_set_key(right):
         blockers.append("summary_return_overlap_unproven:memory_read_model_mismatch")
     return tuple(dict.fromkeys(blockers))
@@ -1992,6 +2197,8 @@ def _transition_evidence_has_required_parts(
         analysis,
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
     ):
+        return True
+    if _linear_self_recursion_evidence_is_strong(value, analysis):
         return True
     state_transition_evidence = _unwrap_state_transition_loop_evidence(value)
     if state_transition_evidence is not None:
@@ -3097,18 +3304,99 @@ def _call_effect_key(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
     )
 
 
-def _effect_eligibility_blocker(analysis: FunctionReturnAnalysis) -> Optional[str]:
+def _effect_eligibility_blocker(
+    analysis: FunctionReturnAnalysis,
+    transition_evidence_key: Optional[Tuple[Any, ...]] = None,
+) -> Optional[str]:
     effect_summary = getattr(analysis, "effect_summary", None)
     if effect_summary is None:
         return "summary_effect_unmodeled:effect_summary_missing"
     if getattr(effect_summary, "effects", None):
         return "summary_effect_unmodeled:memory_write_effects_present"
     if getattr(effect_summary, "has_unsupported_call", False):
+        if _linear_self_recursion_evidence_is_strong(
+            transition_evidence_key, analysis
+        ):
+            return None
         return "summary_effect_unmodeled:unsupported_call_effect"
     incomplete = tuple(getattr(effect_summary, "incomplete_reasons", ()) or ())
     if incomplete:
         return "summary_effect_unmodeled:" + ",".join(str(reason) for reason in incomplete)
     return None
+
+
+def _linear_self_recursion_evidence_is_strong(
+    value: Any,
+    analysis: FunctionReturnAnalysis,
+) -> bool:
+    if not isinstance(value, tuple) or not value:
+        return False
+    if value[0] != "linear_self_recursion_transition_evidence_v1":
+        return False
+    fields = _tagged_tuple_fields(value[1:])
+    required = {
+        "function", "self_call", "counter", "step", "split_bound",
+        "base_affine", "addend_affine", "effect_profile",
+        "termination_measure", "width", "replacement_obligation",
+    }
+    if not required.issubset(fields):
+        return False
+    if fields["step"] != ("step", -1):
+        return False
+    if fields["effect_profile"] != (
+        "effect_profile", "single_direct_self_call_no_store"
+    ):
+        return False
+    if fields["termination_measure"] != (
+        "termination_measure", "signed_unit_decrement_to_bound"
+    ):
+        return False
+    if not isinstance(fields["width"][1], int) or fields["width"][1] <= 0:
+        return False
+    function_ref = getattr(analysis, "function_ref", None)
+    function_key = (
+        function_ref.stable_key()
+        if callable(getattr(function_ref, "stable_key", None))
+        else None
+    )
+    if fields["function"] != ("function", function_key):
+        return False
+    effect_summary = getattr(analysis, "effect_summary", None)
+    if effect_summary is None or tuple(getattr(effect_summary, "effects", ()) or ()):
+        return False
+    if any(
+        str(reason) not in {
+            "callee_effect_summary_missing",
+            "unsupported_call_effect",
+            "effect_call_argument_evidence_incomplete",
+        }
+        for reason in getattr(effect_summary, "incomplete_reasons", ()) or ()
+    ):
+        return False
+    sites = tuple(getattr(effect_summary, "unsupported_call_sites", ()) or ())
+    if len(sites) != 1:
+        return False
+    site = sites[0]
+    target_ref = getattr(site, "target_ref", None)
+    if not callable(getattr(target_ref, "stable_key", None)):
+        return False
+    if target_ref.stable_key() != function_key:
+        return False
+    pcode_ref = getattr(site, "pcode_op_ref", None)
+    if not callable(getattr(pcode_ref, "stable_key", None)):
+        return False
+    if fields["self_call"] != ("self_call", pcode_ref.stable_key()):
+        return False
+    evidence = tuple(
+        item
+        for item in getattr(effect_summary, "call_argument_evidence", {}).values()
+        if item is not None
+    )
+    return all(
+        callable(getattr(getattr(item, "target_ref", None), "stable_key", None))
+        and item.target_ref.stable_key() == function_key
+        for item in evidence
+    )
 
 
 def _iter_return_info_expression_nodes(ret: ReturnInfo):
@@ -3143,17 +3431,6 @@ def _return_info_contains_phi_circular(ret: ReturnInfo) -> bool:
         ):
             return True
     return False
-
-
-def _expression_signedness_key(expr: Optional[Expression]) -> Tuple[Any, ...]:
-    if expr is None:
-        return ("signedness", "unknown")
-    data_type = str(getattr(expr, "data_type", "") or "").lower()
-    if "unsigned" in data_type:
-        return ("signedness", "unsigned")
-    if data_type:
-        return ("signedness", "declared", data_type)
-    return ("signedness", "unknown")
 
 
 def _return_storage_width_key(ret: ReturnInfo) -> Tuple[Any, ...]:

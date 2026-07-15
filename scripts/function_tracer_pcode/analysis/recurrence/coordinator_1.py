@@ -747,7 +747,10 @@ def _impl__make_pcode_block_ref(self, block) -> Optional[PcodeBlockRef]:
     return PcodeBlockRef(
         block_index=block_index,
         start_address_offset=start_address_offset,
-        binary_id=getattr(self.tracer, "_function_binary_id", None),
+        binary_id=(
+            getattr(self.tracer, "_function_binary_id", None)
+            or getattr(self.tracer, "_function_program_id", None)
+        ),
         function_entry_space=getattr(self.tracer, "_function_entry_space", None),
         function_entry_offset=getattr(self.tracer, "_function_entry_offset", None),
     )

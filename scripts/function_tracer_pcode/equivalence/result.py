@@ -111,6 +111,7 @@ class EquivalenceResult:
     reason_completion_applicability_contexts: List[Dict[str, Any]] = field(default_factory=list)
     call_effect_shadow_manifest: Optional[Dict[str, Any]] = None
     call_proof_terminal_provenance: Optional[Dict[str, Any]] = None
+    recurrence_promotion_receipt: Optional[Dict[str, Any]] = None
     binary1_content_identity: Optional[Tuple[Any, ...]] = None
     binary2_content_identity: Optional[Tuple[Any, ...]] = None
     function1_identity: Optional[Tuple[Any, ...]] = None
@@ -219,6 +220,10 @@ class EquivalenceResult:
         if self.call_proof_terminal_provenance is not None:
             result["call_proof_terminal_provenance"] = dict(
                 self.call_proof_terminal_provenance
+            )
+        if self.recurrence_promotion_receipt is not None:
+            result["recurrence_promotion_receipt"] = dict(
+                self.recurrence_promotion_receipt
             )
         
         # ★ 新規追加: mips64_abi_constraints
