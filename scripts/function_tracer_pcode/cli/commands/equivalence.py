@@ -313,6 +313,12 @@ def run_equivalence_check(args):
     rewrite_direction = getattr(args, "rewrite_direction", "to_modulo")
     pairwise_timeout = getattr(args, "pairwise_timeout", 5)
     pairwise_timeout_hard = getattr(args, "pairwise_timeout_hard", 30)
+    monolithic_timeout = getattr(args, "monolithic_timeout", None)
+    if not isinstance(monolithic_timeout, int) or isinstance(monolithic_timeout, bool):
+        monolithic_timeout = None
+    monolithic_query_mode = _get_choice_arg(
+        "monolithic_query_mode", {"split", "legacy"}, "split"
+    )
     pairwise_save_unknown = getattr(args, "pairwise_save_unknown", False)
     pairwise_unknown_dir = getattr(args, "pairwise_unknown_dir", None)
     normalization_mode = _get_choice_arg("normalize_mode", {"off", "safe", "full"}, "safe")
@@ -328,6 +334,8 @@ def run_equivalence_check(args):
         strategy=strategy,
         pairwise_timeout=pairwise_timeout,
         pairwise_timeout_hard=pairwise_timeout_hard,
+        monolithic_timeout=monolithic_timeout,
+        monolithic_query_mode=monolithic_query_mode,
         pairwise_save_unknown=pairwise_save_unknown,
         pairwise_unknown_dir=pairwise_unknown_dir,
         normalization_mode=normalization_mode,

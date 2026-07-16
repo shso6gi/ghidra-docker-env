@@ -31,6 +31,10 @@ from .semantic_width import (
     align_return_value_extension_surfaces as _trusted_align_return_surfaces,
     normalize_analysis_semantic_width as _trusted_normalize_semantic_width,
 )
+from .monolithic_authority import (
+    verify_monolithic_proof_bundle as _PINNED_MONOLITHIC_PROOF_VERIFIER,
+    verify_terminal_decision_receipt as _PINNED_MONOLITHIC_TERMINAL_VERIFIER,
+)
 
 
 class CallProofDecisionMode(str, Enum):
@@ -1364,17 +1368,38 @@ class PreparedDispatchFrame:
         default_factory=dict, init=False, repr=False
     )
     cleanup_complete: bool = field(default=False, init=False)
+    production_branch_authority_lease: Any = field(default=None, repr=False, compare=False)
+    monolithic_execution_authority_lease: Any = field(default=None, init=False, repr=False, compare=False)
+    monolithic_terminal_receipt: Any = field(default=None, init=False, repr=False, compare=False)
+    monolithic_proof_bundle: Any = field(default=None, init=False, repr=False, compare=False)
+    monolithic_counterexample_safety_receipt: Any = field(
+        default=None, init=False, repr=False, compare=False
+    )
     decision_lease: CallProofDecisionLease = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self.decision_lease = _acquire_decision_lease(
-            self.comparison_session_id,
-            self.branch_id,
-            self.generation,
-            self.prepared.surface_digest,
-            self.decision_mode,
+        lease = _acquire_decision_lease(
+            self.comparison_session_id, self.branch_id, self.generation,
+            self.prepared.surface_digest, self.decision_mode,
         )
+        self.decision_lease = lease
+        try:
+            if "MONOLITHIC" in self.branch_id.upper():
+                if self.production_branch_authority_lease is None:
+                    raise RuntimeError("production_branch_authority_missing")
+                from .monolithic_authority import derive_monolithic_execution_authority
+                self.monolithic_execution_authority_lease = (
+                    derive_monolithic_execution_authority(
+                        self.production_branch_authority_lease,
+                        prepared_surface_digest=self.prepared.surface_digest,
+                        projection_id=self.projection.projection_id,
+                        dispatch_nonce=self.dispatch_nonce,
+                    )
+                )
+        except Exception:
+            _release_decision_lease(lease)
+            raise
 
     def consume(self, analysis1: Any, analysis2: Any) -> "PreparedDispatchFrame":
         with self._lock:
@@ -1400,10 +1425,8 @@ class PreparedDispatchFrame:
         with self._lock:
             if authority_token is not _BUILTIN_RECEIPT_AUTHORITY_TOKEN:
                 raise RuntimeError("comparison_receipt_untrusted_issuer")
-            if self.lifecycle_state not in {"claimed", "closed"}:
+            if self.lifecycle_state != "claimed":
                 raise RuntimeError("prepared_dispatch_context_scope_closed")
-            if self.lifecycle_state == "closed" and not self.cleanup_complete:
-                raise RuntimeError("prepared_dispatch_cleanup_incomplete")
             records = tuple(query_records)
             if not all(isinstance(item, QueryExecutionRecord) and item.validate() for item in records):
                 raise RuntimeError("comparison_receipt_query_evidence_invalid")
@@ -1552,6 +1575,8 @@ class PreparedDispatchFrame:
         """No-fail, idempotent capability revocation."""
         with self._lock:
             self.lifecycle_state = "closed"
+        from .monolithic_authority import revoke_monolithic_execution_authority
+        revoke_monolithic_execution_authority(self.monolithic_execution_authority_lease)
         _release_decision_lease(self.decision_lease)
 
 
@@ -1591,6 +1616,20 @@ def current_dispatch_depth() -> int:
 
 _BUILTIN_RECEIPT_AUTHORITY_TOKEN = object()
 _TRUSTED_BUILTIN_EXECUTOR_CODES: Dict[str, Any] = {}
+def verify_monolithic_terminal_receipt(frame: PreparedDispatchFrame) -> bool:
+    terminal = frame.monolithic_terminal_receipt
+    return bool(
+        terminal is not None
+        and _PINNED_MONOLITHIC_TERMINAL_VERIFIER(terminal)
+    )
+
+
+def verify_monolithic_proof_receipt(frame: PreparedDispatchFrame) -> bool:
+    bundle = frame.monolithic_proof_bundle
+    return bool(
+        bundle is not None
+        and _PINNED_MONOLITHIC_PROOF_VERIFIER(bundle)
+    )
 
 
 def register_builtin_receipt_executor(role: str, executor: Any) -> None:
@@ -1691,6 +1730,67 @@ def finalize_pairwise_comparison_receipt(
         )
     if frame.receipt is None or not frame.receipt.is_trusted_for(frame):
         raise RuntimeError("pairwise_receipt_final_runtime_validation_failed")
+    return frame.receipt
+
+
+def finalize_monolithic_comparison_receipt(
+    frame: PreparedDispatchFrame,
+) -> ComparisonExecutionReceipt:
+    """Validate a receipt sealed by the strategy before frame close.
+
+    This function intentionally has no issuance path.  Post-close issuance was
+    the authority gap fixed by the monolithic split cutover.
+    """
+
+    if frame.lifecycle_state != "closed" or not frame.cleanup_complete:
+        raise RuntimeError("monolithic_receipt_dispatch_cleanup_incomplete")
+    if frame.receipt is None or not frame.receipt.is_trusted_for(frame):
+        raise RuntimeError("monolithic_receipt_final_validation_failed")
+    terminal = frame.monolithic_terminal_receipt
+    if terminal is None or not verify_monolithic_terminal_receipt(frame):
+        raise RuntimeError("monolithic_terminal_receipt_invalid")
+    if terminal.comparison_receipt_id != frame.receipt.receipt_id:
+        raise RuntimeError("monolithic_terminal_comparison_receipt_mismatch")
+    if (
+        frame.monolithic_proof_bundle is not None
+        and terminal.outcome_kind in {"eq_closure", "decisive_counterexample"}
+        and not verify_monolithic_proof_receipt(frame)
+    ):
+        raise RuntimeError("monolithic_proof_bundle_invalid")
+    return frame.receipt
+
+
+def issue_inconclusive_monolithic_receipts(
+    frame: PreparedDispatchFrame,
+    frozen_surface: Any,
+    canonical_census: Any,
+    reason: str,
+) -> ComparisonExecutionReceipt:
+    """Seal diagnostic-only authority while the frame is active.
+
+    This path cannot authorize EQ or NOT_EQ and is therefore safe for
+    fail-closed exception/unsupported-surface exits.
+    """
+    if frame.lifecycle_state != "claimed":
+        raise RuntimeError("prepared_dispatch_context_scope_closed")
+    if frame.receipt is None:
+        frame._complete_from_builtin_executor(
+            (), (), {"total": 0, "unsat": 0, "sat": 0, "unknown": 1, "error": 0},
+            authority_token=_BUILTIN_RECEIPT_AUTHORITY_TOKEN,
+        )
+    from .monolithic_authority import reconstruct_fallback_census, seal_terminal_decision
+    census = canonical_census or reconstruct_fallback_census(frozen_surface)
+    reason_digest = hashlib.sha256(str(reason).encode("utf-8")).hexdigest()
+    frame.monolithic_terminal_receipt = seal_terminal_decision(
+        frame.production_branch_authority_lease,
+        frame.monolithic_execution_authority_lease,
+        frozen_surface,
+        census,
+        outcome_kind="inconclusive_diagnostic",
+        comparison_receipt_id=frame.receipt.receipt_id,
+        region_receipt_digests=(),
+        diagnostic_reason_digests=(reason_digest,),
+    )
     return frame.receipt
 
 

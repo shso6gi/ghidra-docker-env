@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Query execution helpers for PairwiseStrategy."""
 import copy
+import contextvars
 import hashlib
 import inspect
 from pathlib import Path
@@ -31,8 +32,27 @@ from ..obligations.guard_overlap import (
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
 
 
+def _build_region_executor_scope():
+    current = contextvars.ContextVar("monolithic_region_executor", default=None)
+
+    def run(executor, callback):
+        token = current.set(executor)
+        try:
+            return callback()
+        finally:
+            current.reset(token)
+
+    def get():
+        return current.get()
+
+    return run, get
+
+
+run_with_region_executor, _current_region_executor = _build_region_executor_scope()
+
+
 def register_canonical_guard_strategy_type(strategy_type: type) -> None:
-    """Register the production PairwiseStrategy exact type once."""
+    """Register a production strategy type allowed to execute guard queries."""
 
     global _bind_canonical_guard_strategy_type
     frame = inspect.currentframe()
@@ -43,7 +63,7 @@ def register_canonical_guard_strategy_type(strategy_type: type) -> None:
             caller is None
             or caller.f_code.co_name != "<module>"
             or caller_path is None
-            or caller_path.name != "pairwise.py"
+            or caller_path.name not in {"pairwise.py", "monolithic.py"}
             or caller_path.parent.name != "strategies"
         ):
             raise RuntimeError("canonical guard strategy registrar is not trusted")
@@ -51,10 +71,7 @@ def register_canonical_guard_strategy_type(strategy_type: type) -> None:
         del caller
         del frame
     binder = _bind_canonical_guard_strategy_type
-    if binder is None:
-        raise RuntimeError("canonical guard strategy already registered")
     binder(strategy_type)
-    _bind_canonical_guard_strategy_type = None
 
 
 def _is_void_return_placeholder(expr: Any) -> bool:
@@ -172,7 +189,11 @@ def _build_return_width_abi_guard_query(
 
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
-    timeout = strategy.per_query_timeout_hard if use_hard_timeout else strategy.per_query_timeout
+    timeout = (
+        strategy.per_query_timeout_hard
+        if use_hard_timeout
+        else getattr(strategy, "_active_query_timeout", strategy.per_query_timeout)
+    )
     query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
     runner = strategy.solver_runner
     configured_solvers = getattr(runner, "solvers", None)
@@ -213,7 +234,12 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
                     stats.get("exact_query_attempt_cache_hits", 0) or 0
                 ) + 1
             return result
-    parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    shared_region_executor = _current_region_executor()
+    parallel_result = (
+        shared_region_executor(query, timeout)
+        if callable(shared_region_executor)
+        else _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    )
     semantic = getattr(parallel_result, "is_equivalent", None)
     if semantic not in {True, False, None}:
         semantic = None
@@ -269,17 +295,14 @@ def _build_canonical_guard_query_executor(solver: Any):
     trusted_strategy_types: list[type] = []
 
     def bind_strategy_type(strategy_type: type) -> None:
-        if trusted_strategy_types:
-            raise RuntimeError("canonical guard strategy already bound")
+        if strategy_type in trusted_strategy_types:
+            return
         trusted_strategy_types.append(strategy_type)
 
     def execute(strategy, requirement, query: str, pair_id: str):
-        trusted_strategy_type = (
-            trusted_strategy_types[0] if trusted_strategy_types else None
-        )
-        if (
-            trusted_strategy_type is None
-            or trusted_strategy_type not in type(strategy).__mro__
+        if not any(
+            trusted_type in type(strategy).__mro__
+            for trusted_type in trusted_strategy_types
         ):
             raise RuntimeError("canonical guard strategy is not trusted")
         runner = getattr(strategy, "solver_runner", None)
@@ -858,6 +881,15 @@ def count_counterexample_model_assertions(
     return len(_build_model_assertions(base_ctx, counterexample_raw))
 
 
+def build_counterexample_model_assertions(
+    base_ctx: Dict[str, Any],
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> Tuple[str, ...]:
+    """Public structured replay seam shared by pairwise and monolithic."""
+
+    return tuple(_build_model_assertions(base_ctx, counterexample_raw))
+
+
 def _validate_counterexample_model(
     strategy,
     base_ctx: Dict[str, Any],
@@ -1163,6 +1195,11 @@ def _check_same_side_case_equality_under_model(
 def _run_validation_query(strategy, query: str, label: str) -> Optional[bool]:
     timeout = min(getattr(strategy, "per_query_timeout", 5), 5)
     parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    replay_collector = getattr(
+        strategy, "_monolithic_replay_execution_collector", None
+    )
+    if callable(replay_collector):
+        replay_collector(query, label, parallel_result)
 
     _log_solver_errors(strategy, query, parallel_result.results)
     if parallel_result.is_equivalent is True:

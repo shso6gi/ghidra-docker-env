@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
 from .model import ActivationState, FunctionProofOutcome
@@ -133,42 +135,75 @@ def run_obligation_branch_plan(
         checker._debug_print("-" * 60)
 
         def execute_branch():
-            if spec.strategy == "abstract_pairwise":
-                return checker._run_recursive_abstraction_stage(
-                    analysis1, analysis2, binary1_name, binary2_name, save_formula,
-                    type_fix_result, retry_count, original_signature1, original_signature2,
-                )
-            strategies = {
-                "pairwise": checker.pairwise_strategy,
-                "loop_template_pairwise": checker.loop_template_strategy,
-                "monolithic": checker.monolithic_strategy,
-            }
-            if spec.strategy not in strategies:
-                raise ValueError(f"Unknown strategy: {spec.strategy}")
+            from ..monolithic_authority import (
+                issue_production_branch_authority,
+                revoke_production_branch_authority,
+            )
+            session_id = uuid4().hex
+            generation = int(getattr(checker, "_call_proof_generation", 0) or 0) + 1
+            view_digest = hashlib.sha256(repr((
+                runtime.current_view.view_id, runtime.premise_digest,
+            )).encode("utf-8")).hexdigest()
+            branch_lease = issue_production_branch_authority(
+                session_id, branch_id, generation, view_digest,
+            )
+            previous_lease = getattr(checker, "_active_production_branch_authority_lease", None)
+            previous_session = getattr(checker, "_active_comparison_session_id", None)
+            previous_generation = getattr(checker, "_active_comparison_generation", None)
+            checker._active_production_branch_authority_lease = branch_lease
+            checker._active_comparison_session_id = session_id
+            checker._active_comparison_generation = generation
             try:
-                strategies[spec.strategy]._obligation_runtime_session = runtime
-            except (AttributeError, TypeError):
-                # Characterization tests may use immutable opaque sentinels.
-                # Real strategy instances always accept the runtime binding.
-                pass
-            previous_branch = getattr(checker, "_active_call_proof_branch_id", None)
-            checker._active_call_proof_branch_id = branch_id
-            try:
-                return checker.check(
-                    analysis1, analysis2, binary1_name, binary2_name, save_formula,
-                    type_fix_result=type_fix_result, retry_count=retry_count,
-                    original_signature1=original_signature1,
-                    original_signature2=original_signature2,
-                    force_strategy=strategies[spec.strategy],
-                )
+                if spec.strategy == "abstract_pairwise":
+                    return checker._run_recursive_abstraction_stage(
+                        analysis1, analysis2, binary1_name, binary2_name, save_formula,
+                        type_fix_result, retry_count, original_signature1, original_signature2,
+                    )
+                strategies = {
+                    "pairwise": checker.pairwise_strategy,
+                    "loop_template_pairwise": checker.loop_template_strategy,
+                    "monolithic": checker.monolithic_strategy,
+                }
+                if spec.strategy not in strategies:
+                    raise ValueError(f"Unknown strategy: {spec.strategy}")
+                try:
+                    strategies[spec.strategy]._obligation_runtime_session = runtime
+                except (AttributeError, TypeError):
+                    pass
+                previous_branch = getattr(checker, "_active_call_proof_branch_id", None)
+                checker._active_call_proof_branch_id = branch_id
+                try:
+                    return checker.check(
+                        analysis1, analysis2, binary1_name, binary2_name, save_formula,
+                        type_fix_result=type_fix_result, retry_count=retry_count,
+                        original_signature1=original_signature1,
+                        original_signature2=original_signature2,
+                        force_strategy=strategies[spec.strategy],
+                    )
+                finally:
+                    if previous_branch is None:
+                        try:
+                            del checker._active_call_proof_branch_id
+                        except AttributeError:
+                            pass
+                    else:
+                        checker._active_call_proof_branch_id = previous_branch
             finally:
-                if previous_branch is None:
-                    try:
-                        del checker._active_call_proof_branch_id
-                    except AttributeError:
-                        pass
+                revoke_production_branch_authority(branch_lease)
+                if previous_lease is None:
+                    for name in (
+                        "_active_production_branch_authority_lease",
+                        "_active_comparison_session_id",
+                        "_active_comparison_generation",
+                    ):
+                        try:
+                            delattr(checker, name)
+                        except AttributeError:
+                            pass
                 else:
-                    checker._active_call_proof_branch_id = previous_branch
+                    checker._active_production_branch_authority_lease = previous_lease
+                    checker._active_comparison_session_id = previous_session
+                    checker._active_comparison_generation = previous_generation
 
         active_strategy = (
             checker.pairwise_strategy
@@ -317,9 +352,33 @@ def run_obligation_branch_plan(
             checker._merge_completed_recovery_proofs_from_result(
                 analysis1, analysis2, result
             )
+        pre_aggregation_outcome = result.is_equivalent
         DecisionAggregator.apply(result, runtime)
+        post_aggregation_outcome = result.is_equivalent
         dispatch_frame = getattr(result, "_prepared_dispatch_frame", None)
         strategy_result = getattr(result, "_strategy_result", None)
+        if (
+            strategy_result is not None
+            and post_aggregation_outcome != pre_aggregation_outcome
+            and post_aggregation_outcome != strategy_result.is_equivalent
+        ):
+            from ..unknown_reason import make_unknown_reason
+
+            mismatch_reason = make_unknown_reason(
+                "equivalence_blocking_unsafety",
+                stage="DECISION_AGGREGATION",
+                evidence_refs=("decision_aggregator_terminal_receipt_mismatch",),
+                detail=(
+                    "Decision aggregation changed the terminal outcome after query "
+                    "evidence was prepared; a new generation is required."
+                ),
+            )
+            result.is_equivalent = None
+            strategy_result.is_equivalent = None
+            result.unknown_reasons = [*list(result.unknown_reasons or ()), mismatch_reason]
+            strategy_result.unknown_reasons = [
+                *list(strategy_result.unknown_reasons or ()), mismatch_reason
+            ]
         if dispatch_frame is not None and strategy_result is not None:
             if (
                 dispatch_frame.pair_disposition_ledger is not None
@@ -349,6 +408,17 @@ def run_obligation_branch_plan(
                     # The final gate below converts the missing receipt into a
                     # typed UNKNOWN blocker; it is never surfaced as ERROR.
                     strategy_result.comparison_execution_receipt = None
+            elif dispatch_frame.monolithic_terminal_receipt is not None:
+                try:
+                    from ..call_effect_preflight import (
+                        finalize_monolithic_comparison_receipt,
+                    )
+
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_monolithic_comparison_receipt(dispatch_frame)
+                    )
+                except RuntimeError:
+                    strategy_result.comparison_execution_receipt = None
             checker._apply_preflight_final_gate(
                 strategy_result,
                 dispatch_frame,
@@ -364,6 +434,25 @@ def run_obligation_branch_plan(
                 )
                 provenance["comparison_receipt_id"] = (
                     receipt.receipt_id if trusted else None
+                )
+                terminal_receipt = dispatch_frame.monolithic_terminal_receipt
+                provenance["monolithic_terminal_receipt"] = (
+                    {
+                        "receipt_digest": terminal_receipt.receipt_digest,
+                        "outcome_kind": terminal_receipt.outcome_kind,
+                        "parent_lease_digest": terminal_receipt.parent_lease_digest,
+                        "execution_lease_digest": terminal_receipt.execution_lease_digest,
+                        "frozen_surface_digest": terminal_receipt.frozen_surface_digest,
+                        "census_digest": terminal_receipt.census_digest,
+                        "sat_region_id": terminal_receipt.sat_region_id,
+                        "model_digest": terminal_receipt.model_digest,
+                        "fixed_model_assertion_digest": terminal_receipt.fixed_model_assertion_digest,
+                        "legacy_replay_receipt_digest": terminal_receipt.legacy_replay_receipt_digest,
+                        "counterexample_safety_receipt_digest": terminal_receipt.counterexample_safety_receipt_digest,
+                        "gate_reference_digests": list(terminal_receipt.gate_reference_digests),
+                        "validated": terminal_receipt.validates(),
+                    }
+                    if terminal_receipt is not None else None
                 )
                 provenance["query_execution_receipts"] = [
                     {
@@ -455,5 +544,46 @@ def run_obligation_branch_plan(
         controller.policy_version, tuple(records), terminal
     )
     if last_result is None:
-        raise RuntimeError("No applicable obligation branch produced a result")
+        from ...smt import ParallelResult
+        from ..result import EquivalenceResult
+        from ..unknown_reason import make_unknown_reason
+
+        blockers = tuple(dict.fromkeys(
+            str(item)
+            for analysis in (analysis1, analysis2)
+            for item in (
+                analysis.get_equivalence_blocking_unsafety_reasons()
+                if callable(getattr(
+                    analysis, "get_equivalence_blocking_unsafety_reasons", None
+                ))
+                else ()
+            )
+        ))
+        return EquivalenceResult(
+            is_equivalent=None,
+            function1_name=analysis1.function_name,
+            function2_name=analysis2.function_name,
+            binary1_name=binary1_name,
+            binary2_name=binary2_name,
+            solver_results=ParallelResult(results=[]),
+            type_fix_result=type_fix_result,
+            retry_count=retry_count,
+            function1_signature=original_signature1,
+            function2_signature=original_signature2,
+            stage_path=[],
+            unknown_reasons=[
+                make_unknown_reason(
+                    "equivalence_blocking_unsafety",
+                    stage="S_MONOLITHIC_FALLBACK",
+                    evidence_refs=(
+                        "monolithic_branch_inapplicable",
+                        *(blockers or ("incomplete_control_flow_summary",)),
+                    ),
+                    detail=(
+                        "Monolithic comparison was inapplicable because the "
+                        "control-flow summary is incomplete."
+                    ),
+                )
+            ],
+        )
     return last_result

@@ -222,6 +222,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pairwise戦略の難しいクエリの再試行タイムアウト（秒）デフォルト: 30",
     )
     parser.add_argument(
+        "--monolithic-timeout",
+        type=int,
+        default=None,
+        help="Monolithic分割全体の専用タイムアウト（秒）。未指定時は--equiv-timeout",
+    )
+    parser.add_argument(
+        "--monolithic-query-mode",
+        choices=["split", "legacy"],
+        default="split",
+        help="Monolithic query encoding。split は region 分割、legacy は検証用の単一 query",
+    )
+    parser.add_argument(
         "--pairwise-save-unknown",
         action="store_true",
         help="Pairwise戦略でUNKNOWNになったクエリを/tmpに保存する",

@@ -6,7 +6,7 @@ import os
 from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
+from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo, StorageInfo
 from ...model.render_smt import expression_smt_bit_width
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
@@ -145,6 +145,8 @@ def build_canonical_return_observation_query(
 def extract_return_cases(
     analysis: FunctionReturnAnalysis,
     normalization_settings: NormalizationSettings | None = None,
+    *,
+    apply_effective_partition: bool = True,
 ) -> List[ReturnCase]:
     """FunctionReturnAnalysis から ReturnCase を抽出"""
     cases = []
@@ -191,10 +193,81 @@ def extract_return_cases(
         merged_cases[key] = case
         cases.append(case)
 
-    return _build_effective_return_case_partition(
-        cases,
-        return_size=get_return_size(analysis),
+    if not apply_effective_partition:
+        return cases
+    return _build_effective_return_case_partition(cases, return_size=get_return_size(analysis))
+
+
+def return_cases_require_relation(cases: List[ReturnCase]) -> bool:
+    """Return whether overlapping values cannot use deterministic ordered ITEs.
+
+    This is the object-level counterpart of the formula renderer's relation
+    choice.  The monolithic region planner calls it before any SMT string is
+    rendered and falls back to the legacy whole query when the choice is
+    ambiguous.
+    """
+
+    for index, left in enumerate(cases):
+        left_value = _build_return_case_key(left)[1]
+        left_set = ConditionSimplifier.build_constraint_set(left.conditions or [])
+        for right in cases[index + 1 :]:
+            if left_value == _build_return_case_key(right)[1]:
+                continue
+            combined = list(left.conditions or []) + list(right.conditions or [])
+            if ConditionSimplifier.object_centric_is_contradiction(combined):
+                continue
+            right_set = ConditionSimplifier.build_constraint_set(right.conditions or [])
+            left_implies_right = left_set.implies_all(right.conditions or [])
+            right_implies_left = right_set.implies_all(left.conditions or [])
+            if left_implies_right != right_implies_left:
+                continue
+            return True
+    return False
+
+
+def append_ordered_ite_default_case(
+    analysis: FunctionReturnAnalysis,
+    cases: List[ReturnCase],
+) -> List[ReturnCase]:
+    """Append the renderer's zero-valued default region, when reachable.
+
+    The default guard is built from structured conditions as
+    ``not(C0) and ... and not(Cn)``.  It is never recovered by parsing the
+    rendered ITE expression.
+    """
+
+    default_conditions: List[Condition] = []
+    for case in cases:
+        combined = Condition.combine_and(list(case.conditions or []))
+        if combined is None:
+            return list(cases)
+        default_conditions.append(combined.negate())
+    if _condition_region_is_unsat(default_conditions):
+        return list(cases)
+    return_size = get_return_size(analysis)
+    zero = Expression.constant(0, size=max(1, (int(return_size) + 7) // 8))
+    default_info = ReturnInfo(
+        address="<ordered-ite-default>",
+        value=zero,
+        conditions=list(default_conditions),
+        return_kind="ordered_ite_default",
     )
+    default_case = ReturnCase(
+        index=-1,
+        conditions=list(default_conditions),
+        value_expr=zero,
+        normalized_value_expr=zero,
+        return_info=default_info,
+        return_type=analysis.get_comparison_type_name(),
+        return_type_obj=analysis.get_comparison_type_obj(),
+        source_indices=[-1],
+        parameters=list(analysis.parameters or []),
+        effect_summary=getattr(analysis, "effect_summary", None),
+        comparison_surface=analysis.get_comparison_surface(),
+        summary_conditions=list(default_conditions),
+        program_is_big_endian=getattr(analysis, "program_is_big_endian", None),
+    )
+    return [*cases, default_case]
 
 
 def _build_condition_rewriter(analysis: FunctionReturnAnalysis):

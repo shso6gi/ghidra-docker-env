@@ -356,9 +356,8 @@ def test_receipt_merges_guard_closure_binding_consumption_and_exclusion():
     }
     token = push_prepared_dispatch_frame(frame)
     consume_prepared_dispatch_frame(source.analysis1, source.analysis2)
-    close_prepared_dispatch_frame(frame, token)
-
     receipt = finalize_pairwise_comparison_receipt(frame)
+    close_prepared_dispatch_frame(frame, token)
 
     assert receipt.required_projection_binding_ids == (
         "guard-binding", "value-binding"
@@ -453,9 +452,8 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
     }
     token = push_prepared_dispatch_frame(frame)
     consume_prepared_dispatch_frame(source.analysis1, source.analysis2)
-    close_prepared_dispatch_frame(frame, token)
-
     receipt = finalize_pairwise_comparison_receipt(frame)
+    close_prepared_dispatch_frame(frame, token)
 
     assert frame.pair_disposition_ledger is successor
     assert runtime.pair_ledger_manager.current is successor

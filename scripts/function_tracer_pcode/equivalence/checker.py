@@ -4,6 +4,7 @@
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass, replace
+import hashlib
 import time
 from uuid import uuid4
 
@@ -53,6 +54,8 @@ from .call_effect_preflight import (
     prepare_solver_surface,
     push_prepared_dispatch_frame,
     validate_call_resolution_projection,
+    verify_monolithic_terminal_receipt,
+    verify_monolithic_proof_receipt,
 )
 from .recurrence_promotion import (
     PairPromotionState,
@@ -103,6 +106,8 @@ class EquivalenceChecker:
         strategy: str = "pairwise",
         pairwise_timeout: int = 5,
         pairwise_timeout_hard: int = 30,
+        monolithic_timeout: Optional[int] = None,
+        monolithic_query_mode: str = "split",
         pairwise_save_unknown: bool = False,
         pairwise_unknown_dir: Optional[str] = None,
         normalization_mode: str = "safe",
@@ -175,6 +180,20 @@ class EquivalenceChecker:
             debug=debug,
             normalization_settings=self.normalization_settings,
             enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        )
+        self.monolithic_strategy.total_timeout = max(
+            1, int(timeout if monolithic_timeout is None else monolithic_timeout)
+        )
+        if monolithic_query_mode not in {"split", "legacy"}:
+            raise ValueError("invalid_monolithic_query_mode")
+        self.monolithic_strategy.query_mode = monolithic_query_mode
+        self.monolithic_strategy.per_query_timeout = min(
+            self.monolithic_strategy.per_query_timeout,
+            self.monolithic_strategy.total_timeout,
+        )
+        self.monolithic_strategy.per_query_timeout_hard = max(
+            self.monolithic_strategy.per_query_timeout,
+            self.monolithic_strategy.per_query_timeout_hard,
         )
         self.loop_template_strategy = LoopTemplatePairwiseStrategy(
             self.formula_builder,
@@ -1026,8 +1045,14 @@ class EquivalenceChecker:
             replan_plan = getattr(self, "_active_pair_replan_plan", None)
             if replan_plan is None:
                 self._call_proof_generation += 1
-                generation = self._call_proof_generation
-                comparison_session_id = uuid4().hex
+                generation = int(
+                    getattr(self, "_active_comparison_generation", None)
+                    or self._call_proof_generation
+                )
+                comparison_session_id = str(
+                    getattr(self, "_active_comparison_session_id", None)
+                    or uuid4().hex
+                )
                 branch_id = str(
                     getattr(self, "_active_call_proof_branch_id", None)
                     or strategy.__class__.__name__
@@ -1040,6 +1065,7 @@ class EquivalenceChecker:
                 branch_id = str(replan_plan.branch_id)
             decision_mode = self.call_proof_decision_mode
             dispatch_frame = None
+            locally_issued_branch_authority = None
             cleanup_complete = True
             preflight_gate_delta_diagnostic = None
 
@@ -1072,19 +1098,46 @@ class EquivalenceChecker:
                         root_blockers=("completed_recovery_proofs_disabled",),
                         covered_blockers=(),
                     )
-                dispatch_frame = PreparedDispatchFrame(
-                    comparison_session_id=comparison_session_id,
-                    branch_id=branch_id,
-                    generation=generation,
-                    source=source_pair,
-                    prepared=prepared_pair,
-                    projection=projection,
-                    preflight_manifest=call_effect_shadow_manifest,
-                    trusted_proof_artifacts=tuple(
-                        self._last_internal_call_effect_artifacts
-                    ),
-                    decision_mode=decision_mode,
+                branch_authority = getattr(
+                    self, "_active_production_branch_authority_lease", None
                 )
+                if (
+                    isinstance(strategy, MonolithicStrategy)
+                    and branch_authority is None
+                ):
+                    # Direct checker calls are a compatibility execution domain;
+                    # production stage execution supplies the parent lease.
+                    from .monolithic_authority import issue_production_branch_authority
+                    locally_issued_branch_authority = issue_production_branch_authority(
+                        comparison_session_id,
+                        branch_id,
+                        generation,
+                        "direct_checker_compatibility_view",
+                    )
+                    branch_authority = locally_issued_branch_authority
+                try:
+                    dispatch_frame = PreparedDispatchFrame(
+                        comparison_session_id=comparison_session_id,
+                        branch_id=branch_id,
+                        generation=generation,
+                        source=source_pair,
+                        prepared=prepared_pair,
+                        projection=projection,
+                        preflight_manifest=call_effect_shadow_manifest,
+                        trusted_proof_artifacts=tuple(
+                            self._last_internal_call_effect_artifacts
+                        ),
+                        decision_mode=decision_mode,
+                        production_branch_authority_lease=branch_authority,
+                    )
+                except Exception:
+                    if locally_issued_branch_authority is not None:
+                        from .monolithic_authority import revoke_production_branch_authority
+                        revoke_production_branch_authority(
+                            locally_issued_branch_authority
+                        )
+                        locally_issued_branch_authority = None
+                    raise
                 obligation_runtime = getattr(
                     self, "_obligation_runtime_session", None
                 )
@@ -1127,6 +1180,14 @@ class EquivalenceChecker:
                     try:
                         token = push_prepared_dispatch_frame(dispatch_frame)
                         strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                        if (
+                            isinstance(strategy, PairwiseStrategy)
+                            and dispatch_frame.pair_disposition_ledger is not None
+                            and dispatch_frame.receipt is None
+                        ):
+                            strategy_result.comparison_execution_receipt = (
+                                finalize_pairwise_comparison_receipt(dispatch_frame)
+                            )
                     finally:
                         if token is None:
                             dispatch_frame.close()
@@ -1136,6 +1197,11 @@ class EquivalenceChecker:
                             cleanup_complete = close_prepared_dispatch_frame(
                                 dispatch_frame,
                                 token,
+                            )
+                        if locally_issued_branch_authority is not None:
+                            from .monolithic_authority import revoke_production_branch_authority
+                            revoke_production_branch_authority(
+                                locally_issued_branch_authority
                             )
                 else:
                     # Non-built-in compatibility branches cannot consume a
@@ -1155,6 +1221,13 @@ class EquivalenceChecker:
                 ):
                     strategy_result.comparison_execution_receipt = (
                         finalize_pairwise_comparison_receipt(dispatch_frame)
+                    )
+                elif isinstance(strategy, MonolithicStrategy) and not stage_runner_owns_finalization:
+                    from .call_effect_preflight import (
+                        finalize_monolithic_comparison_receipt,
+                    )
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_monolithic_comparison_receipt(dispatch_frame)
                     )
                 if not stage_runner_owns_finalization:
                     self._apply_preflight_final_gate(
@@ -1368,6 +1441,33 @@ class EquivalenceChecker:
                             if dispatch_frame is not None and dispatch_frame.receipt is not None
                             else None
                         ),
+                        "monolithic_terminal_receipt": (
+                            {
+                                "receipt_digest": dispatch_frame.monolithic_terminal_receipt.receipt_digest,
+                                "outcome_kind": dispatch_frame.monolithic_terminal_receipt.outcome_kind,
+                                "parent_lease_digest": dispatch_frame.monolithic_terminal_receipt.parent_lease_digest,
+                                "execution_lease_digest": dispatch_frame.monolithic_terminal_receipt.execution_lease_digest,
+                                "frozen_surface_digest": dispatch_frame.monolithic_terminal_receipt.frozen_surface_digest,
+                                "census_digest": dispatch_frame.monolithic_terminal_receipt.census_digest,
+                                "sat_region_id": dispatch_frame.monolithic_terminal_receipt.sat_region_id,
+                                "model_digest": dispatch_frame.monolithic_terminal_receipt.model_digest,
+                                "fixed_model_assertion_digest": dispatch_frame.monolithic_terminal_receipt.fixed_model_assertion_digest,
+                                "legacy_replay_receipt_digest": dispatch_frame.monolithic_terminal_receipt.legacy_replay_receipt_digest,
+                                "counterexample_safety_receipt_digest": dispatch_frame.monolithic_terminal_receipt.counterexample_safety_receipt_digest,
+                                "proof_bundle_digest": dispatch_frame.monolithic_terminal_receipt.proof_bundle_digest,
+                                "typed_global_replay_receipt_count": len(tuple(
+                                    getattr(
+                                        dispatch_frame.monolithic_terminal_receipt.counterexample_safety_receipt,
+                                        "global_replay_receipts", (),
+                                    ) or ()
+                                )),
+                                "gate_reference_digests": list(dispatch_frame.monolithic_terminal_receipt.gate_reference_digests),
+                                "validated": dispatch_frame.monolithic_terminal_receipt.validates(),
+                            }
+                            if dispatch_frame is not None
+                            and dispatch_frame.monolithic_terminal_receipt is not None
+                            else None
+                        ),
                         "query_execution_receipts": [
                             {
                                 "query_label": record.query_label,
@@ -1563,8 +1663,8 @@ class EquivalenceChecker:
                 known_targets.add(target)
         return reasons
 
-    @staticmethod
     def _apply_preflight_final_gate(
+        self,
         strategy_result: Any,
         frame: PreparedDispatchFrame,
         *,
@@ -1615,7 +1715,7 @@ class EquivalenceChecker:
             and receipt_counts.get("error")
             == int(getattr(strategy_result, "error_pairs", 0) or 0)
         )
-        monolithic_complete = (
+        legacy_monolithic_complete = (
             len(receipt_queries) == 1
             and receipt_queries[0].query_label == "monolithic"
             and receipt_queries[0].disposition == "unsat"
@@ -1631,6 +1731,69 @@ class EquivalenceChecker:
             )
             and getattr(getattr(strategy_result, "solver_results", None), "is_equivalent", None)
             is True
+        )
+        terminal_receipt = frame.monolithic_terminal_receipt
+        terminal_region_digests = tuple(
+            hashlib.sha256(repr((
+                record.query_label,
+                record.premise_digest,
+                record.formula_digest,
+                record.disposition,
+            )).encode("utf-8")).hexdigest()
+            for record in receipt_queries
+        )
+        terminal_receipt_valid = bool(
+            terminal_receipt is not None
+            and verify_monolithic_terminal_receipt(frame)
+            and receipt is not None
+            and terminal_receipt.comparison_receipt_id == receipt.receipt_id
+            and terminal_receipt.region_receipt_digests == terminal_region_digests
+        )
+        split_region_complete = bool(
+            terminal_receipt_valid
+            and verify_monolithic_proof_receipt(frame)
+            and frame.monolithic_proof_bundle.outcome_kind == "eq_closure"
+            and terminal_receipt.outcome_kind == "eq_closure"
+            and receipt_counts.get("total", 0) > 0
+            and receipt_counts.get("unsat") == receipt_counts.get("total")
+            and receipt_counts.get("sat") == 0
+            and receipt_counts.get("unknown") == 0
+            and receipt_counts.get("error") == 0
+            and getattr(getattr(strategy_result, "solver_results", None), "is_equivalent", None)
+            is True
+        )
+        monolithic_complete = (
+            terminal_receipt_valid
+            and terminal_receipt.outcome_kind == "eq_closure"
+            and (legacy_monolithic_complete or split_region_complete)
+        )
+        decisive_not_eq_receipt = bool(
+            getattr(strategy_result, "is_equivalent", None) is False
+            and (
+                (
+                    getattr(receipt, "branch_payload_kind", None) == "pairwise_ledger"
+                    and int(receipt_counts.get("sat", 0) or 0) > 0
+                )
+                or (
+                    terminal_receipt_valid
+                    and verify_monolithic_proof_receipt(frame)
+                    and frame.monolithic_proof_bundle.outcome_kind
+                    == "decisive_counterexample"
+                    and terminal_receipt.outcome_kind == "decisive_counterexample"
+                    and (
+                        (
+                            len(receipt_queries) == 1
+                            and receipt_queries[0].query_label == "monolithic"
+                            and receipt_queries[0].disposition == "sat"
+                        )
+                        or any(
+                            record.proof_kind == "monolithic_global_counterexample_replay"
+                            and record.disposition == "sat"
+                            for record in receipt_queries
+                        )
+                    )
+                )
+            )
         )
         ordinary_complete = (
             pairwise_complete
@@ -1681,6 +1844,20 @@ class EquivalenceChecker:
         )
 
         blockers = []
+        expected_terminal_kind = (
+            "eq_closure" if getattr(strategy_result, "is_equivalent", None) is True
+            else "decisive_counterexample"
+            if getattr(strategy_result, "is_equivalent", None) is False
+            else "inconclusive_diagnostic"
+        )
+        if (
+            terminal_receipt is not None
+            and (
+                not terminal_receipt_valid
+                or terminal_receipt.outcome_kind != expected_terminal_kind
+            )
+        ):
+            blockers.append("monolithic_terminal_outcome_mismatch")
         if not cleanup_complete or not frame.cleanup_complete:
             blockers.append("dispatch_cleanup_incomplete")
         if not source_valid:
@@ -1691,7 +1868,17 @@ class EquivalenceChecker:
             blockers.extend(frame.projection.root_blockers or ("call_effect_preflight_incomplete",))
         if not mapping_valid:
             blockers.append("deferred_call_use_coverage_mapping_invalid")
-        if frame.projection.required and not receipt_valid:
+        split_stats = dict(
+            getattr(strategy_result, "pairwise_debug_stats", None) or {}
+        )
+        split_receipt_required = int(
+            split_stats.get("monolithic_split_planned_regions", 0) or 0
+        ) > 0
+        if (
+            getattr(strategy_result, "is_equivalent", None) in {True, False}
+            and not receipt_valid
+            and (frame.projection.required or split_receipt_required)
+        ):
             blockers.append("comparison_receipt_missing")
         if receipt_valid and not projection_receipt_partition_valid:
             blockers.append("call_projection_active_pair_receipt_invalid")
@@ -1711,9 +1898,11 @@ class EquivalenceChecker:
             blockers.append("call_projection_binding_consumption_incomplete")
         if receipt_valid and getattr(strategy_result, "is_equivalent", None) is True and not ordinary_complete:
             blockers.append("ordinary_comparison_proof_incomplete")
+        if receipt_valid and getattr(strategy_result, "is_equivalent", None) is False and not decisive_not_eq_receipt:
+            blockers.append("decisive_counterexample_receipt_incomplete")
 
         if blockers:
-            if getattr(strategy_result, "is_equivalent", None) is True:
+            if getattr(strategy_result, "is_equivalent", None) in {True, False}:
                 strategy_result.is_equivalent = None
             existing = {
                 str(ref)

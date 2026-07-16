@@ -41,6 +41,7 @@ def _analysis(binary_id):
         entry_point="0x1000",
         analysis_view_identity=None,
         partition_revision=0,
+        get_equivalence_blocking_unsafety_reasons=lambda: (),
     )
 
 
@@ -150,6 +151,20 @@ def test_monolithic_applicability_gate_is_recorded_as_inapplicable():
     records = checker._last_obligation_branch_trace.records
     assert records[-1].branch_id == "S_MONOLITHIC_FALLBACK"
     assert records[-1].activation_state == ActivationState.INAPPLICABLE
+
+
+def test_monolithic_only_inapplicable_plan_returns_typed_unknown() -> None:
+    checker = _checker([])
+    checker.stage_plan = [
+        StageSpec(StageID.S_MONOLITHIC_FALLBACK, "monolithic", "monolithic")
+    ]
+    checker._should_skip_monolithic_fallback = Mock(return_value=True)
+
+    result = _run(checker, "_run_stage_plan")
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert result.unknown_reasons[0].evidence_refs[0] == "monolithic_branch_inapplicable"
 
 
 def test_shadow_compares_proof_actions_not_only_reason_labels():

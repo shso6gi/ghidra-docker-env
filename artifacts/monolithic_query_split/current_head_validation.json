@@ -1,0 +1,226 @@
+{
+  "schema_version": "monolithic_query_split_validation_v5",
+  "baseline_head": "140c7e55d2335349004b6b27fdf09c2f28dd6bb1",
+  "working_tree_changes_included": true,
+  "scope": {
+    "roadmap_item": 8,
+    "strategy": "monolithic",
+    "cate1_included": false,
+    "solver": "Z3 4.16.0",
+    "monolithic_timeout_seconds": 30,
+    "excluded_requested_sample": "targets/cate1/function_call_test/fc_long_branch_dispatch B8_B9",
+    "exclusion_reason": "cate1 is outside the user-authorized validation scope"
+  },
+  "authority_contract": {
+    "eq_chain": [
+      "ProductionBranchAuthorityLease",
+      "MonolithicExecutionAuthorityLease",
+      "FrozenSurface",
+      "CanonicalRegionCensus",
+      "ExpectedRegionQuerySet",
+      "RegionSolverExecutionReceipt",
+      "MonolithicProofVerificationBundle",
+      "MonolithicTerminalDecisionReceipt"
+    ],
+    "not_eq_chain": [
+      "ReplayQueryContract",
+      "ReplayQueryExecutionReceipt(legacy_violation_predicate)",
+      "ReplayQueryExecutionReceipt(global_case_validation:whole_surface)",
+      "GateArtifactReference(coverage/effect/projection/width)",
+      "CounterexampleSafetyDecisionReceipt",
+      "MonolithicTerminalDecisionReceipt"
+    ],
+    "solver_execution_authority": "import-time pinned factory plus pinned SharedZ3RegionSession.execute; strategy attributes are not consulted; session certificate binds query_set_digest, child execution lease digest, Z3 version, and executor code identity",
+    "final_verifier": "import-time pinned pure-verifier dependency graph reconstructs census/query set from FrozenSurface, binds every QueryExecutionRecord field including formula_text/projection/width evidence, and rejects missing, extra, duplicate, formula, premise, disposition, solver-session, replay, model, and gate mismatches without artifact virtual dispatch",
+    "counterexample_gate_verification": {
+      "coverage": "recomputes validated unary coverage artifacts from the runtime; the no-proof case requires one unconditional return on each canonical surface",
+      "effect": "rebuilds and checks the structural coverage certificate and trusted effect artifacts",
+      "projection": "checks prepared surface digest, generation, blockers, completed obligations, and semantic bindings",
+      "width": "checks the bound canonical width bundle, or proves that all canonical observed return widths are equal",
+      "not_required": "requires and seals a gate-specific reason"
+    },
+    "lease_failure_semantics": "frame construction releases its decision lease; direct checker child-derivation failure revokes the locally issued parent lease",
+    "close_semantics": "comparison, proof, safety, and terminal receipts are sealed while the frame is claimed; close only verifies and revokes"
+  },
+  "solver_sharing": {
+    "implementation": "one Z3 Context and one incremental Solver per canonical query set",
+    "common_assertions": "installed once",
+    "region_assertions": "push/add/check/pop",
+    "ast_sharing": "all canonical formulas are parsed in the same hash-consing Z3 context",
+    "legacy_runner_retained_for": [
+      "explicit legacy validation control",
+      "relation surfaces",
+      "unsupported width bridge surfaces"
+    ]
+  },
+  "samples": [
+    {
+      "sample": "EqBench/CLEVER/getSign2/Eq",
+      "function": "client",
+      "pair": "B1_B2",
+      "split": {
+        "outcome": "EQ",
+        "planned_regions": 4,
+        "closed_regions": 4,
+        "guard_queries": 4,
+        "value_queries": 2,
+        "total_query_bytes": 9748,
+        "maximum_query_bytes": 1724,
+        "shared_z3_contexts": 1,
+        "shared_z3_asts": 7,
+        "shared_z3_checks": 6,
+        "total_time_seconds": 2.798682689666748,
+        "terminal_outcome_kind": "eq_closure",
+        "terminal_validated": true
+      },
+      "legacy_control": {
+        "outcome": "EQ",
+        "query_bytes": 2272,
+        "total_time_seconds": 2.5487067699432373,
+        "terminal_outcome_kind": "eq_closure",
+        "terminal_validated": true
+      },
+      "maximum_query_reduction": {
+        "legacy_query_bytes": 2272,
+        "split_maximum_query_bytes": 1724,
+        "reduction_bytes": 548,
+        "reduction_percent": 24.119718309859156,
+        "same_head_same_inputs": true,
+        "note": "This proves a production maximum-query-size reduction, not a legacy TIMEOUT to decisive-outcome transition."
+      }
+    },
+    {
+      "sample": "EqBench/bess/SIGN/Eq",
+      "function": "snippet",
+      "pair": "B9_B16",
+      "split": {
+        "outcome": "UNKNOWN",
+        "planned_regions": 25,
+        "guard_queries": 25,
+        "value_queries": 8,
+        "closed_regions": 21,
+        "total_query_bytes": 56549,
+        "maximum_query_bytes": 3766,
+        "shared_z3_contexts": 1,
+        "shared_z3_asts": 11,
+        "shared_z3_checks": 33,
+        "total_time_seconds": 8.526971817016602,
+        "unknown_reason": "sat_counterexample_ambiguous",
+        "terminal_outcome_kind": "inconclusive_diagnostic",
+        "terminal_validated": true
+      },
+      "legacy_control": {
+        "outcome": "UNKNOWN",
+        "query_bytes": 3557,
+        "solver_checks": 1,
+        "total_time_seconds": 5.36052680015564,
+        "unknown_reason": "sat_unsafety"
+      },
+      "note": "All 25 canonical regions were executed; the result remains fail-closed because the floating-point counterexample is ambiguous."
+    },
+    {
+      "sample": "EqBench/bess/SIGN/Eq",
+      "function": "snippet",
+      "pair": "B1_B3",
+      "split": {
+        "outcome": "UNKNOWN",
+        "planned_regions": 30,
+        "closed_regions": 26,
+        "guard_queries": 30,
+        "value_queries": 8,
+        "maximum_query_bytes": 4667,
+        "shared_z3_contexts": 1,
+        "shared_z3_asts": 13,
+        "shared_z3_checks": 38,
+        "total_time_seconds": 28.78636384010315,
+        "unknown_reason": "sat_counterexample_ambiguous"
+      },
+      "legacy_control": {
+        "outcome": "UNKNOWN",
+        "query_bytes": 4456,
+        "solver_checks": 1,
+        "total_time_seconds": 20.54993462562561,
+        "unknown_reason": "sat_unsafety"
+      },
+      "note": "This is evidence that the production splitter executes a larger canonical region set, not evidence of a timeout or latency improvement. No such improvement is claimed."
+    },
+    {
+      "sample": "refactor/current-head-fc11037/sat-not-eq/fixtures",
+      "function": "refactor_not_eq",
+      "outcome": "NOT_EQ",
+      "planned_regions": 1,
+      "sat_region_id": "0:0",
+      "total_time_seconds": 1.4889042377471924,
+      "model_digest": "62a644112d819145b5dd68d8d39a79c389a6408c199ffcfb3af541fea9fd80da",
+      "fixed_model_assertion_digest": "23ed2a46cdd15c5136ddc1f1f2868fbd52edae0859164b9045abf2588fa9bf1a",
+      "legacy_replay_receipt_digest": "c71da313e778ce2c41d82938c330b280f679fd070fc0efadb6a0fe99d6624454",
+      "counterexample_safety_receipt_digest": "4b438fed8a494a309ce5f4500989deeec528bd026214cb0d2539e03f819d76da",
+      "gate_reference_count": 4,
+      "terminal_outcome_kind": "decisive_counterexample",
+      "terminal_validated": true,
+      "before": "UNKNOWN: sat_unsafety/counterexample_replay_missing",
+      "after": "NOT_EQ authorized by typed legacy and independent whole-surface replay receipts"
+    },
+    {
+      "sample": "EqBench/CLEVER/is_prime3/Eq",
+      "function": "lib",
+      "pair": "B7_B8",
+      "outcome": "UNKNOWN",
+      "encoding": "legacy fallback",
+      "unknown_reason": "solver_unknown_timeout",
+      "note": "This relation surface is intentionally not split; no split improvement is claimed."
+    }
+  ],
+  "verification": {
+    "full_suite": "3338 passed, 33 skipped after final dependency-graph and exact-type hardening",
+    "full_suite_seconds": 468.385,
+    "post_fix_focused_suite": "79 passed after complete dependency-graph, exact-type pinning, and subclass rejection; 31 monolithic tests passed",
+    "refactor_contract": "passed",
+    "git_diff_check": "passed",
+    "attack_tests": [
+      "unexecuted assert-false UNSAT record is rejected",
+      "missing, extra, duplicate, premise, formula, and disposition mismatches are rejected",
+      "tampered typed counterexample safety receipt is rejected",
+      "late module verifier monkeypatch does not replace import-pinned verifiers",
+      "child derivation failure leaks neither decision nor parent production lease",
+      "post-close issuance is rejected",
+      "one incremental Z3 context executes all canonical region checks",
+      "same-name NOT_EQ requires and consumes typed whole-surface replay evidence"
+      ,"late shared Z3 factory monkeypatch cannot inject UNSAT"
+      ,"late SharedZ3RegionSession.execute monkeypatch cannot inject UNSAT"
+      ,"late private pinned-executor and strategy-module factory symbols cannot inject UNSAT"
+      ,"strategy executor attributes are ignored"
+      ,"session certificate tampering of backend/query-set/lease binding is rejected"
+      ,"coverage/effect/width gates cannot self-report proven"
+      ,"final counterexample gate verifier ignores late method/module monkeypatches and rechecks source evidence"
+      ,"forged QueryExecutionRecord.formula_text is rejected even when QueryExecutionRecord.validate is monkeypatched true"
+      ,"late monkeypatches of artifact validates methods, pure verifier module symbols, census reconstruction, query-set builder, query lookup, record digest, and seal symbol cannot redirect the final verifier"
+      ,"authority artifact subclasses are rejected before field access can act as dynamic dispatch"
+    ]
+  },
+  "empirical_timeout_reduction": {
+    "status": "maximum_query_size_reduction_demonstrated_within_non_cate1_scope",
+    "claim": "EqBench/CLEVER/getSign2 B1_B2 reduces the largest production Z3 query from 2272 bytes to 1724 bytes (548 bytes, 24.12%) while preserving EQ and executing six checks in one shared Z3 context.",
+    "timeout_to_decisive_transition": "not_claimed",
+    "non_cate1_timeout_candidate_audit": [
+      {
+        "sample": "EqBench/CLEVER/ltfive client B10_B14",
+        "legacy_query_bytes": 7807,
+        "outcome": "TIMEOUT",
+        "reason": "relation surface; production correctly retained legacy fallback"
+      },
+      {
+        "sample": "EqBench/tcas/NonCrossingBiasedDescend snippet B3_B4",
+        "legacy_query_bytes": 15258,
+        "outcome": "TIMEOUT",
+        "reason": "relation surface; production correctly retained legacy fallback"
+      },
+      {
+        "sample": "EqBench/bess/pythag snippet B3_B4",
+        "outcome": "validation process exceeded 300 seconds before a result artifact was emitted",
+        "reason": "excluded; preprocessing/runtime completion was not available and is not counted as solver-query evidence"
+      }
+    ],
+    "scope_note": "cate1 remains excluded. No timeout is reclassified as EQ, and no relation surface is unsafely forced through the structured splitter."
+  }
+}
