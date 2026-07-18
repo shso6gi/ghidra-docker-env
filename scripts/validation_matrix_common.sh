@@ -114,16 +114,6 @@ validation_ensure_final_result_line() {
         --error-detail "exit_code=${exit_code}" >> "$log_file"
 }
 
-validation_append_pair_process_timeout_payload() {
-    local log_file="$1"
-
-    {
-        echo "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
-        echo '{"is_equivalent": null, "is_timeout": true, "timeout_class": "pair_process_timeout"}'
-        echo "=== EQUIVALENCE_RESULT_JSON_END ==="
-    } >> "$log_file"
-}
-
 validation_classify_log_result() {
     local log_file="$1"
     "${PYTHON_BIN:-python3}" -m \
@@ -157,6 +147,5 @@ validation_classify_log_display() {
 export -f validation_result_log_is_complete
 export -f validation_result_log_has_final_authority
 export -f validation_ensure_final_result_line
-export -f validation_append_pair_process_timeout_payload
 export -f validation_classify_log_result
 export -f validation_classify_log_display

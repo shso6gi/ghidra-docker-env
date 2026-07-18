@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "c7efec72c802d1a1bf2a31254075406cd6eea22692e706649f7cc77402c5ad34",
+  "artifact_digest": "8232ceb050e912b2478851d1aab62c3b901bfa243cfa2d9745d02a3eb2a4fd3f",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
@@ -3080,13 +3080,13 @@
     "baseline_sha256": "29106b47b7e9dfdf797807dfe25eb12601cb5bbee607c754e41598f99a4207fb",
     "blanket_baseline_regeneration": false,
     "command": [
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/.venv-pyghidra/bin/python",
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py",
+      "/mnt/c/users/saito/git/ghidra-docker-env/.venv-pyghidra/bin/python",
+      "/mnt/c/users/saito/git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py",
       "--manifest",
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"
+      "/mnt/c/users/saito/git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"
     ],
     "contract_kind": "phase9-exact-refactor-replacement-v1",
-    "current_contract_digest": "57c5c45cffca2d7734e88cd799960b9dfd0ef34070aff4e413ba24eeb97ac208",
+    "current_contract_digest": "a9bcdbacaff29e68a2e60bdf548787a44b41f3419ac4f0a7a5300cc6f0edceae",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -5783,17 +5783,12 @@
         12
       ]
     ],
-    "current_source_tree_hash": "41b3a0dbdd2d55e8f0ee119f60320241b9a091183063ca6d10e4b068fb88dd41",
+    "current_source_tree_hash": "14451a5acc94d3780ef5cb9d4725428aced6b705582325f576b5ffd6d48e8821",
     "delta_classifications": [
       {
         "classification": "five_value_error_surface_contract",
         "evidence": "Phase8 all-five receipt and ERROR boundary JUnit",
         "failure": "symbols_changed"
-      },
-      {
-        "classification": "v2_domain_module_decomposition_debt",
-        "evidence": "exact line count and source hash; no gate weakening",
-        "failure": "new_file_hard_limit_exceeded:equivalence/v2/abi_width_readonly.py"
       },
       {
         "classification": "exact_import_edge_delta",
@@ -5808,7 +5803,6 @@
     ],
     "exact_failures": [
       "symbols_changed",
-      "new_file_hard_limit_exceeded:equivalence/v2/abi_width_readonly.py",
       "private_import_count_increased",
       "new_dependency_cycle:scripts.function_tracer_pcode.equivalence.call_effect_preflight,scripts.function_tracer_pcode.equivalence.call_effect_producer,scripts.function_tracer_pcode.equivalence.debug_trace,scripts.function_tracer_pcode.equivalence.monolithic_authority,scripts.function_tracer_pcode.equivalence.obligations.outcome_partition,scripts.function_tracer_pcode.equivalence.obligations.pair_disposition,scripts.function_tracer_pcode.equivalence.obligations.return_width,scripts.function_tracer_pcode.equivalence.obligations.runtime,scripts.function_tracer_pcode.equivalence.recurrence_promotion,scripts.function_tracer_pcode.equivalence.return_width_pipeline,scripts.function_tracer_pcode.equivalence.return_width_surface,scripts.function_tracer_pcode.equivalence.strategies.base,scripts.function_tracer_pcode.equivalence.strategies.expression_safety,scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder,scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor,scripts.function_tracer_pcode.equivalence.strategies.pairwise_services._shared,scripts.function_tracer_pcode.equivalence.strategies.pairwise_solver_proven_rewrite,scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.call_effect_1,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.call_effect_2,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.recovery,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.sat_safety,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.solver_timeout,scripts.function_tracer_pcode.equivalence.unknown_reason,scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly,scripts.function_tracer_pcode.equivalence.v2.call_effect,scripts.function_tracer_pcode.equivalence.v2.candidate,scripts.function_tracer_pcode.equivalence.v2.census_contract,scripts.function_tracer_pcode.equivalence.v2.codecs,scripts.function_tracer_pcode.equivalence.v2.execution_authority,scripts.function_tracer_pcode.equivalence.v2.loop_recurrence,scripts.function_tracer_pcode.equivalence.v2.operational_extraction,scripts.function_tracer_pcode.equivalence.v2.phase7_cutover,scripts.function_tracer_pcode.equivalence.v2.process_supervisor,scripts.function_tracer_pcode.equivalence.v2.production_signals,scripts.function_tracer_pcode.equivalence.v2.reducer,scripts.function_tracer_pcode.equivalence.v2.return_outcome,scripts.function_tracer_pcode.equivalence.v2.sat_safety,scripts.function_tracer_pcode.equivalence.v2.stream,scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation"
     ],
@@ -11711,7 +11705,6 @@
     "stderr": "",
     "stdout_lines": [
       "symbols_changed",
-      "new_file_hard_limit_exceeded:equivalence/v2/abi_width_readonly.py",
       "private_import_count_increased",
       "new_dependency_cycle:scripts.function_tracer_pcode.equivalence.call_effect_preflight,scripts.function_tracer_pcode.equivalence.call_effect_producer,scripts.function_tracer_pcode.equivalence.debug_trace,scripts.function_tracer_pcode.equivalence.monolithic_authority,scripts.function_tracer_pcode.equivalence.obligations.outcome_partition,scripts.function_tracer_pcode.equivalence.obligations.pair_disposition,scripts.function_tracer_pcode.equivalence.obligations.return_width,scripts.function_tracer_pcode.equivalence.obligations.runtime,scripts.function_tracer_pcode.equivalence.recurrence_promotion,scripts.function_tracer_pcode.equivalence.return_width_pipeline,scripts.function_tracer_pcode.equivalence.return_width_surface,scripts.function_tracer_pcode.equivalence.strategies.base,scripts.function_tracer_pcode.equivalence.strategies.expression_safety,scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder,scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor,scripts.function_tracer_pcode.equivalence.strategies.pairwise_services._shared,scripts.function_tracer_pcode.equivalence.strategies.pairwise_solver_proven_rewrite,scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.call_effect_1,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.call_effect_2,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.recovery,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.sat_safety,scripts.function_tracer_pcode.equivalence.strategies.proof_gates.solver_timeout,scripts.function_tracer_pcode.equivalence.unknown_reason,scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly,scripts.function_tracer_pcode.equivalence.v2.call_effect,scripts.function_tracer_pcode.equivalence.v2.candidate,scripts.function_tracer_pcode.equivalence.v2.census_contract,scripts.function_tracer_pcode.equivalence.v2.codecs,scripts.function_tracer_pcode.equivalence.v2.execution_authority,scripts.function_tracer_pcode.equivalence.v2.loop_recurrence,scripts.function_tracer_pcode.equivalence.v2.operational_extraction,scripts.function_tracer_pcode.equivalence.v2.phase7_cutover,scripts.function_tracer_pcode.equivalence.v2.process_supervisor,scripts.function_tracer_pcode.equivalence.v2.production_signals,scripts.function_tracer_pcode.equivalence.v2.reducer,scripts.function_tracer_pcode.equivalence.v2.return_outcome,scripts.function_tracer_pcode.equivalence.v2.sat_safety,scripts.function_tracer_pcode.equivalence.v2.stream,scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation"
     ],

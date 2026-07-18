@@ -62,6 +62,19 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _dry_run_source_ids(path: Path) -> tuple[str, ...]:
+    """Return repository-location-independent EqBench source identities."""
+
+    marker = "/targets/EqBench/benchmarks/"
+    identities = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        normalized = raw_line.replace("\\", "/")
+        if marker not in normalized:
+            raise ValueError("EqBench dry-run source is outside the benchmark tree")
+        identities.append(normalized.split(marker, 1)[1])
+    return tuple(identities)
+
+
 def _passing_junit(
     path: Path, *, minimum: int, required_names: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
@@ -89,7 +102,8 @@ def _eqbench_dry_run_evidence(root: Path) -> Mapping[str, Any]:
     sources = stored / "dry_run_sources.txt"
     if "dry_run=1" not in manifest.read_text(encoding="utf-8"):
         raise ValueError("stored EqBench evidence is not a dry run")
-    if len(sources.read_text(encoding="utf-8").splitlines()) != 1:
+    stored_source_ids = _dry_run_source_ids(sources)
+    if len(stored_source_ids) != 1:
         raise ValueError("stored EqBench dry run did not select exactly one sample")
     import tempfile
 
@@ -107,7 +121,7 @@ def _eqbench_dry_run_evidence(root: Path) -> Mapping[str, Any]:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             check=True,
         )
-        if (rerun / "dry_run_sources.txt").read_bytes() != sources.read_bytes():
+        if _dry_run_source_ids(rerun / "dry_run_sources.txt") != stored_source_ids:
             raise ValueError("EqBench dry-run source selection drifted")
     return {
         "command": "DRY_RUN=1 EQBENCH_MAX_SAMPLES=1 ./eqbench_run_all_32jobs.sh",

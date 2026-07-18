@@ -122,5 +122,10 @@ def test_phase9_refactor_replacement_preserves_the_exact_delta():
         len(replacement["added_private_imports"])
         - len(replacement["removed_private_imports"])
     ) == 59
+    assert len(replacement["exact_failures"]) == 3
+    assert not any(
+        failure.startswith("new_file_hard_limit_exceeded:")
+        for failure in replacement["exact_failures"]
+    )
     assert replacement["new_dependency_cycle_module_counts"] == (41,)
     assert replacement["blanket_baseline_regeneration"] is False

@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "delta_kind": "phase6_slice2_local_inventory_delta",
+  "delta_kind": "phase6_slice2_inventory_delta",
   "previous_slice": {
     "candidate_set_digest": "e55740e5a9bbfbeb6928f4293a114507e3c4a9635b2fa5e0c3624c739a2354fa",
     "candidate_count": 590
   },
   "current_source": {
-    "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655",
-    "candidate_count": 597
+    "candidate_set_digest": "7528de1d25b87b8542ceb1ed5952934cffa8d4c95b58753563057427b873dcac",
+    "candidate_count": 594
   },
   "added": [
     {
@@ -103,6 +103,10 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
+      "site_id": "0fa4286439536cec2ea7c75578cb40045fb9e27d23105285531b3fd6b670d292",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
       "site_id": "0faac34710ed16f0c51e4f1b65adae0c1bf3cbf566780b01adf81b41bce8afb7",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -187,10 +191,6 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
-      "site_id": "24d2df608b5c7eba7223cc9a89ec07a81e9dbc6c08d18ccabef30cfab0004196",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
       "site_id": "24e459fc26ee4c09621b7aea41d1f1190b85c756adf2c46946f373579cd7bcd1",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -204,10 +204,6 @@
     },
     {
       "site_id": "28ccdbc1510fb55d7da5abe25c8974dfdaeab946a9b408fa34c77e81aa48c397",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
-      "site_id": "29388c228a5712ecb7443082b63a0e94757bbe83a79257ea9a1a3d9dae104fc7",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
@@ -236,10 +232,6 @@
     },
     {
       "site_id": "2f3a9550d73fb5d845a978bd5b76dfb12722317143c0f97888971b682cca9ce1",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
-      "site_id": "2fc3a153dbbe1454b168a6401f15daa054b101872427824fe5ccecba158c6721",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
@@ -375,6 +367,10 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
+      "site_id": "533005e2d95a7c191de15e86be2c368a69a0f1b08b1f86452aa2dcbb9bc942c6",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
       "site_id": "537090b1be3dfdd95a463b1784e12439fb309d60767f095a06bbaf5fc391c810",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -384,6 +380,10 @@
     },
     {
       "site_id": "53ac2ac47e1ea1de30eefb2b11d4a18e7de7a56b2cba65d324a56aa6a7361873",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
+      "site_id": "53cb9f75169c9e0bcddcfbee524b188081db8b42fc8bf9ebd056f84a7bbf7f44",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
@@ -523,10 +523,6 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
-      "site_id": "7d07bb1bf3f9bee615171e20a004ee9fdf15dd0ee7f3e6fae8c9a21cd8fec0d4",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
       "site_id": "7dd86ec8098874b9cb4c23c66fd340fc66f226b86fef1eedbc52c246c3009801",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -536,10 +532,6 @@
     },
     {
       "site_id": "7ef02750b2f76dd710951bc9fa9cf5a11546ac040cb9268531ef8b56b654412e",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
-      "site_id": "807126eb656de8e1adfb520c7c609092b4541e788480b4911516f9d13a736db7",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
@@ -607,10 +599,6 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
-      "site_id": "96b2e3f1db27bb0cb085d148bd10d5d0f8696699d75cb935354c139d775a7b73",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
       "site_id": "96b962ebc3dae5d9ff3968f7d7d4d4410556556858eaadcd8be28c62442e108d",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -623,15 +611,7 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
-      "site_id": "97675c2dc3d8d21a624c796104721e44b7a20288f38ad57d046ca0addf1a469d",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
       "site_id": "97cfc6bc716fc44001a98f818f79b1f3d798185a9d4e9022dab0363405ce8703",
-      "review_status": "reviewed_by_main_pending_fixed_review"
-    },
-    {
-      "site_id": "97ef2c10e37ea79dd16967bf259a878e6f0926195b00db4a9e3a22ba2beb6350",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
@@ -707,6 +687,10 @@
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {
+      "site_id": "adb6e13d4d8ebd798da6bad61c783540b6d661f4f9084cf71237c6b61936bd04",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
       "site_id": "ae5fc2a068d0594d8660a2f24a7382ab67eb76f57ef72f8bc8ca9b9b82421fe1",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
@@ -716,6 +700,10 @@
     },
     {
       "site_id": "b2156cc695c606ccc4e0f78593619b29bb34ea4ac0300b1311717c128ba86f7c",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
+      "site_id": "b25083bb1f59161ceed8cae84177a1697b51b30c5e744c58cd56dbea5cca6d65",
       "review_status": "reviewed_by_main_pending_fixed_review"
     },
     {

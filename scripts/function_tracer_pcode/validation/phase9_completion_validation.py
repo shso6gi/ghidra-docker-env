@@ -82,6 +82,37 @@ def _sealed(body: Mapping[str, Any]) -> Mapping[str, Any]:
     return {**body, "artifact_digest": authority_digest(body)}
 
 
+def _validate_phase6_inventory_bindings(root: Path) -> None:
+    from .unknown_taxonomy_audit import build_inventory_review_template
+
+    current = build_inventory_review_template(root)
+    expected = {
+        "candidate_set_digest": current["candidate_set_digest"],
+        "candidate_count": len(current["entries"]),
+    }
+    slice2 = _load(
+        root, "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json"
+    )
+    if slice2.get("current_source") != expected:
+        raise ValueError("Phase 6 slice2 inventory is not current-source bound")
+
+    for name in (
+        "slice3_representative_validation.json", "slice4_representative_validation.json",
+        "slice5_representative_validation.json",
+    ):
+        payload = _load(root, f"artifacts/unknown_taxonomy_v2/phase6/{name}")
+        body = dict(payload)
+        saved_digest = body.pop("artifact_digest", None)
+        if saved_digest != authority_digest(body):
+            raise ValueError(f"Phase 6 inventory artifact digest drifted: {name}")
+        source_inventory = payload.get("source_inventory") or {}
+        if (
+            source_inventory.get("current_source") != expected
+            or source_inventory.get("live_delta") != {"added": 0, "removed": 0}
+        ):
+            raise ValueError(f"Phase 6 inventory binding drifted: {name}")
+
+
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
@@ -242,24 +273,19 @@ def _refactor_replacement_contract(root: Path) -> Mapping[str, Any]:
                 "evidence": "Phase8 all-five receipt and ERROR boundary JUnit",
             },
             {
-                "failure": failures[1],
-                "classification": "v2_domain_module_decomposition_debt",
-                "evidence": "exact line count and source hash; no gate weakening",
-            },
-            {
                 "failure": "private_import_count_increased",
                 "classification": "exact_import_edge_delta",
                 "evidence": "baseline/current/add/remove import tuples persisted",
             },
             {
-                "failure": failures[3],
+                "failure": failures[2],
                 "classification": "legacy_v2_migration_integration_scc",
                 "evidence": "complete 41-module membership persisted",
             },
         ),
     }
     if (
-        len(failures) != 4
+        len(failures) != 3
         or len(raw_symbol_deltas) != 18
         or len(symbol_deltas) != 1
         or len(new_cycles) != 1
@@ -268,9 +294,14 @@ def _refactor_replacement_contract(root: Path) -> Mapping[str, Any]:
         or len(before_private_imports) != baseline["private_import_count"]
         or len(after_private_imports) != current["private_import_count"]
         or len(added_private_imports) - len(removed_private_imports) != 59
-        or not failures[1].startswith("new_file_hard_limit_exceeded:")
+        or failures[:2] != (
+            "symbols_changed",
+            "private_import_count_increased",
+        )
+        or not failures[2].startswith("new_dependency_cycle:")
+        or any(item.startswith("new_file_hard_limit_exceeded:") for item in failures)
     ):
-        raise ValueError("refactor replacement contract is not the reviewed four-delta set")
+        raise ValueError("refactor replacement contract is not the cleanup three-delta set")
     return replacement
 
 
@@ -354,6 +385,7 @@ def build_phase9_evidence(repo_root: Path) -> Mapping[str, Mapping[str, Any]]:
     validate_phase7_producer_manifest(root, producer)
     validate_phase7_cutover_validation(root, phase7)
     validate_phase8_cutover_validation(root, phase8)
+    _validate_phase6_inventory_bindings(root)
     if sat["final_outcome"] != "UNKNOWN" or timeout["final_outcome"] != "TIMEOUT":
         raise ValueError("representative final outcomes drifted")
     base_rows = tuple(sat["c_active_rows"]) + tuple(sat["q_open_rows"])

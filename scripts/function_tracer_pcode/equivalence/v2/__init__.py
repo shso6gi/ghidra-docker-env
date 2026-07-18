@@ -1,16 +1,6 @@
-"""UNKNOWN Taxonomy v2 authority contracts.
+"""UNKNOWN Taxonomy v2 package.
 
-The package is intentionally disconnected from the v1 execution path until
-the shadow and dual-write phases explicitly wire it in.
+Authority types are intentionally owned by their defining submodules.  The
+post-cutover package does not provide the migration-era implicit re-export
+surface; callers must import the exact authority module they depend on.
 """
-
-from .contracts import *  # noqa: F401,F403
-from .decision import *  # noqa: F401,F403
-from .frontier import *  # noqa: F401,F403
-from .stream import *  # noqa: F401,F403
-from .registry import *  # noqa: F401,F403
-from .codecs import *  # noqa: F401,F403
-from .legacy_codec import *  # noqa: F401,F403
-from .reducer import *  # noqa: F401,F403
-from .candidate import *  # noqa: F401,F403
-from .shadow_compare import *  # noqa: F401,F403

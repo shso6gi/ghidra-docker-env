@@ -7,8 +7,8 @@
   "source_inventory": {
     "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
     "current_source": {
-      "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655",
-      "candidate_count": 597
+      "candidate_set_digest": "7528de1d25b87b8542ceb1ed5952934cffa8d4c95b58753563057427b873dcac",
+      "candidate_count": 594
     },
     "live_delta": {
       "added": 0,
@@ -155,7 +155,7 @@
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "124e31ed68b2dd0a2055fd950210e04a826be31efd2e0becbc38495a0adfb4b6",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "c9f7b81518cdc5469dc9842cb569921dbb2f2f0c03cfdf8890c1c668ca8bcf7d",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "5ee6c228a2974e892fa22b57f73bd159d3ab75ca53eab3affe93c027f432af90",
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
     "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "faafa908413cbf23d24ba784f4f0c6f035866357538fd333f42511088affa62a",
     "scripts/function_tracer_pcode/equivalence/v2/shadow_compare.py": "83f837ccdffdd70ad525c434527b6a6fa4587a85437e5c1abf17b62a644ed634"
@@ -451,5 +451,5 @@
     },
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome"
   },
-  "artifact_digest": "c2ae65de89d075562019b800ada56c5714cb0375f2b2391c2787ab599f8a98dc"
+  "artifact_digest": "9005a786a4e5ba72677f4679ba4d045af02bc631b5f38c15d92afd22daf83b4e"
 }
