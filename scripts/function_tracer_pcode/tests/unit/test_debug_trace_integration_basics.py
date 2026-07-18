@@ -13,7 +13,8 @@ def test_stage_path_still_recorded(mock_program_x86):
     """既存の stage_path テストが壊れていないことを確認"""
     checker = EquivalenceChecker(
         debug=False,
-        strategy="pairwise"
+        strategy="pairwise",
+        canonical_decision_cutover=False,
     )
     
     # モック解析結果を作成
@@ -113,7 +114,8 @@ def test_debug_trace_multiple_attempts_on_unknown(mock_program_x86):
     """
     checker = EquivalenceChecker(
         debug=False,
-        strategy="pairwise"
+        strategy="pairwise",
+        canonical_decision_cutover=False,
     )
     
     # unsigned int 型で Phase 1 のトリガーになる
@@ -268,7 +270,8 @@ def test_debug_trace_to_dict_machine_readable(mock_program_x86):
     
     checker = EquivalenceChecker(
         debug=False,
-        strategy="pairwise"
+        strategy="pairwise",
+        canonical_decision_cutover=False,
     )
     
     mock_analysis = FunctionReturnAnalysis(

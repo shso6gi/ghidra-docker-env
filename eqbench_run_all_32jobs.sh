@@ -27,6 +27,8 @@ EQBENCH_MAX_SAMPLES="${EQBENCH_MAX_SAMPLES:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-300s}"
 PAIR_PROCESS_KILL_AFTER="${PAIR_PROCESS_KILL_AFTER:-30s}"
+PAIR_PROCESS_TIMEOUT_SECONDS="${PAIR_PROCESS_TIMEOUT%s}"
+PAIR_PROCESS_KILL_AFTER_SECONDS="${PAIR_PROCESS_KILL_AFTER%s}"
 EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-10}"
 DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
@@ -49,8 +51,9 @@ if [[ ! -f "$FUNCTION_LISTER" ]]; then
     echo "Error: function lister not found: $FUNCTION_LISTER" >&2
     exit 1
 fi
-if ! command -v timeout >/dev/null 2>&1; then
-    echo "Error: GNU coreutils timeout command is required for pair process timeouts" >&2
+if [[ ! "$PAIR_PROCESS_TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+    || [[ ! "$PAIR_PROCESS_KILL_AFTER_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "Error: pair process timeout values must be seconds, for example 300s" >&2
     exit 1
 fi
 
@@ -128,6 +131,20 @@ run_pair() {
     local count="$8"
     local total="$9"
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
+    local identity_line result_occurrence_id source_snapshot_fingerprint stream_id
+    identity_line="$(PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+        --print-production-execution-identity \
+        --binary1-path "$left_bin" --binary2-path "$right_bin" \
+        --binary1-id "$left_id" --binary2-id "$right_id" \
+        --function-name1 "$function_name" --function-name2 "$function_name")"
+    IFS=$'\t' read -r result_occurrence_id source_snapshot_fingerprint stream_id \
+        <<< "$identity_line"
+    local execution_nonce checkpoint_root authority_output
+    execution_nonce="${result_occurrence_id#production-pilot-}"
+    checkpoint_root="${output_dir}/.process-authority"
+    authority_output="${checkpoint_root}/${execution_nonce}/supervisor-projection.json"
+    mkdir -p "$checkpoint_root"
 
     local -a equiv_cmd=(
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main
@@ -141,8 +158,23 @@ run_pair() {
     )
 
     local ec
-    if timeout --kill-after="$PAIR_PROCESS_KILL_AFTER" "$PAIR_PROCESS_TIMEOUT" \
-        "${equiv_cmd[@]}" > "$log_file" 2>&1; then
+    if "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command \
+        --checkpoint-root "$checkpoint_root" \
+        --authority-output "$authority_output" \
+        --working-directory "$SCRIPT_DIR" \
+        --execution-nonce "$execution_nonce" \
+        --result-occurrence-id "$result_occurrence_id" \
+        --source-snapshot-fingerprint "$source_snapshot_fingerprint" \
+        --stream-id "$stream_id" \
+        --deadline-policy-digest "$PAIR_PROCESS_DEADLINE_POLICY_DIGEST" \
+        --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID" \
+        --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
+        --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
+        --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
+        --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" \
+        --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" \
+        -- "${equiv_cmd[@]}" > "$log_file" 2>&1; then
         ec=0
     else
         ec=$?
@@ -155,7 +187,16 @@ run_pair() {
             echo "Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER"
             echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
         } >> "$log_file"
-        validation_append_pair_process_timeout_payload "$log_file"
+        PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
+            scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+            --emit-process-timeout-json \
+            --checkpoint-root "$checkpoint_root" \
+            --execution-nonce "$execution_nonce" \
+            --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID" \
+            --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
+            --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
+            --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
+            >> "$log_file"
     fi
 
     validation_ensure_final_result_line "$log_file" "$ec"
@@ -223,6 +264,27 @@ if (( EQBENCH_MAX_SAMPLES > 0 && ${#SAMPLE_SOURCES[@]} > EQBENCH_MAX_SAMPLES ));
 fi
 
 mkdir -p "$OUTPUT_BASE_DIR"
+PROCESS_AUTHORITY_ROOT="$OUTPUT_BASE_DIR/.process-authority-keys"
+mkdir -p "$PROCESS_AUTHORITY_ROOT"
+chmod 700 "$PROCESS_AUTHORITY_ROOT"
+PROCESS_SUPERVISOR_KEY_ID="eqbench-phase8-supervisor-v1"
+PROCESS_WORKER_KEY_ID="eqbench-phase8-worker-v1"
+PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
+PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
+if [[ ! -s "$PROCESS_SUPERVISOR_KEY_FILE" ]]; then
+    umask 077
+    head -c 32 /dev/urandom > "$PROCESS_SUPERVISOR_KEY_FILE"
+fi
+if [[ ! -s "$PROCESS_WORKER_KEY_FILE" ]]; then
+    umask 077
+    head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
+fi
+PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
+    "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
+    | sha256sum | awk '{print $1}')"
+export PROCESS_SUPERVISOR_KEY_ID PROCESS_WORKER_KEY_ID
+export PROCESS_SUPERVISOR_KEY_FILE PROCESS_WORKER_KEY_FILE
+export PAIR_PROCESS_DEADLINE_POLICY_DIGEST
 
 cat > "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
 run_kind=eqbench_all_eq_matrix_current
@@ -379,6 +441,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             write_summary_file "$output_function_dir/results_summary.txt" \
                 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
                     --function-summary \
+                    --canonical-only \
                     --function-name "$function_name" \
                     --summary-level "$VALIDATION_SUMMARY_LEVEL" \
                     "${function_logs[@]}"
@@ -393,6 +456,7 @@ if (( ${#ALL_LOG_FILES[@]} > 0 )); then
     write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt" \
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
             --overall-summary \
+            --canonical-only \
             --summary-level "$VALIDATION_SUMMARY_LEVEL" \
             --health-summary-json "$OUTPUT_BASE_DIR/run_health_summary.json" \
             --health-summary-text "$OUTPUT_BASE_DIR/run_health_summary.txt" \

@@ -24,7 +24,8 @@ class TestSelectiveReanalysis:
             timeout=5,
             debug=True,
             enable_rewrite=False,
-            strategy="pairwise"
+            strategy="pairwise",
+            canonical_decision_cutover=False,
         )
     
     @pytest.fixture
@@ -355,7 +356,8 @@ class TestSelectiveReanalysisIntegration:
             timeout=5,
             debug=True,
             enable_rewrite=False,
-            strategy="pairwise"
+            strategy="pairwise",
+            canonical_decision_cutover=False,
         )
     
     @pytest.fixture

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "unknown_taxonomy_v2_phase6_slice1_sat_safety",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "slice_status": "fixed_review_go",
+  "legacy_projection_authoritative_for_v2": false,
+  "legacy_reason_projection": [
+    "sat_unsafety",
+    "sat_counterexample_ambiguous"
+  ],
+  "v2_typed_reasons": [
+    "counterexample_analysis_safety_unproven",
+    "counterexample_partition_replay_ambiguous",
+    "counterexample_same_function_replay_unproven"
+  ],
+  "migration_contract": {
+    "timeout_creates_reason": false,
+    "one_legacy_umbrella_may_materialize_multiple_independent_causes": true,
+    "same_cause_reobservation_is_coalesced": true,
+    "completion_requires_exact_observed_occurrence": true,
+    "not_eq_requires_safe_counterexample_receipt": true,
+    "encoder_failure_changes_v1": false
+  },
+  "focused_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py scripts/function_tracer_pcode/tests/unit/test_phase3_sat_unsafety_lane5.py scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_sat.py scripts/function_tracer_pcode/tests/unit/test_guard_overlap_graph.py",
+    "result": "75 passed",
+    "elapsed_seconds": 17.33
+  },
+  "phase5_plus_slice_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py",
+    "result": "35 passed",
+    "elapsed_seconds": 15.48
+  },
+  "combined_regression_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase3.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase4.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py",
+    "result": "179 passed",
+    "elapsed_seconds": 44.48
+  },
+  "phase0_snapshot_policy": {
+    "phase0_inventory_remains_frozen": true,
+    "current_source_candidate_digest_expected_to_differ": true,
+    "new_v2_producer_sites_tracked_by": "artifacts/unknown_taxonomy_v2/phase6/slice1_inventory_delta.json",
+    "inventory_delta_sha256": "cb6d3e675e3944e6d0104842575fb4aa0eef0886b943f9eaf7a9a6c8d0cf9e6d"
+  },
+  "representative_current_source_run": {
+    "command": [
+      "./.venv-pyghidra/bin/python",
+      "-m",
+      "scripts.function_tracer_pcode.cli.main",
+      "--equiv",
+      "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+      "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+      "--binary-ids",
+      "PHASE6_SAT_LEFT",
+      "PHASE6_SAT_RIGHT",
+      "-f",
+      "divide_long",
+      "modulo_long",
+      "--strategy",
+      "pairwise",
+      "--emit-result-json"
+    ],
+    "exit_code": 1,
+    "stdout_sha256": "82f71546faf2320bb5494b329c489def7117edd4601a93466ca9076b73028c23",
+    "decision": "NOT_EQ",
+    "unknown_reason_ids": [],
+    "pairwise_stats": {
+      "total_pairs": 4,
+      "unsat_pairs": 3,
+      "sat_pairs": 1,
+      "unknown_pairs": 0,
+      "error_pairs": 0
+    },
+    "stage_path": ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"],
+    "counterexample_present": true,
+    "binary_content_sha256": "b130a3b1f2abaa9cf9b2df56e53ddf8acb2ae443f8afc271f122c337434ba779",
+    "function_pair": ["divide_long", "modulo_long"],
+    "total_time_seconds": 4.699056148529053,
+    "result_artifact": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice1_representative_result.json",
+      "sha256": "974f45ae271b63ea78bd2f13fd0edb35281f6fa44fab82ea769345504fb6c598"
+    },
+    "note": "CLI remains default-off for v2 shadow; typed dual-write authority is exercised by the monkeypatch-free production producer fixture. The real run proves the current source preserves the representative legacy NOT_EQ decision."
+  },
+  "before_after": {
+    "legacy_before": {
+      "blocked_reason_ids": ["sat_unsafety", "sat_counterexample_ambiguous"],
+      "safe_decision": "NOT_EQ"
+    },
+    "v2_shadow_after": {
+      "blocked_reason_ids": [
+        "counterexample_analysis_safety_unproven",
+        "counterexample_partition_replay_ambiguous",
+        "counterexample_same_function_replay_unproven"
+      ],
+      "proof_backlog_kind": "counterexample_safety",
+      "safe_decision": "NOT_EQ",
+      "legacy_decision_changed": false
+    }
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/sat_safety.py": "1ff1f2fffa72401d7f71eabc7b27c862ff1cb51573bd3114ee417e06136e3c5d",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "2cfad7ed703a3e448c0c2a9ba7a491316ffc329ff75b4891b8d2299785b29a2a",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7d60fb17080d55b788ac584b36c37a3c50fad7ccb7bb0922a3a9a2e3cb2c8bb8",
+    "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py": "da17cdbb92ff73d74dcfc250e86e9a358341c4a7c2356801d4d71ca0e69997f6",
+    "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/__init__.py": "649f786a69907796adecd0e0b8137421e6ebc4fa1289ad6879a5b4189fab0ca7",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "2475ca8e1a5386262ec9a946aec6a0bffaad7606d20fcb091029cb3c26a9e135",
+    "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py": "3cc9c6ef5add780d98de86c18fb177d17406fa90c3b39b46430e7629247a0d71",
+    "artifacts/unknown_taxonomy_v2/phase6/slice1_inventory_delta.json": "cb6d3e675e3944e6d0104842575fb4aa0eef0886b943f9eaf7a9a6c8d0cf9e6d",
+    "artifacts/unknown_taxonomy_v2/phase6/slice1_representative_result.json": "974f45ae271b63ea78bd2f13fd0edb35281f6fa44fab82ea769345504fb6c598",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py": "5cc29fce4b64182e11cd0a78f5b7d3253c150748074dc4cf9a2638faa43f1cc7"
+  }
+}

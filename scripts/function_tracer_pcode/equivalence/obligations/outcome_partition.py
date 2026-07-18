@@ -115,7 +115,22 @@ def prove_unary_partition(
         if producer is None:
             return UnaryPartitionProofResult("blocked", f"outcome_{stage}_producer_missing")
         requirement = requirement_for_stage(seed, stage)
-        result = producer()
+        stage_premise_digest = runtime.view_records[
+            runtime.current_view.view_id
+        ].premise_digest
+        (
+            result,
+            pilot_receipts,
+            pilot_attempt_identity,
+            pilot_attempt_ordinal,
+        ) = _run_outcome_producer_with_pilot_signal(
+            producer,
+            seed,
+            stage,
+            requirement,
+            function_premise_digest=stage_premise_digest,
+            snapshot_fingerprint=snapshot_fingerprint,
+        )
         if not isinstance(result, UnaryProducerResult):
             raise TypeError(f"unary outcome producer {stage} returned an invalid result")
         if not result.proved:
@@ -146,6 +161,26 @@ def prove_unary_partition(
             payload=artifact.payload,
         )
         runtime.artifacts[-1] = versioned
+        from ..v2.production_signals import (
+            active_production_pilot_session,
+            record_production_pilot_shadow_error,
+        )
+        if active_production_pilot_session() is not None:
+            try:
+                _emit_outcome_producer_pilot_signal(
+                    seed=seed,
+                    stage=stage,
+                    requirement=requirement,
+                    result=result,
+                    execution_receipts=pilot_receipts,
+                    validated_artifact=versioned,
+                    function_snapshot_fingerprint=snapshot_fingerprint,
+                    function_premise_digest=stage_premise_digest,
+                    producer_attempt_identity=pilot_attempt_identity,
+                    producer_attempt_ordinal=pilot_attempt_ordinal,
+                )
+            except Exception as exc:
+                record_production_pilot_shadow_error(exc)
         previous = (versioned,)
 
     final_artifact = previous[0]
@@ -166,3 +201,170 @@ def prove_unary_partition(
         encoding_version=OUTCOME_ENCODING_VERSION,
     )
     return UnaryPartitionProofResult("proved", final_artifact=final_artifact, cache_entry=entry)
+
+
+def _run_outcome_producer_with_pilot_signal(
+    producer: Callable[[], UnaryProducerResult],
+    seed: Any,
+    stage: str,
+    requirement: ProofRequirementId,
+    *,
+    function_premise_digest: str,
+    snapshot_fingerprint: str,
+) -> Tuple[UnaryProducerResult, Tuple[Any, ...], Optional[str], Optional[int]]:
+    """Run the real producer and mirror its explicit result to an opt-in v2 session."""
+
+    from ..v2.production_signals import (
+        active_production_pilot_session,
+        record_production_pilot_shadow_error,
+    )
+    pilot_session = active_production_pilot_session()
+    if pilot_session is None:
+        return producer(), (), None, None
+    from ..v2.return_outcome import outcome_stage_capture_scope
+    invocation_state = pilot_session.domain_signal_state.setdefault(
+        "return_outcome_invocation_authority",
+        {"invocation_ordinal": 0, "producer_attempt_ordinal": 0},
+    )
+    invocation_state["producer_attempt_ordinal"] += 1
+    producer_attempt_ordinal = invocation_state["producer_attempt_ordinal"]
+    producer_attempt_identity = SnapshotFingerprintCodec.digest((
+        "return_outcome_producer_attempt",
+        pilot_session.identity.execution_identity_digest,
+        requirement.to_key(),
+        producer_attempt_ordinal,
+    ))
+
+    def next_invocation_ordinal() -> int:
+        invocation_state["invocation_ordinal"] += 1
+        return invocation_state["invocation_ordinal"]
+
+    with outcome_stage_capture_scope(
+        seed=seed,
+        stage=stage,
+        premise_digest=function_premise_digest,
+        function_snapshot_fingerprint=snapshot_fingerprint,
+        execution_identity_digest=(
+            pilot_session.identity.execution_identity_digest
+        ),
+        producer_attempt_identity=producer_attempt_identity,
+        producer_attempt_ordinal=producer_attempt_ordinal,
+        next_invocation_ordinal=next_invocation_ordinal,
+    ) as capture:
+        result = producer()
+    if isinstance(result, UnaryProducerResult) and not result.proved:
+        try:
+            _emit_outcome_producer_pilot_signal(
+                seed=seed,
+                stage=stage,
+                requirement=requirement,
+                result=result,
+                execution_receipts=tuple(capture.receipts),
+                validated_artifact=None,
+                function_snapshot_fingerprint=snapshot_fingerprint,
+                function_premise_digest=function_premise_digest,
+                producer_attempt_identity=producer_attempt_identity,
+                producer_attempt_ordinal=producer_attempt_ordinal,
+            )
+        except Exception as exc:
+            record_production_pilot_shadow_error(exc)
+    return (
+        result,
+        tuple(capture.receipts),
+        producer_attempt_identity,
+        producer_attempt_ordinal,
+    )
+
+
+def _emit_outcome_producer_pilot_signal(
+    *,
+    seed: Any,
+    stage: str,
+    requirement: ProofRequirementId,
+    result: UnaryProducerResult,
+    execution_receipts: Tuple[Any, ...],
+    validated_artifact: Optional[ProofArtifact],
+    function_snapshot_fingerprint: str,
+    function_premise_digest: str,
+    producer_attempt_identity: Optional[str],
+    producer_attempt_ordinal: Optional[int],
+) -> None:
+    from ..v2.contracts import authority_digest
+    from ..v2.production_signals import (
+        OutcomePartitionProductionSignal,
+        active_production_pilot_session,
+        emit_outcome_partition_signal,
+    )
+    from ..v2.return_outcome import (
+        WITNESSED_REASON_PROPOSITIONS,
+        UnaryOutcomeWitnessArtifact,
+        reason_for_stage_status,
+    )
+
+    try:
+        reason_id = reason_for_stage_status(stage, result.status)
+    except ValueError:
+        # The bridge must remain a no-op for legacy/custom producers when the
+        # pilot is disabled.  The exact v2 encoder rejects an unsealed pair in
+        # an active pilot session and records that fail-closed signal error.
+        reason_id = None
+    witness_artifact = None
+    if reason_id in WITNESSED_REASON_PROPOSITIONS:
+        sat_receipts = tuple(
+            receipt for receipt in execution_receipts
+            if getattr(receipt, "observed_status", None) == "sat"
+        )
+        if len(sat_receipts) != 1:
+            raise ValueError("witnessed outcome result requires exactly one SAT receipt")
+        witness_artifact = UnaryOutcomeWitnessArtifact.create(
+            sat_receipts[0],
+            reason_id=reason_id,
+            witnessed_proposition=WITNESSED_REASON_PROPOSITIONS[reason_id],
+            producer_version=OUTCOME_PRODUCER_VERSION,
+            encoding_version=OUTCOME_ENCODING_VERSION,
+        )
+
+    artifact_authority = None
+    if validated_artifact is not None:
+        if not validated_artifact.is_validated:
+            raise ValueError("outcome completion artifact is not validated")
+        artifact_payload = {
+            "artifact_id": validated_artifact.artifact_id,
+            "requirement_id": validated_artifact.requirement_id.to_dict(),
+            "produced_from_view_id": validated_artifact.produced_from_view_id,
+            "premise_digest": validated_artifact.premise_digest,
+            "dependency_artifact_ids": validated_artifact.dependency_artifact_ids,
+            "producer_id": validated_artifact.producer_id,
+            "producer_version": validated_artifact.producer_version,
+            "encoding_version": validated_artifact.encoding_version,
+            "artifact_validation_status": validated_artifact.artifact_validation_status,
+            "function_snapshot_fingerprint": function_snapshot_fingerprint,
+            "outcome_seed_digest": outcome_seed_digest(seed),
+            "outcome_seed_revision": int(
+                getattr(seed, "partition_revision", 0) or 0
+            ),
+            "stage": stage,
+        }
+        artifact_authority = {
+            **artifact_payload,
+            "artifact_authority_digest": authority_digest(artifact_payload),
+        }
+    emit_outcome_partition_signal(OutcomePartitionProductionSignal(
+        stage=stage,
+        producer_status=result.status,
+        proof_requirement_identity=requirement.to_dict(),
+        function_identity=tuple(getattr(seed, "function_identity", ()) or ()),
+        outcome_seed_digest=outcome_seed_digest(seed),
+        producer_evidence=dict(result.evidence),
+        outcome_seed_revision=int(getattr(seed, "partition_revision", 0) or 0),
+        function_snapshot_fingerprint=function_snapshot_fingerprint,
+        premise_digest=function_premise_digest,
+        producer_attempt_identity=producer_attempt_identity,
+        producer_attempt_ordinal=producer_attempt_ordinal,
+        execution_identity_digest=(
+            active_production_pilot_session().identity.execution_identity_digest
+        ),
+        execution_receipts=execution_receipts,
+        witness_artifact=witness_artifact,
+        validated_artifact_authority=artifact_authority,
+    ), producer_site_manifest_id="outcome-partition-stage-result")

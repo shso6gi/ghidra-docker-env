@@ -1,0 +1,65 @@
+{
+  "analysis_command": [
+    "./.venv-pyghidra/bin/python",
+    "-m",
+    "scripts.function_tracer_pcode.cli.main",
+    "--equiv",
+    "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O0",
+    "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O1",
+    "--binary-ids",
+    "B9",
+    "B10",
+    "-f",
+    "snippet",
+    "--strategy",
+    "monolithic",
+    "--monolithic-query-mode",
+    "legacy",
+    "--equiv-timeout",
+    "120",
+    "--monolithic-timeout",
+    "1",
+    "--emit-result-json"
+  ],
+  "analysis_command_digest": "14ae99c05db69d830ccd51ec6fd44018c0c621cd4a2c3d0c199d0d633e0b082b",
+  "analysis_config": {
+    "explicit_legacy_validation_control": true,
+    "monolithic_query_mode": "legacy",
+    "monolithic_timeout": 1,
+    "strategy": "monolithic"
+  },
+  "analysis_config_digest": "1ac27f39c0cf940c5e7b12550dc5b6b1400bb1296f5587dbca48263f62444e06",
+  "binary_content_identities": {
+    "left": [
+      "sha256",
+      "7cb5782c4c4179dd1ae358cd077ecc9a0cbfe9525301f1a64133a641ef869492"
+    ],
+    "right": [
+      "sha256",
+      "ac7bc1e69a85ce5ce3e370ac963fb5777af2bc8df35c4d2340a2979b892d4c74"
+    ]
+  },
+  "decision": "TIMEOUT",
+  "exit_code": 2,
+  "finished_at_utc": "2026-07-16T16:27:52.179378+00:00",
+  "head_tree_digest": "f17420710598e894eef246a8e34cfc3b525ab4be",
+  "observed_binary_content_identities": {
+    "left": [
+      "sha256",
+      "7cb5782c4c4179dd1ae358cd077ecc9a0cbfe9525301f1a64133a641ef869492"
+    ],
+    "right": [
+      "sha256",
+      "ac7bc1e69a85ce5ce3e370ac963fb5777af2bc8df35c4d2340a2979b892d4c74"
+    ]
+  },
+  "payload_digest": "fd4a567e171d8574542ef1ecfdecdb0c57ea4ffe9eb66fcc9e4e1f575015dec7",
+  "payload_index": 0,
+  "receipt_kind": "phase0_current_head_run_receipt",
+  "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "schema_version": 1,
+  "source_artifact_digest": "4e448794ee37e2431975761b37abdcef7ed05656c33a9e8fb882e95423a59536",
+  "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_legacy_monolithic_timeout.log",
+  "started_at_utc": "2026-07-16T16:27:01.215997+00:00",
+  "tracked_worktree_digest": "0258631b12ead771100bc747524c68caac17f5f319e11c7ab2aa5a8f40f81262"
+}

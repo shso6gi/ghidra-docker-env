@@ -1,0 +1,46 @@
+{
+  "artifact_digest": "aafbd09e0710fac66299724d3a31e0694066ec7eb463c158c2920091b6f15cb2",
+  "artifact_kind": "phase9-decision-transition-matrix-v1",
+  "batch_resume": {
+    "EQUIVALENT": "COMPLETE_EQ",
+    "ERROR": "FAILED_INFRASTRUCTURE",
+    "NOT_EQ": "COMPLETE_NOT_EQ",
+    "TIMEOUT": "RESUMABLE_DEADLINE_BACKLOG",
+    "UNKNOWN": "RESUMABLE_SEMANTIC_BACKLOG"
+  },
+  "cli_exit": {
+    "EQUIVALENT": 0,
+    "ERROR": 4,
+    "NOT_EQ": 1,
+    "TIMEOUT": 3,
+    "UNKNOWN": 2
+  },
+  "eq_not_eq_decisive_receipts_unchanged_authority": {
+    "all_five_test_family": "test_decision_receipt_is_only_serialized_status_authority",
+    "focused_junit_sha256": "09efbe04e4ff90855b0337d618f1500893ecd094f653939773c9e4220e35083b",
+    "phase8_artifact_digest": "7489ae02f2527ef94c4af0619a028f07d1468a7374d8b1a2658c360a7503de64",
+    "phase8_artifact_sha256": "5e4511bb54265a26cbfe0255dd353e3f88cc545d7f6c60b654c35c5c43e0e046"
+  },
+  "retry_fallback": {
+    "EQUIVALENT": [
+      "STOP"
+    ],
+    "ERROR": [
+      "STOP"
+    ],
+    "NOT_EQ": [
+      "STOP"
+    ],
+    "TIMEOUT": [
+      "RETRY_WITH_LARGER_BUDGET",
+      "FALLBACK_NEXT_STRATEGY",
+      "STOP"
+    ],
+    "UNKNOWN": [
+      "RETRY_TYPED_PROOF",
+      "FALLBACK_NEXT_STRATEGY",
+      "STOP"
+    ]
+  },
+  "unknown_and_timeout_are_distinct": true
+}

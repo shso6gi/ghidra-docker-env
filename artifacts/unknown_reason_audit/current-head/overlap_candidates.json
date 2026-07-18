@@ -1,0 +1,111 @@
+{
+  "audit_kind": "unknown_taxonomy_v1_current_head_inventory",
+  "authority": "review_candidates_only",
+  "candidates": [
+    {
+      "reason_ids": [
+        "return_coverage_gap",
+        "summary_partition_not_total"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "function",
+        "decision_effect": "blocks_equivalence",
+        "reason_class": "coverage_gap",
+        "reason_scope": "function"
+      }
+    },
+    {
+      "reason_ids": [
+        "strategy_exception",
+        "unexpected_pairwise_state"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "result",
+        "decision_effect": "blocks_decision",
+        "reason_class": "internal_error",
+        "reason_scope": "stage"
+      }
+    },
+    {
+      "reason_ids": [
+        "unresolved_expression",
+        "unresolved_value_expression"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "pair",
+        "decision_effect": "blocks_decision",
+        "reason_class": "operational_gap",
+        "reason_scope": "expression"
+      }
+    },
+    {
+      "reason_ids": [
+        "decompilation_failed",
+        "high_function_missing"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "function",
+        "decision_effect": "blocks_decision",
+        "reason_class": "operational_gap",
+        "reason_scope": "function"
+      }
+    },
+    {
+      "reason_ids": [
+        "outcome_cfg_reachability_incomplete",
+        "outcome_cross_kind_overlap",
+        "outcome_member_unclassified",
+        "outcome_partition_residual_sat",
+        "outcome_partition_totality_timeout",
+        "outcome_partition_unknown",
+        "outcome_path_region_incomplete",
+        "outcome_return_consistency_unknown",
+        "outcome_return_value_conflict",
+        "phi_circular_replacement_unproven",
+        "summary_effect_unmodeled",
+        "summary_precondition_incomplete",
+        "summary_return_candidate_invalid",
+        "summary_return_overlap_unproven"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "function",
+        "decision_effect": "blocks_equivalence",
+        "reason_class": "proof_obligation",
+        "reason_scope": "function"
+      }
+    },
+    {
+      "reason_ids": [
+        "solver_proven_rewrite_no_change",
+        "solver_proven_rewrite_proof_failed"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "pair",
+        "decision_effect": "retryable",
+        "reason_class": "proof_obligation",
+        "reason_scope": "pair"
+      }
+    },
+    {
+      "reason_ids": [
+        "sat_counterexample_ambiguous",
+        "sat_unsafety"
+      ],
+      "review_required": true,
+      "shared_v1_metadata": {
+        "aggregation_unit": "pair",
+        "decision_effect": "blocks_disequivalence",
+        "reason_class": "unsafe_analysis",
+        "reason_scope": "pair"
+      }
+    }
+  ],
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "schema_version": 1
+}

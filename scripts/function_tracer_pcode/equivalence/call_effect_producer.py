@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import threading
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..analysis.effect_summary import (
@@ -56,6 +57,7 @@ _STAGES = (
     "caller_memory_relation",
 )
 _TYPED_RENDERER_TOKEN = object()
+_QUERY_AUTHORITY_TOKEN = object()
 _TOTAL_BINARY_OPERATORS = frozenset(
     {
         "INT_EQUAL",
@@ -145,6 +147,87 @@ class PureCallRegionProofInput:
 class PureDirectCallProofProduction:
     artifacts: Tuple[InternalSolverProofArtifact, ...]
     failure_causes: Tuple[str, ...] = ()
+    v2_blocker_signals: Tuple[Any, ...] = ()
+
+
+@dataclass
+class V2CallEffectExecutionContext:
+    producer_stage_registry: Any
+    lifecycle_projection: Any
+    result_occurrence_id: str
+    q_open_assignments: Sequence[Tuple[Tuple[str, str], Any]]
+    execution_refusal_sink: Any = None
+    attempt_ordinals: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _attempt_lock: Any = field(default_factory=threading.RLock, repr=False)
+    _q_open_rows_by_obligation_stage: Dict[Tuple[str, str], Tuple[Any, ...]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        from .v2.contracts import VerifiedLifecyclePrefixProjection
+
+        if type(self.lifecycle_projection) is not VerifiedLifecyclePrefixProjection:
+            raise TypeError("v2 execution context requires PREFIX lifecycle authority")
+        self.lifecycle_projection.validate()
+        if self.result_occurrence_id != self.lifecycle_projection.result_occurrence_id:
+            raise ValueError("v2 execution context result differs from lifecycle projection")
+        grouped: Dict[Tuple[str, str], List[Any]] = {}
+        normalized = tuple(self.q_open_assignments)
+        for item in normalized:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError("Q_open assignment must be a duplicate-preserving key/row pair")
+            key, row = item
+            if (
+                type(key) is not tuple
+                or len(key) != 2
+                or any(type(value) is not str or not value for value in key)
+            ):
+                raise TypeError("Q_open assignment key must be obligation/stage strings")
+            if row not in self.lifecycle_projection.q_open_base:
+                raise ValueError("Q_open assignment row is not live in lifecycle projection")
+            grouped.setdefault(key, []).append(row)
+        self.q_open_assignments = normalized
+        self._q_open_rows_by_obligation_stage = {
+            key: tuple(rows) for key, rows in grouped.items()
+        }
+
+    def membership_for(self, query_authority: "CallEffectSolverQueryAuthority") -> Any:
+        from .v2.execution_authority import (
+            ProducerAttemptMembership,
+            issue_call_effect_requirement_assignment,
+        )
+
+        key = (query_authority.obligation_id, query_authority.stage)
+        candidates = self._q_open_rows_by_obligation_stage.get(key, ())
+        if not candidates:
+            raise ValueError("v2 solver stage lacks live Q_open assignment")
+        if len(candidates) != 1:
+            if callable(self.execution_refusal_sink):
+                self.execution_refusal_sink(query_authority, candidates)
+            raise ValueError("v2 solver stage has ambiguous live Q_open assignments")
+        q_open_row = candidates[0]
+        assignment = issue_call_effect_requirement_assignment(
+            projection=self.lifecycle_projection,
+            q_open_row=q_open_row,
+            query_authority=query_authority,
+        )
+        with self._attempt_lock:
+            ordinal = self.attempt_ordinals.get(key, 0) + 1
+            self.attempt_ordinals[key] = ordinal
+        return ProducerAttemptMembership(
+            "call-effect-domain-v1",
+            "typed-call-effect-solver-v1",
+            "1",
+            query_authority.stage,
+            q_open_row.proof_requirement_id,
+            query_authority.obligation_id,
+            query_authority.observation_contract_id,
+            "attempted",
+            f"{self.result_occurrence_id}:{query_authority.obligation_id}:{query_authority.stage}",
+            ordinal,
+            query_authority.execution_identity_digest,
+            assignment,
+        )
 
 
 @dataclass(frozen=True)
@@ -155,6 +238,93 @@ class _RenderedStage:
     stage_input_payload: Mapping[str, Any]
     precondition_payload: Mapping[str, Any]
     renderer_token: Any = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, init=False)
+class CallEffectSolverQueryAuthority:
+    stage: str
+    obligation_id: str
+    observation_contract_id: str
+    left_fact_id: str
+    right_fact_id: str
+    query_text: str
+    normalized_assertion_text: str
+    stage_input_digest: str
+    precondition_digest: str
+    execution_identity_digest: str
+    authority_digest: str
+    _factory_token: Any = field(default=None, init=False, repr=False, compare=False)
+
+    def __init__(self, *, _factory_token: Any = None, **payload: Any) -> None:
+        if _factory_token is not _QUERY_AUTHORITY_TOKEN:
+            raise TypeError("call-effect query authority must be typed-renderer issued")
+        for name, value in payload.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_factory_token", _factory_token)
+
+    def payload(self) -> Mapping[str, Any]:
+        return {
+            "stage": self.stage,
+            "obligation_id": self.obligation_id,
+            "observation_contract_id": self.observation_contract_id,
+            "left_fact_id": self.left_fact_id,
+            "right_fact_id": self.right_fact_id,
+            "query_text": self.query_text,
+            "normalized_assertion_text": self.normalized_assertion_text,
+            "stage_input_digest": self.stage_input_digest,
+            "precondition_digest": self.precondition_digest,
+            "execution_identity_digest": self.execution_identity_digest,
+        }
+
+    def validate(self) -> None:
+        if (
+            self.stage not in _STAGES or not self.query_text
+            or not self.normalized_assertion_text or not self.obligation_id
+            or not self.observation_contract_id or not self.left_fact_id
+            or not self.right_fact_id or not self.execution_identity_digest
+        ):
+            raise ValueError("call-effect typed query authority is incomplete")
+        if self.authority_digest != _digest(self.payload()):
+            raise ValueError("call-effect typed query authority digest mismatch")
+
+
+def _issue_solver_query_authority(
+    rendered: _RenderedStage,
+    proof_input: PureDirectCallProofInput | PureCallRegionProofInput,
+) -> CallEffectSolverQueryAuthority:
+    if type(rendered) is not _RenderedStage or rendered.renderer_token is not _TYPED_RENDERER_TOKEN:
+        raise TypeError("solver query authority requires the sealed typed renderer output")
+    stage_input_digest = _digest(rendered.stage_input_payload)
+    precondition_digest = _digest(rendered.precondition_payload)
+    execution_identity_digest = _digest((
+        "call_effect_solver_execution_identity_v1",
+        rendered.stage,
+        proof_input.obligation_id,
+        proof_input.observation_contract_id,
+        proof_input.left_fact_id,
+        proof_input.right_fact_id,
+        stage_input_digest,
+        precondition_digest,
+    ))
+    payload = {
+        "stage": rendered.stage,
+        "obligation_id": proof_input.obligation_id,
+        "observation_contract_id": proof_input.observation_contract_id,
+        "left_fact_id": proof_input.left_fact_id,
+        "right_fact_id": proof_input.right_fact_id,
+        "query_text": rendered.query_text,
+        "normalized_assertion_text": rendered.normalized_assertion_text,
+        "stage_input_digest": stage_input_digest,
+        "precondition_digest": precondition_digest,
+        "execution_identity_digest": execution_identity_digest,
+    }
+    value = CallEffectSolverQueryAuthority(
+        **payload,
+        authority_digest=_digest(payload),
+        _factory_token=_QUERY_AUTHORITY_TOKEN,
+    )
+    value.validate()
+    return value
 
 
 @dataclass(frozen=True)
@@ -2257,6 +2427,7 @@ def _execute_rendered_stage(
     solver_runner: Any,
     timeout_seconds: int,
     dependency_ids: Tuple[str, ...],
+    v2_execution_context: Optional[V2CallEffectExecutionContext] = None,
 ) -> InternalSolverProofArtifact:
     if rendered.renderer_token is not _TYPED_RENDERER_TOKEN:
         raise ValueError("untrusted_typed_stage_renderer")
@@ -2269,29 +2440,59 @@ def _execute_rendered_stage(
     )
     if expected_dependencies != dependency_ids:
         raise ValueError("typed_stage_dependency_mismatch")
-    parallel_result = solver_runner.run_parallel(
-        rendered.query_text,
-        timeout=max(1, int(timeout_seconds)),
-    )
-    result = getattr(parallel_result, "first_definitive", None)
-    if result is None:
-        results = tuple(getattr(parallel_result, "results", ()) or ())
-        result = results[0] if results else None
-    status_name = (
-        str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
-        if result is not None
-        else "unknown"
-    )
-    if result is not None and result.status == SolverStatus.UNSAT:
+    query_authority = _issue_solver_query_authority(rendered, proof_input)
+    v2_execution_receipt = None
+    v2_execution_receipts = ()
+    v2_membership = None
+    if v2_execution_context is not None:
+        from .v2.execution_authority import PINNED_SOLVER_EXECUTION_ISSUER
+
+        v2_membership = v2_execution_context.membership_for(query_authority)
+        receipts = PINNED_SOLVER_EXECUTION_ISSUER.execute(
+            registry=v2_execution_context.producer_stage_registry,
+            result_occurrence_id=v2_execution_context.result_occurrence_id,
+            membership=v2_membership,
+            invocation_identity=(
+                f"{proof_input.obligation_id}:{rendered.stage}:"
+                f"{v2_membership.attempt_ordinal}"
+            ),
+            first_invocation_ordinal=1,
+            query=rendered.query_text,
+            configured_timeout_ms=max(1, int(timeout_seconds)) * 1000,
+            query_authority=query_authority,
+            lifecycle_projection=v2_execution_context.lifecycle_projection,
+        )
+        v2_execution_receipts = tuple(receipts)
+        v2_execution_receipt = next(
+            (item for item in receipts if item.observed_status in {"sat", "unsat"}),
+            receipts[0],
+        )
+        status_name = v2_execution_receipt.observed_status
+        solver_name = v2_execution_receipt.solver_identity
+    else:
+        parallel_result = solver_runner.run_parallel(
+            rendered.query_text,
+            timeout=max(1, int(timeout_seconds)),
+        )
+        result = getattr(parallel_result, "first_definitive", None)
+        if result is None:
+            results = tuple(getattr(parallel_result, "results", ()) or ())
+            result = results[0] if results else None
+        status_name = (
+            str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
+            if result is not None
+            else "unknown"
+        )
+        solver_name = str(getattr(result, "solver_name", "unavailable") or "unavailable")
+    if status_name == "unsat":
         record_status = "proven"
         solver_result = "unsat"
-    elif result is not None and result.status == SolverStatus.SAT:
+    elif status_name == "sat":
         record_status = "refuted"
         solver_result = "sat"
     else:
         record_status = "inconclusive"
         solver_result = status_name
-    solver_name = str(getattr(result, "solver_name", "unavailable") or "unavailable")
     query_digest = hashlib.sha256(rendered.query_text.encode("utf-8")).hexdigest()
     assertion_digest = hashlib.sha256(
         rendered.normalized_assertion_text.encode("utf-8")
@@ -2345,6 +2546,10 @@ def _execute_rendered_stage(
         normalized_assertion_text=rendered.normalized_assertion_text,
         stage_input_payload=rendered.stage_input_payload,
         precondition_payload=rendered.precondition_payload,
+        query_authority=query_authority,
+        v2_execution_receipt=v2_execution_receipt,
+        v2_execution_receipts=v2_execution_receipts,
+        v2_producer_membership=v2_membership,
         producer_kind=_PRODUCER_KIND,
         producer_token=_INTERNAL_SOLVER_PRODUCER_TOKEN,
     )
@@ -2357,10 +2562,24 @@ def produce_pure_direct_call_proofs(
     *,
     solver_runner: Any,
     timeout_seconds: int,
+    v2_execution_context: Optional[V2CallEffectExecutionContext] = None,
 ) -> PureDirectCallProofProduction:
     """Produce fixed semantic stages for eligible pure call relations."""
 
     proof_inputs, failures = _build_inputs(manifest, analysis1, analysis2)
+    from .v2.production_signals import (
+        CallEffectBlockerProductionSignal,
+        emit_call_effect_signal,
+    )
+    blocker_signals = tuple(
+        CallEffectBlockerProductionSignal.from_proof_input(proof_input)
+        for proof_input in proof_inputs
+    )
+    for signal in blocker_signals:
+        emit_call_effect_signal(
+            signal,
+            producer_site_manifest_id="call-effect-producer-blocker",
+        )
     artifacts: List[InternalSolverProofArtifact] = []
     failure_list = list(failures)
     for proof_input in proof_inputs:
@@ -2376,6 +2595,7 @@ def produce_pure_direct_call_proofs(
                 solver_runner,
                 timeout_seconds,
                 dependencies,
+                v2_execution_context,
             )
             artifacts.append(first)
             if first.record.status != "proven":
@@ -2397,6 +2617,7 @@ def produce_pure_direct_call_proofs(
                 solver_runner,
                 timeout_seconds,
                 dependencies,
+                v2_execution_context,
             )
             artifacts.append(second)
             if second.record.status != "proven":
@@ -2418,6 +2639,7 @@ def produce_pure_direct_call_proofs(
                 solver_runner,
                 timeout_seconds,
                 dependencies,
+                v2_execution_context,
             )
             artifacts.append(third)
             if third.record.status != "proven":
@@ -2446,6 +2668,7 @@ def produce_pure_direct_call_proofs(
                     solver_runner,
                     timeout_seconds,
                     dependencies,
+                    v2_execution_context,
                 )
                 artifacts.append(fourth)
                 if fourth.record.status != "proven":
@@ -2478,6 +2701,7 @@ def produce_pure_direct_call_proofs(
                     solver_runner,
                     timeout_seconds,
                     dependencies,
+                    v2_execution_context,
                 )
                 artifacts.append(caller_memory)
                 if caller_memory.record.status != "proven":
@@ -2490,10 +2714,33 @@ def produce_pure_direct_call_proofs(
     return PureDirectCallProofProduction(
         artifacts=tuple(artifacts),
         failure_causes=tuple(failure_list),
+        v2_blocker_signals=blocker_signals,
+    )
+
+
+def produce_v2_pure_direct_call_proofs(
+    manifest: Mapping[str, Any],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    execution_context: V2CallEffectExecutionContext,
+    timeout_seconds: int,
+) -> PureDirectCallProofProduction:
+    """V2 authority path; solver execution is owned only by the pinned issuer."""
+
+    return produce_pure_direct_call_proofs(
+        manifest,
+        analysis1,
+        analysis2,
+        solver_runner=None,
+        timeout_seconds=timeout_seconds,
+        v2_execution_context=execution_context,
     )
 
 
 __all__ = [
     "PureDirectCallProofProduction",
+    "V2CallEffectExecutionContext",
     "produce_pure_direct_call_proofs",
+    "produce_v2_pure_direct_call_proofs",
 ]

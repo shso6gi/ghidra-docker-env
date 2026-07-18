@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """等価性判定結果のデータモデル"""
 
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Mapping, Tuple
 from dataclasses import dataclass, field
 
 from ..model import FunctionSignature
@@ -116,6 +116,11 @@ class EquivalenceResult:
     binary2_content_identity: Optional[Tuple[Any, ...]] = None
     function1_identity: Optional[Tuple[Any, ...]] = None
     function2_identity: Optional[Tuple[Any, ...]] = None
+    decision_receipt: Optional[Any] = field(default=None, repr=False, compare=False)
+    final_outcome: Optional[str] = None
+    canonical_decision_required: bool = False
+    canonical_c_active_base: Tuple[Mapping[str, Any], ...] = ()
+    canonical_q_open_base: Tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -141,6 +146,13 @@ class EquivalenceResult:
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
+        if self.decision_receipt is not None:
+            from .v2.phase8_cutover import outcome_from_result
+            from .v2.contracts import Outcome
+
+            return outcome_from_result(self) is Outcome.TIMEOUT
+        if self.canonical_decision_required:
+            raise ValueError("canonical result lacks DecisionReceipt")
         if self.is_equivalent is not None:
             return False
         if not self.solver_results or not self.solver_results.results:
@@ -151,7 +163,14 @@ class EquivalenceResult:
         return False
     
     def is_unknown(self) -> bool:
-        """結果が不明（タイムアウト含む）かどうかを判定"""
+        """結果がsemantic UNKNOWNかどうかを判定（TIMEOUTは含めない）。"""
+        if self.decision_receipt is not None:
+            from .v2.phase8_cutover import outcome_from_result
+            from .v2.contracts import Outcome
+
+            return outcome_from_result(self) is Outcome.UNKNOWN
+        if self.canonical_decision_required:
+            raise ValueError("canonical result lacks DecisionReceipt")
         return self.is_equivalent is None and self.error_message is None
     
     def has_critical_error(self) -> bool:
@@ -171,6 +190,17 @@ class EquivalenceResult:
     
     def to_dict(self) -> Dict[str, Any]:
         """機械可読な辞書に変換（JSON シリアライズ可能）"""
+        decision_receipt = None
+        if self.decision_receipt is not None:
+            from .v2.phase8_cutover import (
+                decision_receipt_payload,
+                outcome_from_result,
+            )
+
+            outcome_from_result(self)
+            decision_receipt = decision_receipt_payload(self.decision_receipt)
+        elif self.canonical_decision_required:
+            raise ValueError("canonical serialization lacks DecisionReceipt")
         result = {
             "is_equivalent": self.is_equivalent,
             "function1_name": self.function1_name,
@@ -196,6 +226,10 @@ class EquivalenceResult:
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
+            "final_outcome": self.final_outcome,
+            "decision_receipt": decision_receipt,
+            "c_active_base": [dict(row) for row in self.canonical_c_active_base],
+            "q_open_base": [dict(row) for row in self.canonical_q_open_base],
             "constrained_fragments": self.constrained_fragments,
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
             "pairwise_stats": self.pairwise_stats,
@@ -403,13 +437,27 @@ class EquivalenceResult:
         
         lines.append("-" * 70)
         
-        if self.error_message:
+        canonical_outcome = None
+        if self.decision_receipt is not None:
+            from .v2.phase8_cutover import outcome_from_result
+
+            canonical_outcome = outcome_from_result(self).value
+        elif self.canonical_decision_required:
+            raise ValueError("canonical rendering lacks DecisionReceipt")
+        if canonical_outcome == "ERROR" or (
+            canonical_outcome is None and self.error_message
+        ):
             lines.append("Result: ERROR")
-            lines.append(f"ERROR: {self.error_message}")
+            if self.error_message:
+                lines.append(f"ERROR: {self.error_message}")
             if self.failure_status:
                 lines.append(f"Failure status: {self.failure_status}")
-        elif self.is_equivalent is None:
-            if self.is_timeout():
+        elif canonical_outcome in {"UNKNOWN", "TIMEOUT"} or (
+            canonical_outcome is None and self.is_equivalent is None
+        ):
+            if canonical_outcome == "TIMEOUT" or (
+                canonical_outcome is None and self.is_timeout()
+            ):
                 lines.append("Result: TIMEOUT (could not determine equivalence within time limit)")
             else:
                 lines.append("Result: UNKNOWN (could not determine equivalence)")
@@ -417,7 +465,9 @@ class EquivalenceResult:
                 lines.append(f"Failure status: {self.failure_status}")
             if self.failure_message:
                 lines.append(f"Failure detail: {self.failure_message}")
-        elif self.is_equivalent:
+        elif canonical_outcome == "EQUIVALENT" or (
+            canonical_outcome is None and self.is_equivalent
+        ):
             lines.append("Result: EQUIVALENT ✓")
         else:
             lines.append("Result: NOT EQUIVALENT ✗")

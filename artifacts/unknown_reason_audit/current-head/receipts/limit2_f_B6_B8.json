@@ -1,0 +1,65 @@
+{
+  "analysis_command": [
+    "./.venv-pyghidra/bin/python",
+    "-m",
+    "scripts.function_tracer_pcode.cli.main",
+    "--equiv",
+    "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O1",
+    "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O3",
+    "--binary-ids",
+    "B6",
+    "B8",
+    "-f",
+    "f",
+    "--strategy",
+    "pairwise",
+    "--equiv-timeout",
+    "300",
+    "--pairwise-timeout",
+    "5",
+    "--pairwise-timeout-hard",
+    "30",
+    "--emit-result-json"
+  ],
+  "analysis_command_digest": "915fc5002cdb9709c0fbea52ca30e96921e599bf699b88d5429c0b788451e220",
+  "analysis_config": {
+    "equiv_timeout": 300,
+    "pairwise_timeout": 5,
+    "pairwise_timeout_hard": 30,
+    "strategy": "pairwise"
+  },
+  "analysis_config_digest": "9ca96586cee165edd635bfe8e36552a1da4a8a624035c59f8182e1409ee89ed4",
+  "binary_content_identities": {
+    "left": [
+      "sha256",
+      "db06eb61bc378613933ff101729165c84a2efa7018cb218b349b23f1677a7329"
+    ],
+    "right": [
+      "sha256",
+      "19eccd4906af5fff7af798c863f1a7af15afbfb6fce7243b72d7cb299a0e83ba"
+    ]
+  },
+  "decision": "UNKNOWN",
+  "exit_code": 2,
+  "finished_at_utc": "2026-07-16T16:32:56.137683+00:00",
+  "head_tree_digest": "f17420710598e894eef246a8e34cfc3b525ab4be",
+  "observed_binary_content_identities": {
+    "left": [
+      "sha256",
+      "db06eb61bc378613933ff101729165c84a2efa7018cb218b349b23f1677a7329"
+    ],
+    "right": [
+      "sha256",
+      "19eccd4906af5fff7af798c863f1a7af15afbfb6fce7243b72d7cb299a0e83ba"
+    ]
+  },
+  "payload_digest": "3499be4368a21bf3af639890fdb5ccc731618fec024fb43dc6656b47635d1134",
+  "payload_index": 0,
+  "receipt_kind": "phase0_current_head_run_receipt",
+  "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "schema_version": 1,
+  "source_artifact_digest": "ae9fbbe3f8e02ca2ad826a88234881672168e5672a69c1c11ee09494c2c863b3",
+  "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/limit2_f_B6_B8.log",
+  "started_at_utc": "2026-07-16T16:29:14.878418+00:00",
+  "tracked_worktree_digest": "0258631b12ead771100bc747524c68caac17f5f319e11c7ab2aa5a8f40f81262"
+}

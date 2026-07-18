@@ -751,6 +751,10 @@ class InternalSolverProofArtifact:
     normalized_assertion_text: str
     stage_input_payload: Any
     precondition_payload: Any
+    query_authority: Any = None
+    v2_execution_receipt: Any = None
+    v2_execution_receipts: Tuple[Any, ...] = ()
+    v2_producer_membership: Any = None
     producer_kind: str = "internal_parallel_solver_runner"
     producer_token: Any = field(default=None, repr=False, compare=False)
 
@@ -760,6 +764,29 @@ class InternalSolverProofArtifact:
             return "untrusted_producer_token"
         if record.producer_kind != self.producer_kind:
             return "producer_kind_mismatch"
+        if self.producer_kind == "internal_typed_pure_direct_call_stage_producer" and (
+            self.query_authority is None
+        ):
+            return "query_authority_missing"
+        if self.query_authority is not None:
+            try:
+                self.query_authority.validate()
+            except (AttributeError, TypeError, ValueError):
+                return "query_authority_invalid"
+            if (
+                self.query_authority.query_text != self.query_text
+                or self.query_authority.stage != record.proof_stage
+                or self.query_authority.obligation_id != record.obligation_id
+                or self.query_authority.observation_contract_id
+                != record.observation_contract_id
+                or self.query_authority.left_fact_id != record.left_object_id
+                or self.query_authority.right_fact_id != record.right_object_id
+                or self.query_authority.stage_input_digest
+                != _digest(self.stage_input_payload)
+                or self.query_authority.precondition_digest
+                != _digest(self.precondition_payload)
+            ):
+                return "query_authority_membership_mismatch"
         query_digest = hashlib.sha256(self.query_text.encode("utf-8")).hexdigest()
         assertion_digest = hashlib.sha256(
             self.normalized_assertion_text.encode("utf-8")

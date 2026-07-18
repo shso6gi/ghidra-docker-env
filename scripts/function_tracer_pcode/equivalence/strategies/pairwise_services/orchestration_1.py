@@ -55,6 +55,7 @@ from ._shared import (
     build_unknown_recovery_actions,
     expression_smt_bit_width,
     infer_parameter_semantics,
+    make_internal_v2_reason_diagnostic,
     make_unknown_reason,
     time,
 )
@@ -456,8 +457,8 @@ def _impl_check(
                     (i, j), "call_projection_lowering_failed",
                     getattr(prepass_lowered, "evidence_digest", "missing"),
                 )
-                unknown_reasons.append(make_unknown_reason(
-                    "equivalence_blocking_unsafety", stage="CALL_EFFECT_PREFLIGHT",
+                unknown_reasons.append(make_internal_v2_reason_diagnostic(
+                    "call_projection_partition_unproven", stage="CALL_EFFECT_PREFLIGHT",
                     pair_or_case=pair_id,
                     evidence_refs=(getattr(prepass_lowered, "failure_cause", None),),
                     detail="Certified guard projection could not be lowered.",
@@ -513,8 +514,8 @@ def _impl_check(
                 if lowered_call_projection.status != "proven":
                     unknown_count += 1
                     unknown_reasons.append(
-                        make_unknown_reason(
-                            "equivalence_blocking_unsafety",
+                        make_internal_v2_reason_diagnostic(
+                            "call_projection_partition_unproven",
                             stage="CALL_EFFECT_PREFLIGHT",
                             pair_or_case=pair_id,
                             evidence_refs=(
@@ -703,8 +704,8 @@ def _impl_check(
                             )
                         )
                     unknown_reasons.append(
-                        make_unknown_reason(
-                            UnknownReasonId.UNRESOLVED_EXPRESSION,
+                        make_internal_v2_reason_diagnostic(
+                            "expression_translation_incomplete",
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
@@ -737,9 +738,180 @@ def _impl_check(
                 case1, case2
             )
             if loop_fallback_reason is not None:
+                v2_loop_blocker_signal = None
                 reason_id = self._unknown_reason_id_for_loop_fallback(
                     loop_fallback_reason
                 )
+                try:
+                    from ...v2.loop_recurrence import LoopBlockerProductionSignal
+                    from ...v2.production_signals import emit_loop_recurrence_signal
+
+                    v2_loop_blocker_signal = (
+                        LoopBlockerProductionSignal.from_loop_fallback(
+                            base_ctx.get("analysis1"),
+                            base_ctx.get("analysis2"),
+                            case1,
+                            case2,
+                            loop_fallback_reason,
+                            observation_contract_id=(
+                                self.observation_contract.contract_id
+                            ),
+                        )
+                    )
+                    emit_loop_recurrence_signal(
+                        v2_loop_blocker_signal,
+                        producer_site_manifest_id="pairwise-loop-fallback-blocker",
+                    )
+                except Exception as exc:
+                    from ...v2.production_signals import (
+                        record_production_pilot_shadow_error,
+                    )
+
+                    record_production_pilot_shadow_error(exc)
+                try:
+                    from ...v2.abi_width_readonly import (
+                        AbiWidthReadonlyBlockerSignal,
+                        AbiWidthReadonlyDisposition,
+                        ReadonlyReductionObjectSetSeed,
+                        classify_readonly_source,
+                    )
+                    from ...v2.production_signals import (
+                        emit_abi_width_readonly_signal,
+                        register_abi_width_solver_candidate,
+                        register_readonly_promotion,
+                    )
+
+                    classification = classify_readonly_source(loop_fallback_reason)
+                    if classification.disposition is (
+                        AbiWidthReadonlyDisposition.TYPED_SLICE5_CAUSE
+                    ) and classification.reason_ids == (
+                        "readonly_storage_identity_unproven",
+                    ):
+                        readonly_seed = ReadonlyReductionObjectSetSeed.from_analyses_and_cases(
+                            base_ctx.get("analysis1"), base_ctx.get("analysis2"),
+                            case1, case2,
+                        )
+                        register_readonly_promotion(readonly_seed)
+                        unresolved = (
+                            ("left", readonly_seed.left_unresolved_member_indices),
+                            ("right", readonly_seed.right_unresolved_member_indices),
+                        )
+                        if not any(indices for _side, indices in unresolved):
+                            raise ValueError(
+                                "readonly unary source did not identify an unresolved member"
+                            )
+                        for side, indices in unresolved:
+                            for member_index in indices:
+                                emit_abi_width_readonly_signal(
+                                    AbiWidthReadonlyBlockerSignal.from_readonly_member(
+                                        readonly_seed, side, member_index
+                                    ),
+                                    producer_site_manifest_id=(
+                                        "pairwise-readonly-identity-blocker"
+                                    ),
+                                )
+                    elif classification.disposition is (
+                        AbiWidthReadonlyDisposition.TYPED_SLICE5_CAUSE
+                    ) and classification.reason_ids == (
+                        "readonly_object_correspondence_unproven",
+                    ):
+                        readonly_seed = ReadonlyReductionObjectSetSeed.from_analyses_and_cases(
+                            base_ctx.get("analysis1"), base_ctx.get("analysis2"),
+                            case1, case2,
+                        )
+                        register_readonly_promotion(readonly_seed)
+                        for side, indices in (
+                            ("left", readonly_seed.left_unresolved_member_indices),
+                            ("right", readonly_seed.right_unresolved_member_indices),
+                        ):
+                            for member_index in indices:
+                                emit_abi_width_readonly_signal(
+                                    AbiWidthReadonlyBlockerSignal.from_readonly_member(
+                                        readonly_seed, side, member_index
+                                    ),
+                                    producer_site_manifest_id=(
+                                        "pairwise-readonly-correspondence-member"
+                                    ),
+                                )
+                    elif classification.disposition is (
+                        AbiWidthReadonlyDisposition.TYPED_SLICE5_CAUSE
+                    ) and classification.reason_ids == (
+                        "return_observation_contract_unproven",
+                        "return_high_bit_relation_unproven",
+                    ):
+                        from ...return_width_surface import (
+                            build_pair_return_observation_seed,
+                            extract_function_return_width_seed,
+                        )
+                        from ...v2.abi_width_readonly import (
+                            ProjectionNotFormable,
+                            ReturnObservationNeedSeed,
+                            ReturnObservationProjectionSeed,
+                        )
+
+                        left_width_seed = extract_function_return_width_seed(
+                            base_ctx.get("analysis1"), case1
+                        )
+                        right_width_seed = extract_function_return_width_seed(
+                            base_ctx.get("analysis2"), case2
+                        )
+                        pair_width_seed = build_pair_return_observation_seed(
+                            left_width_seed, right_width_seed
+                        )
+                        try:
+                            pair_semantic_seed = (
+                                ReturnObservationProjectionSeed.from_pair_seed(
+                                    left_width_seed,
+                                    right_width_seed,
+                                    pair_width_seed,
+                                )
+                            )
+                            signal_factory = (
+                                AbiWidthReadonlyBlockerSignal.from_projection_seed
+                            )
+                            emitted_reason_ids = classification.reason_ids
+                        except ProjectionNotFormable:
+                            pair_semantic_seed = ReturnObservationNeedSeed.from_pair_seed(
+                                left_width_seed,
+                                right_width_seed,
+                                pair_width_seed,
+                            )
+                            signal_factory = (
+                                lambda _reason_id, seed: (
+                                    AbiWidthReadonlyBlockerSignal.from_observation_need_seed(
+                                        seed
+                                    )
+                                )
+                            )
+                            # Without one positive observation projection the
+                            # high-bit proposition is not yet addressable.  The
+                            # observation Q remains live and a later exact
+                            # projection seed may introduce high-bit work.
+                            emitted_reason_ids = (
+                                "return_observation_contract_unproven",
+                            )
+                        for slice5_reason_id in emitted_reason_ids:
+                            signal = signal_factory(
+                                slice5_reason_id, pair_semantic_seed
+                            )
+                            emit_abi_width_readonly_signal(
+                                signal,
+                                producer_site_manifest_id=(
+                                    "pairwise-return-width-relation-blocker"
+                                ),
+                            )
+                            if slice5_reason_id == (
+                                "return_high_bit_relation_unproven"
+                            ):
+                                register_abi_width_solver_candidate(
+                                    signal, pair_semantic_seed
+                                )
+                except Exception as exc:
+                    from ...v2.production_signals import (
+                        record_production_pilot_shadow_error,
+                    )
+
+                    record_production_pilot_shadow_error(exc)
                 object_target_key = None
                 evidence_kind = None
                 if reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
@@ -748,12 +920,17 @@ def _impl_check(
                         pair_id=pair_id,
                     )
                     evidence_kind = "object_storage_identity"
-                elif reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                elif type(reason_id) is str:
                     object_target_key = self._method_b_closure_object_target_key(
                         base_ctx=base_ctx, case1=case1, case2=case2,
                         pair_id=pair_id,
                     )
-                reason_record = make_unknown_reason(
+                reason_factory = (
+                    make_internal_v2_reason_diagnostic
+                    if type(reason_id) is str
+                    else make_unknown_reason
+                )
+                reason_record = reason_factory(
                     reason_id, stage="S_PAIRWISE", pair_or_case=pair_id,
                     evidence_refs=(loop_fallback_reason,),
                     evidence_kind=evidence_kind,
@@ -761,10 +938,65 @@ def _impl_check(
                     detail=loop_fallback_reason,
                 )
                 semantic_artifact = None
-                if reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                if type(reason_id) is str:
                     self._record_completed_method_b_covering_case_proof_if_safe(
-                        reason_record, analysis1, case1, case2
+                        reason_record,
+                        analysis1,
+                        case1,
+                        case2,
+                        v2_blocker_signal=v2_loop_blocker_signal,
                     )
+                    if (
+                        v2_loop_blocker_signal is not None
+                        and loop_fallback_reason
+                        == "counted_loop_summary_expression_proof_missing"
+                        and self._method_b_covering_case_proof(case1, case2) is None
+                    ):
+                        try:
+                            from ..pairwise_query_executor import (
+                                render_loop_v2_solver_query,
+                            )
+                            from ...v2.production_signals import (
+                                active_loop_requirement_for_signal,
+                                active_production_execution_identity_digest,
+                                execute_loop_solver_rendered_query,
+                            )
+
+                            v2_requirement = active_loop_requirement_for_signal(
+                                v2_loop_blocker_signal,
+                                "loop_exact_term_relation",
+                            )
+                            v2_execution_identity = (
+                                active_production_execution_identity_digest()
+                            )
+                            if (
+                                v2_requirement is not None
+                                and v2_execution_identity is not None
+                            ):
+                                rendered_loop_query = render_loop_v2_solver_query(
+                                    blocker=v2_loop_blocker_signal,
+                                    requirement=v2_requirement,
+                                    analysis1=base_ctx.get("analysis1"),
+                                    analysis2=base_ctx.get("analysis2"),
+                                    case1=case1,
+                                    case2=case2,
+                                    pair_id=pair_id,
+                                    execution_identity_digest=v2_execution_identity,
+                                )
+                                execute_loop_solver_rendered_query(
+                                    v2_loop_blocker_signal,
+                                    rendered_loop_query,
+                                    configured_timeout_ms=max(
+                                        1,
+                                        int(self.per_query_timeout_hard * 1000),
+                                    ),
+                                )
+                        except Exception as exc:
+                            from ...v2.production_signals import (
+                                record_production_pilot_shadow_error,
+                            )
+
+                            record_production_pilot_shadow_error(exc)
                     self._record_completed_method_b_dual_summary_solver_proof_if_safe(
                         reason_record, analysis1, case1, case2
                     )
@@ -1056,7 +1288,7 @@ def _impl_check(
                         continue
                     analysis_safety_validated = True
 
-                is_decisive = validate_counterexample_across_cases(
+                self._observe_v2_sat_counterexample_ambiguity((result.pair_stage or "unknown",), analysis1, analysis2, case1=case1, case2=case2, pair_id=pair_id); is_decisive = validate_counterexample_across_cases(
                     self,
                     base_ctx,
                     cases1,
@@ -1083,7 +1315,7 @@ def _impl_check(
                         f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
                     )
                     continue
-                global_case_replay_validated = True
+                self._complete_v2_sat_counterexample_ambiguity_if_observed((result.pair_stage or "unknown",), analysis1, analysis2, case1=case1, case2=case2, pair_id=pair_id, counterexample_raw=result.counterexample_raw); global_case_replay_validated = True
 
                 same_function_replay_reasons = self._same_function_counterexample_replay_reasons(
                     analysis1,
@@ -1218,26 +1450,33 @@ def _impl_check(
                     result.object_evidence = pending_bridge_evidence
 
             unknown_count += 1
-            unknown_reasons.append(
-                make_unknown_reason(
-                    result.blocking_reason or UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
-                    stage="S_PAIRWISE",
-                    pair_or_case=pair_id,
-                    evidence_refs=(result.pair_stage or "unknown", result.blocking_detail),
-                    evidence_kind=getattr(result, "evidence_kind", None),
-                    object_target_key=getattr(result, "object_target_key", None),
-                    recovery_proof_obligations=getattr(
-                        result,
-                        "recovery_proof_obligations",
-                        None,
-                    ),
-                    proof_obligation_id=getattr(result, "proof_obligation_id", None),
-                    proof_requirement_ids=getattr(result, "proof_requirement_ids", None),
-                    object_evidence=getattr(result, "object_evidence", None),
-                    action_status=getattr(result, "action_status", None),
-                    detail=result.blocking_detail,
+            if result.blocking_reason is not None:
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        result.blocking_reason,
+                        stage="S_PAIRWISE",
+                        pair_or_case=pair_id,
+                        evidence_refs=(
+                            result.pair_stage or "unknown", result.blocking_detail
+                        ),
+                        evidence_kind=getattr(result, "evidence_kind", None),
+                        object_target_key=getattr(result, "object_target_key", None),
+                        recovery_proof_obligations=getattr(
+                            result,
+                            "recovery_proof_obligations",
+                            None,
+                        ),
+                        proof_obligation_id=getattr(
+                            result, "proof_obligation_id", None
+                        ),
+                        proof_requirement_ids=getattr(
+                            result, "proof_requirement_ids", None
+                        ),
+                        object_evidence=getattr(result, "object_evidence", None),
+                        action_status=getattr(result, "action_status", None),
+                        detail=result.blocking_detail,
+                    )
                 )
-            )
             self._debug_print(f"  Pair {pair_id}: final result UNKNOWN/TIMEOUT")
 
         if sat_count > 0:
@@ -1281,6 +1520,27 @@ def _impl_check(
                 resolved_pairs.add(pending_pair)
                 continue
             unknown_count += 1
+            try:
+                from ...v2.loop_recurrence import LoopBlockerProductionSignal
+                from ...v2.production_signals import emit_loop_recurrence_signal
+
+                emit_loop_recurrence_signal(
+                    LoopBlockerProductionSignal.from_loop_fallback(
+                        analysis1,
+                        analysis2,
+                        cases1[pending.i],
+                        cases2[pending.j],
+                        pending.reason,
+                        observation_contract_id=self.observation_contract.contract_id,
+                    ),
+                    producer_site_manifest_id="pairwise-pending-loop-blocker",
+                )
+            except Exception as exc:
+                from ...v2.production_signals import (
+                    record_production_pilot_shadow_error,
+                )
+
+                record_production_pilot_shadow_error(exc)
             unknown_reasons.append(make_unknown_reason(
                 self._unknown_reason_id_for_loop_fallback(pending.reason),
                 stage="S_PAIRWISE",
@@ -1410,15 +1670,10 @@ def _impl_check(
     else:
         final_is_equiv = None
         error_count = total_pairs - unsat_count - sat_count - unknown_count
-        unknown_reasons.append(
-            make_unknown_reason(
-                UnknownReasonId.UNEXPECTED_PAIRWISE_STATE,
-                stage="S_PAIRWISE",
-                evidence_refs=(f"errors={error_count}",),
-            )
-        )
+        strategy_error_kind = "unexpected_pairwise_state"
+        strategy_error_message = f"unexpected pairwise state: errors={error_count}"
         self._debug_print("=" * 60)
-        self._debug_print(f"Result: UNKNOWN (unexpected state, errors={error_count})")
+        self._debug_print(f"Result: ERROR (unexpected state, errors={error_count})")
 
     self._debug_print(f"  Total pairs: {total_pairs}")
     self._debug_print(
@@ -1491,6 +1746,8 @@ def _impl_check(
             normalization_rules=all_normalization_rules,
             pairwise_debug_stats=normalization_stats,
             unknown_reasons=unknown_reasons,
+            error_kind=locals().get("strategy_error_kind"),
+            error_message=locals().get("strategy_error_message"),
         )
         final_result.completed_recovery_proof_evidence = [
             {
@@ -1579,12 +1836,10 @@ def _impl__blocking_unknown_reasons_should_replace_pair_unknowns(
         return False
 
     replaceable_pair_reasons = {
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value,
-        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value,
+        "expression_translation_incomplete",
         UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED.value,
         UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE.value,
         UnknownReasonId.NORMALIZATION_NO_CHANGE.value,
-        UnknownReasonId.UNKNOWN.value,
     }
     pair_reason_ids = {
         getattr(reason, "reason_id", None)
@@ -1710,10 +1965,14 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
     analysis: FunctionReturnAnalysis,
     case1: ReturnCase,
     case2: ReturnCase,
+    *,
+    v2_blocker_signal=None,
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+    from ...v2.loop_recurrence import LOOP_REASON_SPECS
+
+    if reason_record.reason_id not in LOOP_REASON_SPECS:
         return
     object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
     if not isinstance(object_target_key, tuple) or len(object_target_key) != 5:
@@ -1730,6 +1989,31 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
         proof=proof,
     ):
         return
+    v2_term_completion_signal = None
+    if v2_blocker_signal is not None:
+        try:
+            from ...v2.loop_recurrence import (
+                LoopExactTermRelationCompletionSignal,
+            )
+            from ...v2.production_signals import emit_loop_recurrence_signal
+
+            v2_term_completion_signal = (
+                LoopExactTermRelationCompletionSignal.from_pairwise_cases(
+                    v2_blocker_signal,
+                    case1,
+                    case2,
+                )
+            )
+            emit_loop_recurrence_signal(
+                v2_term_completion_signal,
+                producer_site_manifest_id="pairwise-loop-term-completed",
+            )
+        except Exception as exc:
+            from ...v2.production_signals import (
+                record_production_pilot_shadow_error,
+            )
+
+            record_production_pilot_shadow_error(exc)
     actions = tuple(build_unknown_recovery_actions([reason_record]))
     records: List[Dict[str, Any]] = [
         dict(item)
@@ -1744,6 +2028,7 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
         records,
         existing_ids,
         actions,
+        reason_id=reason_record.reason_id,
         object_target_key=object_target_key,
         covering=covering,
     )
@@ -1754,10 +2039,32 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
         covering.accumulator_proof,
         count_values,
     ):
+        if v2_term_completion_signal is not None:
+            try:
+                from ...v2.loop_recurrence import (
+                    LoopExactGuardPartitionCompletionSignal,
+                )
+                from ...v2.production_signals import emit_loop_recurrence_signal
+
+                emit_loop_recurrence_signal(
+                    LoopExactGuardPartitionCompletionSignal.from_pairwise_cases(
+                        v2_term_completion_signal,
+                        case1,
+                        case2,
+                    ),
+                    producer_site_manifest_id="pairwise-loop-guard-completed",
+                )
+            except Exception as exc:
+                from ...v2.production_signals import (
+                    record_production_pilot_shadow_error,
+                )
+
+                record_production_pilot_shadow_error(exc)
         changed = self._append_completed_method_b_guard_partition_evidence(
             records,
             existing_ids,
             actions,
+            reason_id=reason_record.reason_id,
             object_target_key=object_target_key,
             covering=covering,
         ) or changed
@@ -1770,6 +2077,7 @@ def _impl__append_completed_method_b_covering_case_evidence(
     existing_ids: set,
     actions: Sequence[Any],
     *,
+    reason_id: str,
     object_target_key: Tuple[Any, ...],
     covering: _MethodBCoveringCaseProof,
 ) -> bool:
@@ -1789,7 +2097,7 @@ def _impl__append_completed_method_b_covering_case_evidence(
         {
             "object_derived": True,
             "status": "complete",
-            "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+            "reason_id": reason_id,
             "proof_kind": action.proof_kind,
             "recovery_proof_kind": action.proof_kind,
             "proof_stage": action.proof_stage,
@@ -1825,6 +2133,7 @@ def _impl__append_completed_method_b_guard_partition_evidence(
     existing_ids: set,
     actions: Sequence[Any],
     *,
+    reason_id: str,
     object_target_key: Tuple[Any, ...],
     covering: _MethodBCoveringCaseProof,
 ) -> bool:
@@ -1849,7 +2158,7 @@ def _impl__append_completed_method_b_guard_partition_evidence(
         {
             "object_derived": True,
             "status": "complete",
-            "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+            "reason_id": reason_id,
             "proof_kind": action.proof_kind,
             "recovery_proof_kind": action.proof_kind,
             "proof_stage": action.proof_stage,

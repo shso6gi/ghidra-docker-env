@@ -1,0 +1,455 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "unknown_taxonomy_v2_phase6_slice4_representative_validation",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "status": "fixed_review_go",
+  "scope": "UNKNOWN reason, TIMEOUT decision, C_active, and Q_open correctness only",
+  "source_inventory": {
+    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
+    "current_source": {
+      "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655",
+      "candidate_count": 597
+    },
+    "live_delta": {
+      "added": 0,
+      "removed": 0
+    },
+    "slice4_exact_classification": {
+      "typed_reason_count": 16,
+      "loop_fallback_source_codes": 9,
+      "summary_blocker_source_codes": 18,
+      "invalid_summary_source_codes": 7,
+      "deferred_slice5_source_codes": 2,
+      "slice3_effect_owner_source_codes": 2,
+      "effect_tuple_reason_owners": 3,
+      "unknown_source_codes_fail_closed": true,
+      "pairwise_disjoint_predicates": true
+    }
+  },
+  "sealed_contract": {
+    "domain_contract_id": "loop-recurrence-summary-v2",
+    "reason_count": 16,
+    "producer_stage_count": 9,
+    "full_registry_digest": "59e3fbedc98851c45400a9618c7814f09c2e372d4f9d912e47a4e52921d84654",
+    "common_registry_digest": "aed45d8bb14646686eefcace9ba0f59856ea48a2b7305d067e875916683c8eb3",
+    "cause_transformation_emitted": false,
+    "strategy_name_in_semantic_identity": false,
+    "semantic_and_proof_relations_separate": true
+  },
+  "relation_evidence": {
+    "loop_exact_observed": {
+      "c_active": 1,
+      "q_open": 2
+    },
+    "loop_exact_term_completed": {
+      "c_active": 1,
+      "q_open": 1
+    },
+    "loop_exact_guard_completed": {
+      "c_active": 0,
+      "q_open": 0
+    },
+    "terminal_solver_timeout": {
+      "final_outcome": "TIMEOUT",
+      "c_active": 1,
+      "q_open": 2,
+      "terminal_timeout_events": 1
+    },
+    "solver_sat_safety_handoff": {
+      "final_outcome": "UNKNOWN",
+      "c_active": 2,
+      "q_open": 3
+    },
+    "timeout_then_unsat_and_guard_proof": {
+      "final_outcome": "EQUIVALENT_ELIGIBLE",
+      "c_active": 0,
+      "q_open": 0,
+      "observed_nonterminal_timeout_events": 1
+    }
+  },
+  "relation_evidence_tests": {
+    "frontier": "test_loop_exact_term_and_guard_issue_separate_ordered_authorities",
+    "terminal_timeout": "test_loop_connector_finalizes_open_ledger_and_selects_terminal_timeout",
+    "sat_handoff": "test_loop_sat_refutation_enters_phase6_1_safety_backlog",
+    "timeout_recovery": "test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q",
+    "recurrence_completion": "test_recurrence_completion_issues_binding_and_completes_exact_observed_q"
+  },
+  "current_head_real_binary_runs": [
+    {
+      "case_id": "eqbench_reve_limit2_f_arm64_clang_o0_gcc_o1",
+      "command": "./.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main --equiv targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-clang-O0 targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O1 --binary-ids B1 B6 -f f --strategy pairwise --normalize-mode safe --equiv-timeout 30 --pairwise-timeout 5 --pairwise-timeout-hard 30 --emit-result-json",
+      "result": "EQUIVALENT",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "recurrence_state": "composed",
+      "transition_tag": "unit_step_affine_recursion_v1",
+      "validated_artifact_imported": true,
+      "promoted_successor_final_outcome": "EQ",
+      "promoted_successor_comparison_receipt_id": "1270b7ab1118bd04765f7f3c8cbd5909d915044e7c8dbad72060f1da86ba02c8",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/limit2_f.result.json.gz.b64"
+    },
+    {
+      "case_id": "eqbench_reve_loop2_f_arm64_clang_o0_o1",
+      "command": "./.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main --equiv targets/EqBench/benchmarks/REVE/loop2/Eq/source/newV-arm64-clang-O0 targets/EqBench/benchmarks/REVE/loop2/Eq/source/newV-arm64-clang-O1 --binary-ids B1 B2 -f f --strategy pairwise --normalize-mode safe --equiv-timeout 30 --pairwise-timeout 5 --pairwise-timeout-hard 30 --emit-result-json",
+      "result": "EQUIVALENT",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "recurrence_state": "composed",
+      "transition_tag": "affine_counted_loop_v1",
+      "validated_artifact_imported": true,
+      "promoted_successor_final_outcome": "EQ",
+      "promoted_successor_comparison_receipt_id": "4077bdd4a0a822299d7eab88c2f6d3c7065dbcb2587d25fb4b7d9bc57d9b3cc2",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/loop2_f.result.json.gz.b64"
+    },
+    {
+      "case_id": "fixture_recurrence_parity_o0_og",
+      "source": "scripts/function_tracer_pcode/tests/fixtures/recurrence_parity.c",
+      "function": "recurrence_parity_sum",
+      "result": "EQUIVALENT",
+      "transition_tag": "affine_counted_loop_v1",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "recurrence_state": "composed",
+      "validated_artifact_imported": true,
+      "promoted_successor_final_outcome": "EQ",
+      "promoted_successor_comparison_receipt_id": "1519a4c56e32a85fc54fa5ffefa139a383967191ac59cf21faa8ac7ddc283bdb",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/recurrence_parity.result.json.gz.b64"
+    },
+    {
+      "case_id": "fixture_recurrence_guarded_affine_o0_og",
+      "source": "scripts/function_tracer_pcode/tests/fixtures/recurrence_guarded_affine.c",
+      "function": "recurrence_guarded_steps",
+      "result": "EQUIVALENT",
+      "transition_tag": "guarded_affine_decreasing_state_v1",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "recurrence_state": "composed",
+      "validated_artifact_imported": true,
+      "promoted_successor_final_outcome": "EQ",
+      "promoted_successor_comparison_receipt_id": "c5f2dd928f139b39575f563a3d6e605d634195136de6b33177ea920a4e382a0f",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/recurrence_guarded_affine.result.json.gz.b64"
+    }
+  ],
+  "default_off_preservation": {
+    "v2_pilot_enabled_for_real_binary_commands": false,
+    "legacy_result_and_production_objects_changed": false,
+    "typed_relation_evidence_class": "fresh integration contract",
+    "real_binary_evidence_class": "current worktree default-off regression"
+  },
+  "validation": {
+    "focused_loop_suite": "91 passed",
+    "solver_combined_suite": "122 passed",
+    "related_contract_suite": "440 passed",
+    "real_binary_matrix": "4 passed",
+    "real_binary_fixture_command": "env RUN_PYGHIDRA_REGRESSIONS=1 PYTHONPATH=. ./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py",
+    "real_binary_fixture_result": "2 passed in 120.85s"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py": "ba52c1c2ceee93ce6b8b008ba0de750b3077ef40546cd28975abf150c17cc9ef",
+    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "f2bb30e002211dd81df664a07500ff3179524e94cde4efeae160f79a05f02e65",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f8a9a0b9d28e042d1ef08adc139f576c466e8b2f4cb3df892d11fd0ca53e5b22",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "9805e267be863a9df2d8e25b6d9958aec3fb9e258dd4ea0f97f2177512ef10a5",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py": "6f0bcb17eb7bf4a9b7b5266b9ffa6961eb9d7fc59c95352ac1163f2bb102d2a4",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a",
+    "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
+    "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "124e31ed68b2dd0a2055fd950210e04a826be31efd2e0becbc38495a0adfb4b6",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "c9f7b81518cdc5469dc9842cb569921dbb2f2f0c03cfdf8890c1c668ca8bcf7d",
+    "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
+    "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "faafa908413cbf23d24ba784f4f0c6f035866357538fd333f42511088affa62a",
+    "scripts/function_tracer_pcode/equivalence/v2/shadow_compare.py": "83f837ccdffdd70ad525c434527b6a6fa4587a85437e5c1abf17b62a644ed634"
+  },
+  "binary_inputs": {
+    "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-clang-O0": "5347ec962197e61c3119e976fb6755755cb224656f30a7e501b3da1322491260",
+    "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O1": "db06eb61bc378613933ff101729165c84a2efa7018cb218b349b23f1677a7329",
+    "targets/EqBench/benchmarks/REVE/loop2/Eq/source/newV-arm64-clang-O0": "787507e28baac3c39e67cdb33ce702d3c27c69e0ee3e752566ef74bacc1f1a0a",
+    "targets/EqBench/benchmarks/REVE/loop2/Eq/source/newV-arm64-clang-O1": "88ff81093723e97342d6e6ae551662edfe8846cf2122b26cdb3343e51e459834",
+    "scripts/function_tracer_pcode/tests/fixtures/recurrence_parity.c": "d0583a7ab54fc055fdcc254c70bab60cf7081d3038401741725f23a578493e8b",
+    "scripts/function_tracer_pcode/tests/fixtures/recurrence_guarded_affine.c": "59254406c6f4c3c398297479ed3b6f7f8b00c415d1cdbfa2cc56f5ffef91b173"
+  },
+  "stored_run_outputs": {
+    "eqbench_reve_limit2_f_arm64_clang_o0_gcc_o1": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/limit2_f.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "eaf14a6dc3308bed2318e3d20e6c97b5f19f1ab2da5998fd6fe44c686aa6d219",
+      "result_json_sha256": "e4054a6fa17c12691eb8221c8a936821022cb69c4d1006910fa042bee5d44077",
+      "diagnostic_stdout_sha256": "e0d3b1eb3786aae6aca3275dc9ea548d4b7c6fb6f1bc27ffd2f0baa48c688be6",
+      "expected_projection": {
+        "promoted_successor_comparison_receipt_id": "1270b7ab1118bd04765f7f3c8cbd5909d915044e7c8dbad72060f1da86ba02c8",
+        "sides": {
+          "left": {
+            "pattern_kind": "linear_self_recursion_summary",
+            "transition_proposition_tags": [
+              "unit_step_affine_recursion_v1"
+            ],
+            "validated_artifact_imported": true
+          },
+          "right": {
+            "pattern_kind": "linear_self_recursion_summary",
+            "transition_proposition_tags": [
+              "unit_step_affine_recursion_v1"
+            ],
+            "validated_artifact_imported": true
+          }
+        }
+      }
+    },
+    "eqbench_reve_loop2_f_arm64_clang_o0_o1": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/loop2_f.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "5177dbf7d92dee7a23823fec49a8d29fe9eb34b134fade6092d1565c9dd6950b",
+      "result_json_sha256": "12e508b98dd37d7be30ccc7a649ee52045286d5e8ac89fbedb1aa6618c2b66bc",
+      "diagnostic_stdout_sha256": "4f87b05a79440415a03febcb8ce5f966d4591c1809c0e983f5eeaf9a4fc2190d",
+      "expected_projection": {
+        "promoted_successor_comparison_receipt_id": "4077bdd4a0a822299d7eab88c2f6d3c7065dbcb2587d25fb4b7d9bc57d9b3cc2",
+        "sides": {
+          "left": {
+            "pattern_kind": "counted_scalar_loop_summary",
+            "transition_proposition_tags": [
+              "affine_counted_loop_v1",
+              "base_member_bound_to_transition_v1"
+            ],
+            "validated_artifact_imported": true
+          },
+          "right": {
+            "pattern_kind": null,
+            "transition_proposition_tags": [],
+            "validated_artifact_imported": false
+          }
+        }
+      }
+    },
+    "fixture_recurrence_parity_o0_og": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/recurrence_parity.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "e060e0294c4ed77ca6c587320f858dcf8d3ecdd1dc89fcbef8b30443c4047663",
+      "result_json_sha256": "12f1031e36018966fb956443e853fd79d0e1e1b7fc3df591358ec3dd536e0e64",
+      "diagnostic_stdout_sha256": "49111cd52a659d3cb231b7b17f352cf9440ed84f1fa050155aa45eae779a4cd3",
+      "expected_projection": {
+        "promoted_successor_comparison_receipt_id": "1519a4c56e32a85fc54fa5ffefa139a383967191ac59cf21faa8ac7ddc283bdb",
+        "sides": {
+          "left": {
+            "pattern_kind": "state_transition_loop_summary",
+            "transition_proposition_tags": [
+              "affine_counted_loop_v1",
+              "base_member_bound_to_transition_v1"
+            ],
+            "validated_artifact_imported": true
+          },
+          "right": {
+            "pattern_kind": "state_transition_loop_summary",
+            "transition_proposition_tags": [
+              "affine_counted_loop_v1",
+              "base_member_bound_to_transition_v1"
+            ],
+            "validated_artifact_imported": true
+          }
+        }
+      }
+    },
+    "fixture_recurrence_guarded_affine_o0_og": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice4_runs/recurrence_guarded_affine.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "9be558f23ff22ff5c67def5dfca9959ec636f70013a6053925263c29953f7c8d",
+      "result_json_sha256": "03a8c965c81d8bda05f210a50bf6b4973a9f767ad93dbf8b13718b6d96f1bd61",
+      "diagnostic_stdout_sha256": "a94df3322fcbbbaf340744c0439dc0a2a5db0dc180a7753dcd6022cf43df371a",
+      "expected_projection": {
+        "promoted_successor_comparison_receipt_id": "c5f2dd928f139b39575f563a3d6e605d634195136de6b33177ea920a4e382a0f",
+        "sides": {
+          "left": {
+            "pattern_kind": "state_transition_loop_summary",
+            "transition_proposition_tags": [
+              "guarded_affine_decreasing_state_v1",
+              "base_member_bound_to_transition_v1"
+            ],
+            "validated_artifact_imported": true
+          },
+          "right": {
+            "pattern_kind": "state_transition_loop_summary",
+            "transition_proposition_tags": [
+              "guarded_affine_decreasing_state_v1",
+              "base_member_bound_to_transition_v1"
+            ],
+            "validated_artifact_imported": true
+          }
+        }
+      }
+    }
+  },
+  "execution_environment": {
+    "fixture_compiler": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+    "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
+  },
+  "before_after": {
+    "default_off_current_head_runs": [
+      {
+        "case_id": "eqbench_reve_limit2_f_arm64_clang_o0_gcc_o1",
+        "before": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "after": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "interpretation": "default-off preservation; no V2 pilot decision claim"
+      },
+      {
+        "case_id": "eqbench_reve_loop2_f_arm64_clang_o0_o1",
+        "before": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "after": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "interpretation": "default-off preservation; no V2 pilot decision claim"
+      },
+      {
+        "case_id": "fixture_recurrence_parity_o0_og",
+        "before": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "after": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "interpretation": "default-off preservation; no V2 pilot decision claim"
+      },
+      {
+        "case_id": "fixture_recurrence_guarded_affine_o0_og",
+        "before": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "after": {
+          "decision": "EQUIVALENT",
+          "unknown_reason_count": 0,
+          "legacy_unknown_backlog_count": 0
+        },
+        "interpretation": "default-off preservation; no V2 pilot decision claim"
+      }
+    ],
+    "typed_integration_contract": {
+      "loop_exact_observed": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_summary_proof_missing"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_exact_summary_relation_unproven"
+          ],
+          "unique_active_causes": 1,
+          "open_requirements": 2
+        }
+      },
+      "loop_exact_term_completed": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_summary_proof_missing"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_exact_summary_relation_unproven"
+          ],
+          "unique_active_causes": 1,
+          "open_requirements": 1
+        }
+      },
+      "loop_exact_guard_completed": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_summary_proof_missing"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "lifecycle_eligibility": "EQUIVALENT_ELIGIBLE",
+          "reason_ids": [],
+          "unique_active_causes": 0,
+          "open_requirements": 0
+        }
+      },
+      "terminal_solver_timeout": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "solver_unknown_timeout"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "decision": "TIMEOUT",
+          "reason_ids": [
+            "loop_exact_summary_relation_unproven"
+          ],
+          "unique_active_causes": 1,
+          "open_requirements": 2,
+          "terminal_timeout_events": 1
+        }
+      },
+      "solver_sat_safety_handoff": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_summary_proof_missing"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "loop_exact_summary_relation_unproven",
+            "counterexample_analysis_safety_unproven"
+          ],
+          "unique_active_causes": 2,
+          "open_requirements": 3
+        }
+      },
+      "timeout_then_unsat_and_guard_proof": {
+        "before": {
+          "decision": "UNKNOWN",
+          "reason_ids": [
+            "solver_unknown_timeout"
+          ],
+          "active_blocker_occurrences": 1,
+          "proof_backlog": "legacy recovery action (not canonical Q_open)"
+        },
+        "after": {
+          "lifecycle_eligibility": "EQUIVALENT_ELIGIBLE",
+          "reason_ids": [],
+          "unique_active_causes": 0,
+          "open_requirements": 0,
+          "observed_nonterminal_timeout_events": 1
+        }
+      }
+    },
+    "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome"
+  },
+  "artifact_digest": "c2ae65de89d075562019b800ada56c5714cb0375f2b2391c2787ab599f8a98dc"
+}

@@ -628,8 +628,10 @@ class ObligationRuntimeSession:
             proof_kind = str(getattr(reason, "recovery_proof_kind", "") or "")
             gate_kind = gate_for_kind.get(proof_kind)
             if getattr(reason, "reason_id", None) in {
-                "method_b_closure_blocked",
-                "loop_summary_proof_missing",
+                "loop_exact_summary_relation_unproven",
+                "loop_summary_guard_correspondence_unproven",
+                "loop_summary_semantic_equality_unproven",
+                "loop_summary_structure_correspondence_unproven",
                 "phi_circular_replacement_unproven",
                 "readonly_identity_missing",
             }:
@@ -644,8 +646,11 @@ class ObligationRuntimeSession:
                 except (TypeError, ValueError):
                     continue
             if not candidates:
+                reason_id = getattr(reason, "reason_id", None)
+                if not isinstance(reason_id, str) or not reason_id:
+                    continue
                 target = getattr(reason, "object_target_key", None) or (
-                    "unknown_reason_target", getattr(reason, "reason_id", "unknown"),
+                    "semantic_reason_target", reason_id,
                     getattr(reason, "pair_or_case", None),
                 )
                 contract = ProofRequirementContract(

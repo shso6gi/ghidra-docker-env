@@ -863,6 +863,10 @@ def _coerce_payload(value: Any) -> Mapping[str, Any]:
 
 
 def _payload_is_unknown(payload: Mapping[str, Any]) -> bool:
+    if payload.get("decision_receipt") is not None:
+        from ..equivalence.v2.phase8_cutover import outcome_from_payload
+
+        return outcome_from_payload(payload).value in {"UNKNOWN", "TIMEOUT"}
     if payload.get("is_equivalent") is not None:
         return False
     debug_trace = payload.get("debug_trace")
@@ -872,6 +876,10 @@ def _payload_is_unknown(payload: Mapping[str, Any]) -> bool:
 
 
 def _payload_final_result(payload: Mapping[str, Any]) -> str:
+    if payload.get("decision_receipt") is not None:
+        from ..equivalence.v2.phase8_cutover import outcome_from_payload
+
+        return outcome_from_payload(payload).value
     debug_trace = payload.get("debug_trace")
     if isinstance(debug_trace, Mapping):
         final_result = debug_trace.get("final_result")
@@ -894,6 +902,10 @@ def _payload_final_result(payload: Mapping[str, Any]) -> str:
 
 
 def _payload_is_timeout(payload: Mapping[str, Any]) -> bool:
+    if payload.get("decision_receipt") is not None:
+        from ..equivalence.v2.phase8_cutover import outcome_from_payload
+
+        return outcome_from_payload(payload).value == "TIMEOUT"
     if payload.get("is_timeout") is True:
         return True
     solver_results = payload.get("solver_results")

@@ -1,0 +1,4632 @@
+{
+  "audit_kind": "unknown_taxonomy_v1_current_head_inventory",
+  "authority_note": "This is a v1 location inventory only. Diagnostic reasons are not final outcome authority and solver_unknown_timeout does not imply a TIMEOUT decision.",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "runtime_timeout_correspondence": [
+    {
+      "configured_timeout_budget_field": "equiv_timeout",
+      "configured_timeout_budget_seconds": null,
+      "correspondence": "not_applicable",
+      "final_outcome": "NOT_EQ",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "21098a6f1001c8330a4c2737aa19e70dacfb76c3d356a4dbb19b6449115d3dff",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "equiv_timeout",
+      "configured_timeout_budget_seconds": null,
+      "correspondence": "not_applicable",
+      "final_outcome": "UNKNOWN",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "4390f9fba75dfb5b4b192aee118149ccc5c80f9210166bcf7d403c43137facc1",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "monolithic_timeout",
+      "configured_timeout_budget_seconds": 1,
+      "correspondence": "reason_budget_mismatch",
+      "final_outcome": "TIMEOUT",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [
+        1.0282604694366455
+      ],
+      "reason_evidence_timeout_budget_seconds": [
+        120.0
+      ],
+      "result_entry_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+      "solver_unknown_timeout_reason_occurrence_count": 1,
+      "terminal_timeout_event_count": 1
+    },
+    {
+      "configured_timeout_budget_field": "pairwise_timeout_hard",
+      "configured_timeout_budget_seconds": 30,
+      "correspondence": "not_applicable",
+      "final_outcome": "UNKNOWN",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "63f6b19231d16f35cbbbb709096825f81e31105bc514e3f736555b735470fb1f",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "equiv_timeout",
+      "configured_timeout_budget_seconds": null,
+      "correspondence": "not_applicable",
+      "final_outcome": "ERROR",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "8ab66ee6589990c94450cf1321261ff271e055dbc1f65c3e31ece1d24b0a045e",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "equiv_timeout",
+      "configured_timeout_budget_seconds": null,
+      "correspondence": "not_applicable",
+      "final_outcome": "UNKNOWN",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "b6f355bd1540c2508fec075fb8219c47ee43b3ab4cc24278ef5de2785053fe32",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "pairwise_timeout_hard",
+      "configured_timeout_budget_seconds": 30,
+      "correspondence": "not_applicable",
+      "final_outcome": "EQ",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "f18f643248d65d6b3d823d0a670dfd067112b842252bc238c45581d230201754",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    },
+    {
+      "configured_timeout_budget_field": "equiv_timeout",
+      "configured_timeout_budget_seconds": null,
+      "correspondence": "not_applicable",
+      "final_outcome": "UNKNOWN",
+      "observed_nonterminal_timeout_event_count": 0,
+      "observed_solver_elapsed_seconds": [],
+      "reason_evidence_timeout_budget_seconds": [],
+      "result_entry_id": "f9da7726189fcc012170fad0d7a42f95891da41811334956aeccb3692032596a",
+      "solver_unknown_timeout_reason_occurrence_count": 0,
+      "terminal_timeout_event_count": 0
+    }
+  ],
+  "schema_version": 1,
+  "sites": [
+    {
+      "line": 80,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/condition/smt_oracle.py",
+      "source": "solver.set(\"timeout\", int(cls.QUERY_TIMEOUT_MS))"
+    },
+    {
+      "line": 518,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/recurrence/__init__.py",
+      "source": "'_state_guard_is_placeholder_not_equal_one': 'guard_proof',"
+    },
+    {
+      "line": 1799,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/recurrence/counted_loop_1.py",
+      "source": "if not self._state_guard_is_placeholder_not_equal_one("
+    },
+    {
+      "line": 1309,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/recurrence/guard_proof.py",
+      "source": "def _impl__state_guard_is_placeholder_not_equal_one("
+    },
+    {
+      "line": 2162,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/recurrence/readonly_reduction_2.py",
+      "source": "from selected earlier memory terms.  That is not equivalent to a normal"
+    },
+    {
+      "line": 1602,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/summary_returns.py",
+      "source": "not_equal = Condition("
+    },
+    {
+      "line": 1610,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/analysis/summary_returns.py",
+      "source": "if _conditions_unsat(list(conditions or ()) + [not_equal]) is True:"
+    },
+    {
+      "line": 189,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/cli/commands/equivalence.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 459,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/cli/commands/equivalence.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 461,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/cli/commands/equivalence.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 34,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/attempts.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 36,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/attempts.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 128,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/attempts.py",
+      "source": "result=result.is_equivalent,"
+    },
+    {
+      "line": 352,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/attempts.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 354,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/attempts.py",
+      "source": "elif result.is_equivalent is False:"
+    },
+    {
+      "line": 1771,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
+      "source": "This path cannot authorize EQ or NOT_EQ and is therefore safe for"
+    },
+    {
+      "line": 332,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if result.is_equivalent is not False:  # SAT でない"
+    },
+    {
+      "line": 563,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if parallel_result.is_equivalent is False:"
+    },
+    {
+      "line": 573,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "is_equivalent=parallel_result.is_equivalent,"
+    },
+    {
+      "line": 610,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "timeout_seconds=getattr(self.solver_runner, \"timeout\", None),"
+    },
+    {
+      "line": 616,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if parallel_result.is_equivalent is None"
+    },
+    {
+      "line": 628,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 726,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if latest_result.is_equivalent is not False:"
+    },
+    {
+      "line": 895,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 899,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "elif result.is_equivalent is False:"
+    },
+    {
+      "line": 900,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "self._debug_print(f\"Stage {stage_id.value}: NOT EQUIVALENT - stopping stage plan\")"
+    },
+    {
+      "line": 946,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if last_result.is_equivalent is not None or last_result.error_message is not None:"
+    },
+    {
+      "line": 1215,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "ordinary_outcome = strategy_result.is_equivalent"
+    },
+    {
+      "line": 1246,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "else \"NOT_EQ\" if ordinary_outcome is False"
+    },
+    {
+      "line": 1250,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "\"EQ\" if strategy_result.is_equivalent is True"
+    },
+    {
+      "line": 1251,
+      "matched_tokens": [
+        "is_equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "else \"NOT_EQ\" if strategy_result.is_equivalent is False"
+    },
+    {
+      "line": 1256,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if ordinary_outcome is strategy_result.is_equivalent"
+    },
+    {
+      "line": 1362,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if strategy_result.is_equivalent is False and strategy_result.counterexample_raw:"
+    },
+    {
+      "line": 1386,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "is_equivalent=strategy_result.is_equivalent,"
+    },
+    {
+      "line": 1434,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "\"EQ\" if strategy_result.is_equivalent is True"
+    },
+    {
+      "line": 1435,
+      "matched_tokens": [
+        "is_equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "else \"NOT_EQ\" if strategy_result.is_equivalent is False"
+    },
+    {
+      "line": 1543,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "\"EQ\" if strategy_result.is_equivalent is True"
+    },
+    {
+      "line": 1544,
+      "matched_tokens": [
+        "is_equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "else \"NOT_EQ\" if strategy_result.is_equivalent is False"
+    },
+    {
+      "line": 1560,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if getattr(strategy_result, \"is_equivalent\", None) is not None:"
+    },
+    {
+      "line": 1632,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "getattr(strategy_result, \"is_equivalent\", None) is not None"
+    },
+    {
+      "line": 1732,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "and getattr(getattr(strategy_result, \"solver_results\", None), \"is_equivalent\", None)"
+    },
+    {
+      "line": 1762,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "and getattr(getattr(strategy_result, \"solver_results\", None), \"is_equivalent\", None)"
+    },
+    {
+      "line": 1770,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "decisive_not_eq_receipt = bool("
+    },
+    {
+      "line": 1771,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "getattr(strategy_result, \"is_equivalent\", None) is False"
+    },
+    {
+      "line": 1848,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "\"eq_closure\" if getattr(strategy_result, \"is_equivalent\", None) is True"
+    },
+    {
+      "line": 1850,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if getattr(strategy_result, \"is_equivalent\", None) is False"
+    },
+    {
+      "line": 1878,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "getattr(strategy_result, \"is_equivalent\", None) in {True, False}"
+    },
+    {
+      "line": 1895,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "and getattr(strategy_result, \"is_equivalent\", None) is True"
+    },
+    {
+      "line": 1899,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if receipt_valid and getattr(strategy_result, \"is_equivalent\", None) is True and not ordinary_complete:"
+    },
+    {
+      "line": 1901,
+      "matched_tokens": [
+        "is_equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if receipt_valid and getattr(strategy_result, \"is_equivalent\", None) is False and not decisive_not_eq_receipt:"
+    },
+    {
+      "line": 1905,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "if getattr(strategy_result, \"is_equivalent\", None) in {True, False}:"
+    },
+    {
+      "line": 1906,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "strategy_result.is_equivalent = None"
+    },
+    {
+      "line": 2164,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "or getattr(strategy_result, \"is_equivalent\", None) is False"
+    },
+    {
+      "line": 2168,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "source": "strategy_result.is_equivalent = True"
+    },
+    {
+      "line": 23,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/debug_trace.py",
+      "source": "TIMEOUT = \"TIMEOUT\"  # タイムアウト → 次Phase"
+    },
+    {
+      "line": 1857,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/formula/builder.py",
+      "source": "lines.append(\"; If SAT: functions are NOT equivalent\")"
+    },
+    {
+      "line": 782,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/monolithic_authority.py",
+      "source": "status = SolverStatus.TIMEOUT if reason == \"timeout\" else SolverStatus.UNKNOWN"
+    },
+    {
+      "line": 944,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/monolithic_authority.py",
+      "source": "value = getattr(result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 951,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/monolithic_authority.py",
+      "source": "getattr(result, \"is_equivalent\", None),"
+    },
+    {
+      "line": 90,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/normalize/guard_prover.py",
+      "source": "is_proven = result.is_equivalent is True"
+    },
+    {
+      "line": 111,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/normalize/guard_prover.py",
+      "source": "\"timeout\" in signature.parameters"
+    },
+    {
+      "line": 33,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/normalize/structural.py",
+      "source": "(is_equivalent, reason)"
+    },
+    {
+      "line": 31,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "decisive_not_eq = False"
+    },
+    {
+      "line": 36,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "elif outcome == FunctionProofOutcome.NOT_EQUIVALENT:"
+    },
+    {
+      "line": 37,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "decisive_not_eq = True"
+    },
+    {
+      "line": 42,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "if decisive_not_eq:"
+    },
+    {
+      "line": 43,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "result.is_equivalent = False"
+    },
+    {
+      "line": 48,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "FunctionProofOutcome.NOT_EQUIVALENT,"
+    },
+    {
+      "line": 64,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "result.is_equivalent = True"
+    },
+    {
+      "line": 68,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "result.is_equivalent = None"
+    },
+    {
+      "line": 79,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "value = getattr(result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 83,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/decision.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 95,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/guard_overlap.py",
+      "source": "getattr(result, \"is_equivalent\", None),"
+    },
+    {
+      "line": 429,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/guard_overlap.py",
+      "source": "semantic = getattr(result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 34,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/model.py",
+      "source": "NOT_EQUIVALENT = \"not_equivalent\""
+    },
+    {
+      "line": 161,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py",
+      "source": "if getattr(result, \"is_equivalent\", None) is not True:"
+    },
+    {
+      "line": 47,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "if any(value == FunctionProofOutcome.NOT_EQUIVALENT for value in outcomes):"
+    },
+    {
+      "line": 49,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "FunctionProofOutcome.NOT_EQUIVALENT,"
+    },
+    {
+      "line": 58,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "has_not_eq = any(value == FunctionProofOutcome.NOT_EQUIVALENT for value in outcomes)"
+    },
+    {
+      "line": 59,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "if has_eq and has_not_eq:"
+    },
+    {
+      "line": 61,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "return ProofEvaluation(FunctionProofOutcome.NOT_EQUIVALENT, True, nodes)"
+    },
+    {
+      "line": 64,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "if outcomes and all(value == FunctionProofOutcome.NOT_EQUIVALENT for value in outcomes):"
+    },
+    {
+      "line": 65,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "return ProofEvaluation(FunctionProofOutcome.NOT_EQUIVALENT, bool(inherited_conflicts), inherited_conflicts)"
+    },
+    {
+      "line": 91,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "value in {FunctionProofOutcome.EQUIVALENT, FunctionProofOutcome.NOT_EQUIVALENT}"
+    },
+    {
+      "line": 119,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/proof.py",
+      "source": "if outcome in {FunctionProofOutcome.EQUIVALENT, FunctionProofOutcome.NOT_EQUIVALENT}:"
+    },
+    {
+      "line": 580,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "elif hasattr(value, \"is_equivalent\"):"
+    },
+    {
+      "line": 581,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "semantic = getattr(value, \"is_equivalent\", None)"
+    },
+    {
+      "line": 587,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "# case and checks analysis/replay safety before deciding NOT_EQ."
+    },
+    {
+      "line": 599,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "outcome = FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 923,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "value == FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 926,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 933,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "if any(value == FunctionProofOutcome.NOT_EQUIVALENT for value in outcomes):"
+    },
+    {
+      "line": 934,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/runtime.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 14,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "SAT_DECISIVE_NOT_EQ = \"SAT_DECISIVE_NOT_EQ\""
+    },
+    {
+      "line": 17,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "TIMEOUT = \"TIMEOUT\""
+    },
+    {
+      "line": 35,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "semantic = getattr(result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 42,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "outcome = SolverOutcomeClass.SAT_DECISIVE_NOT_EQ"
+    },
+    {
+      "line": 82,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "if \"TIMEOUT\" in raw:"
+    },
+    {
+      "line": 83,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "return \"TIMEOUT\""
+    },
+    {
+      "line": 143,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/shadow.py",
+      "source": "getattr(result, \"is_equivalent\", None),"
+    },
+    {
+      "line": 63,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "if getattr(result, \"is_equivalent\", None) is True:"
+    },
+    {
+      "line": 65,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "elif getattr(result, \"is_equivalent\", None) is False:"
+    },
+    {
+      "line": 86,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "value = getattr(result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 90,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 275,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 355,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "pre_aggregation_outcome = result.is_equivalent"
+    },
+    {
+      "line": 357,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "post_aggregation_outcome = result.is_equivalent"
+    },
+    {
+      "line": 363,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "and post_aggregation_outcome != strategy_result.is_equivalent"
+    },
+    {
+      "line": 376,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "result.is_equivalent = None"
+    },
+    {
+      "line": 377,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "strategy_result.is_equivalent = None"
+    },
+    {
+      "line": 427,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "result.is_equivalent = strategy_result.is_equivalent"
+    },
+    {
+      "line": 539,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "if record.outcome in {FunctionProofOutcome.EQUIVALENT, FunctionProofOutcome.NOT_EQUIVALENT}"
+    },
+    {
+      "line": 563,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 271,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "if result.is_equivalent is True:  # UNSAT"
+    },
+    {
+      "line": 273,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "if result.is_equivalent is False:  # SAT"
+    },
+    {
+      "line": 282,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 283,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "return \"NOT EQUIVALENT\""
+    },
+    {
+      "line": 285,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "return \"TIMEOUT\""
+    },
+    {
+      "line": 286,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "elif result.is_equivalent is None:"
+    },
+    {
+      "line": 1081,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "# NOT EQUIVALENT (SAT) の場合のみ"
+    },
+    {
+      "line": 1082,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "if previous_result.is_equivalent is not False:"
+    },
+    {
+      "line": 1114,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "previous_result: 前回の判定結果（NOT EQUIVALENT）"
+    },
+    {
+      "line": 1154,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/phases/handler.py",
+      "source": "self._debug_print(\"No spurious counterexample detected (genuine NOT EQUIVALENT)\")"
+    },
+    {
+      "line": 71,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "is_equivalent: Optional[bool]"
+    },
+    {
+      "line": 130,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "if self.is_equivalent is True and self._has_pending_proof_gate():"
+    },
+    {
+      "line": 131,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "self.is_equivalent = None"
+    },
+    {
+      "line": 144,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "if self.is_equivalent is not None:"
+    },
+    {
+      "line": 155,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "return self.is_equivalent is None and self.error_message is None"
+    },
+    {
+      "line": 175,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "\"is_equivalent\": self.is_equivalent,"
+    },
+    {
+      "line": 411,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "elif self.is_equivalent is None:"
+    },
+    {
+      "line": 415,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "lines.append(\"Result: UNKNOWN (could not determine equivalence)\")"
+    },
+    {
+      "line": 420,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "elif self.is_equivalent:"
+    },
+    {
+      "line": 423,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result.py",
+      "source": "lines.append(\"Result: NOT EQUIVALENT ✗\")"
+    },
+    {
+      "line": 41,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result_factory.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 78,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result_factory.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 146,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/result_factory.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 346,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/expression_safety.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 348,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/expression_safety.py",
+      "source": "elif result.is_equivalent is False:"
+    },
+    {
+      "line": 44,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/loop_template.py",
+      "source": "if base_result.is_equivalent is not None:"
+    },
+    {
+      "line": 86,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/loop_template.py",
+      "source": "result = QueryResult(is_equivalent=True)"
+    },
+    {
+      "line": 181,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent: Optional[bool]"
+    },
+    {
+      "line": 217,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "timeout_candidate = getattr(solver_runner, \"timeout\", 10) or 10"
+    },
+    {
+      "line": 466,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "guard_disposition = disposition(guard_result.is_equivalent)"
+    },
+    {
+      "line": 484,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if guard_result.is_equivalent is True:"
+    },
+    {
+      "line": 537,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "value_disposition = disposition(value_result.is_equivalent)"
+    },
+    {
+      "line": 558,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if value_result.is_equivalent is True:"
+    },
+    {
+      "line": 562,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if value_result.is_equivalent is None:"
+    },
+    {
+      "line": 623,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "replay_disposition = disposition(replay_result.is_equivalent)"
+    },
+    {
+      "line": 646,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if replay_result.is_equivalent is False:"
+    },
+    {
+      "line": 661,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=final,"
+    },
+    {
+      "line": 1140,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 1306,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if \"timeout\" not in str(timeout_error):"
+    },
+    {
+      "line": 1311,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if parallel_result.is_equivalent is False"
+    },
+    {
+      "line": 1327,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = parallel_result.is_equivalent"
+    },
+    {
+      "line": 1347,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent in {True, False}:"
+    },
+    {
+      "line": 1354,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is True and coverage_unsafety_reasons:"
+    },
+    {
+      "line": 1367,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = None"
+    },
+    {
+      "line": 1368,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is True and equivalence_blocking_reasons:"
+    },
+    {
+      "line": 1381,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = None"
+    },
+    {
+      "line": 1387,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False and sat_unsafety_reasons:"
+    },
+    {
+      "line": 1408,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = None"
+    },
+    {
+      "line": 1411,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False:"
+    },
+    {
+      "line": 1459,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "global_result.is_equivalent is False"
+    },
+    {
+      "line": 1461,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False and not counterexample_is_decisive:"
+    },
+    {
+      "line": 1476,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = None"
+    },
+    {
+      "line": 1479,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False:"
+    },
+    {
+      "line": 1498,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False and same_function_replay_reasons:"
+    },
+    {
+      "line": 1519,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = None"
+    },
+    {
+      "line": 1521,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is None and not unknown_reasons:"
+    },
+    {
+      "line": 1522,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "timeout_budget = getattr(self.solver_runner, \"timeout\", None)"
+    },
+    {
+      "line": 1543,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=final_is_equivalent,"
+    },
+    {
+      "line": 1598,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "\"unsat\" if parallel_result.is_equivalent is True"
+    },
+    {
+      "line": 1599,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "else \"sat\" if parallel_result.is_equivalent is False"
+    },
+    {
+      "line": 1643,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "\"unsat\": 1 if parallel_result.is_equivalent is True else 0,"
+    },
+    {
+      "line": 1644,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "\"sat\": 1 if parallel_result.is_equivalent is False else 0,"
+    },
+    {
+      "line": 1645,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "\"unknown\": 1 if parallel_result.is_equivalent is None else 0,"
+    },
+    {
+      "line": 1648,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if strategy_result.is_equivalent is False:"
+    },
+    {
+      "line": 1736,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "strategy_result.is_equivalent = None"
+    },
+    {
+      "line": 1759,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "\"eq_closure\" if strategy_result.is_equivalent is True"
+    },
+    {
+      "line": 1761,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if strategy_result.is_equivalent is False"
+    },
+    {
+      "line": 1774,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "strategy_result.is_equivalent = None"
+    },
+    {
+      "line": 1820,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "final_is_equivalent = strategy_result.is_equivalent"
+    },
+    {
+      "line": 1821,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is True:"
+    },
+    {
+      "line": 1823,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "elif final_is_equivalent is False:"
+    },
+    {
+      "line": 1829,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False"
+    },
+    {
+      "line": 1854,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False else \"\""
+    },
+    {
+      "line": 1860,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False else \"\""
+    },
+    {
+      "line": 1866,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "if final_is_equivalent is False else \"\""
+    },
+    {
+      "line": 1885,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 1922,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 1952,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 182,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_models.py",
+      "source": "is_equivalent: Optional[bool],"
+    },
+    {
+      "line": 186,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_models.py",
+      "source": "self.is_equivalent = is_equivalent"
+    },
+    {
+      "line": 45,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_normalization.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 241,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_normalization.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 293,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_normalization.py",
+      "source": "if norm_result.is_equivalent is True:"
+    },
+    {
+      "line": 304,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_normalization.py",
+      "source": "if norm_result.is_equivalent is False:"
+    },
+    {
+      "line": 316,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_normalization.py",
+      "source": "f\"  Pair {pair_id} normalization: found counterexample -> NOT EQUIVALENT\""
+    },
+    {
+      "line": 243,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "semantic = getattr(parallel_result, \"is_equivalent\", None)"
+    },
+    {
+      "line": 269,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "is_equivalent=semantic,"
+    },
+    {
+      "line": 495,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 503,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "result = QueryResult(is_equivalent=True)"
+    },
+    {
+      "line": 523,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if abi_guard_result.is_equivalent is True:"
+    },
+    {
+      "line": 529,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 650,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "stage2_result.is_equivalent is None"
+    },
+    {
+      "line": 663,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if rewrite_result.is_equivalent is True:"
+    },
+    {
+      "line": 667,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if rewrite_result.is_equivalent is False:"
+    },
+    {
+      "line": 682,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "stage2_result.is_equivalent is None"
+    },
+    {
+      "line": 695,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if norm_result.is_equivalent is True:"
+    },
+    {
+      "line": 699,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if norm_result.is_equivalent is False:"
+    },
+    {
+      "line": 708,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if stage2_result.is_equivalent is None and not getattr(stage2_result, \"blocking_reason\", None):"
+    },
+    {
+      "line": 765,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if stage1_result.is_equivalent is True:"
+    },
+    {
+      "line": 1205,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if parallel_result.is_equivalent is True:"
+    },
+    {
+      "line": 1207,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if parallel_result.is_equivalent is False:"
+    },
+    {
+      "line": 1243,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if \"unexpected keyword argument\" in str(exc) and \"timeout\" in str(exc):"
+    },
+    {
+      "line": 1247,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "has_timeout_parameter = \"timeout\" in signature.parameters"
+    },
+    {
+      "line": 1256,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py",
+      "source": "if \"unexpected keyword argument\" in str(exc) and \"timeout\" in str(exc):"
+    },
+    {
+      "line": 111,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/loop_summary_1.py",
+      "source": "return result.is_equivalent() is True and self._case_pair_has_runtime_guard_coverage_or_equivalence("
+    },
+    {
+      "line": 45,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/loop_summary_2.py",
+      "source": "return loop_result.is_equivalent() is True"
+    },
+    {
+      "line": 944,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "return FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 968,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "\"unsat\" if result.is_equivalent is True"
+    },
+    {
+      "line": 969,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "else \"sat\" if result.is_equivalent is False"
+    },
+    {
+      "line": 1031,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 1146,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "self._debug_print(f\"  Pair {pair_id}: SAT (NOT EQUIVALENT) - stopping\")"
+    },
+    {
+      "line": 1153,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 1185,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "if completed_bridge_result is not None and completed_bridge_result.is_equivalent is True:"
+    },
+    {
+      "line": 1345,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "outcome != FunctionProofOutcome.NOT_EQUIVALENT"
+    },
+    {
+      "line": 1374,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "self._debug_print(\"Result: NOT EQUIVALENT (found SAT pair)\")"
+    },
+    {
+      "line": 1385,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "\"Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: \""
+    },
+    {
+      "line": 1396,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "self._debug_print(f\"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)\")"
+    },
+    {
+      "line": 1403,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "\"Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: \""
+    },
+    {
+      "line": 1421,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "self._debug_print(f\"Result: UNKNOWN (unexpected state, errors={error_count})\")"
+    },
+    {
+      "line": 1478,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "source": "is_equivalent=final_is_equiv,"
+    },
+    {
+      "line": 250,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_2.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 400,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_2.py",
+      "source": "is_equivalent: Optional[bool],"
+    },
+    {
+      "line": 409,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_2.py",
+      "source": "status = status_map.get(is_equivalent, SolverStatus.UNKNOWN)"
+    },
+    {
+      "line": 452,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_2.py",
+      "source": "is_equivalent=None,"
+    },
+    {
+      "line": 145,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/runtime_shortcut.py",
+      "source": "decisive = loop_result.is_equivalent()"
+    },
+    {
+      "line": 39,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 64,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 94,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "result = QueryResult(is_equivalent=None)"
+    },
+    {
+      "line": 122,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "result = QueryResult(is_equivalent=True)"
+    },
+    {
+      "line": 170,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "if not equivalent:"
+    },
+    {
+      "line": 399,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_solver_proven_rewrite.py",
+      "source": "return result.is_equivalent is True"
+    },
+    {
+      "line": 21,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/_shared.py",
+      "source": "is_equivalent: Optional[bool]"
+    },
+    {
+      "line": 61,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 63,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 66,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "return \"timeout\" if \"timeout\" in raw or \"timed out\" in raw else \"unknown\""
+    },
+    {
+      "line": 1517,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "if solver_status in {\"unknown\", \"timeout\", \"error\", \"inconclusive\"}:"
+    },
+    {
+      "line": 2214,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "self._debug_print(\"Outcome partition coverage declined: partitions are not equivalent\")"
+    },
+    {
+      "line": 2647,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "return result.is_equivalent is True"
+    },
+    {
+      "line": 2722,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 2730,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
+      "source": "if result.is_equivalent is None:"
+    },
+    {
+      "line": 45,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "source": "\"\"\"Require replay evidence before accepting same-function SAT as NOT_EQ.\"\"\""
+    },
+    {
+      "line": 152,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False and retry_with_type_fix:"
+    },
+    {
+      "line": 170,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 194,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 213,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 223,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 236,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 242,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 263,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "checker._debug_print(f\"Phase {phase_id.value}: NOT EQUIVALENT - stopping\")"
+    },
+    {
+      "line": 298,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "return _attach_trace_and_return(result, debug_trace, start_time, result.is_equivalent)"
+    },
+    {
+      "line": 336,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False:"
+    },
+    {
+      "line": 354,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 358,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False and retry_with_type_fix and will_try_phase4b:"
+    },
+    {
+      "line": 378,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 394,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is False and did_attempt:"
+    },
+    {
+      "line": 409,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 433,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is not False:"
+    },
+    {
+      "line": 493,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/equivalence/workflow.py",
+      "source": "if result.is_equivalent is True:"
+    },
+    {
+      "line": 2179,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/model/runtime_refs.py",
+      "source": "def is_equivalent(self) -> Optional[bool]:"
+    },
+    {
+      "line": 29,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/interface.py",
+      "source": "def is_equivalent(self) -> bool:"
+    },
+    {
+      "line": 22,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent: Optional[bool] = None"
+    },
+    {
+      "line": 32,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "if self.is_equivalent is None and self.first_definitive is not None:"
+    },
+    {
+      "line": 33,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "self.is_equivalent = self.first_definitive.status == SolverStatus.UNSAT"
+    },
+    {
+      "line": 49,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "\"is_equivalent\": self.is_equivalent,"
+    },
+    {
+      "line": 189,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent=None"
+    },
+    {
+      "line": 286,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent: Optional[bool] = None"
+    },
+    {
+      "line": 288,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent = first_definitive.status == SolverStatus.UNSAT"
+    },
+    {
+      "line": 291,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "print(f\"[ParallelRunner] Final result: is_equivalent={is_equivalent}\")"
+    },
+    {
+      "line": 296,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent=is_equivalent"
+    },
+    {
+      "line": 338,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/smt/parallel.py",
+      "source": "is_equivalent=(first_definitive.status == SolverStatus.UNSAT)"
+    },
+    {
+      "line": 31,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/smt/solvers/z3.py",
+      "source": "self._solver.set(\"timeout\", timeout * 1000)"
+    },
+    {
+      "line": 70,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/smt/solvers/z3.py",
+      "source": "self._solver.set(\"timeout\", self.timeout * 1000)  # ミリ秒"
+    },
+    {
+      "line": 154,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/smt/solvers/z3.py",
+      "source": "if reason == \"timeout\":"
+    },
+    {
+      "line": 2,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"\"\"Build Phase 0D NOT_EQ audit manifests from frozen validation artifacts.\"\"\""
+    },
+    {
+      "line": 15,
+      "matched_tokens": [
+        "classify_result",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "from .result_summary import STATUS_NOT_EQ, classify_result_payload, parse_log_identity"
+    },
+    {
+      "line": 23,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"ground_truth_not_eq\","
+    },
+    {
+      "line": 24,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"suspected_false_not_eq\","
+    },
+    {
+      "line": 33,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "def build_not_eq_audit_manifest("
+    },
+    {
+      "line": 50,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "record = _not_eq_record_from_log("
+    },
+    {
+      "line": 64,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"audit_kind\": \"not_eq_ground_truth_audit\","
+    },
+    {
+      "line": 79,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "validate_not_eq_audit_manifest(audit)"
+    },
+    {
+      "line": 93,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "validate_not_eq_audit_manifest(audit, oracle_manifest=oracle_manifest if oracle_output_path is not None else None)"
+    },
+    {
+      "line": 98,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "def validate_not_eq_audit_manifest("
+    },
+    {
+      "line": 105,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(\"NOT_EQ audit entry_count does not match entries\")"
+    },
+    {
+      "line": 110,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(\"NOT_EQ audit classification_counts do not match entries\")"
+    },
+    {
+      "line": 113,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(\"NOT_EQ audit classification_enum is not canonical\")"
+    },
+    {
+      "line": 120,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} is not an object\")"
+    },
+    {
+      "line": 123,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"invalid NOT_EQ audit classification: {classification!r}\")"
+    },
+    {
+      "line": 124,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "if entry.get(\"current_result\") not in {None, STATUS_NOT_EQ}:"
+    },
+    {
+      "line": 125,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} current_result is not NOT_EQ\")"
+    },
+    {
+      "line": 128,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "if classification == \"ground_truth_not_eq\":"
+    },
+    {
+      "line": 153,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "parser = argparse.ArgumentParser(description=\"Build a Phase 0D NOT_EQ audit manifest.\")"
+    },
+    {
+      "line": 159,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "output = build_not_eq_audit_manifest("
+    },
+    {
+      "line": 168,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "def _not_eq_record_from_log("
+    },
+    {
+      "line": 179,
+      "matched_tokens": [
+        "classify_result",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "if classify_result_payload(payload) != STATUS_NOT_EQ:"
+    },
+    {
+      "line": 200,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"current_result\": \"NOT_EQ\","
+    },
+    {
+      "line": 227,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"target_proof_lane\": \"not_eq_counterexample_replay\","
+    },
+    {
+      "line": 231,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"required_for_ground_truth_not_eq\": True,"
+    },
+    {
+      "line": 238,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"required_for_ground_truth_not_eq\": True,"
+    },
+    {
+      "line": 252,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires accepted oracle\")"
+    },
+    {
+      "line": 253,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "if _has_expected_equivalent_conflict(entry) and not _has_accepted_not_eq_override(entry):"
+    },
+    {
+      "line": 255,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "f\"ground_truth_not_eq entry {index} has expected_equivalent=true conflict; \""
+    },
+    {
+      "line": 265,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires counterexample replay\")"
+    },
+    {
+      "line": 272,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires replay harness\")"
+    },
+    {
+      "line": 280,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires no coverage unknown/error pairs\")"
+    },
+    {
+      "line": 289,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} has active or unknown {field_name}\")"
+    },
+    {
+      "line": 291,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires ABI/storage width proof\")"
+    },
+    {
+      "line": 293,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires return compare width proof\")"
+    },
+    {
+      "line": 295,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"ground_truth_not_eq entry {index} requires UB exclusion proof\")"
+    },
+    {
+      "line": 365,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} missing oracle_manifest_ref\")"
+    },
+    {
+      "line": 369,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} references missing oracle entry: {key}\")"
+    },
+    {
+      "line": 371,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} oracle expected_equivalent mismatch\")"
+    },
+    {
+      "line": 373,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} oracle review status mismatch\")"
+    },
+    {
+      "line": 375,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "raise ValueError(f\"NOT_EQ audit entry {index} is outside oracle scope\")"
+    },
+    {
+      "line": 396,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "def _has_accepted_not_eq_override(entry: Mapping[str, Any]) -> bool:"
+    },
+    {
+      "line": 456,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/not_eq_audit_manifest.py",
+      "source": "\"audit_entry_scope\": \"NOT_EQ observed pairs only\","
+    },
+    {
+      "line": 19,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0b_unknown_reason_correspondence_gate.py",
+      "source": "from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, aggregate_validation_logs"
+    },
+    {
+      "line": 456,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0b_unknown_reason_correspondence_gate.py",
+      "source": "if record.status in {STATUS_UNKNOWN, STATUS_TIMEOUT} and not record.payloads"
+    },
+    {
+      "line": 475,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0b_unknown_reason_correspondence_gate.py",
+      "source": "1 for record in aggregate.records if record.status in {STATUS_UNKNOWN, STATUS_TIMEOUT}"
+    },
+    {
+      "line": 45,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"NOT_EQ\": 71,"
+    },
+    {
+      "line": 48,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"TIMEOUT\": 119,"
+    },
+    {
+      "line": 53,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"NOT_EQ\": 1,"
+    },
+    {
+      "line": 56,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"TIMEOUT\": 0,"
+    },
+    {
+      "line": 71,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"NOT_EQ\": 72,"
+    },
+    {
+      "line": 74,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0c_observed_baseline_census_gate.py",
+      "source": "\"TIMEOUT\": 119,"
+    },
+    {
+      "line": 2,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"\"\"Build a Phase 0D NOT_EQ audit acceptance gate."
+    },
+    {
+      "line": 4,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "This gate intentionally does not bless any observed NOT_EQ as ground truth."
+    },
+    {
+      "line": 5,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "It freezes the current audit posture: observed same-source NOT_EQ results are"
+    },
+    {
+      "line": 20,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "from .not_eq_audit_manifest import ("
+    },
+    {
+      "line": 22,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "validate_not_eq_audit_manifest,"
+    },
+    {
+      "line": 64,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_counterexample_replay\": 72,"
+    },
+    {
+      "line": 85,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "def build_phase0d_not_eq_audit_gate("
+    },
+    {
+      "line": 159,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"manifest_kind\": \"phase0d_not_eq_audit_gate\","
+    },
+    {
+      "line": 199,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"phase0d_not_eq_audit_ready\": summary[\"failed\"] == 0,"
+    },
+    {
+      "line": 203,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "path = output / \"phase0d_not_eq_audit_gate.json\""
+    },
+    {
+      "line": 208,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "def validate_phase0d_not_eq_audit_gate(manifest: Mapping[str, Any]) -> None:"
+    },
+    {
+      "line": 224,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "if manifest.get(\"phase0d_not_eq_audit_ready\") is not True:"
+    },
+    {
+      "line": 225,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "failures.append(\"phase0d_not_eq_audit_not_ready\")"
+    },
+    {
+      "line": 250,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"phase0d_not_eq_audit_ready\","
+    },
+    {
+      "line": 259,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "if manifest.get(\"phase0d_not_eq_audit_ready\") is False and failures == [\"phase0d_not_eq_audit_not_ready\"]:"
+    },
+    {
+      "line": 260,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "raise ValueError(\"Phase 0D NOT_EQ audit gate is not ready without failed gate kinds\")"
+    },
+    {
+      "line": 261,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "raise ValueError(f\"Phase 0D NOT_EQ audit gate failed: {', '.join(map(str, failures))}\")"
+    },
+    {
+      "line": 381,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"phase0d_not_eq_audit_ready\": summary[\"failed\"] == 0,"
+    },
+    {
+      "line": 396,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "parser = argparse.ArgumentParser(description=\"Build a Phase 0D NOT_EQ audit gate.\")"
+    },
+    {
+      "line": 405,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "path = build_phase0d_not_eq_audit_gate("
+    },
+    {
+      "line": 414,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "validate_phase0d_not_eq_audit_gate(_read_json(path))"
+    },
+    {
+      "line": 422,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "validate_not_eq_audit_manifest(audit, oracle_manifest=oracle)"
+    },
+    {
+      "line": 424,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "checks.append(_failed(\"not_eq_audit_oracle_schema\", error=str(exc)))"
+    },
+    {
+      "line": 426,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "checks.append(_ok(\"not_eq_audit_oracle_schema\"))"
+    },
+    {
+      "line": 485,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_entry_count_expected\", count=actual_entry_count)"
+    },
+    {
+      "line": 487,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_entry_count_expected\", expected=expected_entry_count, actual=actual_entry_count),"
+    },
+    {
+      "line": 488,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_classification_counts_expected\", counts=actual_classification_counts)"
+    },
+    {
+      "line": 491,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_classification_counts_expected\","
+    },
+    {
+      "line": 495,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_no_accepted_ground_truth\", count=actual_classification_counts.get(\"ground_truth_not_eq\", 0))"
+    },
+    {
+      "line": 496,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "if actual_classification_counts.get(\"ground_truth_not_eq\", 0) == 0"
+    },
+    {
+      "line": 497,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_no_accepted_ground_truth\", actual=actual_classification_counts.get(\"ground_truth_not_eq\")),"
+    },
+    {
+      "line": 498,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_classification_enum_expected\")"
+    },
+    {
+      "line": 500,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_classification_enum_expected\"),"
+    },
+    {
+      "line": 563,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_source_logs_present\", count=checked_count)"
+    },
+    {
+      "line": 565,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_source_logs_present\", missing=missing),"
+    },
+    {
+      "line": 566,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_source_log_hashes_match\", count=checked_count)"
+    },
+    {
+      "line": 568,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_source_log_hashes_match\", mismatched=mismatched[:20]),"
+    },
+    {
+      "line": 605,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "if entry.get(\"classification\") != \"ground_truth_not_eq\":"
+    },
+    {
+      "line": 610,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "if _has_expected_equivalent_conflict(entry) and not _has_accepted_not_eq_override(entry):"
+    },
+    {
+      "line": 637,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_required_fields_present\")"
+    },
+    {
+      "line": 640,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_required_fields_present\","
+    },
+    {
+      "line": 643,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_ground_truth_conflicts_have_override\")"
+    },
+    {
+      "line": 646,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_ground_truth_conflicts_have_override\","
+    },
+    {
+      "line": 649,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_ground_truth_requires_accepted_oracle\")"
+    },
+    {
+      "line": 652,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_ground_truth_requires_accepted_oracle\","
+    },
+    {
+      "line": 655,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_target_proof_lane_counts_expected\", counts=dict(target_counts))"
+    },
+    {
+      "line": 658,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_target_proof_lane_counts_expected\","
+    },
+    {
+      "line": 662,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_replay_status_counts_expected\", counts=dict(replay_counts))"
+    },
+    {
+      "line": 665,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_replay_status_counts_expected\","
+    },
+    {
+      "line": 669,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_coverage_status_source_counts_expected\", counts=dict(coverage_sources))"
+    },
+    {
+      "line": 672,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_coverage_status_source_counts_expected\","
+    },
+    {
+      "line": 752,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_concrete_identities_unique\", count=report.get(\"unique_concrete_identity_count\"))"
+    },
+    {
+      "line": 754,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_concrete_identities_unique\", duplicates=duplicates),"
+    },
+    {
+      "line": 755,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_concrete_identity_fields_present\", count=report.get(\"entry_count\"))"
+    },
+    {
+      "line": 757,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_concrete_identity_fields_present\", missing=missing),"
+    },
+    {
+      "line": 758,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_binary_pair_matches_sides\", count=report.get(\"entry_count\"))"
+    },
+    {
+      "line": 760,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "else _failed(\"not_eq_audit_binary_pair_matches_sides\", mismatches=pair_mismatches),"
+    },
+    {
+      "line": 761,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "_ok(\"not_eq_audit_category_counts_expected\", counts=category_counts)"
+    },
+    {
+      "line": 764,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "\"not_eq_audit_category_counts_expected\","
+    },
+    {
+      "line": 859,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase0d_not_eq_audit_gate.py",
+      "source": "def _has_accepted_not_eq_override(entry: Mapping[str, Any]) -> bool:"
+    },
+    {
+      "line": 415,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase15_regression_gates.py",
+      "source": "if entry.get(\"current_result\") == \"NOT_EQ\" and entry.get(\"must_not_be_equivalent\") is True:"
+    },
+    {
+      "line": 15,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "from .result_summary import classify_result_payload"
+    },
+    {
+      "line": 274,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "\"expected_result\": \"NOT_EQ\","
+    },
+    {
+      "line": 284,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "\"expected_result\": \"NOT_EQ\","
+    },
+    {
+      "line": 453,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "elif expected == \"NOT_EQ\":"
+    },
+    {
+      "line": 455,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if not _ground_truth_source_is_accepted_not_eq(source):"
+    },
+    {
+      "line": 457,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "f\"negative entry {entry.get('id')} expected NOT_EQ requires accepted ground_truth_not_eq\""
+    },
+    {
+      "line": 771,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if entry.get(\"expected_result\") != \"NOT_EQ\":"
+    },
+    {
+      "line": 772,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "raise ValueError(f\"synthetic negative entry {entry.get('id')} must expect NOT_EQ\")"
+    },
+    {
+      "line": 777,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if entry.get(\"current_result\") not in (None, \"NOT_EQ\"):"
+    },
+    {
+      "line": 778,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "raise ValueError(f\"synthetic negative entry {entry.get('id')} must have NOT_EQ current result\")"
+    },
+    {
+      "line": 788,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if not _ground_truth_source_is_accepted_not_eq(source):"
+    },
+    {
+      "line": 832,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if not isinstance(final_result, Mapping) or final_result.get(\"NOT_EQ\") != 1:"
+    },
+    {
+      "line": 833,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "raise ValueError(f\"synthetic negative entry {entry.get('id')} must freeze NOT_EQ expected count\")"
+    },
+    {
+      "line": 855,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "def _ground_truth_source_is_accepted_not_eq(source: object) -> bool:"
+    },
+    {
+      "line": 858,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "if source.get(\"classification\") != \"ground_truth_not_eq\":"
+    },
+    {
+      "line": 991,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase1_concrete_manifests.py",
+      "source": "current_result=classify_result_payload(payload),"
+    },
+    {
+      "line": 26,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_equivalence_blocking_unsafety.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 978,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_equivalence_blocking_unsafety.py",
+      "source": "if record.status == STATUS_EQ or payload.get(\"is_equivalent\") is True:"
+    },
+    {
+      "line": 2367,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_equivalence_blocking_unsafety.py",
+      "source": "if status != STATUS_TIMEOUT:"
+    },
+    {
+      "line": 2377,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_equivalence_blocking_unsafety.py",
+      "source": "if isinstance(solver_result, Mapping) and str(solver_result.get(\"status\")) == \"TIMEOUT\":"
+    },
+    {
+      "line": 2379,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_equivalence_blocking_unsafety.py",
+      "source": "return \"timeout\""
+    },
+    {
+      "line": 301,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_return_coverage_risk_preflight.py",
+      "source": "\"^Result: UNKNOWN\","
+    },
+    {
+      "line": 331,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_return_coverage_risk_preflight.py",
+      "source": "elif text.startswith(\"Result: UNKNOWN\"):"
+    },
+    {
+      "line": 450,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase2_return_coverage_risk_preflight.py",
+      "source": "elif line.startswith(\"Result: UNKNOWN\"):"
+    },
+    {
+      "line": 272,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_lane_index.py",
+      "source": "pending_proof_keeps_final_result=\"TIMEOUT\","
+    },
+    {
+      "line": 13,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_method_b_closure_lane4.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 15,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_method_b_closure_lane4.py",
+      "source": "classify_result_payload,"
+    },
+    {
+      "line": 729,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_method_b_closure_lane4.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 800,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_method_b_closure_lane4.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 13,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_readonly_identity_lane3.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 15,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_readonly_identity_lane3.py",
+      "source": "classify_result_payload,"
+    },
+    {
+      "line": 689,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_readonly_identity_lane3.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 760,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_readonly_identity_lane3.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 17,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 20,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "classify_result_payload,"
+    },
+    {
+      "line": 1718,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "if entry.get(\"current_result\") == \"NOT_EQ\" and entry.get(\"must_not_be_equivalent\") is True:"
+    },
+    {
+      "line": 1732,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "if record[\"status\"] in {STATUS_UNKNOWN, \"NOT_EQ\"}:"
+    },
+    {
+      "line": 1929,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "elif current_result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 2474,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "\"timeout\": ("
+    },
+    {
+      "line": 2475,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "baseline.get(\"final_result\") == STATUS_TIMEOUT"
+    },
+    {
+      "line": 2476,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "or current.get(\"final_result\") == STATUS_TIMEOUT"
+    },
+    {
+      "line": 2580,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_coverage_lane1.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 15,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_width_bridge_lane2.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 17,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_width_bridge_lane2.py",
+      "source": "classify_result_payload,"
+    },
+    {
+      "line": 823,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_width_bridge_lane2.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 917,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_return_width_bridge_lane2.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 11,
+      "matched_tokens": [
+        "classify_result",
+        "not_eq",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "from .result_summary import STATUS_NOT_EQ, STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload"
+    },
+    {
+      "line": 140,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "\"role\": \"SAT counterexample false-NOT_EQ guard with active coverage/effect unsafety\","
+    },
+    {
+      "line": 376,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 572,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 575,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "if result == STATUS_NOT_EQ:"
+    },
+    {
+      "line": 716,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "source": "\"baseline_mode\": \"pending_proof_or_completed_not_eq_against_pre_fix_manifest\","
+    },
+    {
+      "line": 11,
+      "matched_tokens": [
+        "classify_result",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_lane7.py",
+      "source": "from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload"
+    },
+    {
+      "line": 442,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_lane7.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 596,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_lane7.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 11,
+      "matched_tokens": [
+        "classify_result",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
+      "source": "from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload"
+    },
+    {
+      "line": 452,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 557,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 11,
+      "matched_tokens": [
+        "classify_result",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "from .result_summary import STATUS_EQ, STATUS_TIMEOUT, classify_result_payload"
+    },
+    {
+      "line": 313,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "\"pending_proof_keeps_final_result\": STATUS_TIMEOUT,"
+    },
+    {
+      "line": 358,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "if baseline.get(\"final_result\") == STATUS_TIMEOUT"
+    },
+    {
+      "line": 367,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "if current.get(\"final_result\") == STATUS_TIMEOUT"
+    },
+    {
+      "line": 650,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "if result != STATUS_TIMEOUT:"
+    },
+    {
+      "line": 655,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "expected_result=STATUS_TIMEOUT,"
+    },
+    {
+      "line": 702,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_timeout_lane9.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 11,
+      "matched_tokens": [
+        "classify_result",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "from .result_summary import STATUS_EQ, STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload"
+    },
+    {
+      "line": 168,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "\"expected_current_result\": STATUS_TIMEOUT,"
+    },
+    {
+      "line": 181,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "\"expected_current_result\": STATUS_TIMEOUT,"
+    },
+    {
+      "line": 194,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "\"expected_current_result\": STATUS_TIMEOUT,"
+    },
+    {
+      "line": 528,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "\"final_result\": classify_result_payload(payload),"
+    },
+    {
+      "line": 772,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "expected_current = entry.get(\"expected_current_result\") or STATUS_TIMEOUT"
+    },
+    {
+      "line": 892,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
+      "source": "if result == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 35,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_NOT_EQ = \"NOT_EQ\""
+    },
+    {
+      "line": 37,
+      "matched_tokens": [
+        "\"timeout\"",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_TIMEOUT = \"TIMEOUT\""
+    },
+    {
+      "line": 42,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_NOT_EQ,"
+    },
+    {
+      "line": 45,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 150,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "def classify_result_payload(payload: Mapping[str, Any], *, matrix_context: bool = False) -> str:"
+    },
+    {
+      "line": 158,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "is_equivalent = payload.get(\"is_equivalent\")"
+    },
+    {
+      "line": 159,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if is_equivalent is True:"
+    },
+    {
+      "line": 161,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if is_equivalent is False:"
+    },
+    {
+      "line": 162,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return STATUS_NOT_EQ"
+    },
+    {
+      "line": 164,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return STATUS_TIMEOUT"
+    },
+    {
+      "line": 169,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if isinstance(solver_result, Mapping) and str(solver_result.get(\"status\")) == \"TIMEOUT\":"
+    },
+    {
+      "line": 170,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return STATUS_TIMEOUT"
+    },
+    {
+      "line": 205,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "classify_result_payload(payload, matrix_context=matrix_context),"
+    },
+    {
+      "line": 216,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "status = _classify_result_line(line)"
+    },
+    {
+      "line": 222,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "def _classify_result_line(line: str) -> Optional[str]:"
+    },
+    {
+      "line": 225,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if line.startswith(\"Result: NOT EQUIVALENT\"):"
+    },
+    {
+      "line": 226,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return STATUS_NOT_EQ"
+    },
+    {
+      "line": 230,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return STATUS_TIMEOUT"
+    },
+    {
+      "line": 231,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if line.startswith(\"Result: UNKNOWN\"):"
+    },
+    {
+      "line": 327,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "int(after_counts.get(STATUS_TIMEOUT, 0) or 0)"
+    },
+    {
+      "line": 328,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "- int(before_counts.get(STATUS_TIMEOUT, 0) or 0)"
+    },
+    {
+      "line": 359,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "\"timeout_final_results\": _status_counts(record_tuple).get(STATUS_TIMEOUT, 0),"
+    },
+    {
+      "line": 416,
+      "matched_tokens": [
+        "not_eq",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "for status in (STATUS_NOT_EQ, STATUS_ERROR, STATUS_UNKNOWN, STATUS_TIMEOUT, STATUS_INCOMPLETE)"
+    },
+    {
+      "line": 483,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "\"  {name:<30s} : TOTAL={total:3d}, EQ={eq:3d}, NOT_EQ={not_eq:3d}, \""
+    },
+    {
+      "line": 488,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "not_eq=aggregate.count(STATUS_NOT_EQ),"
+    },
+    {
+      "line": 491,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "timeout=aggregate.count(STATUS_TIMEOUT),"
+    },
+    {
+      "line": 498,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "\"  Overall totals              : TOTAL={total:3d}, EQ={eq:3d}, NOT_EQ={not_eq:3d}, \""
+    },
+    {
+      "line": 502,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "not_eq=summary.overall.count(STATUS_NOT_EQ),"
+    },
+    {
+      "line": 505,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "timeout=summary.overall.count(STATUS_TIMEOUT),"
+    },
+    {
+      "line": 801,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_NOT_EQ: aggregate.count(STATUS_NOT_EQ),"
+    },
+    {
+      "line": 804,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "STATUS_TIMEOUT: aggregate.count(STATUS_TIMEOUT),"
+    },
+    {
+      "line": 839,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "f\"NOT_EQ={counts.get(STATUS_NOT_EQ, 0)} \""
+    },
+    {
+      "line": 841,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "f\"TIMEOUT={counts.get(STATUS_TIMEOUT, 0)} \""
+    },
+    {
+      "line": 941,
+      "matched_tokens": [
+        "not equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "f\"{indent}Not equivalent : {aggregate.count(STATUS_NOT_EQ)}\","
+    },
+    {
+      "line": 944,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "f\"{indent}Timeout        : {aggregate.count(STATUS_TIMEOUT)}\","
+    },
+    {
+      "line": 952,
+      "matched_tokens": [
+        "not equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "(STATUS_NOT_EQ, \"NOT EQUIVALENT pairs\"),"
+    },
+    {
+      "line": 955,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "(STATUS_TIMEOUT, \"TIMEOUT pairs\"),"
+    },
+    {
+      "line": 1075,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if status == STATUS_TIMEOUT:"
+    },
+    {
+      "line": 1081,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if status != STATUS_TIMEOUT:"
+    },
+    {
+      "line": 1091,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "if isinstance(solver_result, Mapping) and str(solver_result.get(\"status\")) == \"TIMEOUT\":"
+    },
+    {
+      "line": 1094,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "source": "return \"timeout\""
+    },
+    {
+      "line": 26,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/root_blocker_summary.py",
+      "source": "_FINAL_TRANSITIONS = {\"UNKNOWN\", \"TIMEOUT\"}"
+    },
+    {
+      "line": 574,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/root_blocker_summary.py",
+      "source": "value = payload.get(\"is_equivalent\")"
+    },
+    {
+      "line": 20,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_NOT_EQ,"
+    },
+    {
+      "line": 21,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_TIMEOUT,"
+    },
+    {
+      "line": 30,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "r\"NOT_EQ=\\s*(?P<NOT_EQ>\\d+),\\s*\""
+    },
+    {
+      "line": 46,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_NOT_EQ: 0,"
+    },
+    {
+      "line": 49,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_TIMEOUT: 0,"
+    },
+    {
+      "line": 98,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_NOT_EQ: totals[STATUS_NOT_EQ],"
+    },
+    {
+      "line": 101,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_TIMEOUT: totals[STATUS_TIMEOUT],"
+    },
+    {
+      "line": 132,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_NOT_EQ: int(match.group(\"NOT_EQ\")),"
+    },
+    {
+      "line": 135,
+      "matched_tokens": [
+        "\"timeout\"",
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/run_health_summary.py",
+      "source": "STATUS_TIMEOUT: int(match.group(\"TIMEOUT\")),"
+    },
+    {
+      "line": 35,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "_FINAL_UNKNOWN_TRANSITIONS = {\"UNKNOWN\", \"TIMEOUT\"}"
+    },
+    {
+      "line": 866,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "if payload.get(\"is_equivalent\") is not None:"
+    },
+    {
+      "line": 882,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "return \"NOT_EQ\""
+    },
+    {
+      "line": 884,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "is_equivalent = payload.get(\"is_equivalent\")"
+    },
+    {
+      "line": 885,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "if is_equivalent is True:"
+    },
+    {
+      "line": 887,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "if is_equivalent is False:"
+    },
+    {
+      "line": 888,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "return \"NOT_EQ\""
+    },
+    {
+      "line": 892,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "return \"TIMEOUT\""
+    },
+    {
+      "line": 903,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
+      "source": "if isinstance(solver_result, Mapping) and str(solver_result.get(\"status\")) == \"TIMEOUT\":"
+    },
+    {
+      "line": 28,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "from .result_summary import classify_result_payload"
+    },
+    {
+      "line": 56,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"decision:NOT_EQ\","
+    },
+    {
+      "line": 445,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "if row.get(\"final_outcome\") == \"TIMEOUT\":"
+    },
+    {
+      "line": 506,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "if classify_result_payload(payload) != entry.get(\"decision\"):"
+    },
+    {
+      "line": 772,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "if any(token in lowered for token in (\"unknown_reason\", \"unknown\", \"timeout\")):"
+    },
+    {
+      "line": 1123,
+      "matched_tokens": [
+        "is_equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"is_equivalent\","
+    },
+    {
+      "line": 1124,
+      "matched_tokens": [
+        "status_timeout"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"status_timeout\","
+    },
+    {
+      "line": 1125,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "'\"timeout\"',"
+    },
+    {
+      "line": 1126,
+      "matched_tokens": [
+        "'timeout'"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"'timeout'\","
+    },
+    {
+      "line": 1127,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"not_eq\","
+    },
+    {
+      "line": 1128,
+      "matched_tokens": [
+        "not equivalent"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"not equivalent\","
+    },
+    {
+      "line": 1129,
+      "matched_tokens": [
+        "result: unknown"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"result: unknown\","
+    },
+    {
+      "line": 1130,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"classify_result\","
+    },
+    {
+      "line": 1224,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "decision = classify_result_payload(payload)"
+    },
+    {
+      "line": 1226,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "if decision == \"NOT_EQ\":"
+    },
+    {
+      "line": 1228,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "raise ValueError(\"NOT_EQ selection lacks domain rationale\")"
+    },
+    {
+      "line": 1233,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "raise ValueError(\"NOT_EQ selection lacks a solver model\")"
+    },
+    {
+      "line": 1234,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "if decision == \"TIMEOUT\":"
+    },
+    {
+      "line": 1236,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "row.get(\"status\") == \"TIMEOUT\""
+    },
+    {
+      "line": 1283,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"decision\": classify_result_payload(payload),"
+    },
+    {
+      "line": 1392,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "timeout_rows = tuple(row for row in solver_rows if row.get(\"status\") == \"TIMEOUT\")"
+    },
+    {
+      "line": 1430,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"terminal_timeout_event_count\": len(timeout_rows) if decision == \"TIMEOUT\" else 0,"
+    },
+    {
+      "line": 1432,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "len(timeout_rows) if decision != \"TIMEOUT\" else 0"
+    },
+    {
+      "line": 1503,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"outcome_return_value_conflict\": (\"retain_proved_return_conflict_as_disequivalence_blocker\", \"return_value_conflict_cause\", \"clarify whether a safe decisive NOT_EQ receipt can discharge UNKNOWN\"),"
+    },
+    {
+      "line": 1559,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"observed_decision\": classify_result_payload(payloads[-1]),"
+    },
+    {
+      "line": 1607,
+      "matched_tokens": [
+        "not equivalent",
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"Not equivalent\": \"NOT_EQ\","
+    },
+    {
+      "line": 1610,
+      "matched_tokens": [
+        "\"timeout\""
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"Timeout\": \"TIMEOUT\","
+    },
+    {
+      "line": 1694,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py",
+      "source": "\"decision\": classify_result_payload(payload),"
+    },
+    {
+      "line": 14,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_evidence_runner.py",
+      "source": "from .result_summary import classify_result_payload"
+    },
+    {
+      "line": 123,
+      "matched_tokens": [
+        "classify_result"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/unknown_taxonomy_evidence_runner.py",
+      "source": "\"decision\": classify_result_payload(payload),"
+    },
+    {
+      "line": 5,
+      "matched_tokens": [
+        "not_eq"
+      ],
+      "path": "scripts/function_tracer_pcode/validation/validation_transfer_bundle.py",
+      "source": "artifacts that are most useful for UNKNOWN/NOT_EQ triage after a dedicated-PC"
+    }
+  ]
+}

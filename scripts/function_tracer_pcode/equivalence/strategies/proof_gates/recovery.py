@@ -81,7 +81,9 @@ def _impl__method_b_closure_proof_is_complete(
     analysis1: FunctionReturnAnalysis,
     analysis2: FunctionReturnAnalysis,
 ) -> bool:
-    if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+    from ...v2.loop_recurrence import LOOP_REASON_SPECS
+
+    if reason_record.reason_id not in LOOP_REASON_SPECS:
         return False
     if reason_record.recovery_proof_kind not in {
         UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value,
@@ -202,7 +204,10 @@ def _impl__method_b_closure_proof_id_from_evidence(cls, evidence: Any) -> Option
         return None
     if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
         return None
-    if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+    from ...v2.loop_recurrence import LOOP_REASON_SPECS
+
+    evidence_reason_id = cls._evidence_text(evidence, "reason_id")
+    if evidence_reason_id not in LOOP_REASON_SPECS:
         return None
     proof_kind = cls._evidence_text(evidence, "proof_kind") or cls._evidence_text(
         evidence,
@@ -224,7 +229,7 @@ def _impl__method_b_closure_proof_id_from_evidence(cls, evidence: Any) -> Option
     if not cls._method_b_closure_target_is_specific(object_target_key):
         return None
     proof_id = build_proof_obligation_id(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+        evidence_reason_id,
         proof_stage,
         proof_kind,
         evidence_kind,

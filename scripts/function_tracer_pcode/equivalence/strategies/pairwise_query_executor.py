@@ -4,6 +4,8 @@ import copy
 import contextvars
 import hashlib
 import inspect
+import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -30,6 +32,251 @@ from ..obligations.guard_overlap import (
     register_guard_query_executor,
 )
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
+
+
+class _SealedLoopV2RendererReceiptMeta(type):
+    def __setattr__(cls, name: str, value: Any) -> None:
+        if getattr(cls, "_sealed_renderer_receipt_type", False):
+            raise TypeError("loop v2 renderer receipt type is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if getattr(cls, "_sealed_renderer_receipt_type", False):
+            raise TypeError("loop v2 renderer receipt type is immutable")
+        super().__delattr__(name)
+
+
+@dataclass(frozen=True, init=False)
+class RenderedLoopV2SolverQuery(metaclass=_SealedLoopV2RendererReceiptMeta):
+    _sealed_renderer_receipt_type = False
+    _validator = None
+    proof_stage: str
+    proof_kind: str
+    proof_requirement_id: str
+    semantic_target_digest: str
+    blocker_target_digest: str
+    obligation_id: str
+    observation_contract_id: str
+    query_text: str
+    normalized_assertion_text: str
+    premise_assertions: tuple[str, ...]
+    declaration_rows: tuple[str, ...]
+    source_snapshot_digests: tuple[str, str]
+    prepared_surface_digest: str
+    execution_identity_digest: str
+    renderer_receipt_digest: str
+
+    def __init__(self, **payload: Any) -> None:
+        del payload
+        raise TypeError("loop v2 renderer receipt must be factory-issued")
+
+    def __copy__(self) -> "RenderedLoopV2SolverQuery":
+        return self
+
+    def __deepcopy__(self, memo: Any) -> "RenderedLoopV2SolverQuery":
+        return self
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        raise TypeError("loop v2 renderer receipt is not pickle-authority")
+
+    def validate(self) -> None:
+        validator = type(self)._validator
+        if not callable(validator):
+            raise ValueError("loop v2 renderer receipt validator is unavailable")
+        validator(self)
+
+
+def _derive_loop_v2_solver_query_payload(
+    *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
+    case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+) -> Dict[str, Any]:
+    """Derive a loop solver query from the canonical pairwise semantic objects."""
+
+    from .pairwise_models import ReturnCase
+    from .pairwise_query_builder import build_pair_query
+    from ..formula.builder import FormulaBuilder
+    from ..formula.symbol_replace import build_symbol_replacer
+    from ...model.analysis import FunctionReturnAnalysis
+    from ..obligations.snapshot import AnalysisSnapshot
+    from ..v2.contracts import ProofRequirement, authority_digest, canonical_value
+    from ..v2.loop_recurrence import (
+        LOOP_PRODUCER_STAGE_SPECS,
+        LoopBlockerProductionSignal,
+        LoopStageCapability,
+        _loop_case_object_identity,
+    )
+
+    if type(blocker) is not LoopBlockerProductionSignal:
+        raise TypeError("loop typed renderer requires exact blocker")
+    if type(requirement) is not ProofRequirement:
+        raise TypeError("loop typed renderer requires exact proof requirement")
+    if type(analysis1) is not FunctionReturnAnalysis or type(
+        analysis2
+    ) is not FunctionReturnAnalysis:
+        raise TypeError("loop typed renderer requires exact function analyses")
+    if type(case1) is not ReturnCase or type(case2) is not ReturnCase:
+        raise TypeError("loop typed renderer requires exact return cases")
+    target_cases = {
+        blocker.canonical_target_key[3][1],
+        blocker.canonical_target_key[4][1],
+    }
+    if {
+        _loop_case_object_identity(case1),
+        _loop_case_object_identity(case2),
+    } != target_cases:
+        raise ValueError("loop typed renderer cases differ from blocker target")
+    left_snapshot = AnalysisSnapshot.from_function_analysis(
+        analysis1
+    ).semantic_fingerprint
+    right_snapshot = AnalysisSnapshot.from_function_analysis(
+        analysis2
+    ).semantic_fingerprint
+    if (
+        blocker.canonical_target_key[1][1] != left_snapshot
+        or blocker.canonical_target_key[2][1] != right_snapshot
+    ):
+        raise ValueError("loop typed renderer analyses differ from blocker snapshots")
+    matches = tuple(
+        row for row in LOOP_PRODUCER_STAGE_SPECS
+        if row.proof_kind == requirement.proof_kind
+        and row.capability is not LoopStageCapability.STRUCTURAL_ONLY
+    )
+    if (
+        len(matches) != 1
+        or requirement.proof_kind != "loop_exact_term_relation"
+    ):
+        raise ValueError(
+            "loop typed pair-value renderer does not own this proof kind"
+        )
+    base_ctx = FormulaBuilder(debug=False).build_base_context(analysis1, analysis2)
+    param_replace_fn1 = build_symbol_replacer(
+        base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
+    )
+    param_replace_fn2 = build_symbol_replacer(
+        base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp"
+    )
+    diagnostic_query_text = build_pair_query(
+        base_ctx,
+        case1,
+        case2,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id,
+    )
+    assertion_lines = tuple(
+        line.strip() for line in diagnostic_query_text.splitlines()
+        if line.strip().startswith("(assert ")
+    )
+    if not assertion_lines:
+        raise ValueError("loop typed renderer produced no semantic assertions")
+    if any(not line.endswith(")") for line in assertion_lines):
+        raise ValueError("loop typed renderer produced a noncanonical assertion")
+    declaration_rows = tuple(
+        line.strip() for line in diagnostic_query_text.splitlines()
+        if line.strip().startswith("(declare-const ")
+    )
+    normalized_assertion_text = assertion_lines[-1][len("(assert "):-1]
+    premise_assertions = assertion_lines[:-1]
+    query_text = "\n".join((
+        *declaration_rows,
+        *premise_assertions,
+        f"(assert {normalized_assertion_text})",
+        "(check-sat)",
+    ))
+    semantic_target_digest = authority_digest({
+        "semantic_target": canonical_value(requirement.semantic_target_key),
+    })
+    payload = {
+        "proof_stage": matches[0].proof_stage,
+        "proof_kind": requirement.proof_kind,
+        "proof_requirement_id": requirement.requirement_id,
+        "semantic_target_digest": semantic_target_digest,
+        "blocker_target_digest": authority_digest(blocker.canonical_target_key),
+        "obligation_id": "loop-obligation-" + authority_digest({
+            "blocker_target": blocker.canonical_target_key,
+            "proof_kind": requirement.proof_kind,
+        })[:32],
+        "observation_contract_id": authority_digest(blocker.observation_surface),
+        "query_text": query_text,
+        "normalized_assertion_text": normalized_assertion_text,
+        "premise_assertions": premise_assertions,
+        "declaration_rows": declaration_rows,
+        "source_snapshot_digests": (left_snapshot, right_snapshot),
+        "prepared_surface_digest": authority_digest({
+            "left_snapshot": left_snapshot,
+            "right_snapshot": right_snapshot,
+            "left_case": _loop_case_object_identity(case1),
+            "right_case": _loop_case_object_identity(case2),
+            "proof_requirement_id": requirement.requirement_id,
+            "semantic_target_digest": semantic_target_digest,
+        }),
+        "execution_identity_digest": execution_identity_digest,
+    }
+    return payload
+
+
+def _build_loop_v2_renderer_authority():
+    derive = _derive_loop_v2_solver_query_payload
+    receipt_type = RenderedLoopV2SolverQuery
+    issued: "weakref.WeakValueDictionary[int, RenderedLoopV2SolverQuery]" = (
+        weakref.WeakValueDictionary()
+    )
+
+    def validate(rendered: RenderedLoopV2SolverQuery) -> None:
+        from ..v2.contracts import authority_digest
+
+        payload = {
+            name: getattr(rendered, name)
+            for name in rendered.__dataclass_fields__
+            if name != "renderer_receipt_digest"
+        }
+        if (
+            issued.get(id(rendered)) is not rendered
+            or rendered.renderer_receipt_digest != authority_digest(payload)
+        ):
+            raise ValueError("loop v2 renderer receipt is invalid")
+
+    def render(
+        *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
+        case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+    ) -> RenderedLoopV2SolverQuery:
+        from ..v2.contracts import authority_digest
+
+        payload = derive(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=analysis1,
+            analysis2=analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id=pair_id,
+            execution_identity_digest=execution_identity_digest,
+        )
+        rendered = object.__new__(receipt_type)
+        for name, value in payload.items():
+            object.__setattr__(rendered, name, value)
+        object.__setattr__(
+            rendered, "renderer_receipt_digest", authority_digest(payload)
+        )
+        issued[id(rendered)] = rendered
+        validate(rendered)
+        return rendered
+
+    return render, validate
+
+
+render_loop_v2_solver_query, _loop_v2_renderer_validator = (
+    _build_loop_v2_renderer_authority()
+)
+type.__setattr__(
+    RenderedLoopV2SolverQuery, "_validator", _loop_v2_renderer_validator
+)
+type.__setattr__(
+    RenderedLoopV2SolverQuery, "_sealed_renderer_receipt_type", True
+)
+del _build_loop_v2_renderer_authority
+del _derive_loop_v2_solver_query_payload
+del _loop_v2_renderer_validator
 
 
 def _build_region_executor_scope():
@@ -705,21 +952,8 @@ def solve_query_after_guard(
             stage2_result.blocking_detail = norm_result.blocking_detail
             stage2_result.pair_stage = norm_result.pair_stage or stage2_result.pair_stage
 
-    if stage2_result.is_equivalent is None and not getattr(stage2_result, "blocking_reason", None):
-        stage2_result.blocking_reason = "solver_unknown_timeout"
-        stage2_result.blocking_detail = "pairwise solver query timed out or returned unknown"
-        stage2_result.evidence_kind = "query_hash"
-        target_builder = getattr(strategy, "_solver_timeout_object_target_key", None)
-        if callable(target_builder):
-            stage2_result.object_target_key = target_builder(
-                analysis1=base_ctx.get("analysis1"),
-                analysis2=base_ctx.get("analysis2"),
-                stage=stage2_result.pair_stage or "with-ineq",
-                query=stage2_result.last_query,
-                timeout_seconds=getattr(strategy, "per_query_timeout_hard", None),
-                pair_id=pair_id,
-                parallel_result=getattr(stage2_result, "solver_results", None),
-            )
+    # An undecided solver result carries execution status/receipt only.  A
+    # semantic blocker, when present, was established independently above.
 
     return stage2_result
 

@@ -19,7 +19,7 @@ def test_debug_trace_phase4a_to_phase4b_transition(mock_program_mips64, mock_pro
     from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
     from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
     
-    checker = EquivalenceChecker(debug=False, strategy="pairwise")
+    checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
     
     # MIPS64側: 64bit long パラメータ
     mock_analysis_mips64 = FunctionReturnAnalysis(
@@ -251,7 +251,7 @@ def test_phase4b_final_smt_in_to_dict(mock_program_mips64, mock_program_x86):
     from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
     import json
     
-    checker = EquivalenceChecker(debug=False, strategy="pairwise")
+    checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
     
     # 前テストと同じセットアップ
     mock_analysis_mips64 = FunctionReturnAnalysis(

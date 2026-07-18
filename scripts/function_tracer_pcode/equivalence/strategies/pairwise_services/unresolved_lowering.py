@@ -35,7 +35,7 @@ def _impl__unresolved_expression_object_target_key(
     """Object-derived target key for unresolved-expression diagnostics."""
 
     target: List[Any] = [
-        "unresolved_expression",
+        "expression_translation_incomplete",
         ("pair", pair_id),
         self._unresolved_expression_side_object_key(
             "left",

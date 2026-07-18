@@ -651,6 +651,13 @@ def test_summary_candidate_missing_effect_evidence_is_not_accepted_or_merged():
 
     assert result.accepted_returns == ()
     assert "summary_effect_unmodeled:effect_summary_missing" in result.blockers
+    effect_occurrence = next(
+        item for item in result.blocker_occurrences
+        if item.source_code == "summary_effect_unmodeled:effect_summary_missing"
+    )
+    assert effect_occurrence.candidate_id == result.candidates[0].candidate_id
+    assert effect_occurrence.peer_return_identity is None
+    assert effect_occurrence.function_identity == analysis.outcome_function_identity()
     assert len(analysis.returns) == 2
     assert all(ret.return_kind == "exact" for ret in analysis.returns)
 
@@ -702,6 +709,14 @@ def test_summary_candidate_overlap_requires_value_equality_proof():
 
     assert result.accepted_returns == ()
     assert "summary_return_overlap_unproven:value_equality_not_proved" in result.blockers
+    overlap_occurrence = next(
+        item for item in result.blocker_occurrences
+        if item.source_code
+        == "summary_return_overlap_unproven:value_equality_not_proved"
+    )
+    assert overlap_occurrence.candidate_id == result.candidates[0].candidate_id
+    assert overlap_occurrence.peer_return_identity is not None
+    assert overlap_occurrence.function_identity == analysis.outcome_function_identity()
     assert len(analysis.returns) == 2
 
 

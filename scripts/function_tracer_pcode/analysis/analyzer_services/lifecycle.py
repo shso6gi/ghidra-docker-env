@@ -123,8 +123,15 @@ def _impl__find_block_info_for_program_offset(
 
 def _impl__decompile_function(self, function, timeout: int = 60):
     try:
-        decompiler = self._get_decompiler()
-        results = decompiler.decompileFunction(function, timeout, None)
+        from ..decompilation_broker import (
+            LIFECYCLE_HELPER_SOURCE_CONTRACT,
+            decompile_function,
+        )
+        results = decompile_function(
+            self, function, timeout, None,
+            source_contract_id=LIFECYCLE_HELPER_SOURCE_CONTRACT,
+            semantic_owner="subordinate",
+        )
         if not results.decompileCompleted():
             return None
         return results

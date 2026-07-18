@@ -1,0 +1,42 @@
+{
+  "artifact_schema": "unknown-taxonomy-v2-phase6-process-census-validation-v1",
+  "repository_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "validation_date": "2026-07-18",
+  "python": "./.venv-pyghidra/bin/python",
+  "command": "./.venv-pyghidra/bin/python -m pytest -q --junitxml=artifacts/unknown_taxonomy_v2/phase6/process_census_validation.xml scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_operational_extraction.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_census.py",
+  "result": {
+    "collected": 66,
+    "passed": 66,
+    "failed": 0,
+    "skipped": 0
+  },
+  "focused_process_census_tests": 18,
+  "source_sha256": {
+    "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py": "0645b00ef57363d2c919bb8bb34029858f92ff1b0fdcbc03c9c5f8cfcb0c62be",
+    "scripts/function_tracer_pcode/equivalence/v2/process_supervisor.py": "308a50eddd330ca223d2393e2acac4d815674533bc493c0b4c6a16e30281b78f",
+    "scripts/function_tracer_pcode/equivalence/v2/process_census.py": "fc22e65351371486ae77afd695681440637ea48b9759d4c33e0731c7a9458d66",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_census.py": "11a9a0addffdd78ea591469c8c405a3e5e7cb9a3e0a04d89f24baa350ac0e9b7"
+  },
+  "junit_xml": {
+    "path": "artifacts/unknown_taxonomy_v2/phase6/process_census_validation.xml",
+    "sha256": "16c696f6b480bbf9ec777978ea2874ce7229f0af95bc6ea872dfcb2c1787fb7c"
+  },
+  "closed_authority_cases": [
+    "issuer invocation census exact key-set closure",
+    "issued-after-seal stale census rejection",
+    "mixed operational issuer factory rejection",
+    "record-time foreign same-digest attempt and ERROR issuer rejection",
+    "membership proof requirement ordinal and priority tamper rejection",
+    "worker timeout exact FINAL stream binding",
+    "supervisor nested terminal segment revalidation",
+    "ERROR exact published FINAL event binding",
+    "later success and ERROR timeout suppression",
+    "exact census and selection receipt integrity"
+  ],
+  "excluded_pending_work": [
+    "before-checkpoint and empty-prefix ERROR model",
+    "production supervisor command and wiring",
+    "Phase 5 source-hash rematerialization",
+    "Phase 7 through Phase 9"
+  ]
+}

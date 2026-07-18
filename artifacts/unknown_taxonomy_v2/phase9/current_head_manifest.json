@@ -1,0 +1,89 @@
+{
+  "artifact_digest": "f87fe99d467767a00420178f1ccfdb8b2a882ec34b21b29065d04e2c971548fc",
+  "artifact_kind": "phase9-current-head-manifest-v2",
+  "closeout_bindings": [
+    {
+      "artifact_digest": "e99a16b76e18c3db8d67e86e580fdc6b5293407db3bba4d5221b38286abc7436",
+      "path": "cause_lifecycle_snapshot.json",
+      "sha256": "a1839a0ece9f5d9e88a0331c926ac2c98066c49eaf23e50a2310af238d86d12b"
+    },
+    {
+      "artifact_digest": "74c475d38b2cf3e054ef08478e5d5f9d4e8672f9af6d4c173ad933fa12be646e",
+      "path": "decision_receipt.json",
+      "sha256": "4633212654b6cbf24b17f1dd27f6952b6584c4e6b3a20ddadb0d0bb9a14e6601"
+    },
+    {
+      "artifact_digest": "aafbd09e0710fac66299724d3a31e0694066ec7eb463c158c2920091b6f15cb2",
+      "path": "decision_transition_matrix.json",
+      "sha256": "483954263674f6aca895be0fd294bfe565a7e9e5096a5403eec425f04793654a"
+    },
+    {
+      "artifact_digest": "fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087",
+      "path": "legacy_coverage.json",
+      "sha256": "b6e264d30c9ac11cc48046e49b42940fc560040f745350273fb55661b67c7c41"
+    },
+    {
+      "artifact_digest": "24473c559b542009f8e470d24cb035e2a42bcb9aa922128760826c472ccd3725",
+      "path": "query_execution_receipts.json",
+      "sha256": "d0f6a65ff1020aa2df3af75e91d5b1d6a9745374def4f49660013f5e9ae95789"
+    },
+    {
+      "artifact_digest": "85eed5cbbbdb5af0d50943bb0db799ecbee87d2814f9386c30655d2c91fd0df1",
+      "path": "reason_before_after.json",
+      "sha256": "1ad605a7672eacba8393aa4ea85650a91d5feff3a5bf7c3c936011a7ee2ccf11"
+    },
+    {
+      "artifact_digest": "c7efec72c802d1a1bf2a31254075406cd6eea22692e706649f7cc77402c5ad34",
+      "path": "validation_run.json",
+      "sha256": "39b1890ecacecf1596a195e42affc99e895167f7da005292839f611b6c8158d8"
+    }
+  ],
+  "phase7_artifact_sha256": "50ca902b0623bd0247ac0ff1591c44de99f5df5f52582a0014bb135001113fe5",
+  "phase8_artifact_sha256": "5e4511bb54265a26cbfe0255dd353e3f88cc545d7f6c60b654c35c5c43e0e046",
+  "phase9_focused_junit": {
+    "path": "artifacts/unknown_taxonomy_v2/phase9/phase9-focused-validation.xml",
+    "sha256": "6b4c0692e0c59e117da9ba4bbbbec48586c015bc8078e376b03694d3b7472d25",
+    "test_count": 6
+  },
+  "producer_manifest_digest": "a019eb7be3661eaffd23e754be337881da9d32967b2566e9783f8e04c2f1bc40",
+  "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "source_files": [
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/contracts.py",
+      "sha256": "5396aab77e1b344813dda109fe6c09b24814b302fb0b7de5bf28c87fa4ce9c08"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/census_contract.py",
+      "sha256": "faafa908413cbf23d24ba784f4f0c6f035866357538fd333f42511088affa62a"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/decision.py",
+      "sha256": "edd090d761a63d1de605ca58513fc0b85ed69c746771e3d5bd5b0261480562a8"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_context.py",
+      "sha256": "e2a2577476584e5a1048cc91dbb68404922e4902db787387f32d16501a4c76bd"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
+      "sha256": "f8a9a0b9d28e042d1ef08adc139f576c466e8b2f4cb3df892d11fd0ca53e5b22"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
+      "sha256": "f4d7943b76ebb7a020c4bb9e8fa2dfcfecf09de7f00fad0e2e0c43a795358272"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "sha256": "a2e7f782f5a4338b89b60c078281d2e6f12a8f902d864a08755f9d04afcf42da"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/validation/phase9_completion_validation.py",
+      "sha256": "082ed67955b8283f51391eba36d94b86bc6965659c43afe7750d234a088a8ad9"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase9_completion.py",
+      "sha256": "5cacee6a153cdedb5e487d84d2e645733da67aa9e96f76626249569743651f15"
+    }
+  ],
+  "validation_run_log_sha256": "182815839414bfe2a459e83936c99ce8323ee4d5eefc65ef17a924e1cc418fcf"
+}

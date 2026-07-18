@@ -28,7 +28,9 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    if reason_record.reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+    from ...v2.call_effect import CALL_EFFECT_REASON_SPECS
+
+    if reason_record.reason_id not in CALL_EFFECT_REASON_SPECS:
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
         return
@@ -114,7 +116,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
         {
             "object_derived": True,
             "status": "complete",
-            "reason_id": UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+            "reason_id": reason_record.reason_id,
             "recovery_proof_kind": UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
             "proof_stage": "object_evidence_collected",
             "evidence_kind": "call_effect_summary",
@@ -1879,7 +1881,9 @@ def _impl__call_effect_summary_proof_is_complete(
     analysis1: FunctionReturnAnalysis,
     analysis2: FunctionReturnAnalysis,
 ) -> bool:
-    if reason_record.reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+    from ...v2.call_effect import CALL_EFFECT_REASON_SPECS
+
+    if reason_record.reason_id not in CALL_EFFECT_REASON_SPECS:
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
         return False
@@ -1909,7 +1913,10 @@ def _impl__call_effect_summary_proof_id_from_evidence(cls, evidence: Any) -> Opt
         return None
     if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
         return None
-    if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+    from ...v2.call_effect import CALL_EFFECT_REASON_SPECS
+
+    evidence_reason_id = cls._evidence_text(evidence, "reason_id")
+    if evidence_reason_id not in CALL_EFFECT_REASON_SPECS:
         return None
     proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
     if proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
@@ -1926,7 +1933,7 @@ def _impl__call_effect_summary_proof_id_from_evidence(cls, evidence: Any) -> Opt
     if not isinstance(object_target_key, tuple):
         return None
     proof_id = build_proof_obligation_id(
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        evidence_reason_id,
         proof_stage,
         proof_kind,
         evidence_kind,

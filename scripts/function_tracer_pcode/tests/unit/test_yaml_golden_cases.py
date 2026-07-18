@@ -167,7 +167,9 @@ class TestYAMLGoldenCases:
         checker_kwargs = {"debug": True}
         if "S_LOOP_TEMPLATE_ABSTRACTION" in required_stage_path:
             checker_kwargs["enable_template_abstraction"] = True
-        checker = EquivalenceChecker(**checker_kwargs)
+        checker = EquivalenceChecker(
+            canonical_decision_cutover=False, **checker_kwargs
+        )
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",
@@ -297,7 +299,9 @@ class TestMonolithicStrategyBackwardCompatibility:
         from unittest.mock import Mock, patch
         
         # monolithic strategy で初期化
-        checker = EquivalenceChecker(strategy="monolithic", debug=True)
+        checker = EquivalenceChecker(
+            strategy="monolithic", debug=True, canonical_decision_cutover=False
+        )
         
         # stage_plan が monolithic のみであることを確認
         assert len(checker.stage_plan) == 1
@@ -409,7 +413,9 @@ class TestMonolithicStrategyBackwardCompatibility:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         
         # pairwise strategy で初期化
-        checker = EquivalenceChecker(strategy="pairwise", debug=True)
+        checker = EquivalenceChecker(
+            strategy="pairwise", debug=True, canonical_decision_cutover=False
+        )
         
         assert len(checker.stage_plan) == 3
         assert checker.stage_plan[0].stage_id.value == "S_PAIRWISE"
@@ -429,6 +435,7 @@ class TestMonolithicStrategyBackwardCompatibility:
             strategy="pairwise",
             debug=True,
             enable_template_abstraction=True,
+            canonical_decision_cutover=False,
         )
 
         assert len(checker.stage_plan) == 4

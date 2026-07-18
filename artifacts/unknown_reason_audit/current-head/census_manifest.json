@@ -1,0 +1,951 @@
+{
+  "audit_kind": "unknown_taxonomy_v1_current_head_inventory",
+  "entries": [
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+        "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+        "--binary-ids",
+        "NEG_LEFT",
+        "NEG_RIGHT",
+        "-f",
+        "divide_long",
+        "modulo_long",
+        "--strategy",
+        "pairwise",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "d6cc00b215b85c632a6985d171cea740a9959d4aef2397819a20ede3a080f4f9",
+      "analysis_config": {
+        "deliberately_different_functions": true,
+        "domain_rationale": "divide and remainder differ for a=1,b=-2; SAT model is retained in the result",
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "cf85685bbafc9c718fdb71a0f2445392c38206716582ac8693de16baef077740",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "b130a3b1f2abaa9cf9b2df56e53ddf8acb2ae443f8afc271f122c337434ba779"
+        ],
+        "right": [
+          "sha256",
+          "b130a3b1f2abaa9cf9b2df56e53ddf8acb2ae443f8afc271f122c337434ba779"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "arithmetic_long_test-x86_64-gcc-O0",
+        "binary2_name": "arithmetic_long_test-x86_64-gcc-O0",
+        "function1_name": "divide_long",
+        "function2_name": "modulo_long"
+      },
+      "comparison_identity_digest": "26c450fb6fdccd30fc61d1855c603b529468c0e4fe912bb7047d5fad92b1c0cb",
+      "covered_consumer_branches": [
+        "decision:NOT_EQ",
+        "counterexample:model_present"
+      ],
+      "decision": "NOT_EQ",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "130dd1951db526a16981a1cbb8d5cbfdce5884ad4f723a1c07169394f7db0c21",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "21098a6f1001c8330a4c2737aa19e70dacfb76c3d356a4dbb19b6449115d3dff",
+      "result_occurrence_id": "21098a6f1001c8330a4c2737aa19e70dacfb76c3d356a4dbb19b6449115d3dff",
+      "run_receipt_digest": "9b1909dc92227e06f0e2d534fa99cd2ae518397d6b0714d17f22b6f085cdfa9c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/arithmetic_divide_vs_modulo_not_eq.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "safe decisive NOT_EQ with an intentional semantic difference and solver model",
+      "selection_row_digest": "c100eebaf79750c7b9619493894deadafeac07457b9389095b820a9498875ae2",
+      "selection_row_index": 1,
+      "source_artifact_digest": "ae8355d8d2b5483020c5daf9fe922f6cb655bac65a0ded9650eac93154ab68ea",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/arithmetic_divide_vs_modulo_not_eq.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "expected_decision": "UNKNOWN",
+        "fixture_kind": "parser_decision_contract"
+      },
+      "analysis_config_digest": "8ecae0ace82557a820419e2f21b47385f8035c53ac824deb20be2ecd1d049346",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "synthetic-left",
+        "binary2_name": "synthetic-right",
+        "function1_name": "synthetic_operational",
+        "function2_name": "synthetic_operational"
+      },
+      "comparison_identity_digest": "23ccd323a47085855ee738f5a584dfd0e7178e40c40581f5f7c987de7f4ef2b6",
+      "covered_consumer_branches": [
+        "decision:UNKNOWN",
+        "failure_status:decompilation_failed",
+        "operational_unknown"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": null,
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "c2aada9900eb48dece541935aa2c1a06525325606fb493b864112ff5b090686b",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "4390f9fba75dfb5b4b192aee118149ccc5c80f9210166bcf7d403c43137facc1",
+      "result_occurrence_id": "4390f9fba75dfb5b4b192aee118149ccc5c80f9210166bcf7d403c43137facc1",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "operational UNKNOWN parser branch not safely deterministic as a real rerun",
+      "selection_row_digest": "1eb733878a8cf5af9d59ce3c7042ffa7e123d88535d2a5c0cccd23f9dd248758",
+      "selection_row_index": 5,
+      "source_artifact_digest": "bca9042682a89b3b677e6909ca534ab510d4ad6b2a28a2c2630b551984875fcd",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/operational_unknown.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "snippet",
+        "--strategy",
+        "monolithic",
+        "--monolithic-query-mode",
+        "legacy",
+        "--equiv-timeout",
+        "120",
+        "--monolithic-timeout",
+        "1",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "14ae99c05db69d830ccd51ec6fd44018c0c621cd4a2c3d0c199d0d633e0b082b",
+      "analysis_config": {
+        "explicit_legacy_validation_control": true,
+        "monolithic_query_mode": "legacy",
+        "monolithic_timeout": 1,
+        "strategy": "monolithic"
+      },
+      "analysis_config_digest": "1ac27f39c0cf940c5e7b12550dc5b6b1400bb1296f5587dbca48263f62444e06",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "7cb5782c4c4179dd1ae358cd077ecc9a0cbfe9525301f1a64133a641ef869492"
+        ],
+        "right": [
+          "sha256",
+          "ac7bc1e69a85ce5ce3e370ac963fb5777af2bc8df35c4d2340a2979b892d4c74"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "snippet",
+        "function2_name": "snippet"
+      },
+      "comparison_identity_digest": "9bd51c3034be3650014855693689b398546622c3d6b1860b9978ef75e4967971",
+      "covered_consumer_branches": [
+        "decision:TIMEOUT",
+        "terminal_solver_timeout",
+        "solver_unknown_timeout_diagnostic"
+      ],
+      "decision": "TIMEOUT",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "fd4a567e171d8574542ef1ecfdecdb0c57ea4ffe9eb66fcc9e4e1f575015dec7",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+      "result_occurrence_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+      "run_receipt_digest": "4a65b07009b39dc8e0116fd39d6c18ab6ca05650cbda552f9a7ab25d7907d08c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/SQR_snippet_B9_B10_legacy_monolithic_timeout.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "terminal solver-derived TIMEOUT representative",
+      "selection_row_digest": "86e049e5e45877c8ece5bc9e15d33f65a262b1f1edf254d941c583a27c2366a7",
+      "selection_row_index": 3,
+      "source_artifact_digest": "4e448794ee37e2431975761b37abdcef7ed05656c33a9e8fb882e95423a59536",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_legacy_monolithic_timeout.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O1",
+        "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O3",
+        "--binary-ids",
+        "B6",
+        "B8",
+        "-f",
+        "f",
+        "--strategy",
+        "pairwise",
+        "--equiv-timeout",
+        "300",
+        "--pairwise-timeout",
+        "5",
+        "--pairwise-timeout-hard",
+        "30",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "915fc5002cdb9709c0fbea52ca30e96921e599bf699b88d5429c0b788451e220",
+      "analysis_config": {
+        "equiv_timeout": 300,
+        "pairwise_timeout": 5,
+        "pairwise_timeout_hard": 30,
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "9ca96586cee165edd635bfe8e36552a1da4a8a624035c59f8182e1409ee89ed4",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "db06eb61bc378613933ff101729165c84a2efa7018cb218b349b23f1677a7329"
+        ],
+        "right": [
+          "sha256",
+          "19eccd4906af5fff7af798c863f1a7af15afbfb6fce7243b72d7cb299a0e83ba"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-arm64-gcc-O1",
+        "binary2_name": "newV-arm64-gcc-O3",
+        "function1_name": "f",
+        "function2_name": "f"
+      },
+      "comparison_identity_digest": "a83bc91b410c2372b4cb1e024c49e7c44d9f5a2620074009be42e25311110a89",
+      "covered_consumer_branches": [
+        "decision:UNKNOWN",
+        "fallback_retry",
+        "proof_backlog",
+        "multiple_reason",
+        "root_blocker_candidates"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "3499be4368a21bf3af639890fdb5ccc731618fec024fb43dc6656b47635d1134",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "63f6b19231d16f35cbbbb709096825f81e31105bc514e3f736555b735470fb1f",
+      "result_occurrence_id": "63f6b19231d16f35cbbbb709096825f81e31105bc514e3f736555b735470fb1f",
+      "run_receipt_digest": "63d911df26c1106a65e6d116dcfaa8dbf0b968c8461060c3e54a74e945ccdcae",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/limit2_f_B6_B8.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "non-timeout UNKNOWN with multiple semantic blockers, recovery backlog, and retry activity",
+      "selection_row_digest": "a79748fb9a27fd8ee3328bc400e3207b15c1ccb3867b92e0b4de16328ecd3d07",
+      "selection_row_index": 2,
+      "source_artifact_digest": "ae9fbbe3f8e02ca2ad826a88234881672168e5672a69c1c11ee09494c2c863b3",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/limit2_f_B6_B8.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "__phase0_missing_function__",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "a7284d279222a51902de0905b35ff0c18b8c4753557be0827d06cd4de2faf86b",
+      "analysis_config": {
+        "fixture_kind": "deterministic_function_lookup_miss"
+      },
+      "analysis_config_digest": "dacf47953b461a2af83c9cc7faf6ebf68b9944d7bc02067fa281e70d41e2134d",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5"
+        ],
+        "right": [
+          "sha256",
+          "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "__phase0_missing_function__",
+        "function2_name": "__phase0_missing_function__"
+      },
+      "comparison_identity_digest": "5160f4cb98d795537a9406abb29e693c35f21af7c8d559c01551e6f68ae46893",
+      "covered_consumer_branches": [
+        "decision:ERROR",
+        "failure_status:function_lookup_miss",
+        "cli_parser"
+      ],
+      "decision": "ERROR",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "863ec640a3b3891f8f201c8802f5561331d03c2bd82f13514704150d6d41d366",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "8ab66ee6589990c94450cf1321261ff271e055dbc1f65c3e31ece1d24b0a045e",
+      "result_occurrence_id": "8ab66ee6589990c94450cf1321261ff271e055dbc1f65c3e31ece1d24b0a045e",
+      "run_receipt_digest": "bf2f663de146d9cad1d78eb93831b76e12e9ae9543f758f9061affbcaa1cf7e1",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/operational_function_lookup_miss.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "current ERROR path and function-lookup consumer representative",
+      "selection_row_digest": "7359a40b06a1c985dab75b99a684ade130702b30bdfa173d7e2fcd94b6cad1f1",
+      "selection_row_index": 4,
+      "source_artifact_digest": "6576978f43b87c09e79a87adbb0356a68499cc827062035359200c1568de11d9",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/operational_function_lookup_miss.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "fixture_kind": "duplicate_stable_result"
+      },
+      "analysis_config_digest": "2ecd343091424672ae1f594fdcf179b770b664320a4a74ca3c05c67d81e27a0c",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "duplicate-left",
+        "binary2_name": "duplicate-right",
+        "function1_name": "duplicate_fixture",
+        "function2_name": "duplicate_fixture"
+      },
+      "comparison_identity_digest": "1700152749d4b6f3277ab14a99bd5fc84b5084f586c271d88ddec47bcb4516bc",
+      "covered_consumer_branches": [
+        "duplicate_stable_result"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": "retain_both_occurrences_and_report_duplicate_group",
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "58ee764fc72ced6b181545ada8c2dca34c821dc310f2050fc338f1fd61d47abe",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "b6f355bd1540c2508fec075fb8219c47ee43b3ab4cc24278ef5de2785053fe32",
+      "result_occurrence_id": "b6f355bd1540c2508fec075fb8219c47ee43b3ab4cc24278ef5de2785053fe32",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "first occurrence for explicit duplicate stable-result detection",
+      "selection_row_digest": "60b24f49a3a2d63c3fbfb84481a2c8369aca6032d13a2b07193a97088d827fbd",
+      "selection_row_index": 6,
+      "source_artifact_digest": "5a39f7705e046b79f85b130a9758dc1e57b662abf2d8edc9a97a84e2ded69423",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/duplicate_stable_a.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "tr",
+        "--strategy",
+        "pairwise",
+        "--equiv-timeout",
+        "300",
+        "--pairwise-timeout",
+        "5",
+        "--pairwise-timeout-hard",
+        "30",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "c7f7d091b16bd9977ed55e19944b20f5e3d43ca549853959095c1549cc76deea",
+      "analysis_config": {
+        "equiv_timeout": 300,
+        "pairwise_timeout": 5,
+        "pairwise_timeout_hard": 30,
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "9ca96586cee165edd635bfe8e36552a1da4a8a624035c59f8182e1409ee89ed4",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5"
+        ],
+        "right": [
+          "sha256",
+          "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "tr",
+        "function2_name": "tr"
+      },
+      "comparison_identity_digest": "e24d56fe87f488608c2ddea65af8ab1aa4c411ccb8637b7f77304838ca65c309",
+      "covered_consumer_branches": [
+        "decision:EQUIVALENT",
+        "final_primary:no_active_reason"
+      ],
+      "decision": "EQ",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "1684b33c0e6885d150c03dc3ade7057fd08ce665c0bcbaa4742e8afecc836adc",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "f18f643248d65d6b3d823d0a670dfd067112b842252bc238c45581d230201754",
+      "result_occurrence_id": "f18f643248d65d6b3d823d0a670dfd067112b842252bc238c45581d230201754",
+      "run_receipt_digest": "ae7779f8db51d8804cfb8dfcab2177fcb541a28d02773d7d9ff5db645bdb1467",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/triangularMod_tr_B9_B10.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "decisive EQUIVALENT representative",
+      "selection_row_digest": "6eda92053e7294e78651208b1944603fd0cd58693043188a847199d2be926e2a",
+      "selection_row_index": 0,
+      "source_artifact_digest": "62082934524df994ec876354057864f774416a9919838bc36bf07266f8334e7d",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/triangularMod_tr_B9_B10.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "fixture_kind": "duplicate_stable_result"
+      },
+      "analysis_config_digest": "2ecd343091424672ae1f594fdcf179b770b664320a4a74ca3c05c67d81e27a0c",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "duplicate-left",
+        "binary2_name": "duplicate-right",
+        "function1_name": "duplicate_fixture",
+        "function2_name": "duplicate_fixture"
+      },
+      "comparison_identity_digest": "1700152749d4b6f3277ab14a99bd5fc84b5084f586c271d88ddec47bcb4516bc",
+      "covered_consumer_branches": [
+        "duplicate_stable_result"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": "retain_both_occurrences_and_report_duplicate_group",
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "58ee764fc72ced6b181545ada8c2dca34c821dc310f2050fc338f1fd61d47abe",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "f9da7726189fcc012170fad0d7a42f95891da41811334956aeccb3692032596a",
+      "result_occurrence_id": "f9da7726189fcc012170fad0d7a42f95891da41811334956aeccb3692032596a",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "second occurrence for explicit duplicate stable-result detection",
+      "selection_row_digest": "39ae6e2e799a9e84e16971f376190c57eb9f618eaa2f10e0895831a742ca225a",
+      "selection_row_index": 7,
+      "source_artifact_digest": "5a39f7705e046b79f85b130a9758dc1e57b662abf2d8edc9a97a84e2ded69423",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/duplicate_stable_b.log"
+    }
+  ],
+  "entry_count": 8,
+  "excluded_result_observation_count": 3,
+  "excluded_result_observations": [
+    {
+      "exclusion_reason": "split monolithic query reaches EQUIVALENT under the one-second budget; does not cover terminal TIMEOUT",
+      "non_authoritative": true,
+      "observed_decision": "EQ",
+      "selection_row_digest": "4f553b68958c7ea017dc93a63a4dafb22ff5e673c41ebee15254e59720a3c35e",
+      "selection_row_index": 1,
+      "source_artifact_digest": "d8eff28ee84e6364863f22a91f5bd82233033080786388bb9dfedc256390b4a3",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_forced_monolithic_timeout.log"
+    },
+    {
+      "exclusion_reason": "old TIMEOUT candidate now reaches EQUIVALENT on current HEAD; retained as selection-trial evidence only",
+      "non_authoritative": true,
+      "observed_decision": "EQ",
+      "selection_row_digest": "907e591ab63ce2091996de094a275f1adc29f3dd95245ec4331f23192efde999",
+      "selection_row_index": 0,
+      "source_artifact_digest": "1317492cb227965b92196589725a1e45e04abc2100c466e511e9da109aea52b5",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_timeout.log"
+    },
+    {
+      "exclusion_reason": "preflight semantic blocker returns UNKNOWN before a solver query; not a solver-derived TIMEOUT representative",
+      "non_authoritative": true,
+      "observed_decision": "UNKNOWN",
+      "selection_row_digest": "69b1faab87a2bb36582ec7b42cf29cdc999df1b8062fc0a3614ff7b1ac2039af",
+      "selection_row_index": 2,
+      "source_artifact_digest": "ac3790efb5114dcfea915337a1691c06d09f42db790291336d5c8e33e3fd0f02",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/limit2_f_B6_B8_forced_monolithic_timeout.log"
+    }
+  ],
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "incompatible_with": "v2_canonical_census_manifest",
+  "legacy_baseline_binding": {
+    "baseline_digest": "6f5eae71f85bed4dfb0eb3da36aaa30e16804fd990e8e93b4b6efac2e784ef6a",
+    "baseline_kind": "saved_eqbench_411_summary_legacy_diagnostic",
+    "non_current_diagnostic": true,
+    "summary_file_count": 411
+  },
+  "manifest_kind": "phase0_legacy_diagnostic_selection",
+  "missing_required_selection_branches": [],
+  "mode_counts": {
+    "CURRENT_HEAD_REAL_RERUN": 5,
+    "SYNTHETIC_CONTRACT_FIXTURE": 3
+  },
+  "non_authoritative": true,
+  "required_selection_branches": [
+    "decision:EQUIVALENT",
+    "decision:ERROR",
+    "decision:NOT_EQ",
+    "decision:TIMEOUT",
+    "decision:UNKNOWN",
+    "duplicate_stable_result",
+    "fallback_retry",
+    "multiple_reason",
+    "operational_unknown",
+    "root_blocker_candidates"
+  ],
+  "schema_version": 1,
+  "selected_result_entries": [
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+        "targets/cate1/arithmetic_long_test/arithmetic_long_test-x86_64-gcc-O0",
+        "--binary-ids",
+        "NEG_LEFT",
+        "NEG_RIGHT",
+        "-f",
+        "divide_long",
+        "modulo_long",
+        "--strategy",
+        "pairwise",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "d6cc00b215b85c632a6985d171cea740a9959d4aef2397819a20ede3a080f4f9",
+      "analysis_config": {
+        "deliberately_different_functions": true,
+        "domain_rationale": "divide and remainder differ for a=1,b=-2; SAT model is retained in the result",
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "cf85685bbafc9c718fdb71a0f2445392c38206716582ac8693de16baef077740",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "b130a3b1f2abaa9cf9b2df56e53ddf8acb2ae443f8afc271f122c337434ba779"
+        ],
+        "right": [
+          "sha256",
+          "b130a3b1f2abaa9cf9b2df56e53ddf8acb2ae443f8afc271f122c337434ba779"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "arithmetic_long_test-x86_64-gcc-O0",
+        "binary2_name": "arithmetic_long_test-x86_64-gcc-O0",
+        "function1_name": "divide_long",
+        "function2_name": "modulo_long"
+      },
+      "comparison_identity_digest": "26c450fb6fdccd30fc61d1855c603b529468c0e4fe912bb7047d5fad92b1c0cb",
+      "covered_consumer_branches": [
+        "decision:NOT_EQ",
+        "counterexample:model_present"
+      ],
+      "decision": "NOT_EQ",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "130dd1951db526a16981a1cbb8d5cbfdce5884ad4f723a1c07169394f7db0c21",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "21098a6f1001c8330a4c2737aa19e70dacfb76c3d356a4dbb19b6449115d3dff",
+      "result_occurrence_id": "21098a6f1001c8330a4c2737aa19e70dacfb76c3d356a4dbb19b6449115d3dff",
+      "run_receipt_digest": "9b1909dc92227e06f0e2d534fa99cd2ae518397d6b0714d17f22b6f085cdfa9c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/arithmetic_divide_vs_modulo_not_eq.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "safe decisive NOT_EQ with an intentional semantic difference and solver model",
+      "selection_row_digest": "c100eebaf79750c7b9619493894deadafeac07457b9389095b820a9498875ae2",
+      "selection_row_index": 1,
+      "source_artifact_digest": "ae8355d8d2b5483020c5daf9fe922f6cb655bac65a0ded9650eac93154ab68ea",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/arithmetic_divide_vs_modulo_not_eq.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "expected_decision": "UNKNOWN",
+        "fixture_kind": "parser_decision_contract"
+      },
+      "analysis_config_digest": "8ecae0ace82557a820419e2f21b47385f8035c53ac824deb20be2ecd1d049346",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "synthetic-left",
+        "binary2_name": "synthetic-right",
+        "function1_name": "synthetic_operational",
+        "function2_name": "synthetic_operational"
+      },
+      "comparison_identity_digest": "23ccd323a47085855ee738f5a584dfd0e7178e40c40581f5f7c987de7f4ef2b6",
+      "covered_consumer_branches": [
+        "decision:UNKNOWN",
+        "failure_status:decompilation_failed",
+        "operational_unknown"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": null,
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "c2aada9900eb48dece541935aa2c1a06525325606fb493b864112ff5b090686b",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "4390f9fba75dfb5b4b192aee118149ccc5c80f9210166bcf7d403c43137facc1",
+      "result_occurrence_id": "4390f9fba75dfb5b4b192aee118149ccc5c80f9210166bcf7d403c43137facc1",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "operational UNKNOWN parser branch not safely deterministic as a real rerun",
+      "selection_row_digest": "1eb733878a8cf5af9d59ce3c7042ffa7e123d88535d2a5c0cccd23f9dd248758",
+      "selection_row_index": 5,
+      "source_artifact_digest": "bca9042682a89b3b677e6909ca534ab510d4ad6b2a28a2c2630b551984875fcd",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/operational_unknown.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/bess/SQR/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "snippet",
+        "--strategy",
+        "monolithic",
+        "--monolithic-query-mode",
+        "legacy",
+        "--equiv-timeout",
+        "120",
+        "--monolithic-timeout",
+        "1",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "14ae99c05db69d830ccd51ec6fd44018c0c621cd4a2c3d0c199d0d633e0b082b",
+      "analysis_config": {
+        "explicit_legacy_validation_control": true,
+        "monolithic_query_mode": "legacy",
+        "monolithic_timeout": 1,
+        "strategy": "monolithic"
+      },
+      "analysis_config_digest": "1ac27f39c0cf940c5e7b12550dc5b6b1400bb1296f5587dbca48263f62444e06",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "7cb5782c4c4179dd1ae358cd077ecc9a0cbfe9525301f1a64133a641ef869492"
+        ],
+        "right": [
+          "sha256",
+          "ac7bc1e69a85ce5ce3e370ac963fb5777af2bc8df35c4d2340a2979b892d4c74"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "snippet",
+        "function2_name": "snippet"
+      },
+      "comparison_identity_digest": "9bd51c3034be3650014855693689b398546622c3d6b1860b9978ef75e4967971",
+      "covered_consumer_branches": [
+        "decision:TIMEOUT",
+        "terminal_solver_timeout",
+        "solver_unknown_timeout_diagnostic"
+      ],
+      "decision": "TIMEOUT",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "fd4a567e171d8574542ef1ecfdecdb0c57ea4ffe9eb66fcc9e4e1f575015dec7",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+      "result_occurrence_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+      "run_receipt_digest": "4a65b07009b39dc8e0116fd39d6c18ab6ca05650cbda552f9a7ab25d7907d08c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/SQR_snippet_B9_B10_legacy_monolithic_timeout.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "terminal solver-derived TIMEOUT representative",
+      "selection_row_digest": "86e049e5e45877c8ece5bc9e15d33f65a262b1f1edf254d941c583a27c2366a7",
+      "selection_row_index": 3,
+      "source_artifact_digest": "4e448794ee37e2431975761b37abdcef7ed05656c33a9e8fb882e95423a59536",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_legacy_monolithic_timeout.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O1",
+        "targets/EqBench/benchmarks/REVE/limit2/Eq/source/newV-arm64-gcc-O3",
+        "--binary-ids",
+        "B6",
+        "B8",
+        "-f",
+        "f",
+        "--strategy",
+        "pairwise",
+        "--equiv-timeout",
+        "300",
+        "--pairwise-timeout",
+        "5",
+        "--pairwise-timeout-hard",
+        "30",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "915fc5002cdb9709c0fbea52ca30e96921e599bf699b88d5429c0b788451e220",
+      "analysis_config": {
+        "equiv_timeout": 300,
+        "pairwise_timeout": 5,
+        "pairwise_timeout_hard": 30,
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "9ca96586cee165edd635bfe8e36552a1da4a8a624035c59f8182e1409ee89ed4",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "db06eb61bc378613933ff101729165c84a2efa7018cb218b349b23f1677a7329"
+        ],
+        "right": [
+          "sha256",
+          "19eccd4906af5fff7af798c863f1a7af15afbfb6fce7243b72d7cb299a0e83ba"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-arm64-gcc-O1",
+        "binary2_name": "newV-arm64-gcc-O3",
+        "function1_name": "f",
+        "function2_name": "f"
+      },
+      "comparison_identity_digest": "a83bc91b410c2372b4cb1e024c49e7c44d9f5a2620074009be42e25311110a89",
+      "covered_consumer_branches": [
+        "decision:UNKNOWN",
+        "fallback_retry",
+        "proof_backlog",
+        "multiple_reason",
+        "root_blocker_candidates"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "3499be4368a21bf3af639890fdb5ccc731618fec024fb43dc6656b47635d1134",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "63f6b19231d16f35cbbbb709096825f81e31105bc514e3f736555b735470fb1f",
+      "result_occurrence_id": "63f6b19231d16f35cbbbb709096825f81e31105bc514e3f736555b735470fb1f",
+      "run_receipt_digest": "63d911df26c1106a65e6d116dcfaa8dbf0b968c8461060c3e54a74e945ccdcae",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/limit2_f_B6_B8.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "non-timeout UNKNOWN with multiple semantic blockers, recovery backlog, and retry activity",
+      "selection_row_digest": "a79748fb9a27fd8ee3328bc400e3207b15c1ccb3867b92e0b4de16328ecd3d07",
+      "selection_row_index": 2,
+      "source_artifact_digest": "ae9fbbe3f8e02ca2ad826a88234881672168e5672a69c1c11ee09494c2c863b3",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/limit2_f_B6_B8.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "__phase0_missing_function__",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "a7284d279222a51902de0905b35ff0c18b8c4753557be0827d06cd4de2faf86b",
+      "analysis_config": {
+        "fixture_kind": "deterministic_function_lookup_miss"
+      },
+      "analysis_config_digest": "dacf47953b461a2af83c9cc7faf6ebf68b9944d7bc02067fa281e70d41e2134d",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5"
+        ],
+        "right": [
+          "sha256",
+          "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "__phase0_missing_function__",
+        "function2_name": "__phase0_missing_function__"
+      },
+      "comparison_identity_digest": "5160f4cb98d795537a9406abb29e693c35f21af7c8d559c01551e6f68ae46893",
+      "covered_consumer_branches": [
+        "decision:ERROR",
+        "failure_status:function_lookup_miss",
+        "cli_parser"
+      ],
+      "decision": "ERROR",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "863ec640a3b3891f8f201c8802f5561331d03c2bd82f13514704150d6d41d366",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "8ab66ee6589990c94450cf1321261ff271e055dbc1f65c3e31ece1d24b0a045e",
+      "result_occurrence_id": "8ab66ee6589990c94450cf1321261ff271e055dbc1f65c3e31ece1d24b0a045e",
+      "run_receipt_digest": "bf2f663de146d9cad1d78eb93831b76e12e9ae9543f758f9061affbcaa1cf7e1",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/operational_function_lookup_miss.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "current ERROR path and function-lookup consumer representative",
+      "selection_row_digest": "7359a40b06a1c985dab75b99a684ade130702b30bdfa173d7e2fcd94b6cad1f1",
+      "selection_row_index": 4,
+      "source_artifact_digest": "6576978f43b87c09e79a87adbb0356a68499cc827062035359200c1568de11d9",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/operational_function_lookup_miss.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "fixture_kind": "duplicate_stable_result"
+      },
+      "analysis_config_digest": "2ecd343091424672ae1f594fdcf179b770b664320a4a74ca3c05c67d81e27a0c",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "duplicate-left",
+        "binary2_name": "duplicate-right",
+        "function1_name": "duplicate_fixture",
+        "function2_name": "duplicate_fixture"
+      },
+      "comparison_identity_digest": "1700152749d4b6f3277ab14a99bd5fc84b5084f586c271d88ddec47bcb4516bc",
+      "covered_consumer_branches": [
+        "duplicate_stable_result"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": "retain_both_occurrences_and_report_duplicate_group",
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "58ee764fc72ced6b181545ada8c2dca34c821dc310f2050fc338f1fd61d47abe",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "b6f355bd1540c2508fec075fb8219c47ee43b3ab4cc24278ef5de2785053fe32",
+      "result_occurrence_id": "b6f355bd1540c2508fec075fb8219c47ee43b3ab4cc24278ef5de2785053fe32",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "first occurrence for explicit duplicate stable-result detection",
+      "selection_row_digest": "60b24f49a3a2d63c3fbfb84481a2c8369aca6032d13a2b07193a97088d827fbd",
+      "selection_row_index": 6,
+      "source_artifact_digest": "5a39f7705e046b79f85b130a9758dc1e57b662abf2d8edc9a97a84e2ded69423",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/duplicate_stable_a.log"
+    },
+    {
+      "analysis_command": [
+        "./.venv-pyghidra/bin/python",
+        "-m",
+        "scripts.function_tracer_pcode.cli.main",
+        "--equiv",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0",
+        "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1",
+        "--binary-ids",
+        "B9",
+        "B10",
+        "-f",
+        "tr",
+        "--strategy",
+        "pairwise",
+        "--equiv-timeout",
+        "300",
+        "--pairwise-timeout",
+        "5",
+        "--pairwise-timeout-hard",
+        "30",
+        "--emit-result-json"
+      ],
+      "analysis_command_digest": "c7f7d091b16bd9977ed55e19944b20f5e3d43ca549853959095c1549cc76deea",
+      "analysis_config": {
+        "equiv_timeout": 300,
+        "pairwise_timeout": 5,
+        "pairwise_timeout_hard": 30,
+        "strategy": "pairwise"
+      },
+      "analysis_config_digest": "9ca96586cee165edd635bfe8e36552a1da4a8a624035c59f8182e1409ee89ed4",
+      "binary_content_identities": {
+        "left": [
+          "sha256",
+          "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5"
+        ],
+        "right": [
+          "sha256",
+          "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e"
+        ]
+      },
+      "comparison_identity": {
+        "binary1_name": "newV-mips64-clang-O0",
+        "binary2_name": "newV-mips64-clang-O1",
+        "function1_name": "tr",
+        "function2_name": "tr"
+      },
+      "comparison_identity_digest": "e24d56fe87f488608c2ddea65af8ab1aa4c411ccb8637b7f77304838ca65c309",
+      "covered_consumer_branches": [
+        "decision:EQUIVALENT",
+        "final_primary:no_active_reason"
+      ],
+      "decision": "EQ",
+      "duplicate_policy": null,
+      "evidence_mode": "CURRENT_HEAD_REAL_RERUN",
+      "legacy_projection_input_digest": "1684b33c0e6885d150c03dc3ade7057fd08ce665c0bcbaa4742e8afecc836adc",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "f18f643248d65d6b3d823d0a670dfd067112b842252bc238c45581d230201754",
+      "result_occurrence_id": "f18f643248d65d6b3d823d0a670dfd067112b842252bc238c45581d230201754",
+      "run_receipt_digest": "ae7779f8db51d8804cfb8dfcab2177fcb541a28d02773d7d9ff5db645bdb1467",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/triangularMod_tr_B9_B10.json",
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "decisive EQUIVALENT representative",
+      "selection_row_digest": "6eda92053e7294e78651208b1944603fd0cd58693043188a847199d2be926e2a",
+      "selection_row_index": 0,
+      "source_artifact_digest": "62082934524df994ec876354057864f774416a9919838bc36bf07266f8334e7d",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/triangularMod_tr_B9_B10.log"
+    },
+    {
+      "analysis_command": null,
+      "analysis_command_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "analysis_config": {
+        "fixture_kind": "duplicate_stable_result"
+      },
+      "analysis_config_digest": "2ecd343091424672ae1f594fdcf179b770b664320a4a74ca3c05c67d81e27a0c",
+      "binary_content_identities": {},
+      "comparison_identity": {
+        "binary1_name": "duplicate-left",
+        "binary2_name": "duplicate-right",
+        "function1_name": "duplicate_fixture",
+        "function2_name": "duplicate_fixture"
+      },
+      "comparison_identity_digest": "1700152749d4b6f3277ab14a99bd5fc84b5084f586c271d88ddec47bcb4516bc",
+      "covered_consumer_branches": [
+        "duplicate_stable_result"
+      ],
+      "decision": "UNKNOWN",
+      "duplicate_policy": "retain_both_occurrences_and_report_duplicate_group",
+      "evidence_mode": "SYNTHETIC_CONTRACT_FIXTURE",
+      "legacy_projection_input_digest": "58ee764fc72ced6b181545ada8c2dca34c821dc310f2050fc338f1fd61d47abe",
+      "payload_index": 0,
+      "repository_commit": "29376ea952073e52185cb1821eebb6d04a383ef3",
+      "result_entry_id": "f9da7726189fcc012170fad0d7a42f95891da41811334956aeccb3692032596a",
+      "result_occurrence_id": "f9da7726189fcc012170fad0d7a42f95891da41811334956aeccb3692032596a",
+      "run_receipt_digest": null,
+      "run_receipt_path": null,
+      "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+      "selection_reason": "second occurrence for explicit duplicate stable-result detection",
+      "selection_row_digest": "39ae6e2e799a9e84e16971f376190c57eb9f618eaa2f10e0895831a742ca225a",
+      "selection_row_index": 7,
+      "source_artifact_digest": "5a39f7705e046b79f85b130a9758dc1e57b662abf2d8edc9a97a84e2ded69423",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/fixtures/duplicate_stable_b.log"
+    }
+  ],
+  "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+  "selection_input_path": "artifacts/unknown_reason_audit/current-head/selection-input.json",
+  "selection_policy": "explicit_reviewed_entries_last_result_payload_no_implicit_duplicates"
+}

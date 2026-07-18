@@ -178,7 +178,7 @@ def test_matrix_validation_classifies_function_lookup_miss_as_incomplete(tmp_pat
     assert read_validation_log_record(path).status == STATUS_INCOMPLETE
 
 
-def test_bash_validation_classifier_ignores_stale_lookup_miss_json(tmp_path):
+def test_bash_validation_classifier_rejects_legacy_json_and_result_lines(tmp_path):
     path = tmp_path / "stale_lookup_then_real_error.log"
     path.write_text(
         "\n".join(
@@ -200,7 +200,7 @@ def test_bash_validation_classifier_ignores_stale_lookup_miss_json(tmp_path):
         )
     )
 
-    assert _bash_validation_classify(path) == STATUS_ERROR
+    assert _bash_validation_classify(path) == STATUS_INCOMPLETE
 
 
 def test_bash_validation_classifier_maps_final_lookup_miss_json_to_incomplete(tmp_path):

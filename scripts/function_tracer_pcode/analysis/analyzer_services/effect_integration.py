@@ -562,8 +562,15 @@ def _impl__build_effect_summary(
         if cached_callee is not None:
             return cached_callee
 
-        decompiler = self._get_decompiler()
-        results = decompiler.decompileFunction(callee, 60, None)
+        from ..decompilation_broker import (
+            EFFECT_SUMMARY_SOURCE_CONTRACT,
+            decompile_function,
+        )
+        results = decompile_function(
+            self, callee, 60, None,
+            source_contract_id=EFFECT_SUMMARY_SOURCE_CONTRACT,
+            semantic_owner="subordinate",
+        )
         if not results.decompileCompleted():
             return None
         callee_high = results.getHighFunction()

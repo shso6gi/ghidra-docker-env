@@ -148,6 +148,11 @@ class ValidationBaselineComparison:
 
 
 def classify_result_payload(payload: Mapping[str, Any], *, matrix_context: bool = False) -> str:
+    if payload.get("decision_receipt") is not None:
+        from ..equivalence.v2.phase8_cutover import outcome_from_payload
+
+        outcome = outcome_from_payload(payload).value
+        return STATUS_EQ if outcome == "EQUIVALENT" else outcome
     failure_status = str(payload.get("failure_status") or "")
     if matrix_context and failure_status == "function_lookup_miss":
         return STATUS_INCOMPLETE
@@ -176,6 +181,18 @@ def classify_log_text(text: str, *, matrix_context: bool = False) -> str:
     if final_events:
         return final_events[-1][1]
     return STATUS_INCOMPLETE
+
+
+def classify_canonical_log_text(text: str, *, matrix_context: bool = False) -> str:
+    """Classify one cutover log only when its final event is receipt-bound JSON."""
+
+    events = _extract_final_result_events(text, matrix_context=matrix_context)
+    if not events:
+        return STATUS_INCOMPLETE
+    _line, status, payload = events[-1]
+    if payload is None or payload.get("decision_receipt") is None:
+        return STATUS_INCOMPLETE
+    return status
 
 
 def _extract_final_result_events(
@@ -233,10 +250,21 @@ def _classify_result_line(line: str) -> Optional[str]:
     return None
 
 
-def read_validation_log_record(path: Any) -> ValidationLogRecord:
+def read_validation_log_record(
+    path: Any, *, canonical_only: bool = False,
+) -> ValidationLogRecord:
     log_path = Path(path)
     text = log_path.read_text(errors="replace") if log_path.is_file() else ""
     payloads = extract_result_payloads_from_text(text)
+    if canonical_only:
+        events = _extract_final_result_events(text, matrix_context=True)
+        final_payload = events[-1][2] if events else None
+        payloads = (
+            (final_payload,)
+            if final_payload is not None
+            and final_payload.get("decision_receipt") is not None
+            else ()
+        )
     function_name, pair_label = parse_log_identity(log_path)
     if payloads:
         payload = payloads[-1]
@@ -249,7 +277,11 @@ def read_validation_log_record(path: Any) -> ValidationLogRecord:
         path=str(log_path),
         function_name=function_name,
         pair_label=pair_label,
-        status=classify_log_text(text, matrix_context=True),
+        status=(
+            classify_canonical_log_text(text, matrix_context=True)
+            if canonical_only
+            else classify_log_text(text, matrix_context=True)
+        ),
         payloads=payloads,
     )
 
@@ -280,12 +312,22 @@ def aggregate_validation_records(records: Iterable[ValidationLogRecord]) -> Vali
     )
 
 
-def aggregate_validation_logs(log_paths: Iterable[Any]) -> ValidationResultAggregate:
-    return aggregate_validation_records(read_validation_log_record(path) for path in log_paths)
+def aggregate_validation_logs(
+    log_paths: Iterable[Any], *, canonical_only: bool = False,
+) -> ValidationResultAggregate:
+    return aggregate_validation_records(
+        read_validation_log_record(path, canonical_only=canonical_only)
+        for path in log_paths
+    )
 
 
-def aggregate_validation_logs_by_function(log_paths: Iterable[Any]) -> OverallValidationSummary:
-    records = tuple(read_validation_log_record(path) for path in log_paths)
+def aggregate_validation_logs_by_function(
+    log_paths: Iterable[Any], *, canonical_only: bool = False,
+) -> OverallValidationSummary:
+    records = tuple(
+        read_validation_log_record(path, canonical_only=canonical_only)
+        for path in log_paths
+    )
     grouped: Dict[str, list] = {}
     for record in records:
         grouped.setdefault(record.function_name, []).append(record)
@@ -656,7 +698,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--function-summary", action="store_true")
     mode.add_argument("--overall-summary", action="store_true")
+    mode.add_argument("--classify-log", action="store_true")
     parser.add_argument("--function-name", default=None)
+    parser.add_argument(
+        "--canonical-only",
+        action="store_true",
+        help="require receipt-bound five-value result JSON; legacy logs become INCOMPLETE",
+    )
     parser.add_argument("--elapsed-seconds", type=float, default=None)
     parser.add_argument("--before-dir", default=None)
     parser.add_argument(
@@ -719,8 +767,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     compact = args.summary_level == "compact"
 
+    if args.classify_log:
+        if len(args.logs) != 1:
+            parser.error("--classify-log requires exactly one log")
+        print(classify_canonical_log_text(
+            Path(args.logs[0]).read_text(encoding="utf-8", errors="replace"),
+            matrix_context=True,
+        ))
+        return 0
+
     if args.function_summary:
-        aggregate = aggregate_validation_logs(args.logs)
+        aggregate = aggregate_validation_logs(
+            args.logs, canonical_only=args.canonical_only
+        )
         function_name = args.function_name or _single_function_name(aggregate.records) or "(unknown)"
         before_logs = sorted(Path(args.before_dir).glob("*.log")) if args.before_dir else ()
         _require_before_logs(before_logs, args.require_before_dir)
@@ -743,7 +802,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 0
 
-    overall = aggregate_validation_logs_by_function(args.logs)
+    overall = aggregate_validation_logs_by_function(
+        args.logs, canonical_only=args.canonical_only
+    )
     assert_aggregation_invariant(overall)
     before_logs = sorted(Path(args.before_dir).glob("*/*.log")) if args.before_dir else ()
     _require_before_logs(before_logs, args.require_before_dir)
@@ -757,7 +818,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     print(output)
     if args.health_summary_json or args.health_summary_text:
-        before_records = aggregate_validation_logs(before_logs).records if before_logs else ()
+        before_records = aggregate_validation_logs(
+            before_logs, canonical_only=args.canonical_only
+        ).records if before_logs else ()
         health = build_run_health_summary(
             overall,
             before_records=before_records,

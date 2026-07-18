@@ -13,7 +13,8 @@ def test_debug_trace_sat_with_pairwise_decisive(mock_program_x86):
     """SAT時にpairwise decisive情報が記録されることを確認（中身の詳細検証を含む）"""
     checker = EquivalenceChecker(
         debug=False,
-        strategy="pairwise"
+        strategy="pairwise",
+        canonical_decision_cutover=False,
     )
     
     mock_analysis = FunctionReturnAnalysis(
@@ -174,7 +175,7 @@ def test_debug_trace_normalization_rules_end_to_end(mock_program_x86):
     from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
     import json
     
-    checker = EquivalenceChecker(debug=False, strategy="pairwise")
+    checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
     
     # ★ シンプルな解析結果（詳細は pairwise_strategy.check のモックで制御）
     mock_analysis1 = FunctionReturnAnalysis(
@@ -375,7 +376,7 @@ def test_pairwise_decisive_final_query_structure(mock_program_x86):
     from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
     import re
     
-    checker = EquivalenceChecker(debug=False, strategy="pairwise")
+    checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
     
     mock_analysis = FunctionReturnAnalysis(
         function_name="test_func",

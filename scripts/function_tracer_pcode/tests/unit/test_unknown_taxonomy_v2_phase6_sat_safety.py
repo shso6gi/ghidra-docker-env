@@ -1,0 +1,308 @@
+# -*- coding: utf-8 -*-
+
+from unittest.mock import Mock
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from scripts.function_tracer_pcode.equivalence.obligations.pair_disposition import (
+    CounterexampleSafetyReceipt,
+)
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
+from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    ProductionDualWritePilotConnector,
+)
+from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    SatSafetyBlockerProductionSignal,
+    emit_sat_safety_signal,
+    production_signal_scope,
+)
+from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+    SAT_SAFETY_REASON_REGISTRY,
+    SAT_SAFETY_RECOVERY_REGISTRY,
+    SatSafetyPilotEncoder,
+)
+from scripts.function_tracer_pcode.tests.unit.test_phase3_sat_unsafety_lane5 import _case
+from scripts.function_tracer_pcode.validation.unknown_taxonomy_audit import (
+    build_inventory_review_template,
+)
+
+
+class _LegacyResult:
+    def __init__(self, outcome):
+        self.is_equivalent = False if outcome == Outcome.NOT_EQ else None
+        self.error_message = None
+        self.failure_status = None
+        self.failure_message = None
+
+    def is_timeout(self):
+        return False
+
+
+def _connector():
+    return ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=SAT_SAFETY_REASON_REGISTRY,
+            recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=SatSafetyPilotEncoder(),
+    )
+
+
+def _strategy_and_surface():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy.enable_completed_recovery_proofs = True
+    analysis1, case1 = _case("B10", 0x1000, 0)
+    analysis2, case2 = _case("B9", 0x2000, 1)
+    return strategy, analysis1, analysis2, case1, case2
+
+
+def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authority():
+    connector = _connector()
+    session = connector.begin({"phase": "6.1", "case": "sat-safety-complete"})
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    model = {"x_1": 0, "x_2": 1}
+    with production_signal_scope(session):
+        reason = strategy._make_sat_unsafety_unknown_reason(
+            (
+                "function1:incomplete_control_flow",
+                "counterexample_replay_missing",
+            ),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            stage="S_PAIRWISE",
+        )
+        # Re-observing the same legacy umbrella must not duplicate one v2 cause.
+        strategy._make_sat_unsafety_unknown_reason(
+            tuple(reason.evidence_refs),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            stage="S_PAIRWISE",
+        )
+        strategy._record_completed_sat_counterexample_replay_proof(
+            reason,
+            analysis1,
+            analysis2,
+            counterexample_raw=model,
+            fixed_model_assertion_count=2,
+            replay_source="phase6-production-fixture",
+        )
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason,
+            analysis1,
+            analysis2,
+            current_counterexample_raw=model,
+        )
+        receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
+            query="(assert (not (= x_1 x_2)))\n(check-sat)",
+            model=model,
+            premise_digest="phase6-premise",
+            pair_key=(0, 1),
+            analysis_safe=True,
+            global_case_replay_safe=True,
+            same_function_replay_safe=True,
+        )
+    evidence = connector.finish(
+        session,
+        _LegacyResult(Outcome.NOT_EQ),
+        case_id="phase6-sat-safety-complete",
+    )
+    evidence.validate()
+    assert reason.reason_id == "counterexample_analysis_safety_unproven"
+    assert receipt.validates(
+        type("Binding", (), {"premise_digest": "phase6-premise"})(),
+        (0, 1),
+    )
+    observed = [
+        event for event in evidence.pilot_result.sealed_event_stream.events
+        if event.header.event_type.value == "CAUSE_OBSERVED"
+    ]
+    completed = [
+        event for event in evidence.pilot_result.sealed_event_stream.events
+        if event.header.event_type.value == "REQUIREMENT_COMPLETED"
+    ]
+    assert len(observed) == 2
+    assert len(completed) == 2
+    assert len({row.authority_payload.occurrence_authority.occurrence.cause_id.value for row in observed}) == 2
+    assert evidence.pilot_result.reduction.projection.c_active_base == ()
+    assert evidence.pilot_result.reduction.projection.q_open_base == ()
+    assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
+
+
+def test_real_ambiguity_producer_is_distinct_from_analysis_safety_cause():
+    connector = _connector()
+    session = connector.begin({"phase": "6.1", "case": "ambiguity"})
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    model = {"x_1": 0, "x_2": 1}
+    with production_signal_scope(session):
+        strategy._observe_v2_sat_counterexample_ambiguity(
+            ("partition-a", "partition-b"),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+        )
+        # A failed legacy projection re-observes the already-live v2 requirement.
+        legacy = strategy._make_sat_counterexample_ambiguous_unknown_reason(
+            ("partition-a", "partition-b"),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            stage="S_PAIRWISE",
+        )
+        strategy._complete_v2_sat_counterexample_ambiguity_if_observed(
+            ("partition-a", "partition-b"),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            counterexample_raw=model,
+        )
+        CounterexampleSafetyReceipt.from_pairwise_validation(
+            query="(assert distinct)\n(check-sat)",
+            model=model,
+            premise_digest="ambiguity-premise",
+            pair_key=(0, 1),
+            analysis_safe=True,
+            global_case_replay_safe=True,
+            same_function_replay_safe=True,
+        )
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.NOT_EQ), case_id="phase6-ambiguity"
+    )
+    assert legacy.reason_id == "sat_counterexample_ambiguous"
+    event_types = [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ]
+    assert event_types == ["CAUSE_OBSERVED", "REQUIREMENT_COMPLETED", "COUNTEREXAMPLE"]
+    assert evidence.pilot_result.reduction.projection.c_active_base == ()
+    assert evidence.pilot_result.reduction.projection.q_open_base == ()
+    assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
+
+
+def test_sat_safety_dedup_state_is_isolated_between_identical_sessions():
+    connector = _connector()
+    signal = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=("same-execution-payload",),
+        missing_semantic_fact=("analysis_safety", False),
+        evidence_refs=("incomplete_control_flow",),
+        producer_id="session-isolation-fixture",
+    )
+    event_counts = []
+    for _ in range(2):
+        session = connector.begin({"identical": "payload"})
+        with production_signal_scope(session):
+            assert emit_sat_safety_signal(signal) == 1
+        evidence = connector.finish(
+            session, _LegacyResult(Outcome.UNKNOWN), case_id=session.identity.result_occurrence_id
+        )
+        event_counts.append(len(evidence.pilot_result.sealed_event_stream.events))
+    assert event_counts == [1, 1]
+
+
+def test_sat_safety_completion_near_miss_cannot_close_an_unobserved_cause():
+    connector = _connector()
+    session = connector.begin({"phase": "6.1", "case": "near-miss"})
+    with production_signal_scope(session):
+        emitted = emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
+            action="COMPLETED",
+            reason_id="counterexample_analysis_safety_unproven",
+            canonical_target_key=("different-pair",),
+            missing_semantic_fact=("counterexample_safety_gate_unproven", "x"),
+            evidence_refs=("x",),
+            producer_id="near-miss",
+            proof_artifact_digest="proof-near-miss",
+        ))
+    assert emitted == 0
+    assert session.domain_signal_error_kinds == ["ValueError"]
+    with pytest.raises(ValueError, match="cannot seal an empty"):
+        session.recorder.seal()
+    with pytest.raises(ValueError, match="signal encoding is incomplete"):
+        connector.finish(
+            session, _LegacyResult(Outcome.UNKNOWN), case_id="phase6-near-miss"
+        )
+
+
+def test_invalid_counterexample_safety_never_emits_decisive_event():
+    connector = _connector()
+    session = connector.begin({"phase": "6.1", "case": "invalid-decisive"})
+    with production_signal_scope(session):
+        with pytest.raises(ValueError, match="validation is incomplete"):
+            CounterexampleSafetyReceipt.from_pairwise_validation(
+                query="(check-sat)",
+                model={"x": 1},
+                premise_digest="premise",
+                pair_key=(0, 0),
+                analysis_safe=True,
+                global_case_replay_safe=False,
+                same_function_replay_safe=True,
+            )
+    assert session.observed_domain_signal_count == 0
+    with pytest.raises(ValueError, match="cannot seal an empty"):
+        session.recorder.seal()
+
+
+def test_slice1_inventory_delta_remains_a_frozen_historical_transition():
+    root = Path(__file__).resolve().parents[4]
+    frozen = json.loads(
+        (root / "artifacts/unknown_reason_audit/current-head/inventory-review.json").read_text()
+    )
+    delta = json.loads(
+        (root / "artifacts/unknown_taxonomy_v2/phase6/slice1_inventory_delta.json").read_text()
+    )
+    frozen_ids = {row["site_id"] for row in frozen["entries"]}
+    added_ids = {row["site_id"] for row in delta["added"]}
+    removed_ids = {row["site_id"] for row in delta["removed"]}
+    assert delta["frozen_phase0"] == {
+        "candidate_set_digest": frozen["candidate_set_digest"],
+        "candidate_count": len(frozen_ids),
+    }
+    assert delta["current_source"]["candidate_count"] == (
+        len(frozen_ids) - len(removed_ids) + len(added_ids)
+    )
+    assert added_ids.isdisjoint(frozen_ids)
+    assert removed_ids <= frozen_ids
+    assert all(row["review_status"] == "reviewed_by_main_pending_fixed_review" for row in delta["added"])
+
+
+def test_representative_result_is_repo_local_and_bound_by_slice_evidence():
+    root = Path(__file__).resolve().parents[4]
+    relative_path = "artifacts/unknown_taxonomy_v2/phase6/slice1_representative_result.json"
+    result_path = root / relative_path
+    result_bytes = result_path.read_bytes()
+    result = json.loads(result_bytes)
+    slice_evidence = json.loads(
+        (root / "artifacts/unknown_taxonomy_v2/phase6/slice1_sat_safety.json").read_text()
+    )
+    assert slice_evidence["representative_current_source_run"]["result_artifact"] == {
+        "path": relative_path,
+        "sha256": hashlib.sha256(result_bytes).hexdigest(),
+    }
+    assert result["decision"] == "NOT_EQ"
+    assert result["process_exit_code"] == 1
+    assert result["result_payload_projection"]["is_timeout"] is False
+    assert result["result_payload_projection"]["unknown_reasons"] == []
+    assert result["result_payload_projection"]["pairwise_stats"] == {
+        "total_pairs": 4,
+        "unsat_pairs": 3,
+        "sat_pairs": 1,
+        "unknown_pairs": 0,
+        "error_pairs": 0,
+    }

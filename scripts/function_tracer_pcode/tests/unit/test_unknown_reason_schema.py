@@ -3,6 +3,8 @@
 import hashlib
 from unittest.mock import Mock
 
+import pytest
+
 from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
@@ -22,10 +24,32 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     get_unknown_recovery_plan,
     get_unknown_reason_definition,
     make_unknown_reason,
+    make_internal_v2_reason_diagnostic,
+    make_production_unknown_reason,
     summarize_unknown_recovery_backlog,
     unknown_reason_registry_snapshot,
     unknown_recovery_plan_registry_snapshot,
 )
+
+
+def test_internal_v2_reason_diagnostic_accepts_only_exact_v2_reason_ids():
+    record = make_internal_v2_reason_diagnostic(
+        "expression_semantics_unsupported",
+        stage="S_PAIRWISE",
+        detail="unsupported intrinsic",
+    )
+    assert record.reason_id == "expression_semantics_unsupported"
+    assert record.reason_class == "operational_gap"
+    assert record.decision_effect == "blocks_decision"
+    assert UnknownReasonRecord.from_dict(record.to_dict()) == record
+
+    with pytest.raises(ValueError, match="reader-only"):
+        make_internal_v2_reason_diagnostic("unresolved_expression")
+    with pytest.raises(KeyError, match="unknown exact v2 reason ID"):
+        make_internal_v2_reason_diagnostic("made_up_reason")
+
+    with pytest.raises(TypeError, match="exact issuer"):
+        make_production_unknown_reason("expression_semantics_unsupported", projection_factory=None)
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
     solve_query_internal,
@@ -817,7 +841,7 @@ class _NoSolverPairwiseTimeoutStrategy(_NonZ3PairwiseTimeoutStrategy):
         MonolithicStrategy.__init__(self, Mock(), _NoSolverTimeoutRunner())
 
 
-def test_pairwise_solver_timeout_target_uses_query_result_solver_metadata():
+def test_pairwise_solver_timeout_remains_execution_metadata_not_reason():
     strategy = _NonZ3PairwiseTimeoutStrategy()
     left = create_mock_analysis("fc_long_branch_dispatch")
     right = create_mock_analysis("fc_long_branch_dispatch")
@@ -840,10 +864,9 @@ def test_pairwise_solver_timeout_target_uses_query_result_solver_metadata():
     )
 
     assert result.is_equivalent is None
-    assert result.blocking_reason == UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
+    assert result.blocking_reason is None
     assert getattr(result.solver_results.results[0], "solver_name") == "CVC5"
-    assert ("solver_options", ("solver", "CVC5"), ("timeout_seconds", 2)) in result.object_target_key
-    assert ("solver_options", ("solver", "Z3"), ("timeout_seconds", 2)) not in result.object_target_key
+    assert result.object_target_key is None
 
 
 def test_pairwise_solver_timeout_keeps_no_solver_result_without_proof_target():
@@ -867,17 +890,9 @@ def test_pairwise_solver_timeout_keeps_no_solver_result_without_proof_target():
     )
 
     assert result.is_equivalent is None
-    assert result.blocking_reason == UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
+    assert result.blocking_reason is None
     assert result.solver_results.results == []
     assert result.object_target_key is None
-    reason = make_unknown_reason(
-        result.blocking_reason,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,0)",
-        evidence_kind=result.evidence_kind,
-        object_target_key=result.object_target_key,
-    )
-    assert reason.proof_obligation_id is None
 
 
 class _FallbackReasonStrategy:

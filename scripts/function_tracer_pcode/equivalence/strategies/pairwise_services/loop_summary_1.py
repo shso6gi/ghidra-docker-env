@@ -52,8 +52,18 @@ def _impl__unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
         "loop_summary_operand_mismatch",
         "loop_summary_intrinsic_mismatch",
     }:
-        return UnknownReasonId.METHOD_B_CLOSURE_BLOCKED
-    return UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING
+        from ...v2.loop_recurrence import classify_loop_fallback
+
+        classification = classify_loop_fallback(reason_text)
+        if len(classification.reason_ids) != 1:
+            raise ValueError("loop fallback lacks one typed semantic reason")
+        return classification.reason_ids[0]
+    from ...v2.loop_recurrence import classify_loop_fallback
+
+    classification = classify_loop_fallback(reason_text)
+    if len(classification.reason_ids) != 1:
+        raise ValueError("loop fallback lacks one typed semantic reason")
+    return classification.reason_ids[0]
 
 def _impl__case_pair_loop_summaries_solver_equivalent(
     self,

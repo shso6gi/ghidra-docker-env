@@ -1,0 +1,151 @@
+{
+  "artifact_sha256": {
+    "census.json": "714a1f0e03dbf366ad48d8046a2fc9971ea7160450082691e877f0f93c4f704f",
+    "census_manifest.json": "8fc3e86f5def66d3c5809884052af73184b723056ef84e2fa92f5d520392c550",
+    "consumers.json": "dcfa23fd16fbe04bed4c44cfdf79aca56170466b2bb7ad794e0a921eaf782ecc",
+    "decision_projection.json": "76d1de3890abe41b2a257a424eba465b8322e6fcc71e5297f4f5050ef05bf86b",
+    "legacy_aliases.json": "d02ebc6dfd88a02b4d3544a25dd72a370292f09dc685061f04d5b092aef0afbd",
+    "migration_manifest.json": "aaeb28c28f8599b5045d277d79b9de91bd3b3e2f04adbf7b05888a0140fafceb",
+    "overlap_candidates.json": "dd43f153ae884c881912e30da22b8e62ecb1e3502f26312eeba7775f053510b4",
+    "producers.json": "52d83eb1a8bc309da4381a1b6538346f6fb321a297ce510576ac50f0634f63ea",
+    "registry.json": "65c96e2ca6d082686825267b65a3ba86212fc8018c6bc6b8eed4264ecbcce253"
+  },
+  "census": {
+    "current_head_real_rerun_count": 5,
+    "diagnostic_decision_counts": {
+      "EQ": 1,
+      "ERROR": 1,
+      "NOT_EQ": 1,
+      "TIMEOUT": 1,
+      "UNKNOWN": 4
+    },
+    "duplicate_stable_result_group_count": 1,
+    "excluded_selection_trial_count": 3,
+    "missing_required_selection_branches": [],
+    "selected_entry_count": 8,
+    "selection_input_digest": "b07ad7c055750a61f53c0b15747e5fc5e1c84c84775bafa7d13c4d5fa0be8994",
+    "synthetic_contract_fixture_count": 3
+  },
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "inventory": {
+    "candidate_set_digest": "82fe1f812ca10cb245d79ca720d7c1ea850b260f46c4737b1e7c26395d7eef0d",
+    "candidate_site_count": 589,
+    "indirect_constructor_site_count": 14,
+    "inventory_review_digest": "6c7a4fdd9cbb35d676a10911f279b3c8d521dacc98f0c75470f74250c136f4ae",
+    "registered_reason_count": 37,
+    "reviewed_by": "root/main-manual-source-review",
+    "unresolved_dynamic_site_count": 0
+  },
+  "legacy_baseline_diagnostic": {
+    "aggregate_saved_decision_counts": {
+      "EQUIVALENT": 4330,
+      "ERROR": 77,
+      "INCOMPLETE": 22696,
+      "NOT_EQ": 0,
+      "TIMEOUT": 4188,
+      "TOTAL": 39016,
+      "UNKNOWN": 7725
+    },
+    "baseline_digest": "6f5eae71f85bed4dfb0eb3da36aaa30e16804fd990e8e93b4b6efac2e784ef6a",
+    "non_current_diagnostic": true,
+    "summary_file_count": 411
+  },
+  "phase_status": "phase0_go_fixed_reviewer",
+  "production_behavior_change_allowlist": [],
+  "receipt_sha256": {
+    "SQR_snippet_B9_B10_legacy_monolithic_timeout.json": "4a65b07009b39dc8e0116fd39d6c18ab6ca05650cbda552f9a7ab25d7907d08c",
+    "arithmetic_divide_vs_modulo_not_eq.json": "9b1909dc92227e06f0e2d534fa99cd2ae518397d6b0714d17f22b6f085cdfa9c",
+    "limit2_f_B6_B8.json": "63d911df26c1106a65e6d116dcfaa8dbf0b968c8461060c3e54a74e945ccdcae",
+    "operational_function_lookup_miss.json": "bf2f663de146d9cad1d78eb93831b76e12e9ae9543f758f9061affbcaa1cf7e1",
+    "triangularMod_tr_B9_B10.json": "ae7779f8db51d8804cfb8dfcab2177fcb541a28d02773d7d9ff5db645bdb1467"
+  },
+  "representative_real_reruns": [
+    {
+      "decision": "NOT_EQ",
+      "exit_code": 1,
+      "run_receipt_digest": "9b1909dc92227e06f0e2d534fa99cd2ae518397d6b0714d17f22b6f085cdfa9c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/arithmetic_divide_vs_modulo_not_eq.json",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/arithmetic_divide_vs_modulo_not_eq.log",
+      "wall_observed_seconds": 57.579
+    },
+    {
+      "decision": "TIMEOUT",
+      "exit_code": 2,
+      "run_receipt_digest": "4a65b07009b39dc8e0116fd39d6c18ab6ca05650cbda552f9a7ab25d7907d08c",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/SQR_snippet_B9_B10_legacy_monolithic_timeout.json",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/SQR_snippet_B9_B10_legacy_monolithic_timeout.log",
+      "wall_observed_seconds": 50.963
+    },
+    {
+      "decision": "UNKNOWN",
+      "exit_code": 2,
+      "run_receipt_digest": "63d911df26c1106a65e6d116dcfaa8dbf0b968c8461060c3e54a74e945ccdcae",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/limit2_f_B6_B8.json",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/limit2_f_B6_B8.log",
+      "wall_observed_seconds": 221.259
+    },
+    {
+      "decision": "ERROR",
+      "exit_code": 2,
+      "run_receipt_digest": "bf2f663de146d9cad1d78eb93831b76e12e9ae9543f758f9061affbcaa1cf7e1",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/operational_function_lookup_miss.json",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/operational_function_lookup_miss.log",
+      "wall_observed_seconds": 49.232
+    },
+    {
+      "decision": "EQ",
+      "exit_code": 0,
+      "run_receipt_digest": "ae7779f8db51d8804cfb8dfcab2177fcb541a28d02773d7d9ff5db645bdb1467",
+      "run_receipt_path": "artifacts/unknown_reason_audit/current-head/receipts/triangularMod_tr_B9_B10.json",
+      "source_artifact_path": "artifacts/unknown_reason_audit/current-head/runs/triangularMod_tr_B9_B10.log",
+      "wall_observed_seconds": 54.734
+    }
+  ],
+  "review_gate": {
+    "R10": "CLOSED",
+    "R5": "CLOSED",
+    "R6": "CLOSED",
+    "findings": [],
+    "fixed_reviewer": "plan-reviewer",
+    "phase0": "GO",
+    "phase1_start": "YES"
+  },
+  "schema_version": 2,
+  "tests": [
+    {
+      "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py",
+      "elapsed_seconds": 78.51,
+      "result": "17 passed"
+    },
+    {
+      "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py scripts/function_tracer_pcode/tests/unit/test_root_blocker_summary.py scripts/function_tracer_pcode/tests/unit/test_debug_trace.py",
+      "elapsed_seconds": 31.64,
+      "result": "178 passed"
+    },
+    {
+      "command": "./.venv-pyghidra/bin/python -m py_compile scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py scripts/function_tracer_pcode/validation/unknown_taxonomy_evidence_runner.py",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
+  "timeout_correspondence": {
+    "configured_timeout_budget_field": "monolithic_timeout",
+    "configured_timeout_budget_seconds": 1,
+    "correspondence": "reason_budget_mismatch",
+    "final_outcome": "TIMEOUT",
+    "observed_nonterminal_timeout_event_count": 0,
+    "observed_solver_elapsed_seconds": [
+      1.0282604694366455
+    ],
+    "reason_evidence_timeout_budget_seconds": [
+      120.0
+    ],
+    "result_entry_id": "55207bee06bb547ab16be7bfdf0b9c8d6c999fe0f527fa084464f3ddcb1a3654",
+    "solver_unknown_timeout_reason_occurrence_count": 1,
+    "terminal_timeout_event_count": 1
+  },
+  "validation_kind": "unknown_taxonomy_phase0_gate_evidence"
+}

@@ -28,6 +28,18 @@ from .runtime_refs import (
 )
 
 
+class UnsupportedSmtIntrinsicError(ValueError):
+    """Typed semantic-lowering refusal; message text is diagnostic only."""
+
+    def __init__(self, *, mnemonic: Optional[str], opcode: Optional[str]) -> None:
+        self.mnemonic = mnemonic
+        self.opcode = opcode
+        self.intrinsic_identity = mnemonic or opcode
+        super().__init__(
+            f"Unsupported intrinsic for SMT lowering: {self.intrinsic_identity}"
+        )
+
+
 _BOOLEAN_BINARY_OPERATORS = {
     "INT_EQUAL",
     "INT_NOTEQUAL",
@@ -2483,9 +2495,7 @@ def _lower_intrinsic_to_smt(
             result_bits=result_bits,
         )
 
-    raise ValueError(
-        f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"
-    )
+    raise UnsupportedSmtIntrinsicError(mnemonic=mnemonic, opcode=opcode)
 
 def _coerce_address_value_ref(expr) -> Optional[AddressValueRef]:
     runtime_ref = getattr(expr, "runtime_ref", None)

@@ -21,7 +21,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         # Phase 0 で SAT になるケース
         mock_analysis = create_mock_analysis(
@@ -69,7 +69,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",
@@ -139,7 +139,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
 
         analysis1 = create_mock_analysis(
             function_name="test_func",
@@ -234,7 +234,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
 
         analysis1 = create_mock_analysis(
             function_name="test_func",
@@ -319,7 +319,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
 
         analysis1 = create_mock_analysis(
             function_name="test_func",
@@ -390,7 +390,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
         from unittest.mock import Mock, patch
 
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
 
         analysis1 = create_mock_analysis(
             function_name="test_func",
@@ -514,7 +514,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         # ★ サイズ不一致でテスト（MIPS64=64bit, x86=32bit）
         mock_analysis_mips64 = create_mock_analysis(
@@ -602,7 +602,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",
@@ -708,7 +708,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         # サイズ不一致（MIPS64=64bit, x86=32bit）
         mock_analysis_mips64 = create_mock_analysis(
@@ -790,7 +790,7 @@ class TestPhaseRetryGates:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         # サイズ不一致
         mock_analysis_mips64 = create_mock_analysis(

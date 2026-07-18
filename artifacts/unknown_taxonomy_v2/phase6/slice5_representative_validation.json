@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "status": "complete",
+  "scope": "ABI, return-width, readonly UNKNOWN causes and TIMEOUT aggregation only",
+  "source_inventory": {
+    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
+    "current_source": {
+      "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655",
+      "candidate_count": 597
+    },
+    "live_delta": {
+      "added": 0,
+      "removed": 0
+    }
+  },
+  "sealed_contract": {
+    "domain_contract_id": "abi-return-width-readonly-v2",
+    "reason_count": 8,
+    "producer_stage_count": 8,
+    "full_registry_digest": "2161081892ca7a9faca9c60c6e93d82e14c008ca219b2d5f33c920d63c5722ab",
+    "common_registry_digest": "551027e8142ff34fe691aa34351dc3d784cc81a617c748caa57cfcf650495465",
+    "semantic_relation": "C_active",
+    "proof_relation": "Q_open",
+    "cause_and_requirement_cardinality_independent": true,
+    "strategy_name_in_semantic_identity": false
+  },
+  "lifecycle_matrix": {
+    "return_width_provenance_unavailable": {
+      "proof_kind": "return_width_provenance",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_return_width_provenance",
+      "sealed_event_stream_digest": "4b6f713e3d62b64b650b014c6afe6cf55172941d6cded08124985d7606100047"
+    },
+    "return_width_relation_unproven": {
+      "proof_kind": "same_function_return_width_relation",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_same_function_return_width_relation",
+      "sealed_event_stream_digest": "f327dfc1464b92506858ec196725408d129666a776c51de1337db5c3e487c8f8"
+    },
+    "return_abi_provenance_unavailable": {
+      "proof_kind": "return_abi_provenance",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_return_abi_provenance",
+      "sealed_event_stream_digest": "fe24c97ba1ad90c5f6d9c8a789ec1a115e0c8ab7afcc85c2704afda3a128093b"
+    },
+    "return_observation_contract_unproven": {
+      "proof_kind": "return_observation_contract",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_return_observation_contract",
+      "sealed_event_stream_digest": "68046d41cd8443a31eb14997d9f52303e13ded5b2711328b47dce8e3d385dd27"
+    },
+    "return_abi_relation_unproven": {
+      "proof_kind": "return_abi_relation",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_return_abi_relation",
+      "sealed_event_stream_digest": "99d18b4d8527e4fa5781e423517db2e56e90d090df18903d41c59000e6126e4c"
+    },
+    "return_high_bit_relation_unproven": {
+      "proof_kind": "return_high_bit_relation",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_return_high_bit_relation",
+      "sealed_event_stream_digest": "8c0a16ee4f3d7f934ff636bf49a2c1f4b57731492b588b38bfc5fde4d5dd1880"
+    },
+    "readonly_storage_identity_unproven": {
+      "proof_kind": "readonly_storage_identity",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_readonly_storage_identity",
+      "sealed_event_stream_digest": "9cf3baf8bb1905820e3ab6ad9936342e591b77606983a99f847be6ba5c6df96a"
+    },
+    "readonly_object_correspondence_unproven": {
+      "proof_kind": "readonly_object_correspondence",
+      "observed": {
+        "c_active": 1,
+        "q_open": 1
+      },
+      "completed": {
+        "c_active": 0,
+        "q_open": 0
+      },
+      "completion_entrypoint": "complete_readonly_object_correspondence",
+      "sealed_event_stream_digest": "87c269676ce5c455d080a26ef789fccf2f431dfb3086ec4ddc17237df2c0a958"
+    }
+  },
+  "typed_integration_evidence": {
+    "all_reason_observation": "test_all_eight_reasons_have_independent_c_and_q_with_n_readonly_members",
+    "generic_exact_completion": "test_completion_rechecks_live_c_and_q_before_issuing_receipt",
+    "readonly_unary_to_relational_promotion": "test_n_readonly_completions_promote_one_resolved_relational_cause_in_order",
+    "readonly_real_z3_unsat_and_near_miss_sat": "test_readonly_theorem_uses_real_solver_for_nontrivial_unsat_and_near_miss_sat",
+    "high_bit_unsat_completion": "test_high_bit_solver_unsat_uses_live_abi_completion_and_common_issuer",
+    "terminal_timeout": "test_readonly_solver_timeout_terminalizes_to_timeout_not_unknown",
+    "timeout_recovery": "test_readonly_solver_noncompletion_and_recovered_timeout_histories",
+    "bounded_receiptless_retry": "test_dependency_ready_production_scheduler_executes_registered_readonly_query",
+    "sat_unsat_conflict": "test_parallel_sat_unsat_conflict_never_completes_or_hands_off"
+  },
+  "aggregation_gates": {
+    "semantic_relation": "C_active",
+    "proof_relation": "Q_open",
+    "terminal_timeout": {
+      "decision": "TIMEOUT",
+      "c_active": 1,
+      "q_open": 1,
+      "terminal_timeout_events": 1,
+      "observed_nonterminal_timeout_events": 0
+    },
+    "recovered_timeout": {
+      "decision": "EQUIVALENT",
+      "c_active": 0,
+      "q_open": 0,
+      "terminal_timeout_events": 0,
+      "observed_nonterminal_timeout_events": 1
+    },
+    "solver_unknown": {
+      "decision": "UNKNOWN",
+      "c_active": 1,
+      "q_open": 1,
+      "terminal_timeout_events": 0,
+      "observed_nonterminal_timeout_events": 0
+    },
+    "parallel_sat_unsat_conflict": {
+      "decision": "UNKNOWN",
+      "c_active": 1,
+      "q_open": 1,
+      "terminal_timeout_events": 0,
+      "observed_nonterminal_timeout_events": 0
+    },
+    "canonical_manifest": {
+      "manifest_authority_digest": "3cbf9ce6a18742968bbb0383cb31a25d70e638427d9c2a89a395fd14c1e32a27",
+      "manifest_entry_count": 4,
+      "result_occurrence_ids": [
+        "production-pilot-8f29a2f46e5559fe3d765fc3",
+        "production-pilot-a54ac8a9cf5d1f0fd37480b9",
+        "production-pilot-cb81f81828a5b5243b17ffe9",
+        "production-pilot-f476b7dd91a4009830afb0c3"
+      ],
+      "decision_receipt_digests": [
+        "5bd08f213e0b30edc24b5b8b548d418007017c80cddf201067a9b56714b0facf",
+        "8e05955c508876f70ec756607fd29b8fde2342f7bae2c651cd6667e93f02664b",
+        "8233a6d46198823de28c0e37ddc6001b9593af33c9449cbdd3323d4a42ea2050",
+        "fad2e31045e5688adea290ecb61ea14e3033ab746d4810f29b2f296e03c6c47d"
+      ],
+      "exactly_one_decision_receipt_per_result": true,
+      "all_q_open_foreign_keys_resolve_to_c_active": true
+    },
+    "canonical_metrics": {
+      "decision_counts": {
+        "EQUIVALENT": 1,
+        "NOT_EQ": 0,
+        "UNKNOWN": 2,
+        "TIMEOUT": 1,
+        "ERROR": 0
+      },
+      "final_unknown_results": 2,
+      "final_timeout_results": 1,
+      "active_blocker_occurrences": 3,
+      "unique_open_requirements": 1,
+      "terminal_timeout_events": 1,
+      "observed_nonterminal_timeout_events": 1
+    },
+    "conservation": {
+      "sum_decision_counts_equals_manifest_entries": true,
+      "terminal_timeout_events_equals_final_timeout_results": true
+    }
+  },
+  "current_head_real_binary_runs": [
+    {
+      "case_id": "eqbench_reve_triangularMod_tr_mips64_clang_o0_o1",
+      "command": "./.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main --equiv targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0 targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1 --binary-ids B9 B10 -f tr --strategy pairwise --normalize-mode safe --equiv-timeout 30 --pairwise-timeout 5 --pairwise-timeout-hard 30 --emit-result-json",
+      "result": "EQUIVALENT",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "evidence_role": "return-width bridge activation and discharge",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/triangularMod_tr_B9_B10.result.json.gz.b64"
+    },
+    {
+      "case_id": "eqbench_bess_SIGN_snippet_arm64_clang_o3_mips64_gcc_o3",
+      "command": "./.venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main --equiv targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-arm64-clang-O3 targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-mips64-gcc-O3 --binary-ids B4 B16 -f snippet --strategy pairwise --normalize-mode safe --equiv-timeout 30 --pairwise-timeout 5 --pairwise-timeout-hard 30 --emit-result-json",
+      "result": "EQUIVALENT",
+      "solver_status": "UNSAT",
+      "unknown_reason_count": 0,
+      "evidence_role": "conservative width-proof nonformability with unchanged default-off decision",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/SIGN_snippet_B4_B16.result.json.gz.b64"
+    }
+  ],
+  "default_off_preservation": {
+    "v2_pilot_enabled_for_real_binary_commands": false,
+    "current_head_run_count": 2,
+    "both_legacy_decisions": "EQUIVALENT",
+    "typed_failures_change_legacy_decision": false,
+    "evidence_class": "current worktree default-off regression"
+  },
+  "stored_run_outputs": {
+    "eqbench_reve_triangularMod_tr_mips64_clang_o0_o1": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/triangularMod_tr_B9_B10.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "a040b5eb31ff3e9d17d6b902c09ab58044d6b4fcef8e5b797cda39696a8d37d9",
+      "result_json_sha256": "6cf31a9eb3723ef15e755106d913470c9db1d9edb75acbdbc8ce1e213481a644",
+      "expected_projection": {
+        "pairwise_debug_stats": {
+          "pair_width_projection_queries": 1,
+          "return_width_bridge_missing": 0,
+          "width_binding_receipts": 1,
+          "width_observation_blocked": 0,
+          "width_observation_proven": 1,
+          "width_seed_complete_count": 2,
+          "width_seed_incomplete_count": 0
+        }
+      },
+      "input_binding": {
+        "binary1_path": "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0",
+        "binary2_path": "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1",
+        "binary_ids": [
+          "B9",
+          "B10"
+        ],
+        "function1": "tr",
+        "function2": "tr"
+      }
+    },
+    "eqbench_bess_SIGN_snippet_arm64_clang_o3_mips64_gcc_o3": {
+      "path": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/SIGN_snippet_B4_B16.result.json.gz.b64",
+      "encoding": "base64(gzip(result_json_utf8))",
+      "encoded_sha256": "a566ebefd59f6d3a2fa83b675b4d4080c2075b73daf97a9991ba4fabffd1c82e",
+      "result_json_sha256": "2e6499ffd695bf90eaf0164081114c5cc44a17579827474b58eb9aab2aea1098",
+      "expected_projection": {
+        "pairwise_debug_stats": {
+          "pair_width_projection_queries": 0,
+          "return_width_bridge_missing": 0,
+          "width_binding_receipts": 0,
+          "width_observation_blocked": 7,
+          "width_observation_blocked_return_width_seed_incomplete": 6,
+          "width_observation_blocked_validated_observation_proof_bundle": 1,
+          "width_observation_proven": 0,
+          "width_seed_complete_count": 6,
+          "width_seed_incomplete_count": 5
+        }
+      },
+      "input_binding": {
+        "binary1_path": "targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-arm64-clang-O3",
+        "binary2_path": "targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-mips64-gcc-O3",
+        "binary_ids": [
+          "B4",
+          "B16"
+        ],
+        "function1": "snippet",
+        "function2": "snippet"
+      }
+    }
+  },
+  "binary_inputs": {
+    "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
+    "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
+    "targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-arm64-clang-O3": "2c20786f2971fa63f631cf7ae8889fcf2b8dab0557cfb608c3e9f7db55c398f3",
+    "targets/EqBench/benchmarks/bess/SIGN/Eq/source/newV-mips64-gcc-O3": "5757fcd61c7d18fdbb94b629b14533a5fb58f091809a05dd4ac02b825cd700e2"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "d8de164412b49ed691d37e1feda39e73057439c54aaac29860d43d02cb6b9ca0",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f8a9a0b9d28e042d1ef08adc139f576c466e8b2f4cb3df892d11fd0ca53e5b22",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "9805e267be863a9df2d8e25b6d9958aec3fb9e258dd4ea0f97f2177512ef10a5",
+    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "f2bb30e002211dd81df664a07500ff3179524e94cde4efeae160f79a05f02e65",
+    "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789",
+    "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "49382812f1ac3f40613cc375076d43b803c1fdf44c303d893d2b14a25f213542",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7",
+    "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "dc454f5f8a2ec9f65b63d35f69ff22de56466b356780b4b910de1c997bcacbae",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "c9f7b81518cdc5469dc9842cb569921dbb2f2f0c03cfdf8890c1c668ca8bcf7d",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
+    "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec",
+    "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
+    "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2"
+  },
+  "validation": {
+    "focused_slice5_suite": "59 passed",
+    "phase6_cross_slice_suite": "219 passed",
+    "width_summary_readonly_regression_suite": "165 passed",
+    "real_binary_matrix": "2 passed",
+    "real_z3_readonly_matrix": "UNSAT positive / SAT near miss"
+  },
+  "compiled_fixture_evidence": {
+    "high_bit_near_miss": {
+      "source": "targets/cate1/zext_or_repro/zext_or_repro.c",
+      "source_sha256": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec",
+      "compile_command": "gcc targets/cate1/zext_or_repro/zext_or_repro.c -O0 -o zext_or_repro.bin",
+      "stored_binary": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/zext_or_repro.bin.gz.b64",
+      "encoded_binary_sha256": "e770c52945978af32d6222af77dbd096a6fa5d66e2df863024b4d0c4824571a9",
+      "binary_sha256": "a1aca91dac6885debed0a7df7ecb8c53142f458f4ca1be7e6588b07b3c601ec6",
+      "function": "zext_or_repro_tail_index_probe",
+      "test": "test_zext_or_high_bit_or_delta_is_rejected_with_real_pcode",
+      "test_command": "env RUN_PYGHIDRA_REGRESSIONS=1 PYTHONPATH=. ./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py::test_zext_or_high_bit_or_delta_is_rejected_with_real_pcode",
+      "test_result": "1 passed",
+      "semantic_result": "INT_OR high-bit delta rejected; low-bit control accepted",
+      "authority_role": "supplemental recurrence-domain negative; excluded from slice5 coverage"
+    },
+    "slice5_return_high_bit_near_miss": {
+      "left_source": "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c",
+      "left_source_sha256": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
+      "right_source": "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c",
+      "right_source_sha256": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
+      "compile_commands": [
+        "gcc scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c -O1 -o slice5_high_bit_left",
+        "gcc scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c -O1 -o slice5_high_bit_right"
+      ],
+      "stored_left_binary": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/high_bit_projection_left.bin.gz.b64",
+      "encoded_left_binary_sha256": "97066d101ff33280473f4d4e57fc76b8c4579e81e6feedacf79b3896bf23ec69",
+      "left_binary_sha256": "388c36521778e49fbf7b399ce4c1e88b6e5b0bf5f7b39f44b3c4f48e769e60d2",
+      "stored_right_binary": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/high_bit_projection_right.bin.gz.b64",
+      "encoded_right_binary_sha256": "e918916bc9d5984dcb87ad8bd4661cb1dd9265b2597ea406c9b9f4af82ea6d34",
+      "right_binary_sha256": "a3b3666baf80f3d0d419d52893639ace33b55a1dceb5ae689c4674dc47309425",
+      "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/high_bit_projection_pair.result.json.gz.b64",
+      "encoded_result_sha256": "d5e76beb2326122fa1318809d940fd4830fdcec490f5056d9b7b4d8a1f952256",
+      "result_json_sha256": "afda08aa06410399c6cf6896c44cc8e6fa268f3c4a83f78aa73a03e787484ae7",
+      "real_binary_shape": {
+        "return_widths": [
+          32,
+          64
+        ],
+        "legacy_reason_id": "return_width_bridge_missing",
+        "decision": "UNKNOWN"
+      },
+      "typed_slice5_test": "test_high_bit_solver_sat_keeps_q_live_and_hands_off_model_safety",
+      "typed_slice5_authority": [
+        "ReturnObservationProjectionSeed",
+        "return_high_bit_relation_unproven C_active/Q_open",
+        "AbiWidthReadonlySolverQueryAuthority.from_high_bit_theorem",
+        "SAT keeps original Q live",
+        "model-bound Phase6.1 safety handoff"
+      ],
+      "shared_authority_chain": {
+        "projection_seed_digest": "7bfdc133e9040b74c38f54850f815c71f84ac8f323bcf5f1f0fdac01502e8987",
+        "projection_source_snapshot_pair": [
+          "ordered_function_pair_v2",
+          [
+            "function_identity_v1",
+            "sha256:388c36521778e49fbf7b399ce4c1e88b6e5b0bf5f7b39f44b3c4f48e769e60d2",
+            [
+              "function",
+              null,
+              4096
+            ],
+            "0x1000"
+          ],
+          [
+            "function_identity_v1",
+            "sha256:a3b3666baf80f3d0d419d52893639ace33b55a1dceb5ae689c4674dc47309425",
+            [
+              "function",
+              null,
+              8192
+            ],
+            "0x2000"
+          ]
+        ],
+        "projection_pair_target_digest": "baff6c87210ecee70848718fef465ca1fe11a08c82bbf04f3ec3727da750394c",
+        "raw_return_widths": [
+          32,
+          64
+        ],
+        "normalized_storage_widths": [
+          64,
+          64
+        ],
+        "extension_relations": [
+          "zero_extend",
+          "zero_extend_or_mask:1099511627776"
+        ],
+        "abi_relation_artifact_digest": "1ca232d1477941ed2b1e71d7e629a66545cac5f455bc9d1807399c84a6236e98",
+        "abi_completion_receipt_digest": "3262c62727b7b11b90a59ea340de5b70bacd8044d9f1d348ebafb8b5173ea35f",
+        "high_bit_cause_rows_digest": "1fe5eaee389e7eda902e69efe84b3628125edbfef1ead0b75dcd2d05e8ddc8d7",
+        "live_requirement_rows_digest": "4e585d2c480803bfdd3be07bfa420815e7bc7bbc1ec486a26a77eb5b824b6518",
+        "query_authority_digest": "3ae38769ce94250468d4ad947db242192e1add0632a599b46c01e4005bf259d1",
+        "solver_membership_digest": "e28f195591f1db89ff879048d071ce95cb86ed8cdda6ea5bd58ebf29a90eace5",
+        "sat_execution_receipt_digest": "606ea8923cab4d17f7163c34376e3026734907f53e3008520d1b1f1afbb81b19",
+        "model_safety_handoff_digest": "8e19f19403dd684a3a7562e07396c777a3a795a811694c48ab93dcc47ef6eaec",
+        "active_reason_ids": [
+          "counterexample_analysis_safety_unproven",
+          "return_high_bit_relation_unproven"
+        ],
+        "open_proof_kinds": [
+          "counterexample_safety",
+          "return_high_bit_relation"
+        ]
+      }
+    }
+  },
+  "representative_coverage": {
+    "return_width_bridge_activation_and_discharge": {
+      "status": "covered",
+      "evidence_class": "current-worktree real binary result",
+      "case_id": "eqbench_reve_triangularMod_tr_mips64_clang_o0_o1"
+    },
+    "high_bit_near_miss": {
+      "status": "covered",
+      "evidence_class": "source/binary-bound return-width near miss joined to exact typed slice5 SAT path",
+      "fixture": "slice5_return_high_bit_near_miss",
+      "real_shape_join": [
+        "content identities",
+        "function",
+        "32/64 return widths",
+        "legacy return-width blocker"
+      ],
+      "typed_authority_test": "test_high_bit_solver_sat_keeps_q_live_and_hands_off_model_safety",
+      "expected_live_reason_ids": [
+        "return_high_bit_relation_unproven",
+        "counterexample_analysis_safety_unproven"
+      ]
+    },
+    "summary_return_width_missing_and_mismatch": {
+      "status": "covered",
+      "evidence_class": "sealed typed production integration",
+      "test": "test_summary_width_deferred_occurrences_expand_to_exact_slice5_signals",
+      "reason_ids": [
+        "return_width_provenance_unavailable",
+        "return_width_relation_unproven"
+      ],
+      "sealed_stream_digests": [
+        "4b6f713e3d62b64b650b014c6afe6cf55172941d6cded08124985d7606100047",
+        "f327dfc1464b92506858ec196725408d129666a776c51de1337db5c3e487c8f8"
+      ]
+    },
+    "two_distinct_readonly_objects": {
+      "status": "covered",
+      "evidence_class": "sealed typed production integration",
+      "test": "test_all_eight_reasons_have_independent_c_and_q_with_n_readonly_members",
+      "object_count": 2,
+      "cause_count": 2,
+      "open_requirement_count": 2
+    },
+    "readonly_correspondence_discharge": {
+      "status": "covered",
+      "evidence_class": "real-Z3 typed production integration",
+      "test": "test_readonly_theorem_uses_real_solver_for_nontrivial_unsat_and_near_miss_sat",
+      "positive_status": "UNSAT",
+      "near_miss_status": "SAT",
+      "sealed_stream_digest": "87c269676ce5c455d080a26ef789fccf2f431dfb3086ec4ddc17237df2c0a958"
+    },
+    "conservative_negative": {
+      "status": "covered",
+      "evidence_class": "current-worktree real binary result",
+      "case_id": "eqbench_bess_SIGN_snippet_arm64_clang_o3_mips64_gcc_o3"
+    }
+  },
+  "artifact_digest": "e74d2bdcba13a4c9cd9b6fad163a3b51f6bea500bf8b8e65b5a6ffec4daa8436"
+}

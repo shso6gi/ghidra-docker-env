@@ -53,7 +53,7 @@ class TestPhaseRetryGatesParametrized:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis_mips64 = create_mock_analysis(
             function_name="test_func",
@@ -180,7 +180,7 @@ class TestPhaseRetryGatesParametrized:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis_mips64 = create_mock_analysis(
             function_name="test_func",

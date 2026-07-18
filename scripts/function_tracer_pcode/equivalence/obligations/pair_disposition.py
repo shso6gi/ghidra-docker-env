@@ -268,10 +268,23 @@ class CounterexampleSafetyReceipt:
             "same_function_replay_safe",
         )
         payload = (formula_digest, model_digest, premise_digest, pair_key, steps)
-        return cls(
+        receipt = cls(
             formula_digest, model_digest, premise_digest, pair_key, steps,
             _closure_artifact_seal(payload),
         )
+        from ..v2.production_signals import (
+            SafeCounterexampleProductionSignal,
+            emit_sat_safety_signal,
+        )
+
+        emit_sat_safety_signal(SafeCounterexampleProductionSignal(
+            proof_artifact_digest=receipt.authority_digest,
+            formula_digest=receipt.formula_digest,
+            model_digest=receipt.model_digest,
+            premise_digest=receipt.premise_digest,
+            pair_key=receipt.pair_key,
+        ), producer_site_manifest_id="pair-disposition-safe-counterexample")
+        return receipt
 
     def validates(self, binding: PairLedgerBinding, pair_key: Tuple[int, int]) -> bool:
         payload = (

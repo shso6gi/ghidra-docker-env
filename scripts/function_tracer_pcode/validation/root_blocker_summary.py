@@ -548,6 +548,10 @@ def _provenance_ref(payload: Mapping[str, Any], index: int) -> ResultProvenanceR
 
 
 def _is_final_unknown(payload: Mapping[str, Any]) -> bool:
+    if payload.get("decision_receipt") is not None:
+        from ..equivalence.v2.phase8_cutover import outcome_from_payload
+
+        return outcome_from_payload(payload).value in {"UNKNOWN", "TIMEOUT"}
     if payload.get("error_message") is not None:
         return False
     trace = payload.get("debug_trace")

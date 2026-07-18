@@ -402,6 +402,8 @@ def _impl__try_pre_return_counted_loop_summary(
         return None
 
     anchor = self._make_pre_return_summary_anchor(function, return_ops)
+    from .session_helpers_1 import _sealed_return_abi_facts
+
     skeleton = FunctionReturnAnalysis(
         function_name=function.getName(),
         entry_point=str(function.getEntryPoint()),
@@ -411,6 +413,9 @@ def _impl__try_pre_return_counted_loop_summary(
         analysis_scope_key=analysis_scope_key,
         return_type=return_type,
         return_type_obj=return_type_obj,
+        return_abi_facts=_sealed_return_abi_facts(
+            self._current_function_prototype, return_type_obj, return_type
+        ),
         signedness_result=signedness_result,
         deferred_calls=dict(self._current_deferred_calls),
         effect_summary=effect_summary,

@@ -70,6 +70,125 @@ def _impl__current_function_entry_address(self):
                 return None
     return None
 
+
+def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):
+    """Snapshot Ghidra ABI API objects without retaining Java object identity."""
+
+    def fact(status, value, source):
+        return {"status": status, "value": value, "source": source}
+
+    calling = None
+    calling_source = None
+    calling_error = False
+    for getter_name in ("getModelName", "getCallingConventionName"):
+        getter = getattr(function_prototype, getter_name, None)
+        if not callable(getter):
+            continue
+        try:
+            value = getter()
+        except Exception:
+            calling_error = True
+            continue
+        if value is not None and str(value).strip():
+            calling = ("ghidra_calling_convention_v1", str(value).strip())
+            calling_source = getter_name
+            break
+        calling_error = True
+    if calling is not None:
+        calling_fact = fact("PRESENT", calling, calling_source)
+    elif calling_error:
+        calling_fact = fact("MALFORMED", None, "ghidra_prototype_calling_convention")
+    else:
+        calling_fact = fact("MISSING", None, "ghidra_prototype_calling_convention")
+
+    type_value = None
+    type_error = False
+    if return_type_obj is not None:
+        try:
+            name_getter = getattr(return_type_obj, "getPathName", None)
+            if not callable(name_getter):
+                name_getter = getattr(return_type_obj, "getName", None)
+            if not callable(name_getter):
+                raise TypeError("return type object lacks an exact name API")
+            raw_type_name = name_getter()
+            if raw_type_name is None or not str(raw_type_name).strip():
+                raise ValueError("return type API returned an empty name")
+            type_name = str(raw_type_name).strip()
+            length_getter = getattr(return_type_obj, "getLength", None)
+            if not callable(length_getter):
+                raise TypeError("return type object lacks an exact length API")
+            raw_type_length = length_getter()
+            if type(raw_type_length) is bool:
+                raise TypeError("return type API returned a boolean length")
+            type_length = int(raw_type_length)
+            if type_length < 0:
+                raise ValueError("return type API returned a negative length")
+            type_value = ("ghidra_return_type_v1", type_name, type_length)
+        except Exception:
+            type_error = True
+    type_fact = (
+        fact("PRESENT", type_value, "ghidra_function_prototype_return_type")
+        if type_value is not None
+        else fact(
+            "MALFORMED" if type_error else "MISSING", None,
+            "ghidra_function_prototype_return_type",
+        )
+    )
+
+    storage_value = None
+    storage_error = False
+    storage_source = "ghidra_function_prototype.getReturnStorage"
+    getter = getattr(function_prototype, "getReturnStorage", None)
+    if callable(getter):
+        try:
+            storage = getter()
+            if storage is None or not callable(getattr(storage, "getVarnodes", None)):
+                raise ValueError("return storage API returned no typed storage")
+            varnodes = tuple(storage.getVarnodes())
+            members = []
+            for varnode in varnodes:
+                address = varnode.getAddress()
+                space = address.getAddressSpace()
+                raw_space_name = space.getName()
+                if raw_space_name is None or not str(raw_space_name).strip():
+                    raise ValueError("return storage member has an empty address space")
+                raw_offset = address.getOffset()
+                raw_size = varnode.getSize()
+                if type(raw_offset) is bool or type(raw_size) is bool:
+                    raise TypeError("return storage member uses boolean coordinates")
+                offset = int(raw_offset)
+                size = int(raw_size)
+                if offset < 0 or size <= 0:
+                    raise ValueError("return storage member coordinates are invalid")
+                members.append((
+                    "ghidra_return_storage_member_v1",
+                    str(raw_space_name).strip(),
+                    offset,
+                    size,
+                ))
+            if not members or len(members) != len(set(members)):
+                raise ValueError("return storage members are empty or duplicated")
+            storage_value = (
+                "ghidra_return_storage_v1",
+                tuple(sorted(members, key=lambda item: (item[1], item[2], item[3]))),
+            )
+        except Exception:
+            storage_error = True
+    storage_fact = (
+        fact("PRESENT", storage_value, storage_source)
+        if storage_value is not None
+        else fact(
+            "MALFORMED" if storage_error else "MISSING", None,
+            storage_source,
+        )
+    )
+    return {
+        "schema_version": 1,
+        "calling_convention": calling_fact,
+        "declared_or_effective_return_type": type_fact,
+        "return_storage_descriptor": storage_fact,
+    }
+
 def _impl__function_entry_address(function):
     entry_getter = getattr(function, "getEntryPoint", None)
     if not callable(entry_getter):
@@ -401,8 +520,15 @@ def _impl_analyze_function(
     self._debug_print(f"Analyzing function: {function.getName()}")
     self._debug_print("=" * 60)
 
-    decompiler = self._get_decompiler()
-    results = decompiler.decompileFunction(function, timeout, None)
+    from ..decompilation_broker import (
+        TOP_LEVEL_SOURCE_CONTRACT,
+        decompile_function,
+    )
+    results = decompile_function(
+        self, function, timeout, None,
+        source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        semantic_owner="slice6",
+    )
 
     if not results.decompileCompleted():
         message = "Decompilation failed!"
@@ -476,6 +602,9 @@ def _impl_analyze_function(
 
         # 戻り値の型を取得
         return_type_obj, return_type = self._get_return_type_info(high_function)
+        return_abi_facts = _sealed_return_abi_facts(
+            function_prototype, return_type_obj, return_type
+        )
         self._debug_print(f"Return type: {return_type}")
 
         # === Phase 1: 符号性検出 ===
@@ -558,6 +687,7 @@ def _impl_analyze_function(
             analysis_scope_key=analysis_scope_key,
             return_type=return_type,
             return_type_obj=return_type_obj,
+            return_abi_facts=return_abi_facts,
             signedness_result=signedness_result,
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,

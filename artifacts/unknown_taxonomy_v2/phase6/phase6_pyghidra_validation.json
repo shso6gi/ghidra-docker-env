@@ -1,0 +1,31 @@
+{
+  "artifact_schema": "unknown-taxonomy-v2-phase6-pyghidra-validation-v1",
+  "repository_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "validation_date": "2026-07-18",
+  "command": "env RUN_PYGHIDRA_REGRESSIONS=1 PYTHONPATH=. ./.venv-pyghidra/bin/python -m pytest -q --junitxml=/tmp/phase6_pyghidra_validation.xml scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py",
+  "result": {
+    "collected": 2,
+    "passed": 2,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 131.63
+  },
+  "validation_scope": [
+    "real PyGhidra program import and analysis",
+    "real HighFunction and P-code recurrence extraction",
+    "frequent recurrence positive patterns",
+    "conservative unsupported and near-miss behavior",
+    "brokered decompilation source path regression"
+  ],
+  "source_sha256": {
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
+    "scripts/function_tracer_pcode/analysis/decompilation_broker.py": "9c4c3bc0fa5653f0d4f8ccb960adc6dffcaf1174fa6452e6939dafc9954135a4",
+    "scripts/function_tracer_pcode/analysis/analyzer_services/lifecycle.py": "184864569341130ef576c7a328ce78359c270024647ce4a48bbdffbfebbe8502",
+    "scripts/function_tracer_pcode/analysis/analyzer_services/session_helpers_3.py": "8475a72798f6152a4aa915166bda8d6c417dd0771d549f13e905a6bbfff35956"
+  },
+  "junit_xml": {
+    "path": "artifacts/unknown_taxonomy_v2/phase6/phase6_pyghidra_validation.xml",
+    "sha256": "fa8a57b280411e26d6662b183954b9f9de560cf299f7952c25b0b1cbee9637b5"
+  },
+  "note": "The durable worker/supervisor lifecycle is covered by the 372-test Phase 6 integration artifact; this artifact independently covers the real PyGhidra object and P-code path."
+}

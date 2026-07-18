@@ -53,9 +53,12 @@ _RECOVERY_TO_GATE = {
 def project_proof_gates(result: Any) -> Tuple[ProofGateProjection, ...]:
     grouped: Dict[str, List[str]] = {}
     for reason in getattr(result, "unknown_reasons", ()) or ():
+        reason_id = getattr(reason, "reason_id", None)
+        if not isinstance(reason_id, str) or not reason_id:
+            continue
         proof_kind = str(getattr(reason, "recovery_proof_kind", "") or "")
         gate_kind = _RECOVERY_TO_GATE.get(proof_kind, "other_blocker")
-        grouped.setdefault(gate_kind, []).append(str(getattr(reason, "reason_id", "unknown")))
+        grouped.setdefault(gate_kind, []).append(reason_id)
     projections = [
         ProofGateProjection(kind, "inconclusive", tuple(dict.fromkeys(reason_ids)))
         for kind, reason_ids in sorted(grouped.items())
@@ -89,6 +92,37 @@ def _outcome(result: Any) -> FunctionProofOutcome:
     if value is False:
         return FunctionProofOutcome.NOT_EQUIVALENT
     return FunctionProofOutcome.INCONCLUSIVE
+
+
+def _cutover_attempt_outcome(result: Any) -> Any:
+    """Classify one strategy attempt without claiming final decision authority."""
+
+    from ..v2.contracts import Outcome
+
+    if getattr(result, "error_message", None) or getattr(
+        result, "failure_status", None
+    ) in {"strategy_exception", "unexpected_pairwise_state"}:
+        return Outcome.ERROR
+    value = getattr(result, "is_equivalent", None)
+    if value is True:
+        return Outcome.EQUIVALENT
+    if value is False:
+        return Outcome.NOT_EQ
+    is_timeout = getattr(result, "is_timeout", None)
+    if callable(is_timeout) and is_timeout():
+        return Outcome.TIMEOUT
+    return Outcome.UNKNOWN
+
+
+def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
+    """Select the actual fallback action from the sealed all-five matrix."""
+
+    from ..v2.phase8_cutover import RETRY_FALLBACK_MATRIX
+
+    attempt_outcome = _cutover_attempt_outcome(result)
+    actions = RETRY_FALLBACK_MATRIX[attempt_outcome]
+    continue_fallback = "FALLBACK_NEXT_STRATEGY" in actions
+    return attempt_outcome, actions, continue_fallback
 
 
 def run_obligation_branch_plan(
@@ -362,23 +396,16 @@ def run_obligation_branch_plan(
             and post_aggregation_outcome != pre_aggregation_outcome
             and post_aggregation_outcome != strategy_result.is_equivalent
         ):
-            from ..unknown_reason import make_unknown_reason
-
-            mismatch_reason = make_unknown_reason(
-                "equivalence_blocking_unsafety",
-                stage="DECISION_AGGREGATION",
-                evidence_refs=("decision_aggregator_terminal_receipt_mismatch",),
-                detail=(
-                    "Decision aggregation changed the terminal outcome after query "
-                    "evidence was prepared; a new generation is required."
-                ),
-            )
             result.is_equivalent = None
             strategy_result.is_equivalent = None
-            result.unknown_reasons = [*list(result.unknown_reasons or ()), mismatch_reason]
-            strategy_result.unknown_reasons = [
-                *list(strategy_result.unknown_reasons or ()), mismatch_reason
-            ]
+            result.error_message = "decision_aggregator_terminal_receipt_mismatch"
+            result.failure_status = "strategy_exception"
+            result.failure_message = (
+                "Decision aggregation changed the terminal outcome after query "
+                "evidence was prepared; a new generation is required."
+            )
+            strategy_result.error_kind = "strategy_exception"
+            strategy_result.error_message = result.failure_message
         if dispatch_frame is not None and strategy_result is not None:
             if (
                 dispatch_frame.pair_disposition_ledger is not None
@@ -514,7 +541,38 @@ def run_obligation_branch_plan(
                     if dispatch_frame.replan_successor_plan is not None
                     else None
                 )
+        from ..v2.production_signals import active_production_pilot_session
+
+        if (
+            result.is_equivalent is True
+            and active_production_pilot_session() is not None
+        ):
+            receipt = getattr(dispatch_frame, "receipt", None)
+            if receipt is None or not receipt.is_trusted_for(dispatch_frame):
+                result.is_equivalent = None
+                result.error_message = "eq_closure_comparison_receipt_invalid"
+                result.failure_status = "strategy_exception"
+                result.failure_message = (
+                    "EQUIVALENT lacks its trusted comparison execution receipt"
+                )
+            else:
+                from ..v2.production_signals import (
+                    emit_sat_safety_signal,
+                    issue_eq_closure_signal,
+                )
+
+                emit_sat_safety_signal(
+                    issue_eq_closure_signal(
+                        active_production_pilot_session(), receipt, dispatch_frame,
+                    ),
+                    producer_site_manifest_id="obligation-stage-final-eq-closure",
+                )
         last_result = result
+        attempt_outcome, cutover_actions, continue_fallback = (
+            _cutover_branch_policy(result)
+        )
+        result.cutover_attempt_outcome = attempt_outcome.value
+        result.cutover_retry_fallback_actions = cutover_actions
         outcome = _outcome(result)
         controller.record(branch_id, outcome)
         view_id = runtime.current_view.view_id
@@ -522,7 +580,7 @@ def run_obligation_branch_plan(
             branch_id, ActivationState.COMPLETED, outcome, view_id,
             project_proof_gates(result),
         ))
-        if outcome != FunctionProofOutcome.INCONCLUSIVE:
+        if outcome != FunctionProofOutcome.INCONCLUSIVE or not continue_fallback:
             controller.next_branch()
             break
 
@@ -546,7 +604,7 @@ def run_obligation_branch_plan(
     if last_result is None:
         from ...smt import ParallelResult
         from ..result import EquivalenceResult
-        from ..unknown_reason import make_unknown_reason
+        from ..unknown_reason import make_internal_v2_reason_diagnostic
 
         blockers = tuple(dict.fromkeys(
             str(item)
@@ -572,8 +630,8 @@ def run_obligation_branch_plan(
             function2_signature=original_signature2,
             stage_path=[],
             unknown_reasons=[
-                make_unknown_reason(
-                    "equivalence_blocking_unsafety",
+                make_internal_v2_reason_diagnostic(
+                    "expression_translation_incomplete",
                     stage="S_MONOLITHIC_FALLBACK",
                     evidence_refs=(
                         "monolithic_branch_inapplicable",

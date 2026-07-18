@@ -4,6 +4,17 @@ validation_prepare_before_after_logs() {
     VALIDATION_BEFORE_SOURCE="not configured"
     VALIDATION_MOVED_OUTPUT_DIR=""
 
+    local execution_authority_root
+    execution_authority_root="$OUTPUT_BASE_DIR/.phase8-execution-authority"
+    mkdir -p "$execution_authority_root"
+    chmod 700 "$execution_authority_root"
+    export UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID="phase8-matrix-worker-v1"
+    export UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE="$execution_authority_root/worker.key"
+    if [[ ! -s "$UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE" ]]; then
+        umask 077
+        head -c 32 /dev/urandom > "$UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
+    fi
+
     if [[ -n "${VALIDATION_BEFORE_DIR:-}" ]]; then
         VALIDATION_BEFORE_SOURCE="configured"
     fi
@@ -58,14 +69,34 @@ validation_finalize_before_after_config() {
 validation_result_log_is_complete() {
     local log_file="$1"
     [[ -f "$log_file" ]] || return 1
-    grep -qE "^Result: (EQUIVALENT|NOT EQUIVALENT|ERROR|TIMEOUT|UNKNOWN)" "$log_file"
+    case "$(validation_batch_resume_policy "$(validation_classify_log_result "$log_file")")" in
+        COMPLETE_EQ|COMPLETE_NOT_EQ|FAILED_INFRASTRUCTURE) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validation_batch_resume_policy() {
+    local outcome="$1"
+    if [[ "$outcome" == "INCOMPLETE" ]]; then
+        echo "INCOMPLETE"
+        return 0
+    fi
+    PYTHONWARNINGS="ignore::RuntimeWarning" "${PYTHON_BIN:-python3}" -m \
+        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+        --print-batch-resume-policy --outcome "$outcome"
+}
+
+validation_result_log_has_final_authority() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || return 1
+    [[ "$(validation_classify_log_result "$log_file")" != "INCOMPLETE" ]]
 }
 
 validation_ensure_final_result_line() {
     local log_file="$1"
     local exit_code="$2"
 
-    if (( exit_code == 0 )) || validation_result_log_is_complete "$log_file"; then
+    if (( exit_code == 0 )) || validation_result_log_has_final_authority "$log_file"; then
         return 0
     fi
 
@@ -75,6 +106,12 @@ validation_ensure_final_result_line() {
         echo "Exit code: $exit_code"
         echo "Result: ERROR (pair process exited before emitting a final result)"
     } >> "$log_file"
+    PYTHONWARNINGS="ignore::RuntimeWarning" "${PYTHON_BIN:-python3}" -m \
+        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+        --emit-infrastructure-error-json \
+        --result-occurrence-id "process-exit-${exit_code}-$(basename "$log_file")" \
+        --error-kind "PAIR_PROCESS_EXIT_ERROR" \
+        --error-detail "exit_code=${exit_code}" >> "$log_file"
 }
 
 validation_append_pair_process_timeout_payload() {
@@ -89,40 +126,9 @@ validation_append_pair_process_timeout_payload() {
 
 validation_classify_log_result() {
     local log_file="$1"
-    local status
-
-    status="$(awk '
-        /^Result: EQUIVALENT/ { status = "EQ"; status_line = NR }
-        /^Result: NOT EQUIVALENT/ { status = "NOT_EQ"; status_line = NR }
-        /^Result: ERROR/ { status = "ERROR"; status_line = NR }
-        /^Result: TIMEOUT/ { status = "TIMEOUT"; status_line = NR }
-        /^Result: UNKNOWN/ { status = "UNKNOWN"; status_line = NR }
-        /^=== EQUIVALENCE_RESULT_JSON_BEGIN ===$/ {
-            in_json = 1
-            json_has_lookup_miss = 0
-            next
-        }
-        /^=== EQUIVALENCE_RESULT_JSON_END ===$/ && in_json {
-            last_json_end = NR
-            last_json_lookup_miss = json_has_lookup_miss
-            in_json = 0
-            next
-        }
-        in_json && /"failure_status"[[:space:]]*:[[:space:]]*"function_lookup_miss"/ {
-            json_has_lookup_miss = 1
-        }
-        END {
-            if (status == "") {
-                status = "INCOMPLETE"
-            }
-            if (status == "ERROR" && last_json_lookup_miss && last_json_end > status_line) {
-                status = "INCOMPLETE"
-            }
-            print status
-        }
-    ' "$log_file")"
-
-    echo "$status"
+    "${PYTHON_BIN:-python3}" -m \
+        scripts.function_tracer_pcode.validation.result_summary \
+        --classify-log "$log_file"
 }
 
 validation_classify_log_display() {
@@ -149,6 +155,7 @@ validation_classify_log_display() {
 }
 
 export -f validation_result_log_is_complete
+export -f validation_result_log_has_final_authority
 export -f validation_ensure_final_result_line
 export -f validation_append_pair_process_timeout_payload
 export -f validation_classify_log_result

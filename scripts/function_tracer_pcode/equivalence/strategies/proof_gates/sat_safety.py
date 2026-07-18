@@ -12,6 +12,7 @@ from ._shared import (
     build_proof_obligation_id,
     hashlib,
     json,
+    make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
 
@@ -88,8 +89,8 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         return UnknownReasonId.RETURN_COVERAGE_GAP
     if reason_kind == "return_coverage_inconclusive":
         return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
-    if reason_kind == "outcome_partition_unknown":
-        return UnknownReasonId.OUTCOME_PARTITION_UNKNOWN
+    if reason_kind == "outcome_partition_completion_unproven":
+        return "outcome_partition_completion_unproven"
     unary_outcome_ids = {
         item.value: item for item in (
             UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
@@ -116,7 +117,19 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         return summary_return_reason_ids[reason_kind]
     if reason_kind in {"recoverable_partial", "argument_recovery_recoverable_partial"}:
         return UnknownReasonId.RECOVERABLE_PARTIAL
-    return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+    call_effect_reasons = {
+        "unsupported_call_effect_summary": "unsupported_call_effect_semantics",
+        "effect_summary_path_coverage_incomplete": "effect_observation_coverage_incomplete",
+        "effect_call_argument_evidence": "call_argument_extraction_incomplete",
+        "effect_call_argument_evidence_incomplete": "call_argument_extraction_incomplete",
+        "effect_call_target_resolution_evidence": "call_target_resolution_unproven",
+        "bounded_call_refinement_argument_alignment_failed": "call_argument_extraction_incomplete",
+        "bounded_call_refinement_deferred_target_unresolved": "call_target_resolution_unproven",
+        "bounded_call_refinement_return_summary_unusable": "callee_return_summary_incomplete",
+    }
+    return call_effect_reasons.get(
+        reason_kind, "effect_observation_coverage_incomplete"
+    )
 
 def _impl__make_blocking_unsafety_unknown_reason(
     self,
@@ -139,7 +152,7 @@ def _impl__make_blocking_unsafety_unknown_reason(
             stage=stage,
         )
     unary_outcome_reason_ids = {
-        UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
+        "outcome_partition_completion_unproven",
         UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE,
         UnknownReasonId.OUTCOME_PATH_REGION_INCOMPLETE,
         UnknownReasonId.OUTCOME_MEMBER_UNCLASSIFIED,
@@ -160,7 +173,12 @@ def _impl__make_blocking_unsafety_unknown_reason(
             analysis1,
             analysis2,
         )
-        return make_unknown_reason(
+        reason_factory = (
+            make_internal_v2_reason_diagnostic
+            if type(typed_reason_id) is str
+            else make_unknown_reason
+        )
+        return reason_factory(
             typed_reason_id,
             stage=stage,
             evidence_refs=(blocking_reason,),
@@ -185,7 +203,9 @@ def _impl__make_blocking_unsafety_unknown_reason(
             recovery_action="unary_outcome_partition_proof_required",
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )
-    if typed_reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY:
+    from ...v2.call_effect import CALL_EFFECT_REASON_SPECS
+
+    if typed_reason_id not in CALL_EFFECT_REASON_SPECS:
         return make_unknown_reason(
             typed_reason_id,
             stage=stage,
@@ -199,14 +219,14 @@ def _impl__make_blocking_unsafety_unknown_reason(
         analysis2,
     )
     if object_target_key is None:
-        return make_unknown_reason(
+        return make_internal_v2_reason_diagnostic(
             typed_reason_id,
             stage=stage,
             evidence_refs=(blocking_reason,),
             detail=blocking_reason,
         )
 
-    return make_unknown_reason(
+    return make_internal_v2_reason_diagnostic(
         typed_reason_id,
         stage=stage,
         evidence_refs=(blocking_reason,),
@@ -245,7 +265,9 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
     *,
     current_counterexample_raw: Optional[Mapping[str, Any]] = None,
 ) -> bool:
-    if reason_record.reason_id != UnknownReasonId.SAT_UNSAFETY.value:
+    from ...v2.production_signals import SAT_SAFETY_TYPED_REASON_IDS
+
+    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return False
@@ -271,7 +293,7 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
         )
         if evidence_model_sha256 != current_model_sha256:
             continue
-        return True
+        return _v2_complete_sat_unsafety_and_true(self, reason_record, proof_content)
     return False
 
 def _impl__record_completed_sat_counterexample_replay_proof(
@@ -286,7 +308,9 @@ def _impl__record_completed_sat_counterexample_replay_proof(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    if reason_record.reason_id != UnknownReasonId.SAT_UNSAFETY.value:
+    from ...v2.production_signals import SAT_SAFETY_TYPED_REASON_IDS
+
+    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return
@@ -319,7 +343,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
         {
             "object_derived": True,
             "status": "complete",
-            "reason_id": UnknownReasonId.SAT_UNSAFETY.value,
+            "reason_id": reason_record.reason_id,
             "recovery_proof_kind": UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
             "proof_stage": "sat_counterexample_safety",
             "evidence_kind": "active_unsafety_summary",
@@ -389,7 +413,10 @@ def _impl__sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) ->
         return None
     if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
         return None
-    if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.SAT_UNSAFETY.value:
+    from ...v2.production_signals import SAT_SAFETY_TYPED_REASON_IDS
+
+    evidence_reason_id = cls._evidence_text(evidence, "reason_id")
+    if evidence_reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return None
     proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
     if proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
@@ -406,7 +433,7 @@ def _impl__sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) ->
     if not isinstance(object_target_key, tuple):
         return None
     proof_id = build_proof_obligation_id(
-        UnknownReasonId.SAT_UNSAFETY.value,
+        evidence_reason_id,
         proof_stage,
         proof_kind,
         evidence_kind,
@@ -479,8 +506,14 @@ def _impl__make_sat_unsafety_unknown_reason(
         case2=case2,
         pair_id=pair_id,
     )
-    return make_unknown_reason(
-        UnknownReasonId.SAT_UNSAFETY,
+    compatibility_reason_id = (
+        "counterexample_same_function_replay_unproven"
+        if sat_unsafety_reasons
+        and all("counterexample_replay" in str(item) for item in sat_unsafety_reasons)
+        else "counterexample_analysis_safety_unproven"
+    )
+    return _v2_observe_sat_unsafety_reason(make_internal_v2_reason_diagnostic(
+        compatibility_reason_id,
         stage=stage,
         pair_or_case=pair_id,
         evidence_refs=tuple(sat_unsafety_reasons),
@@ -514,7 +547,7 @@ def _impl__make_sat_unsafety_unknown_reason(
         ),
         recovery_action="sat_unsafety_resolution_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
-    )
+    ))
 
 def _impl__make_sat_counterexample_ambiguous_unknown_reason(
     self,
@@ -535,7 +568,7 @@ def _impl__make_sat_counterexample_ambiguous_unknown_reason(
         case2=case2,
         pair_id=pair_id,
     )
-    return make_unknown_reason(
+    return _v2_observe_sat_ambiguity_reason(make_unknown_reason(
         UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
         stage=stage,
         pair_or_case=pair_id,
@@ -572,7 +605,8 @@ def _impl__make_sat_counterexample_ambiguous_unknown_reason(
         },
         recovery_action="sat_counterexample_disambiguation_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
-    )
+    ))
+
 
 def _impl__sat_unsafety_object_evidence(
     self,
@@ -664,7 +698,7 @@ def _impl__sat_unsafety_reason_object_evidence(
             "return_partition": self._return_partition_object_key(analysis),
             "guard_disjunction": self._return_guard_disjunction_object_key(analysis),
         }
-    elif analysis is not None and reason_kind == "outcome_partition_unknown":
+    elif analysis is not None and reason_kind == "outcome_partition_completion_unproven":
         evidence["outcome_partition"] = self._outcome_partition_unknown_object_evidence(
             canonical_reason,
             analysis1,
@@ -690,7 +724,7 @@ def _impl__sat_unsafety_object_target_key(
     pair_id: str,
 ) -> Tuple[Any, ...]:
     return (
-        "sat_unsafety",
+        "counterexample_safety_gate",
         ("pair", pair_id),
         self._sat_unsafety_side_object_key("left", analysis1, case1),
         self._sat_unsafety_side_object_key("right", analysis2, case2),
@@ -742,6 +776,7 @@ def _impl__sat_unsafety_side_object_key(
         ),
     ), analysis)
 
+
 def _impl__sat_unsafety_reason_object_target_key(
     self,
     reason: str,
@@ -762,7 +797,7 @@ def _impl__sat_unsafety_reason_object_target_key(
             reason_kind,
             self._artifact_stable_key_for_analysis(target, analysis),
         )
-    if reason_kind == "outcome_partition_unknown":
+    if reason_kind == "outcome_partition_completion_unproven":
         target = self._outcome_partition_unknown_object_target_key(canonical_reason, analysis1, analysis2)
         return (
             "outcome_partition_unsafety",
@@ -799,3 +834,179 @@ def _impl__sat_unsafety_reason_object_target_key(
         self._return_guard_disjunction_object_key(analysis),
         deferred_keys,
     ), analysis)
+
+
+def _v2_observe_sat_unsafety_reason(reason_record: UnknownReasonRecord) -> UnknownReasonRecord:
+    _emit_v2_sat_safety_blockers(
+        "OBSERVED",
+        tuple(str(ref) for ref in reason_record.evidence_refs),
+        reason_record.object_target_key,
+        producer_id="sat_unsafety_reason_producer",
+    )
+    return reason_record
+
+
+def _v2_observe_sat_ambiguity_reason(reason_record: UnknownReasonRecord) -> UnknownReasonRecord:
+    _emit_v2_sat_safety_ambiguity(
+        "OBSERVED",
+        tuple(str(ref) for ref in reason_record.evidence_refs),
+        reason_record.object_target_key,
+        producer_id="sat_counterexample_ambiguity_producer",
+    )
+    return reason_record
+
+
+def _v2_complete_sat_unsafety_and_true(
+    owner: Any,
+    reason_record: UnknownReasonRecord,
+    proof_content: Mapping[str, Any],
+) -> bool:
+    _emit_v2_sat_safety_blockers(
+        "COMPLETED",
+        tuple(str(ref) for ref in reason_record.evidence_refs),
+        owner._normalize_nested_tuple(reason_record.object_target_key),
+        producer_id="sat_unsafety_resolution_producer",
+        proof_artifact_digest=_v2_sat_safety_proof_digest(proof_content),
+    )
+    return True
+
+
+def _impl__complete_v2_sat_counterexample_ambiguity_if_observed(
+    self,
+    evidence_refs: Sequence[str],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    case1: Any,
+    case2: Any,
+    pair_id: str,
+    counterexample_raw: Mapping[str, Any],
+) -> None:
+    object_target_key = self._sat_counterexample_ambiguous_object_target_key(
+        evidence_refs,
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id=pair_id,
+    )
+    _emit_v2_sat_safety_ambiguity_if_observed(
+        tuple(str(ref) for ref in evidence_refs or ()),
+        object_target_key,
+        producer_id="sat_counterexample_disambiguation_producer",
+        proof_artifact_digest=_v2_sat_safety_proof_digest({
+            "object_target_key": object_target_key,
+            "counterexample_raw": counterexample_raw,
+            "partition_disambiguation": "validated",
+        }),
+    )
+
+
+def _impl__observe_v2_sat_counterexample_ambiguity(
+    self,
+    evidence_refs: Sequence[str],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    case1: Any,
+    case2: Any,
+    pair_id: str,
+) -> None:
+    object_target_key = self._sat_counterexample_ambiguous_object_target_key(
+        evidence_refs,
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id=pair_id,
+    )
+    _emit_v2_sat_safety_ambiguity(
+        "OBSERVED",
+        tuple(str(ref) for ref in evidence_refs or ()),
+        object_target_key,
+        producer_id="sat_counterexample_partition_validation_precondition",
+    )
+
+
+def _v2_sat_safety_reason_for_ref(reason_ref: str) -> str:
+    if "counterexample_replay" in reason_ref:
+        return "counterexample_same_function_replay_unproven"
+    return "counterexample_analysis_safety_unproven"
+
+
+def _emit_v2_sat_safety_blockers(
+    action: str,
+    reason_refs: Sequence[str],
+    object_target_key: Any,
+    *,
+    producer_id: str,
+    proof_artifact_digest: Optional[str] = None,
+) -> None:
+    from ...v2.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_signal,
+    )
+
+    for reason_ref in tuple(dict.fromkeys(str(item) for item in reason_refs)):
+        emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
+            action=action,
+            reason_id=_v2_sat_safety_reason_for_ref(reason_ref),
+            canonical_target_key=(object_target_key, ("safety_gate_ref", reason_ref)),
+            missing_semantic_fact=("counterexample_safety_gate_unproven", reason_ref),
+            evidence_refs=(reason_ref,),
+            producer_id=producer_id,
+            proof_artifact_digest=proof_artifact_digest,
+        ), producer_site_manifest_id="sat-safety-blocker-observed")
+
+
+def _emit_v2_sat_safety_ambiguity(
+    action: str,
+    evidence_refs: Sequence[str],
+    object_target_key: Any,
+    *,
+    producer_id: str,
+    proof_artifact_digest: Optional[str] = None,
+) -> None:
+    from ...v2.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_signal,
+    )
+
+    emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
+        action=action,
+        reason_id="counterexample_partition_replay_ambiguous",
+        canonical_target_key=object_target_key,
+        missing_semantic_fact=("unique_counterexample_partition_witness", False),
+        evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
+        producer_id=producer_id,
+        proof_artifact_digest=proof_artifact_digest,
+    ), producer_site_manifest_id="sat-safety-ambiguity-observed")
+
+
+def _emit_v2_sat_safety_ambiguity_if_observed(
+    evidence_refs: Sequence[str],
+    object_target_key: Any,
+    *,
+    producer_id: str,
+    proof_artifact_digest: str,
+) -> None:
+    from ...v2.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_completion_if_observed,
+    )
+
+    emit_sat_safety_completion_if_observed(SatSafetyBlockerProductionSignal(
+        action="COMPLETED",
+        reason_id="counterexample_partition_replay_ambiguous",
+        canonical_target_key=object_target_key,
+        missing_semantic_fact=("unique_counterexample_partition_witness", False),
+        evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
+        producer_id=producer_id,
+        proof_artifact_digest=proof_artifact_digest,
+    ), producer_site_manifest_id="sat-safety-ambiguity-completed")
+
+
+def _v2_sat_safety_proof_digest(proof_content: Mapping[str, Any]) -> str:
+    from ...v2.contracts import authority_digest
+
+    return authority_digest({"sat_safety_proof_content": proof_content})

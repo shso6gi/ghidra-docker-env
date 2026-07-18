@@ -1132,6 +1132,26 @@ def build_top_level_observation_contract(
                 side,
             ))
     if blockers:
+        try:
+            from .v2.abi_width_readonly import AbiWidthReadonlyBlockerSignal
+            from .v2.production_signals import emit_abi_width_readonly_signal
+
+            for seed in (left, right):
+                for slot in seed.unresolved_fact_slots:
+                    if slot in {
+                        "return_storage_fact", "payload_width_fact",
+                        "extension_evidence_fact",
+                    }:
+                        emit_abi_width_readonly_signal(
+                            AbiWidthReadonlyBlockerSignal.from_width_seed(seed, slot),
+                            producer_site_manifest_id=(
+                                "return-width-unary-provenance-blocker"
+                            ),
+                        )
+        except Exception as exc:
+            from .v2.production_signals import record_production_pilot_shadow_error
+
+            record_production_pilot_shadow_error(exc)
         return BlockedObservation(tuple(blockers))
     left_declared = _declared_observation_width(left.calling_convention_fact)
     right_declared = _declared_observation_width(right.calling_convention_fact)
@@ -1151,6 +1171,26 @@ def build_top_level_observation_contract(
         observation_width = int(left.payload_width)
         provenance_kind = "common_validated_semantic_payload_width"
     if observation_width is None:
+        try:
+            from .v2.abi_width_readonly import (
+                AbiWidthReadonlyBlockerSignal,
+                ReturnObservationNeedSeed,
+            )
+            from .v2.production_signals import emit_abi_width_readonly_signal
+
+            pair_seed = build_pair_return_observation_seed(left, right)
+            emit_abi_width_readonly_signal(
+                AbiWidthReadonlyBlockerSignal.from_observation_need_seed(
+                    ReturnObservationNeedSeed.from_pair_seed(left, right, pair_seed)
+                ),
+                producer_site_manifest_id=(
+                    "return-width-observation-contract-blocker"
+                ),
+            )
+        except Exception as exc:
+            from .v2.production_signals import record_production_pilot_shadow_error
+
+            record_production_pilot_shadow_error(exc)
         return BlockedObservation((WidthBlocker(
             "observation_contract",
             target.stable_key(),
@@ -1161,6 +1201,41 @@ def build_top_level_observation_contract(
         observation_width > int(left.storage_width or 0)
         or observation_width > int(right.storage_width or 0)
     ):
+        try:
+            from .v2.abi_width_readonly import (
+                AbiWidthReadonlyBlockerSignal,
+                ReturnObservationProjectionSeed,
+            )
+            from .v2.production_signals import (
+                emit_abi_width_readonly_signal,
+                register_abi_width_solver_candidate,
+            )
+
+            pair_seed = build_pair_return_observation_seed(left, right)
+            projection_seed = ReturnObservationProjectionSeed.from_pair_seed(
+                left, right, pair_seed
+            )
+            for reason_id in (
+                "return_observation_contract_unproven",
+                "return_high_bit_relation_unproven",
+            ):
+                signal = AbiWidthReadonlyBlockerSignal.from_projection_seed(
+                    reason_id, projection_seed
+                )
+                emit_abi_width_readonly_signal(
+                    signal,
+                    producer_site_manifest_id=(
+                        "return-width-projection-relation-blocker"
+                    ),
+                )
+                if reason_id == "return_high_bit_relation_unproven":
+                    register_abi_width_solver_candidate(
+                        signal, projection_seed
+                    )
+        except Exception as exc:
+            from .v2.production_signals import record_production_pilot_shadow_error
+
+            record_production_pilot_shadow_error(exc)
         return BlockedObservation((WidthBlocker(
             "pair_width_compatibility",
             target.stable_key(),

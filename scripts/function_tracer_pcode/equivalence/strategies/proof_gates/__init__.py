@@ -270,6 +270,9 @@ _METHOD_MODULES = {
     '_validated_call_effect_blocker_selected_candidate': 'call_effect_1',
 }
 
+_METHOD_MODULES['_complete_v2_sat_counterexample_ambiguity_if_observed'] = 'sat_safety'
+_METHOD_MODULES['_observe_v2_sat_counterexample_ambiguity'] = 'sat_safety'
+
 
 def resolve_method(name: str) -> Optional[Callable[..., Any]]:
     module_name = _METHOD_MODULES.get(name)

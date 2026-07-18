@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "validation_kind": "unknown_taxonomy_v2_phase2_registry_codec_gate",
+  "phase_status": "review_pending",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "production_decision_integration_changed": false,
+  "focused_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py",
+    "elapsed_seconds": 2.73,
+    "result": "40 passed"
+  },
+  "regression_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py",
+    "elapsed_seconds": 86.40,
+    "result": "111 passed"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/__init__.py": "4204e5738b96ae52bed5b7e98ad35173c1ba356028f91d35d060ea91b1447950",
+    "scripts/function_tracer_pcode/equivalence/v2/codecs.py": "6919f6be297712e447559151f60f0adcb4a74078116686d7fe7c5105943b188d",
+    "scripts/function_tracer_pcode/equivalence/v2/legacy_codec.py": "244956a1db9535ca2025350293be2b69a7ca49f57ae45cc3b63ea6d8d0bfda28",
+    "scripts/function_tracer_pcode/equivalence/v2/registry.py": "c0ddf6359d345290bbc3ed05da92ac46bdbc40e2aa85d17dec50fdb7059a47d8",
+    "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "949442508023cb71802a02b08fbcf225aad2eba5661a4e21f307d5bf0b24ff25",
+    "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "2f374204da829a59b5aa0cda78955162738954afc9fdf399265eb761433f8c87",
+    "scripts/function_tracer_pcode/equivalence/v2/decision.py": "af11082e8572278a9ce87688587c4bc42c067d1877a0671581b69a1f3b4e1581",
+    "scripts/function_tracer_pcode/equivalence/v2/frontier.py": "f22ed8bdb0f69e3c619003a1a700d783084f7866d39873b6c4fb53c26ca9a3b3",
+    "scripts/function_tracer_pcode/equivalence/v2/stream.py": "b74637ce188ad15e2238fa2a16f2387bf78be21b9ebf878a1fb086d512c8f8db",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py": "8edbf3e82d36272b4270d2e012fe6cd612d23645aa64d2c0e7c1abaa73528b0c"
+  }
+}

@@ -143,6 +143,25 @@ def prepare_pair_return_observation(
     left_proof = left_prepared.proofs_by_case_id[id(left_case)]
     right_proof = right_prepared.proofs_by_case_id[id(right_case)]
     pair_seed = build_pair_return_observation_seed(left_seed, right_seed)
+    try:
+        from .v2.abi_width_readonly import assess_return_abi_pair
+        from .v2.production_signals import emit_abi_width_readonly_signal
+
+        abi_assessment = assess_return_abi_pair(
+            left_analysis,
+            right_analysis,
+            left_seed,
+            right_seed,
+            pair_seed,
+        )
+        for signal in abi_assessment.signals:
+            emit_abi_width_readonly_signal(
+                signal, producer_site_manifest_id="return-width-pair-assessment"
+            )
+    except Exception as exc:
+        from .v2.production_signals import record_production_pilot_shadow_error
+
+        record_production_pilot_shadow_error(exc)
     def blocked_result(blockers, **kwargs):
         _inc(stats, "width_observation_blocked")
         for blocker in tuple(blockers or ()):

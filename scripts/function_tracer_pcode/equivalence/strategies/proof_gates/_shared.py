@@ -13,7 +13,7 @@ from ....model import ExpressionType
 from ....model.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from ....smt import ParallelResult
 from ...formula.returns import coerce_value_to_bitvec_width
-from ...unknown_reason import UnknownRecoveryActionStatus, UnknownRecoveryProofKind, UnknownRecoveryProofObligation, UnknownReasonId, UnknownReasonRecord, build_proof_obligation_id, build_unknown_recovery_actions, coerce_unknown_reason_records, make_unknown_reason
+from ...unknown_reason import UnknownRecoveryActionStatus, UnknownRecoveryProofKind, UnknownRecoveryProofObligation, UnknownReasonId, UnknownReasonRecord, build_proof_obligation_id, build_unknown_recovery_actions, coerce_unknown_reason_records, make_internal_v2_reason_diagnostic, make_unknown_reason
 
 @dataclass
 class StrategyResult:
@@ -34,6 +34,8 @@ class StrategyResult:
     normalization_rules: List[Any] = field(default_factory=list)
     pairwise_debug_stats: Optional[Dict[str, int]] = None
     unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
+    error_kind: Optional[str] = None
+    error_message: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -48,4 +50,4 @@ class ReturnCoverageCheckResult:
     coverage_proof_method: Optional[str] = None
     solver_status: Optional[str] = None
 
-__all__ = ('ABC', 'Any', 'Condition', 'ConditionSMTOracle', 'Dict', 'Expression', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'Mapping', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Sequence', 'Set', 'SimpleNamespace', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'abstractmethod', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_provenance_key', 'expression_smt_bit_width', 'field', 'hashlib', 'json', 'make_unknown_reason', 're')
+__all__ = ('ABC', 'Any', 'Condition', 'ConditionSMTOracle', 'Dict', 'Expression', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'Mapping', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Sequence', 'Set', 'SimpleNamespace', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'abstractmethod', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_provenance_key', 'expression_smt_bit_width', 'field', 'hashlib', 'json', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 're')

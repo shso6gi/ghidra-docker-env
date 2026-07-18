@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "delta_kind": "phase6_slice_local_inventory_delta",
+  "frozen_phase0": {
+    "candidate_set_digest": "82fe1f812ca10cb245d79ca720d7c1ea850b260f46c4737b1e7c26395d7eef0d",
+    "candidate_count": 589
+  },
+  "current_source": {
+    "candidate_set_digest": "e55740e5a9bbfbeb6928f4293a114507e3c4a9635b2fa5e0c3624c739a2354fa",
+    "candidate_count": 590
+  },
+  "added": [
+    {
+      "site_id": "8d6616443f0b06eb94cd7e9422b3886f5b7e8aaa62dcb9b9a35d0e14e2b5ae55",
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
+      "line": 35,
+      "symbol": "<module>",
+      "construct_kind": "reason_selection_assignment",
+      "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
+      "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
+      "discovered_authority_role": "derived_projection",
+      "discovered_reason_resolution": "not_applicable",
+      "reviewed_authority_role": "v2_registry_declaration",
+      "reviewed_reason_resolution": "sealed_v2_set",
+      "resolved_v2_reason_ids": [
+        "counterexample_analysis_safety_unproven",
+        "counterexample_partition_replay_ambiguous",
+        "counterexample_same_function_replay_unproven"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
+      "site_id": "976b845bade90102a02e6514418caaf40f8e3498bc3af3a9b9199ecbcb67eba1",
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "line": 482,
+      "symbol": "_impl__make_sat_unsafety_unknown_reason",
+      "construct_kind": "reason_constructor",
+      "source": "return _v2_observe_sat_unsafety_reason(make_unknown_reason(",
+      "inventory_source_fingerprint": "66e761a12b2ee825a14d3eae168c87c984a0210a4b97f26b330e51ed161c90ae",
+      "discovered_authority_role": "production",
+      "discovered_reason_resolution": "static_set",
+      "resolved_legacy_reason_ids": ["sat_unsafety"],
+      "reviewed_authority_role": "legacy_projection_producer_with_v2_dual_write",
+      "reviewed_reason_resolution": "exact_legacy_projection",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    },
+    {
+      "site_id": "c555e4ac4e65aa8e2e5f62f838a667950e30a4301105a5c13b04c2dfa7562234",
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "line": 538,
+      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason",
+      "construct_kind": "reason_constructor",
+      "source": "return _v2_observe_sat_ambiguity_reason(make_unknown_reason(",
+      "inventory_source_fingerprint": "7557115d34884ecb8834230f84100ac656012a8167e38cce6517cfa101f0a6fa",
+      "discovered_authority_role": "production",
+      "discovered_reason_resolution": "static_set",
+      "resolved_legacy_reason_ids": ["sat_counterexample_ambiguous"],
+      "reviewed_authority_role": "legacy_projection_producer_with_v2_dual_write",
+      "reviewed_reason_resolution": "exact_legacy_projection",
+      "review_status": "reviewed_by_main_pending_fixed_review"
+    }
+  ],
+  "removed": [
+    {
+      "site_id": "c98f707b994e6827c8305a862cff56c3f7a4d249751013f080c4bdefc542d542",
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "line": 538,
+      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason",
+      "construct_kind": "reason_constructor",
+      "source": "return make_unknown_reason(",
+      "inventory_source_fingerprint": "a30979531ff5d5c7fa38534c0f76fb4a21167bc1c5f5ad7158acfa600630d8df",
+      "authority_role": "production",
+      "reason_resolution": "static_set",
+      "resolved_reason_ids": ["sat_counterexample_ambiguous"],
+      "replacement_site_id": "c555e4ac4e65aa8e2e5f62f838a667950e30a4301105a5c13b04c2dfa7562234"
+    },
+    {
+      "site_id": "d8bc33b09010024eb5d9fe49d7ab81a97fff62de93fd6c8d1d1fd8c936665ed3",
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "line": 482,
+      "symbol": "_impl__make_sat_unsafety_unknown_reason",
+      "construct_kind": "reason_constructor",
+      "source": "return make_unknown_reason(",
+      "inventory_source_fingerprint": "a30979531ff5d5c7fa38534c0f76fb4a21167bc1c5f5ad7158acfa600630d8df",
+      "authority_role": "production",
+      "reason_resolution": "static_set",
+      "resolved_reason_ids": ["sat_unsafety"],
+      "replacement_site_id": "976b845bade90102a02e6514418caaf40f8e3498bc3af3a9b9199ecbcb67eba1"
+    }
+  ],
+  "gate": {
+    "added_ids_equal_current_minus_frozen": true,
+    "removed_ids_equal_frozen_minus_current": true,
+    "all_added_sites_classified": true,
+    "frozen_phase0_modified": false
+  }
+}

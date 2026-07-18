@@ -1242,6 +1242,17 @@ def _no_active_pair_certificate_proven(
     return False
 
 
+def comparison_receipt_production_session(
+    receipt: "ComparisonExecutionReceipt", frame: "PreparedDispatchFrame",
+) -> Any:
+    """Return the exact production session captured by the trusted issuer."""
+
+    from .v2.production_context import comparison_receipt_authority
+
+    authority = comparison_receipt_authority(receipt, frame)
+    return authority[2] if authority is not None else None
+
+
 @dataclass(frozen=True)
 class ComparisonExecutionReceipt:
     receipt_id: str
@@ -1250,6 +1261,7 @@ class ComparisonExecutionReceipt:
     prepared_surface_digest: str
     projection_id: str
     generation: int
+    dispatch_nonce: str
     query_records: Tuple[QueryExecutionRecord, ...]
     consumed_projection_binding_ids: Tuple[str, ...]
     disposition_counts: Tuple[Tuple[str, int], ...]
@@ -1265,6 +1277,9 @@ class ComparisonExecutionReceipt:
     excluded_projection_binding_ids: Tuple[str, ...] = ()
 
     def is_trusted_for(self, frame: "PreparedDispatchFrame") -> bool:
+        from .v2.production_context import comparison_receipt_authority
+
+        authority = comparison_receipt_authority(self, frame)
         count_map = dict(self.disposition_counts)
         runtime = frame.obligation_runtime
         ledger = frame.pair_disposition_ledger
@@ -1291,12 +1306,19 @@ class ComparisonExecutionReceipt:
             )
         )
         return (
+            authority is not None
+            and authority[0] is frame
+            and authority[1] is self
+            and frame.authoritative_receipt is self
+            and frame.receipt is self
+            and
             self.status == "complete"
             and self.comparison_session_id == frame.comparison_session_id
             and self.branch_id == frame.branch_id
             and self.prepared_surface_digest == frame.prepared.surface_digest
             and self.projection_id == frame.projection.projection_id
             and self.generation == frame.generation
+            and self.dispatch_nonce == frame.dispatch_nonce
             and self.issuer_kind == "builtin_query_executor_v1"
             and self.schema_version == "comparison_execution_receipt_v3"
             and self.branch_payload_kind in {"pairwise_ledger", "monolithic_query", "query_execution_records"}
@@ -1515,6 +1537,7 @@ class PreparedDispatchFrame:
                     self.prepared.surface_digest,
                     self.projection.projection_id,
                     self.generation,
+                    self.dispatch_nonce,
                 ))
                 quiescence_certificate_digest = _digest((
                     "runtime_quiescence_certificate_compatibility_v1",
@@ -1534,6 +1557,7 @@ class PreparedDispatchFrame:
                     self.prepared.surface_digest,
                     self.projection.projection_id,
                     self.generation,
+                    self.dispatch_nonce,
                     records,
                     consumed,
                     counts,
@@ -1553,6 +1577,7 @@ class PreparedDispatchFrame:
                 self.prepared.surface_digest,
                 self.projection.projection_id,
                 self.generation,
+                self.dispatch_nonce,
                 records,
                 consumed,
                 counts,
@@ -1569,6 +1594,15 @@ class PreparedDispatchFrame:
             )
             self.authoritative_receipt = receipt
             self.receipt = receipt
+            from .v2.production_context import (
+                active_production_pilot_session,
+                register_comparison_receipt_authority,
+            )
+
+            register_comparison_receipt_authority(
+                receipt.receipt_id, self, receipt,
+                active_production_pilot_session(),
+            )
             return receipt
 
     def close(self) -> None:

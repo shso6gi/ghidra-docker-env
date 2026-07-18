@@ -1,0 +1,1303 @@
+{
+  "audit_kind": "unknown_taxonomy_v1_current_head_inventory",
+  "expected_reason_count": 37,
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "reason_count": 37,
+  "reasons": [
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 2,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "operational_gap",
+      "reason_id": "decompilation_failed",
+      "reason_scope": "function",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": "decompilation_failed",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "result",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "coverage_gap",
+      "reason_id": "empty_return_cases",
+      "reason_scope": "function",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 16,
+      "direct_static_producer_count": 8,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 12,
+      "reason_class": "unsafe_analysis",
+      "reason_id": "equivalence_blocking_unsafety",
+      "reason_scope": "function",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 73,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 2,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "operational_gap",
+      "reason_id": "high_function_missing",
+      "reason_scope": "function",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": "high_function_missing",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 4,
+      "reason_class": "proof_obligation",
+      "reason_id": "loop_summary_proof_missing",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover generic loop-summary proof gaps by completing the guard partition.",
+        "proof_obligations": [
+          {
+            "description": "Complete the loop-summary guard partition before using it as proof.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "loop_summary_guard_partition",
+            "required_evidence": [
+              "loop_summary_seed",
+              "term_sequence",
+              "case_guard_disjunction",
+              "pure_side_effect_profile"
+            ]
+          }
+        ],
+        "reason_id": "loop_summary_proof_missing",
+        "target_regression": "loop_summary_proof_missing"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "loop_summary_proof_missing",
+      "test_reference_count": 6,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 6,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 3,
+      "reason_class": "proof_obligation",
+      "reason_id": "method_b_closure_blocked",
+      "reason_scope": "stage",
+      "recovery_plan": {
+        "description": "Recover Method-B closure only when covering case and guard partition proofs exist.",
+        "proof_obligations": [
+          {
+            "description": "Prove a Method-B covering case from seed compensation and terms.",
+            "proof_kind": "proof_backed_covering_case",
+            "proof_stage": "method_b_covering_case",
+            "required_evidence": [
+              "seed_compensation",
+              "term_sequence",
+              "pure_side_effect_profile"
+            ]
+          },
+          {
+            "description": "Complete the guard partition that justifies the covering case.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "method_b_guard_partition",
+            "required_evidence": [
+              "guard_partition",
+              "partition_coverage_proof"
+            ]
+          }
+        ],
+        "reason_id": "method_b_closure_blocked",
+        "target_regression": "method_b_closure_blocked"
+      },
+      "recovery_proof_kind": "proof_backed_covering_case",
+      "target_regression": "method_b_closure_blocked",
+      "test_reference_count": 24,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "retryable",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 3,
+      "reason_class": "operational_gap",
+      "reason_id": "normalization_no_change",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover no-op normalization by choosing a typed rewrite strategy.",
+        "proof_obligations": [
+          {
+            "description": "Select a typed normalization strategy when the previous pass made no change.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "normalization_strategy_selection",
+            "required_evidence": [
+              "query_hash",
+              "typed_expression_key",
+              "candidate_rewrite_rules"
+            ]
+          }
+        ],
+        "reason_id": "normalization_no_change",
+        "target_regression": "normalization_no_change"
+      },
+      "recovery_proof_kind": "solver_retry_or_normalization",
+      "target_regression": "normalization_no_change",
+      "test_reference_count": 9,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_cfg_reachability_incomplete",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_cfg_reachability_incomplete",
+        "target_regression": "outcome_cfg_reachability_incomplete"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_cfg_reachability_incomplete",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_cross_kind_overlap",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_cross_kind_overlap",
+        "target_regression": "outcome_cross_kind_overlap"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_cross_kind_overlap",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_member_unclassified",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_member_unclassified",
+        "target_regression": "outcome_member_unclassified"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_member_unclassified",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_partition_residual_sat",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_partition_residual_sat",
+        "target_regression": "outcome_partition_residual_sat"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_partition_residual_sat",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_partition_totality_timeout",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_partition_totality_timeout",
+        "target_regression": "outcome_partition_totality_timeout"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_partition_totality_timeout",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 1,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_partition_unknown",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover unknown outcome partitions by proving the unknown member semantics.",
+        "proof_obligations": [
+          {
+            "description": "Resolve UnknownOutcome members into proved return/divergence outcomes.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "outcome_partition_resolution",
+            "required_evidence": [
+              "unknown_outcome_guard",
+              "unknown_outcome_reason",
+              "must_diverge_or_return_proof"
+            ]
+          }
+        ],
+        "reason_id": "outcome_partition_unknown",
+        "target_regression": "outcome_partition_unknown"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_partition_unknown",
+      "test_reference_count": 6,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_path_region_incomplete",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_path_region_incomplete",
+        "target_regression": "outcome_path_region_incomplete"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_path_region_incomplete",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_return_consistency_unknown",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_return_consistency_unknown",
+        "target_regression": "outcome_return_consistency_unknown"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_return_consistency_unknown",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "outcome_return_value_conflict",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover only by completing the exact unary outcome requirement.",
+        "proof_obligations": [
+          {
+            "description": "Complete the named function-scoped outcome proof obligation.",
+            "proof_kind": "guard_partition_completion",
+            "proof_stage": "unary_outcome_partition",
+            "required_evidence": [
+              "function_outcome_seed",
+              "validated_unary_proof_closure",
+              "function_premise_digest"
+            ]
+          }
+        ],
+        "reason_id": "outcome_return_value_conflict",
+        "target_regression": "outcome_return_value_conflict"
+      },
+      "recovery_proof_kind": "guard_partition_completion",
+      "target_regression": "outcome_return_value_conflict",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "phi_circular_replacement_unproven",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Keep phi_circular unresolved until a structural recurrence replacement is proved.",
+        "proof_obligations": [
+          {
+            "description": "Replace phi_circular only through a structural loop recurrence proof.",
+            "proof_kind": "loop_recurrence_proof",
+            "proof_stage": "phi_circular_structural_replacement",
+            "required_evidence": [
+              "origin_pcode_ref",
+              "induction_binding",
+              "exit_guard_binding",
+              "replacement_expression"
+            ]
+          }
+        ],
+        "reason_id": "phi_circular_replacement_unproven",
+        "target_regression": "phi_circular_replacement_unproven"
+      },
+      "recovery_proof_kind": "loop_recurrence_proof",
+      "target_regression": "phi_circular_replacement_unproven",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 6,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 3,
+      "reason_class": "proof_obligation",
+      "reason_id": "readonly_identity_missing",
+      "reason_scope": "expression",
+      "recovery_plan": {
+        "description": "Recover readonly equality only from object-centric storage/count identity.",
+        "proof_obligations": [
+          {
+            "description": "Propagate readonly identity from storage-backed object/count evidence.",
+            "proof_kind": "storage_backed_identity_propagation",
+            "proof_stage": "readonly_operand_identity",
+            "required_evidence": [
+              "object_storage_identity",
+              "count_identity",
+              "guard_implication",
+              "finite_witness"
+            ]
+          }
+        ],
+        "reason_id": "readonly_identity_missing",
+        "target_regression": "readonly_identity_missing"
+      },
+      "recovery_proof_kind": "storage_backed_identity_propagation",
+      "target_regression": "readonly_identity_missing",
+      "test_reference_count": 17,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "retryable",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "operational_gap",
+      "reason_id": "recoverable_partial",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover partial call argument evidence by completing a path-sensitive merge.",
+        "proof_obligations": [
+          {
+            "description": "Merge partial call-argument evidence under path-sensitive guards.",
+            "proof_kind": "path_sensitive_argument_merge",
+            "proof_stage": "call_argument_recovery",
+            "required_evidence": [
+              "callsite_guard_partition",
+              "argument_value_by_path",
+              "callee_parameter_storage"
+            ]
+          }
+        ],
+        "reason_id": "recoverable_partial",
+        "target_regression": "recoverable_partial"
+      },
+      "recovery_proof_kind": "path_sensitive_argument_merge",
+      "target_regression": "recoverable_partial",
+      "test_reference_count": 12,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 11,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "coverage_gap",
+      "reason_id": "return_coverage_gap",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover return coverage gaps by adding the missing partition and coverage proof.",
+        "proof_obligations": [
+          {
+            "description": "Extract the missing return partition and value under its guard.",
+            "proof_kind": "return_coverage_completion",
+            "proof_stage": "return_partition_extraction",
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ]
+          },
+          {
+            "description": "Prove the completed return cases cover the function precondition.",
+            "proof_kind": "return_coverage_completion",
+            "proof_stage": "return_guard_coverage",
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ]
+          }
+        ],
+        "reason_id": "return_coverage_gap",
+        "target_regression": "return_coverage_gap"
+      },
+      "recovery_proof_kind": "return_coverage_completion",
+      "target_regression": "return_coverage_gap",
+      "test_reference_count": 122,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 11,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 7,
+      "reason_class": "coverage_gap",
+      "reason_id": "return_coverage_inconclusive",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover inconclusive coverage by proving or refuting the uncovered guard.",
+        "proof_obligations": [
+          {
+            "description": "Disambiguate inconclusive return coverage with normalized SMT guards.",
+            "proof_kind": "return_coverage_completion",
+            "proof_stage": "return_coverage_smt_disambiguation",
+            "required_evidence": [
+              "case_guard_disjunction",
+              "normalized_guard_formula",
+              "solver_model_or_timeout"
+            ]
+          }
+        ],
+        "reason_id": "return_coverage_inconclusive",
+        "target_regression": "return_coverage_inconclusive"
+      },
+      "recovery_proof_kind": "return_coverage_completion",
+      "target_regression": "return_coverage_inconclusive",
+      "test_reference_count": 29,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 16,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 7,
+      "reason_class": "proof_obligation",
+      "reason_id": "return_width_bridge_missing",
+      "reason_scope": "query",
+      "recovery_plan": {
+        "description": "Recover width-mismatched returns only with ABI relation plus high-bit proof.",
+        "proof_obligations": [
+          {
+            "description": "Prove the compared return storages are related by the active ABI.",
+            "proof_kind": "abi_relation_proof",
+            "proof_stage": "abi_relation",
+            "required_evidence": [
+              "calling_convention",
+              "return_storage",
+              "narrow_return_width"
+            ]
+          },
+          {
+            "description": "Prove the wider return high bits cannot change the semantic result.",
+            "proof_kind": "high_bit_proof",
+            "proof_stage": "high_bit_relation",
+            "required_evidence": [
+              "producer_width",
+              "extension_semantics",
+              "high_bits_irrelevant_or_equal"
+            ]
+          }
+        ],
+        "reason_id": "return_width_bridge_missing",
+        "target_regression": "return_width_bridge_missing"
+      },
+      "recovery_proof_kind": "abi_relation_high_bit_proof",
+      "target_regression": "return_width_bridge_missing",
+      "test_reference_count": 69,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_disequivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "unsafe_analysis",
+      "reason_id": "sat_counterexample_ambiguous",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover ambiguous SAT counterexamples only with replay plus partition proof.",
+        "proof_obligations": [
+          {
+            "description": "Accept an ambiguous SAT counterexample only after replay proves a unique disequivalence witness under the active case partition.",
+            "proof_kind": "sat_unsafety_resolution",
+            "proof_stage": "sat_counterexample_safety",
+            "required_evidence": [
+              "counterexample_replay",
+              "case_partition_disambiguation",
+              "coverage_effect_safety"
+            ]
+          }
+        ],
+        "reason_id": "sat_counterexample_ambiguous",
+        "target_regression": "sat_counterexample_ambiguous"
+      },
+      "recovery_proof_kind": "sat_unsafety_resolution",
+      "target_regression": "sat_counterexample_ambiguous",
+      "test_reference_count": 7,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_disequivalence",
+      "derived_projection_site_count": 9,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "unsafe_analysis",
+      "reason_id": "sat_unsafety",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover SAT unsafety only with replay plus coverage/effect safety proof.",
+        "proof_obligations": [
+          {
+            "description": "Accept a SAT counterexample only after replay and all active coverage/effect unsafety blockers are discharged.",
+            "proof_kind": "sat_unsafety_resolution",
+            "proof_stage": "sat_counterexample_safety",
+            "required_evidence": [
+              "counterexample_replay",
+              "active_unsafety_discharge",
+              "coverage_effect_safety"
+            ]
+          }
+        ],
+        "reason_id": "sat_unsafety",
+        "target_regression": "sat_unsafety"
+      },
+      "recovery_proof_kind": "sat_unsafety_resolution",
+      "target_regression": "sat_unsafety",
+      "test_reference_count": 48,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "retryable",
+      "derived_projection_site_count": 1,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 3,
+      "reason_class": "proof_obligation",
+      "reason_id": "solver_proven_rewrite_no_change",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover no-op solver rewrites by producing a typed rewrite candidate.",
+        "proof_obligations": [
+          {
+            "description": "Generate a semantically typed rewrite candidate before retrying the solver.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "rewrite_candidate_generation",
+            "required_evidence": [
+              "pre_normalized_query",
+              "rewrite_candidate",
+              "typed_expression_key"
+            ]
+          }
+        ],
+        "reason_id": "solver_proven_rewrite_no_change",
+        "target_regression": "solver_proven_rewrite_no_change"
+      },
+      "recovery_proof_kind": "solver_retry_or_normalization",
+      "target_regression": "solver_proven_rewrite_no_change",
+      "test_reference_count": 10,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "retryable",
+      "derived_projection_site_count": 8,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 4,
+      "reason_class": "proof_obligation",
+      "reason_id": "solver_proven_rewrite_proof_failed",
+      "reason_scope": "pair",
+      "recovery_plan": {
+        "description": "Recover failed solver-proven rewrites by rechecking the proof and retrying the normalized query.",
+        "proof_obligations": [
+          {
+            "description": "Recheck the failed rewrite proof with typed expressions and counterexample evidence.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "rewrite_proof_recheck",
+            "required_evidence": [
+              "rewrite_before_expr",
+              "rewrite_after_expr",
+              "proof_counterexample_or_solver_trace"
+            ]
+          },
+          {
+            "description": "Retry the normalized query with explicit solver settings and traceable query identity.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "solver_retry",
+            "required_evidence": [
+              "normalized_query",
+              "solver_options",
+              "query_hash"
+            ]
+          }
+        ],
+        "reason_id": "solver_proven_rewrite_proof_failed",
+        "target_regression": "solver_proven_rewrite_proof_failed"
+      },
+      "recovery_proof_kind": "solver_retry_or_normalization",
+      "target_regression": "solver_proven_rewrite_proof_failed",
+      "test_reference_count": 18,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "retryable",
+      "derived_projection_site_count": 9,
+      "direct_static_producer_count": 2,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 4,
+      "reason_class": "solver_limitation",
+      "reason_id": "solver_unknown_timeout",
+      "reason_scope": "query",
+      "recovery_plan": {
+        "description": "Recover solver timeouts by retrying a normalized query with explicit solver settings.",
+        "proof_obligations": [
+          {
+            "description": "Retry the timed-out query with traceable options and normalized terms.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "solver_timeout_retry",
+            "required_evidence": [
+              "query_hash",
+              "timeout_budget",
+              "solver_options",
+              "normalized_query"
+            ]
+          }
+        ],
+        "reason_id": "solver_unknown_timeout",
+        "target_regression": "solver_unknown_timeout"
+      },
+      "recovery_proof_kind": "solver_retry_or_normalization",
+      "target_regression": "solver_unknown_timeout",
+      "test_reference_count": 33,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "result",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 3,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "internal_error",
+      "reason_id": "strategy_exception",
+      "reason_scope": "stage",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "summary_effect_unmodeled",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Reject value-only summary returns when effects, memory, or calls are not modeled.",
+        "proof_obligations": [
+          {
+            "description": "Bind summary-derived returns to modeled side effects or object-derived no-effect evidence.",
+            "proof_kind": "effect_summary_completion",
+            "proof_stage": "summary_return_effect_region",
+            "required_evidence": [
+              "effect_region",
+              "memory_write_set",
+              "call_effect_summary"
+            ]
+          }
+        ],
+        "reason_id": "summary_effect_unmodeled",
+        "target_regression": "summary_effect_unmodeled"
+      },
+      "recovery_proof_kind": "effect_summary_completion",
+      "target_regression": "summary_effect_unmodeled",
+      "test_reference_count": 4,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "coverage_gap",
+      "reason_id": "summary_partition_not_total",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Keep summary returns out of the accepted partition until total coverage is proved.",
+        "proof_obligations": [
+          {
+            "description": "Prove the accepted exact/summary return partition covers the active precondition.",
+            "proof_kind": "precondition_completion",
+            "proof_stage": "summary_return_partition_totality",
+            "required_evidence": [
+              "active_function_precondition",
+              "summary_guard_disjunction",
+              "miss_region_unsat"
+            ]
+          }
+        ],
+        "reason_id": "summary_partition_not_total",
+        "target_regression": "summary_partition_not_total"
+      },
+      "recovery_proof_kind": "precondition_completion",
+      "target_regression": "summary_partition_not_total",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "summary_precondition_incomplete",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Do not accept summary returns without the applicability/precondition context.",
+        "proof_obligations": [
+          {
+            "description": "Define the active precondition covered by the proposed return partition.",
+            "proof_kind": "precondition_completion",
+            "proof_stage": "summary_return_active_precondition",
+            "required_evidence": [
+              "active_function_precondition",
+              "summary_applicability_guard"
+            ]
+          }
+        ],
+        "reason_id": "summary_precondition_incomplete",
+        "target_regression": "summary_precondition_incomplete"
+      },
+      "recovery_proof_kind": "precondition_completion",
+      "target_regression": "summary_precondition_incomplete",
+      "test_reference_count": 1,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "summary_return_candidate_invalid",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Recover summary-derived returns only after candidate validity is complete.",
+        "proof_obligations": [
+          {
+            "description": "Validate a loop-summary return candidate before exposing it as ReturnInfo.",
+            "proof_kind": "loop_summary_completion",
+            "proof_stage": "summary_return_candidate_validation",
+            "required_evidence": [
+              "summary_guard",
+              "summary_value_provenance",
+              "loop_summary_identity"
+            ]
+          }
+        ],
+        "reason_id": "summary_return_candidate_invalid",
+        "target_regression": "summary_return_candidate_invalid"
+      },
+      "recovery_proof_kind": "loop_summary_completion",
+      "target_regression": "summary_return_candidate_invalid",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "function",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_equivalence",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "proof_obligation",
+      "reason_id": "summary_return_overlap_unproven",
+      "reason_scope": "function",
+      "recovery_plan": {
+        "description": "Keep overlapping summary returns out of the accepted partition until value equality is proved.",
+        "proof_obligations": [
+          {
+            "description": "Prove overlapping exact/summary returns have equal values under the overlap guard.",
+            "proof_kind": "return_partition_overlap_proof",
+            "proof_stage": "summary_return_overlap_value_equality",
+            "required_evidence": [
+              "overlap_guard",
+              "return_storage",
+              "value_inequality_unsat"
+            ]
+          }
+        ],
+        "reason_id": "summary_return_overlap_unproven",
+        "target_regression": "summary_return_overlap_unproven"
+      },
+      "recovery_proof_kind": "return_partition_overlap_proof",
+      "target_regression": "summary_return_overlap_unproven",
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "result",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 5,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 1,
+      "reason_class": "internal_error",
+      "reason_id": "unexpected_pairwise_state",
+      "reason_scope": "stage",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 0,
+      "test_status": "not_referenced"
+    },
+    {
+      "aggregation_unit": "result",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 34,
+      "direct_static_producer_count": 1,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "fallback_and_exact_id",
+      "lifecycle_posture": "derived_projection_only",
+      "producer_status": "derived_projection_only",
+      "production_site_count": 0,
+      "reason_class": "diagnostic",
+      "reason_id": "unknown",
+      "reason_scope": "global",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 81,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 16,
+      "direct_static_producer_count": 2,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "operational_gap",
+      "reason_id": "unresolved_expression",
+      "reason_scope": "expression",
+      "recovery_plan": {
+        "description": "Recover unresolved expressions by typed lowering and type normalization before any solver retry can affect equivalence decisions.",
+        "proof_obligations": [
+          {
+            "description": "Lower the object-derived unresolved expression into a typed SMT term without erasing provenance.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "typed_expression_lowering",
+            "required_evidence": [
+              "object_target_key",
+              "typed_expression_key",
+              "lowering_rule"
+            ]
+          },
+          {
+            "description": "Normalize operand widths and signedness before retrying the affected query.",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "type_normalization",
+            "required_evidence": [
+              "operand_widths",
+              "signedness_policy",
+              "normalized_expression"
+            ]
+          }
+        ],
+        "reason_id": "unresolved_expression",
+        "target_regression": "unresolved_expression"
+      },
+      "recovery_proof_kind": "none",
+      "target_regression": "unresolved_expression",
+      "test_reference_count": 131,
+      "test_status": "referenced"
+    },
+    {
+      "aggregation_unit": "pair",
+      "consumer_status": "generic_registry_driven",
+      "decision_effect": "blocks_decision",
+      "derived_projection_site_count": 0,
+      "direct_static_producer_count": 0,
+      "legacy_readable": true,
+      "legacy_reader_site_count": 0,
+      "legacy_status": "exact_id_and_suffix_alias",
+      "lifecycle_posture": "production",
+      "producer_status": "production",
+      "production_site_count": 2,
+      "reason_class": "operational_gap",
+      "reason_id": "unresolved_value_expression",
+      "reason_scope": "expression",
+      "recovery_plan": null,
+      "recovery_proof_kind": "none",
+      "target_regression": null,
+      "test_reference_count": 9,
+      "test_status": "referenced"
+    }
+  ],
+  "recovery_plan_count": 29,
+  "schema_version": 1
+}

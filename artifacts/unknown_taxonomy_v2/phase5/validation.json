@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "validation_kind": "unknown_taxonomy_v2_phase5_narrow_dual_write_pilot_gate",
+  "phase_status": "review_pending",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "production_v1_final_outcome_changed": false,
+  "pilot_activation": "default_off_production_binary_boundary_opt_in",
+  "pilot_scope": "return_outcome_totality_solver_execution_alternative_proof",
+  "v2_lifecycle_inference_count": 0,
+  "attempted_solver_requirement_identity_coverage": 1.0,
+  "timeout_creates_semantic_reason": false,
+  "focused_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py",
+    "elapsed_seconds": 1.86,
+    "result": "28 passed"
+  },
+  "regression_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase3.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase4.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py",
+    "elapsed_seconds": 32.64,
+    "result": "172 passed"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "27be5bc8c96731bb388fad2bf52199ab4c3c7443267e5706f15db70d252ba135",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "3af8518bcec0e12f59cfe3c1a68b30860016b94b4e22cd3bb68ca539c0fb3003",
+    "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "1e568ee07f2550afa3147ff927bf4eda6dbfda1aa5061a436d4e63d67d8d1831",
+    "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "073c44cb15cb8568d0c5abd163165970b556639063bdb97dc95e1d3f91a7b340",
+    "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "106ce60fbb201625f54e27086ee6dffa52209a71a9f47962f2fa2b7e547bdf49",
+    "scripts/function_tracer_pcode/equivalence/v2/reducer.py": "bc86e7337f43dfca0958d440b820bc10dc84bbfd2cc95b97fa47a4ed6fb4d1e4",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "a1606c4bb9edb1881340d584ca1796e70eafb12f7d876b834a4ec0094565ebf4",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "a6a7b43fb6912f9e067f87059665fa114f599b94d3594d020eaa50fb1a4eabe4",
+    "scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py": "55a62e1cc6bc7d4b649089a905af5e85694ba196d3826990e2f3a611b70ddf34",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py": "1349cdfe40f4d23e6c1d4b080b0fbdff7132f2a5b3fe81afb32f13ee9b83f592",
+    "artifacts/unknown_taxonomy_v2/phase5/difference_manifest.json": "ddabab8e30f40370eddd789f917583750a15b97c2bd299c6e2f4d2ef9cc008b6"
+  }
+}

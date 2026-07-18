@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -42,8 +43,52 @@ from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
 from scripts.function_tracer_pcode.equivalence.call_effect_producer import (
     _RenderedStage,
     _execute_rendered_stage,
+    V2CallEffectExecutionContext,
     produce_pure_direct_call_proofs,
+    produce_v2_pure_direct_call_proofs,
 )
+from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
+    CALL_EFFECT_ARTIFACT_CAPABILITY_REGISTRY,
+    CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+    CALL_EFFECT_REASON_REGISTRY,
+    CALL_EFFECT_RECOVERY_REGISTRY,
+    CallEffectPilotEncoder,
+)
+from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+    BlockerEligibilityBaseRow,
+    CActiveBaseRow,
+    IdentityScope,
+    QOpenBaseRow,
+    VerifiedLifecycleProjection,
+    CensusMode,
+    authority_digest,
+)
+from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+    CensusManifest,
+    join_outcome_relations,
+)
+from scripts.function_tracer_pcode.equivalence.v2.decision import FinalizationAuthority
+from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    ExecutionAuthorityDeploymentPolicy,
+    ProducerStageContract,
+    ProducerStageRegistry,
+    PINNED_SOLVER_EXECUTION_ISSUER,
+    SolverExecutionEvidenceBundle,
+    SolverResultEntryOccurrenceReceipt,
+    activate_execution_authority_deployment,
+    install_execution_authority_signing_key,
+    issue_call_effect_requirement_assignment,
+)
+from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    CallEffectBlockerProductionSignal,
+    CallEffectProofBatchProductionSignal,
+    CompositeProductionSignalEncoder,
+    production_signal_scope,
+)
+from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    ProductionDualWritePilotConnector,
+)
+from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
 from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     _cross_binary_expression_shape,
 )
@@ -2374,6 +2419,602 @@ def test_typed_call_to_region_proves_guard_input_and_output_relations():
         "return_relation",
     ]
     assert all(item.record.status == "proven" for item in production.artifacts)
+    assert all(item.query_authority is not None for item in production.artifacts)
+    assert all(
+        item.query_authority.stage == item.record.proof_stage
+        and item.query_authority.obligation_id == item.record.obligation_id
+        and item.query_authority.observation_contract_id
+        == item.record.observation_contract_id
+        for item in production.artifacts
+    )
+
+
+def test_v2_typed_call_producer_uses_pinned_execution_and_live_q_open_assignment():
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-test-deployment-key", b"v" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-test-policy", 1, "test-owner", "test-key-source",
+            "v2-call-test-deployment-key", (), 3600, "test-revocation",
+        )
+    )
+    left, right, manifest = _call_to_region_proof_inputs()
+    obligation_id = manifest["phase2_direct_call_eligibility"][0]["obligation_id"]
+    stage_kinds = {
+        "guard_relation": "call_guard_relation",
+        "argument_relation": "call_argument_relation",
+        "return_relation": "call_return_relation",
+    }
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-live-prefix"})
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+        assert len(legacy.v2_blocker_signals) == 1
+        context = composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+    projection = context.lifecycle_projection
+    registry = CALL_EFFECT_PRODUCTION_STAGE_REGISTRY
+    row_map = dict(context.q_open_assignments)
+    production = produce_v2_pure_direct_call_proofs(
+        manifest, left, right, execution_context=context, timeout_seconds=5
+    )
+    assert len(production.artifacts) == 3
+    for artifact in production.artifacts:
+        assert artifact.v2_execution_receipt is not None
+        proof_kind = stage_kinds[artifact.record.proof_stage]
+        assert CALL_EFFECT_ARTIFACT_CAPABILITY_REGISTRY.authorize_completion(
+            artifact,
+            reason_id="pure_call_semantics_unproven",
+            identity_scope=IdentityScope.RELATIONAL,
+            proof_kind=proof_kind,
+            validation_context={
+                "producer_stage_registry": registry,
+                "lifecycle_projection": projection,
+            },
+        ) == "internal-parallel-solver-runner"
+    guard_authority = next(
+        item.query_authority for item in production.artifacts
+        if item.record.proof_stage == "guard_relation"
+    )
+    argument_row = row_map[(obligation_id, "argument_relation")]
+    final_projection = VerifiedLifecycleProjection.seal(
+        result_occurrence_id=projection.result_occurrence_id,
+        snapshot_digest=projection.snapshot_digest,
+        c_active_base=projection.c_active_base,
+        q_open_base=projection.q_open_base,
+        blocker_eligibility_base=projection.blocker_eligibility_base,
+        satisfaction_projection=projection.satisfaction_projection,
+    )
+    with pytest.raises(TypeError, match="PREFIX lifecycle authority"):
+        issue_call_effect_requirement_assignment(
+            projection=final_projection,
+            q_open_row=argument_row,
+            query_authority=guard_authority,
+        )
+    with pytest.raises(ValueError, match="semantic target"):
+        issue_call_effect_requirement_assignment(
+            projection=projection,
+            q_open_row=argument_row,
+            query_authority=guard_authority,
+        )
+
+    guard_row = row_map[(obligation_id, "guard_relation")]
+    ambiguous_context = V2CallEffectExecutionContext(
+        registry,
+        projection,
+        projection.result_occurrence_id,
+        (
+            *tuple(row_map.items()),
+            ((obligation_id, "guard_relation"), guard_row),
+        ),
+    )
+    with pytest.raises(ValueError, match="ambiguous live Q_open assignments"):
+        ambiguous_context.membership_for(guard_authority)
+    assert ambiguous_context.q_open_assignments.count(
+        ((obligation_id, "guard_relation"), guard_row)
+    ) == 2
+
+
+def test_v2_call_effect_pilot_completes_stages_but_keeps_semantic_arms_open():
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-pilot-chain-key", b"c" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-pilot-chain-policy", 1, "test-owner", "test-source",
+            "v2-call-pilot-chain-key", (), 3600, "test-revocation",
+        )
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-stage-chain"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+        assert len(legacy.v2_blocker_signals) == 1
+        prefix = session.preview_lifecycle_projection()
+        assert len(prefix.c_active_base) == 1
+        assert len(prefix.q_open_base) == 5
+        assert session.emit_domain_signal(legacy.v2_blocker_signals[0]) == 0
+        with pytest.raises(TypeError, match="FINAL lifecycle authority"):
+            FinalizationAuthority(session.identity.result_occurrence_id, prefix)
+        with pytest.raises(TypeError, match="FINAL lifecycle authorities"):
+            join_outcome_relations(
+                CensusManifest(
+                    "call-prefix-negative", CensusMode.V2_CANONICAL,
+                    "test-head", "test-config", (),
+                ),
+                (),
+                (prefix,),
+            )
+        context = composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+        v2 = produce_v2_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            execution_context=context,
+            timeout_seconds=5,
+        )
+        assert [artifact.record.proof_stage for artifact in v2.artifacts] == [
+            "guard_relation", "argument_relation", "return_relation",
+        ]
+        emitted = session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+            legacy.v2_blocker_signals[0], v2.artifacts
+        ))
+        assert emitted == 3
+    completed = session.preview_lifecycle_projection()
+    assert len(completed.c_active_base) == 1
+    assert {
+        row.proof_kind for row in completed.q_open_base
+    } == {
+        "inline_region_semantic_proof",
+        "callee_summary_semantic_proof",
+    }
+    evidence = connector.finish(
+        session,
+        SimpleNamespace(
+            error_message=None,
+            is_equivalent=None,
+            failure_status=None,
+            failure_message=None,
+            is_timeout=lambda: False,
+        ),
+        case_id="v2-call-stage-chain",
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome.value == "UNKNOWN"
+    assert len(evidence.execution_authority_evidence_bundles) == 1
+    evidence_body = evidence.to_dict()["execution_authority_evidence"][0]
+    assert evidence_body["startup_receipt"]["startup_mode"] == "fail_closed"
+    assert len(evidence_body["census"]["events"]) == 3
+    assert evidence_body["terminal_selection"] is None
+
+
+def test_v2_call_effect_ambiguous_q_open_refuses_before_execution_and_finishes_unknown():
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-ambiguous-key", b"a" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-ambiguous-policy", 1, "test-owner", "test-source",
+            "v2-call-ambiguous-key", (), 3600, "test-revocation",
+        )
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-ambiguous-q-open"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+    context = composite.build_call_effect_execution_context(
+        session,
+        legacy.v2_blocker_signals,
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+    )
+    guard_authority = next(
+        artifact.query_authority for artifact in legacy.artifacts
+        if artifact.record.proof_stage == "guard_relation"
+    )
+    guard_key = (guard_authority.obligation_id, guard_authority.stage)
+    guard_row = dict(context.q_open_assignments)[guard_key]
+    ambiguous = V2CallEffectExecutionContext(
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        context.lifecycle_projection,
+        context.result_occurrence_id,
+        (*context.q_open_assignments, (guard_key, guard_row)),
+        context.execution_refusal_sink,
+    )
+    with pytest.raises(ValueError, match="ambiguous live Q_open assignments"):
+        ambiguous.membership_for(guard_authority)
+    evidence = connector.finish(
+        session,
+        SimpleNamespace(
+            error_message=None,
+            is_equivalent=None,
+            failure_status=None,
+            failure_message=None,
+            is_timeout=lambda: False,
+        ),
+        case_id="v2-call-ambiguous-q-open",
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome.value == "UNKNOWN"
+    assert len(evidence.pilot_result.reduction.projection.c_active_base) == 1
+    assert len(evidence.pilot_result.reduction.projection.q_open_base) == 5
+    assert evidence.execution_authority_evidence_bundles == ()
+    assert len(evidence.execution_refusal_receipts) == 1
+    assert evidence.to_dict()["execution_refusal_receipts"][0][
+        "refusal_kind"
+    ] == "ambiguous_live_q_open_assignment"
+
+
+def test_v2_call_effect_persists_nonselected_timeout_history(monkeypatch):
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-history-key", b"h" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-history-policy", 1, "test-owner", "test-source",
+            "v2-call-history-key", (), 3600, "test-revocation",
+        )
+    )
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+
+    monkeypatch.setattr(
+        authority_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
+            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
+        ]),
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-nonselected-timeout-history"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+        context = composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+        v2 = produce_v2_pure_direct_call_proofs(
+            manifest, left, right, execution_context=context, timeout_seconds=5
+        )
+        assert all(len(artifact.v2_execution_receipts) == 2 for artifact in v2.artifacts)
+        assert session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+            legacy.v2_blocker_signals[0], v2.artifacts
+        )) == 6
+    evidence = connector.finish(
+        session,
+        SimpleNamespace(
+            error_message=None,
+            is_equivalent=None,
+            failure_status=None,
+            failure_message=None,
+            is_timeout=lambda: False,
+        ),
+        case_id="v2-call-nonselected-timeout-history",
+    )
+    assert evidence.pilot_result.observed_nonterminal_timeout_event_count == 3
+    assert evidence.pilot_result.terminal_timeout_receipt_count == 0
+    body = evidence.to_dict()["execution_authority_evidence"][0]
+    assert len(body["census"]["events"]) == 6
+    assert len(body["observed_stream_receipt_digests"]) == 3
+    assert body["terminal_selection"] is None
+
+
+def test_v2_call_effect_live_solver_timeout_finalizes_as_timeout(monkeypatch):
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-terminal-timeout-key", b"t" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-terminal-timeout-policy", 1, "test-owner", "test-source",
+            "v2-call-terminal-timeout-key", (), 3600, "test-revocation",
+        )
+    )
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+
+    monkeypatch.setattr(
+        authority_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
+        ]),
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-terminal-timeout"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+        context = composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+        v2 = produce_v2_pure_direct_call_proofs(
+            manifest, left, right, execution_context=context, timeout_seconds=5
+        )
+        assert [artifact.record.solver_result for artifact in v2.artifacts] == ["timeout"]
+        assert session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+            legacy.v2_blocker_signals[0], v2.artifacts
+        )) == 1
+    evidence = connector.finish(
+        session,
+        SimpleNamespace(
+            error_message=None,
+            is_equivalent=None,
+            failure_status=None,
+            failure_message=None,
+            is_timeout=lambda: False,
+        ),
+        case_id="v2-call-terminal-timeout",
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome.value == "TIMEOUT"
+    assert evidence.pilot_result.terminal_timeout_receipt_count == 1
+    assert evidence.pilot_result.observed_nonterminal_timeout_event_count == 0
+    body = evidence.to_dict()["execution_authority_evidence"][0]
+    assert len(body["census"]["events"]) == 1
+    assert body["terminal_selection"] is not None
+    assert body["terminal_selection"]["proof_requirement_id"] in {
+        row.proof_requirement_id
+        for row in evidence.pilot_result.reduction.projection.q_open_base
+    }
+    rematerialized = SolverExecutionEvidenceBundle.from_persisted(
+        json.loads(json.dumps(body)),
+        registry=CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+    )
+    assert rematerialized.evidence_digest == body["evidence_digest"]
+
+
+def test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences(monkeypatch):
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key("v2-call-repeat-key", b"r" * 32)
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "v2-call-repeat-policy", 1, "test-owner", "test-source",
+        "v2-call-repeat-key", (), 3600, "test-revocation",
+    ))
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+
+    monkeypatch.setattr(
+        authority_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
+        ]),
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    left, right, manifest = _call_to_region_proof_inputs()
+    evidences = []
+    for _ in range(2):
+        session = connector.begin({"case": "v2-call-identical-repeat"})
+        with production_signal_scope(session):
+            legacy = produce_pure_direct_call_proofs(
+                manifest, left, right,
+                solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+                timeout_seconds=5,
+            )
+            context = composite.build_call_effect_execution_context(
+                session, legacy.v2_blocker_signals,
+                CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+            )
+            v2 = produce_v2_pure_direct_call_proofs(
+                manifest, left, right, execution_context=context, timeout_seconds=5
+            )
+            session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+                legacy.v2_blocker_signals[0], v2.artifacts
+            ))
+        evidences.append(connector.finish(
+            session,
+            SimpleNamespace(
+                error_message=None, is_equivalent=None, failure_status=None,
+                failure_message=None, is_timeout=lambda: False,
+            ),
+            case_id="v2-call-identical-repeat",
+        ))
+    assert evidences[0].pilot_result.reduction.snapshot.result_occurrence_id != (
+        evidences[1].pilot_result.reduction.snapshot.result_occurrence_id
+    )
+    assert (
+        evidences[0].result_entry_occurrence_receipt.receipt_digest
+        != evidences[1].result_entry_occurrence_receipt.receipt_digest
+    )
+    rematerialized_occurrence = SolverResultEntryOccurrenceReceipt.from_persisted(
+        json.loads(json.dumps(
+            evidences[0].to_dict()["result_entry_occurrence_receipt"]
+        ))
+    )
+    assert rematerialized_occurrence.receipt_digest == (
+        evidences[0].result_entry_occurrence_receipt.receipt_digest
+    )
+    assert all(
+        len(evidence.execution_authority_evidence_bundles[0][1].census.events) == 3
+        for evidence in evidences
+    )
+
+
+def test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger(monkeypatch):
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key("v2-call-prebatch-key", b"b" * 32)
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "v2-call-prebatch-policy", 1, "test-owner", "test-source",
+        "v2-call-prebatch-key", (), 3600, "test-revocation",
+    ))
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+
+    monkeypatch.setattr(
+        authority_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
+        ]),
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-post-execution-pre-batch"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest, left, right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+        context = composite.build_call_effect_execution_context(
+            session, legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+        v2 = produce_v2_pure_direct_call_proofs(
+            manifest, left, right, execution_context=context, timeout_seconds=5
+        )
+        assert len(v2.artifacts) == 3
+    assert PINNED_SOLVER_EXECUTION_ISSUER.has_open_result_ledger(
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        session.identity.result_occurrence_id,
+    )
+    session.domain_signal_error_kinds.append("InjectedPostExecutionFailure")
+    with pytest.raises(ValueError, match="domain signal encoding is incomplete"):
+        connector.finish(
+            session,
+            SimpleNamespace(
+                error_message=None, is_equivalent=None, failure_status=None,
+                failure_message=None, is_timeout=lambda: False,
+            ),
+            case_id="v2-call-post-execution-pre-batch",
+        )
+    assert not PINNED_SOLVER_EXECUTION_ISSUER.has_open_result_ledger(
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        session.identity.result_occurrence_id,
+    )
+    assert len(session.domain_signal_state["call_effect_v2"]["solver_census"].events) == 3
+
+
+def test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists():
+    left, right, manifest = _call_to_region_memory_proof_inputs()
+    timeout_runner = SimpleNamespace(run_parallel=lambda _query, timeout: ParallelResult(
+        results=[SolverResult("test", SolverStatus.TIMEOUT, elapsed_time=timeout)]
+    ))
+    production = produce_pure_direct_call_proofs(
+        manifest, left, right, solver_runner=timeout_runner, timeout_seconds=1
+    )
+    assert [artifact.record.proof_stage for artifact in production.artifacts] == [
+        "guard_relation"
+    ]
+    assert len(production.v2_blocker_signals) == 1
+    assert production.v2_blocker_signals[0].effect_stage_required is True
 
 
 def test_typed_call_to_region_proves_ordered_scalar_store_relation():

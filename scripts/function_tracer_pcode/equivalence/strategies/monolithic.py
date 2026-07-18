@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from typing import Optional, Dict, Any, List, Mapping, Set, Tuple
 
 from ...model import FunctionReturnAnalysis
+from ...model.render_smt import UnsupportedSmtIntrinsicError
 from ...model.structural import condition_key, expression_provenance_key
 from ...smt import ParallelResult
 from ..formula.symbol_replace import build_symbol_replacer
@@ -21,7 +22,11 @@ from ..return_width_pipeline import (
     prepare_pair_return_observation,
     return_coverage_artifact_ids,
 )
-from ..unknown_reason import UnknownReasonId, make_unknown_reason
+from ..unknown_reason import (
+    UnknownReasonId,
+    make_internal_v2_reason_diagnostic,
+    make_unknown_reason,
+)
 from ..monolithic_authority import (
     build_expected_region_query_set as _PINNED_BUILD_EXPECTED_REGION_QUERY_SET,
     create_shared_z3_region_session as _PINNED_CREATE_SHARED_Z3_REGION_SESSION,
@@ -1140,8 +1145,8 @@ class MonolithicStrategy(CheckStrategy):
                     is_equivalent=None,
                     solver_results=ParallelResult(results=[]),
                     unknown_reasons=[
-                        make_unknown_reason(
-                            "equivalence_blocking_unsafety",
+                        make_internal_v2_reason_diagnostic(
+                            "call_projection_partition_unproven",
                             stage="CALL_EFFECT_PREFLIGHT",
                             evidence_refs=(
                                 lowered_call_projection.failure_cause,
@@ -1518,26 +1523,8 @@ class MonolithicStrategy(CheckStrategy):
                     )
                     final_is_equivalent = None
                     counterexample_raw = None
-            if final_is_equivalent is None and not unknown_reasons:
-                timeout_budget = getattr(self.solver_runner, "timeout", None)
-                timeout_target = self._solver_timeout_object_target_key(
-                    analysis1=analysis1,
-                    analysis2=analysis2,
-                    stage="S_MONOLITHIC_FALLBACK",
-                    query=smt_formula,
-                    timeout_seconds=timeout_budget,
-                    parallel_result=parallel_result,
-                )
-                unknown_reasons.append(
-                    make_unknown_reason(
-                        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=("monolithic_query_timeout",),
-                        evidence_kind="query_hash",
-                        object_target_key=timeout_target,
-                        detail="monolithic solver query timed out",
-                    )
-                )
+            # A solver UNKNOWN/TIMEOUT remains on the captured execution
+            # receipt.  It must never manufacture a semantic reason row.
             
             strategy_result = StrategyResult(
                 is_equivalent=final_is_equivalent,
@@ -1736,8 +1723,8 @@ class MonolithicStrategy(CheckStrategy):
                         strategy_result.is_equivalent = None
                         strategy_result.counterexample_raw = None
                         counterexample_raw = None
-                        unknown_reasons.append(make_unknown_reason(
-                            "equivalence_blocking_unsafety",
+                        unknown_reasons.append(make_internal_v2_reason_diagnostic(
+                            "counterexample_analysis_safety_unproven",
                             stage="S_MONOLITHIC_FALLBACK",
                             evidence_refs=(
                                 "typed_counterexample_safety_receipt_missing",
@@ -1774,8 +1761,8 @@ class MonolithicStrategy(CheckStrategy):
                         strategy_result.is_equivalent = None
                         strategy_result.counterexample_raw = None
                         counterexample_raw = None
-                        unknown_reasons.append(make_unknown_reason(
-                            "equivalence_blocking_unsafety",
+                        unknown_reasons.append(make_internal_v2_reason_diagnostic(
+                            "counterexample_analysis_safety_unproven",
                             stage="S_MONOLITHIC_FALLBACK",
                             evidence_refs=("monolithic_proof_bundle_invalid",),
                             detail=(
@@ -1913,10 +1900,8 @@ class MonolithicStrategy(CheckStrategy):
                 blocked_result.comparison_execution_receipt = dispatch_frame.receipt
             return blocked_result
 
-        except ValueError as e:
+        except UnsupportedSmtIntrinsicError as e:
             message = str(e)
-            if "Unsupported intrinsic for SMT lowering" not in message:
-                raise
             self._debug_print(f"Monolithic check blocked by unresolved intrinsic: {message}")
             blocked_result = StrategyResult(
                 is_equivalent=None,
@@ -1927,10 +1912,16 @@ class MonolithicStrategy(CheckStrategy):
                 return_var2=None,
                 constrained_fragments=[],
                 unknown_reasons=[
-                    make_unknown_reason(
-                        UnknownReasonId.UNRESOLVED_EXPRESSION,
+                    make_internal_v2_reason_diagnostic(
+                        "expression_semantics_unsupported",
                         stage="S_MONOLITHIC_FALLBACK",
                         evidence_refs=("unsupported_intrinsic_smt_lowering",),
+                        object_target_key=(
+                            "unsupported_smt_intrinsic",
+                            e.intrinsic_identity,
+                            tuple(analysis1.outcome_function_identity()),
+                            tuple(analysis2.outcome_function_identity()),
+                        ),
                         detail=message,
                     )
                 ],
@@ -1956,14 +1947,11 @@ class MonolithicStrategy(CheckStrategy):
                 return_var1=None,
                 return_var2=None,
                 constrained_fragments=[],
-                unknown_reasons=[
-                    make_unknown_reason(
-                        UnknownReasonId.STRATEGY_EXCEPTION,
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=(str(e),),
-                        detail=str(e),
-                    )
-                ],
+                error_pairs=1,
+                pairwise_debug_stats={"strategy_exception_error": 1},
+                unknown_reasons=[],
+                error_kind="strategy_exception",
+                error_message=str(e),
             )
             if dispatch_frame is not None and dispatch_frame.receipt is None:
                 issue_inconclusive_monolithic_receipts(

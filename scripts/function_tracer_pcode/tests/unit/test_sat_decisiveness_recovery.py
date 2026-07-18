@@ -139,9 +139,13 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
     assert reason.object_evidence == query_result.object_evidence
 
 def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_exception():
+    from scripts.function_tracer_pcode.model.render_smt import (
+        UnsupportedSmtIntrinsicError,
+    )
+
     formula_builder = Mock()
-    formula_builder.build_equivalence_formula_extended.side_effect = ValueError(
-        "Unsupported intrinsic for SMT lowering: CALLOTHER"
+    formula_builder.build_equivalence_formula_extended.side_effect = (
+        UnsupportedSmtIntrinsicError(mnemonic="CALLOTHER", opcode="CALLOTHER")
     )
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -164,9 +168,38 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+    assert result.unknown_reasons[0].reason_id == "expression_semantics_unsupported"
     assert result.unknown_reasons[0].evidence_refs == ("unsupported_intrinsic_smt_lowering",)
     solver_runner.run_parallel.assert_not_called()
+
+
+def test_monolithic_does_not_classify_arbitrary_value_error_from_message_text():
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.side_effect = ValueError(
+        "Unsupported intrinsic for SMT lowering: forged diagnostic text"
+    )
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left", entry_point="0x1000", parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right", entry_point="0x2000", parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.error_pairs == 1
+    assert result.pairwise_debug_stats == {"strategy_exception_error": 1}
+    assert result.unknown_reasons == []
+    assert result.error_kind == "strategy_exception"
+    assert "Unsupported intrinsic" in result.error_message
 
 def test_pairwise_global_blocker_dominates_pair_local_unresolved_expression(monkeypatch):
     formula_builder = Mock()
@@ -238,7 +271,7 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
     assert result.is_equivalent is None
     assert result.unknown_pairs == 1
     assert {reason.reason_id for reason in result.unknown_reasons} == {
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        "unsupported_call_effect_semantics",
     }
     assert all(
         reason.reason_id != UnknownReasonId.UNRESOLVED_EXPRESSION.value
@@ -604,7 +637,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     strategy._solve_query_after_guard.assert_not_called()
 
@@ -664,7 +697,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     assert "pairwise_unresolved_lowered_unknown_keys_by_pair" not in base_ctx
@@ -684,7 +717,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     assert {
         action.proof_stage
         for action in actions
-        if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        if action.reason_id == "expression_translation_incomplete"
     } == {
         "phi_circular_guard_condition_lowering",
         "recursive_summary_guard_equivalence",
@@ -692,7 +725,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     assert {
         action.status
         for action in actions
-        if action.reason_id == UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        if action.reason_id == "expression_translation_incomplete"
     } == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
     strategy._solve_query_after_guard.assert_not_called()
     strategy._solve_query_internal.assert_not_called()
@@ -837,7 +870,7 @@ def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     assert "pairwise_unresolved_phi_circular_lowering_evidence_by_pair" not in base_ctx
@@ -874,7 +907,7 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     strategy._solve_query_after_guard.assert_not_called()
@@ -906,7 +939,7 @@ def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_pro
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert strategy._solve_query_internal.call_count == 0
     assert analysis1.completed_recovery_proof_evidence == ()
@@ -938,7 +971,7 @@ def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     strategy._solve_query_after_guard.assert_not_called()

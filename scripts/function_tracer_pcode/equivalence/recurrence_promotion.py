@@ -682,6 +682,38 @@ def _prepare_side_for_proposal(
         enable_completed_recovery_proofs=True,
         require_smt_receipts=True,
     )
+    try:
+        from .v2.call_effect import (
+            summary_effect_prerequisite_signals_from_acceptance,
+        )
+        from .v2.loop_recurrence import summary_signals_from_acceptance
+        from .v2.abi_width_readonly import (
+            summary_abi_width_signals_from_acceptance,
+        )
+        from .v2.production_signals import (
+            emit_abi_width_readonly_signal,
+            emit_call_effect_signal,
+            emit_loop_recurrence_signal,
+        )
+
+        for signal in summary_effect_prerequisite_signals_from_acceptance(
+            analysis, accepted
+        ):
+            emit_call_effect_signal(
+                signal, producer_site_manifest_id="recurrence-summary-call-effect"
+            )
+        for signal in summary_signals_from_acceptance(analysis, accepted):
+            emit_loop_recurrence_signal(
+                signal, producer_site_manifest_id="recurrence-summary-loop"
+            )
+        for signal in summary_abi_width_signals_from_acceptance(analysis, accepted):
+            emit_abi_width_readonly_signal(
+                signal, producer_site_manifest_id="recurrence-summary-abi-width"
+            )
+    except Exception as exc:
+        from .v2.production_signals import record_production_pilot_shadow_error
+
+        record_production_pilot_shadow_error(exc)
     if accepted.blockers or not accepted.accepted_returns:
         raise ValueError(
             "recurrence acceptance failed:" + ",".join(accepted.blockers)

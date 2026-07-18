@@ -181,6 +181,7 @@ def _emit_import_error_result(
     func_name1: str,
     func_name2: str,
     error_message: str,
+    error_kind: str = "PROGRAM_IMPORT_ERROR",
     start_time: float,
     binary1_content_identity=None,
     binary2_content_identity=None,
@@ -197,6 +198,31 @@ def _emit_import_error_result(
         total_time=time.time() - start_time,
         error_message=error_message,
     )
+    from ...equivalence.v2.contracts import authority_digest
+    from ...equivalence.v2.phase8_cutover import (
+        attach_canonical_decision,
+        issue_infrastructure_error_decision,
+    )
+
+    result_occurrence_id = "import-error-" + authority_digest({
+        "binary1_path": binary1_path,
+        "binary2_path": binary2_path,
+        "function_name1": func_name1,
+        "function_name2": func_name2,
+        "binary1_content_identity": binary1_content_identity,
+        "binary2_content_identity": binary2_content_identity,
+    })[:32]
+    attach_canonical_decision(
+        result,
+        issue_infrastructure_error_decision(
+            result_occurrence_id=result_occurrence_id,
+            error_kind=error_kind,
+            error_artifact_digest=authority_digest({
+                "result_occurrence_id": result_occurrence_id,
+                "error_message": error_message,
+            }),
+        ),
+    )
     output_result(
         result.to_string(
             verbose=getattr(args, "verbose", False),
@@ -205,20 +231,22 @@ def _emit_import_error_result(
         args.output,
         args.quiet,
     )
-    if getattr(args, "emit_result_json", False):
-        json_payload = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
-        output_result(
-            "\n".join(
-                (
-                    "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
-                    json_payload,
-                    "=== EQUIVALENCE_RESULT_JSON_END ===",
-                )
-            ),
-            args.output,
-            args.quiet,
-        )
-    sys.exit(1)
+    json_payload = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+    output_result(
+        "\n".join(
+            (
+                "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
+                json_payload,
+                "=== EQUIVALENCE_RESULT_JSON_END ===",
+            )
+        ),
+        args.output,
+        args.quiet,
+    )
+    from ...equivalence.v2.contracts import Outcome
+    from ...equivalence.v2.phase8_cutover import CLI_EXIT_MATRIX
+
+    sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
 
 
 def run_equivalence_check(args):
@@ -233,21 +261,45 @@ def run_equivalence_check(args):
         value = getattr(args, name, default)
         return value if isinstance(value, str) and value in allowed else default
 
-    runtime_env = apply_runtime_environment()
-    pyghidra = load_pyghidra()
-
-    from ...equivalence import EquivalenceChecker, TypeFixerConfig
-    from ...equivalence.source_declarations import infer_adjacent_c_return_type
-
     binary1_path, binary2_path = args.equiv
     binary1_content_identity = _binary_content_identity(binary1_path)
     binary2_content_identity = _binary_content_identity(binary2_path)
     binary1_id, binary2_id = _get_binary_ids_arg(args)
+    try:
+        runtime_env = apply_runtime_environment()
+        pyghidra = load_pyghidra()
+    except Exception as exc:
+        _emit_import_error_result(
+            args,
+            binary1_path=binary1_path,
+            binary2_path=binary2_path,
+            func_name1="<startup>",
+            func_name2="<startup>",
+            error_message=_exception_chain_text(exc),
+            error_kind="CLI_STARTUP_ERROR",
+            start_time=start_time,
+            binary1_content_identity=binary1_content_identity,
+            binary2_content_identity=binary2_content_identity,
+        )
+
+    from ...equivalence import EquivalenceChecker, TypeFixerConfig
+    from ...equivalence.source_declarations import infer_adjacent_c_return_type
+
     function_names = get_target_functions(args)
 
     if len(function_names) == 0:
-        print("Error: 関数名を指定してください（-f オプション）")
-        sys.exit(1)
+        _emit_import_error_result(
+            args,
+            binary1_path=binary1_path,
+            binary2_path=binary2_path,
+            func_name1="<missing>",
+            func_name2="<missing>",
+            error_message="function name is required (-f)",
+            error_kind="CLI_ARGUMENT_ERROR",
+            start_time=start_time,
+            binary1_content_identity=binary1_content_identity,
+            binary2_content_identity=binary2_content_identity,
+        )
     if len(function_names) == 1:
         func_name1 = func_name2 = function_names[0]
     else:
@@ -353,13 +405,18 @@ def run_equivalence_check(args):
         print()
 
     if not available_solvers:
-        print("Error: SMTソルバーが利用できません")
-        print("以下のいずれかをインストールしてください:")
-        print("  pip install z3-solver")
-        print("  pip install pyboolector")
-        print("  pip install yices")
-        print("  pip install cvc5")
-        sys.exit(1)
+        _emit_import_error_result(
+            args,
+            binary1_path=binary1_path,
+            binary2_path=binary2_path,
+            func_name1=func_name1,
+            func_name2=func_name2,
+            error_message="no SMT solver is available",
+            error_kind="NO_SMT_SOLVER",
+            start_time=start_time,
+            binary1_content_identity=binary1_content_identity,
+            binary2_content_identity=binary2_content_identity,
+        )
 
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -456,6 +513,13 @@ def run_equivalence_check(args):
                 handle.write(result.smt_formula)
             print(f"SMT formula saved to: {smt_output}")
 
+    if getattr(result, "decision_receipt", None) is not None:
+        from ...equivalence.v2.phase8_cutover import (
+            CLI_EXIT_MATRIX,
+            outcome_from_result,
+        )
+
+        sys.exit(CLI_EXIT_MATRIX[outcome_from_result(result)])
     if result.is_equivalent is True:
         sys.exit(0)
     if result.is_equivalent is False:

@@ -42,6 +42,41 @@ SUMMARY_RETURN_SCHEMA_VERSION = "summary-return-candidate-v1"
 
 
 @dataclass(frozen=True)
+class SummaryReturnBlockerOccurrence:
+    """Object-derived location of one summary acceptance failure."""
+
+    source_code: str
+    function_identity: Tuple[Any, ...]
+    candidate_id: Optional[Tuple[Any, ...]]
+    candidate_identity: Optional[Tuple[Any, ...]]
+    peer_return_identity: Optional[Tuple[Any, ...]]
+    active_precondition_key: Tuple[Any, ...]
+    observation_surface_key: Tuple[Any, ...]
+    occurrence_digest: str
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "summary_return_blocker_occurrence_v1",
+            self.source_code,
+            self.function_identity,
+            self.candidate_id,
+            self.candidate_identity,
+            self.peer_return_identity,
+            self.active_precondition_key,
+            self.observation_surface_key,
+        )
+
+    def __post_init__(self) -> None:
+        if type(self.source_code) is not str or not self.source_code:
+            raise TypeError("summary blocker occurrence source is incomplete")
+        expected = RecurrenceDigestCodec.digest(
+            "summary_return_blocker_occurrence_v1", self.stable_key()
+        )
+        if self.occurrence_digest != expected:
+            raise ValueError("summary blocker occurrence digest mismatch")
+
+
+@dataclass(frozen=True)
 class SummaryReturnAcceptanceResult:
     accepted_returns: Tuple[ReturnInfo, ...]
     candidates: Tuple[SummaryReturnCandidate, ...]
@@ -49,6 +84,74 @@ class SummaryReturnAcceptanceResult:
     coverage_complete: bool
     overlap_query_receipts: Tuple[RecurrenceSMTQueryReceipt, ...] = ()
     coverage_query_receipts: Tuple[RecurrenceSMTQueryReceipt, ...] = ()
+    blocker_occurrences: Tuple[SummaryReturnBlockerOccurrence, ...] = ()
+
+
+def _summary_blocker_occurrence(
+    analysis: FunctionReturnAnalysis,
+    source_code: str,
+    *,
+    candidate: Optional[SummaryReturnCandidate] = None,
+    peer_return: Optional[ReturnInfo] = None,
+    observation_surface_key: Optional[Tuple[Any, ...]] = None,
+) -> SummaryReturnBlockerOccurrence:
+    function_identity = analysis.outcome_function_identity()
+    candidate_id = tuple(candidate.candidate_id) if candidate is not None else None
+    candidate_identity = (
+        (
+            "summary_candidate_identity_v1",
+            candidate_id,
+            RecurrenceDigestCodec.digest(
+                "summary_candidate_payload_v1", candidate.to_dict()
+            ),
+        )
+        if candidate is not None
+        else None
+    )
+    peer_identity = (
+        (
+            "return_info_identity_v1",
+            _return_info_identity_key(peer_return),
+            RecurrenceDigestCodec.digest(
+                "summary_peer_return_payload_v1", peer_return.to_dict()
+            ),
+        )
+        if peer_return is not None
+        else None
+    )
+    active_key = tuple(
+        ImmutableRecurrenceCondition.from_condition(item).stable_key()
+        for item in _active_preconditions(analysis)
+    )
+    surface = observation_surface_key or (
+        "summary_candidate_observation_surface_v1",
+        getattr(candidate, "effect_region_key", None),
+        getattr(candidate, "memory_read_set_key", None),
+        getattr(candidate, "memory_write_set_key", None),
+        getattr(candidate, "call_effect_key", None),
+    )
+    stable = (
+        "summary_return_blocker_occurrence_v1",
+        source_code,
+        function_identity,
+        candidate_id,
+        candidate_identity,
+        peer_identity,
+        active_key,
+        surface,
+    )
+    return SummaryReturnBlockerOccurrence(
+        source_code,
+        function_identity,
+        candidate_id,
+        candidate_identity,
+        peer_identity,
+        active_key,
+        surface,
+        RecurrenceDigestCodec.digest(
+            "summary_return_blocker_occurrence_v1", stable
+        ),
+    )
 
 
 def accept_summary_return_candidates(
@@ -69,7 +172,11 @@ def accept_summary_return_candidates(
 
     proposed_returns = tuple(proposed_returns or ())
     if not proposed_returns:
-        return SummaryReturnAcceptanceResult((), (), ("summary_return_candidate_invalid:no_proposed_returns",), False)
+        code = "summary_return_candidate_invalid:no_proposed_returns"
+        return SummaryReturnAcceptanceResult(
+            (), (), (code,), False,
+            blocker_occurrences=(_summary_blocker_occurrence(analysis, code),),
+        )
     proposed_summary_returns = tuple(
         ret for ret in proposed_returns if _return_has_summary_provenance(ret)
     )
@@ -126,9 +233,15 @@ def accept_summary_return_candidates(
 
     if not candidates:
         blockers = ("summary_return_candidate_invalid:no_new_summary_returns",)
-        return SummaryReturnAcceptanceResult((), tuple(candidates), blockers, False)
+        return SummaryReturnAcceptanceResult(
+            (), tuple(candidates), blockers, False,
+            blocker_occurrences=(
+                _summary_blocker_occurrence(analysis, blockers[0]),
+            ),
+        )
 
     blockers: List[str] = []
+    blocker_occurrences: List[SummaryReturnBlockerOccurrence] = []
     valid_candidates: Dict[int, SummaryReturnCandidate] = {}
     for candidate in candidates:
         candidate_blockers = _validate_candidate(
@@ -138,6 +251,12 @@ def accept_summary_return_candidates(
         )
         if candidate_blockers:
             blockers.extend(candidate_blockers)
+            blocker_occurrences.extend(
+                _summary_blocker_occurrence(
+                    analysis, blocker, candidate=candidate
+                )
+                for blocker in candidate_blockers
+            )
             candidate.validation_blockers = tuple(candidate_blockers)
             candidate.acceptance_status = "rejected"
             candidate.eq_eligible = False
@@ -150,7 +269,13 @@ def accept_summary_return_candidates(
     if not valid_candidates:
         if not blockers:
             blockers.append("summary_return_candidate_invalid:no_valid_candidates")
-        return SummaryReturnAcceptanceResult((), tuple(candidates), tuple(dict.fromkeys(blockers)), False)
+            blocker_occurrences.append(
+                _summary_blocker_occurrence(analysis, blockers[-1])
+            )
+        return SummaryReturnAcceptanceResult(
+            (), tuple(candidates), tuple(dict.fromkeys(blockers)), False,
+            blocker_occurrences=tuple(blocker_occurrences),
+        )
 
     superseded_exact_keys = _superseded_exact_return_keys_from_candidates(
         valid_candidates.values(),
@@ -176,6 +301,7 @@ def accept_summary_return_candidates(
         effective_exact_returns,
         enable_completed_recovery_proofs=enable_completed_recovery_proofs,
         query_receipts=overlap_query_receipts if require_smt_receipts else None,
+        blocker_occurrences=blocker_occurrences,
     )
     blockers.extend(overlap_blockers)
 
@@ -188,7 +314,21 @@ def accept_summary_return_candidates(
             query_receipts=coverage_query_receipts if require_smt_receipts else None,
         )
         if not coverage_complete:
-            blockers.append("summary_partition_not_total:active_precondition_not_covered")
+            totality_code = "summary_partition_not_total:active_precondition_not_covered"
+            blockers.append(totality_code)
+            blocker_occurrences.append(
+                _summary_blocker_occurrence(
+                    analysis,
+                    totality_code,
+                    observation_surface_key=(
+                        "summary_return_partition_v1",
+                        tuple(
+                            _return_info_identity_key(item)
+                            for item in proposed_partition
+                        ),
+                    ),
+                )
+            )
 
     if blockers:
         unique_blockers = tuple(dict.fromkeys(blockers))
@@ -200,6 +340,7 @@ def accept_summary_return_candidates(
         return SummaryReturnAcceptanceResult(
             (), tuple(candidates), unique_blockers, coverage_complete,
             tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+            tuple(blocker_occurrences),
         )
 
     accepted: List[ReturnInfo] = []
@@ -219,10 +360,11 @@ def accept_summary_return_candidates(
             (), tuple(candidates),
             ("summary_proof_receipt_incomplete:required_smt_receipt_missing",),
             False, tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+            tuple(blocker_occurrences),
         )
     return SummaryReturnAcceptanceResult(
         tuple(accepted), tuple(candidates), (), True,
-        tuple(overlap_query_receipts), tuple(coverage_query_receipts),
+        tuple(overlap_query_receipts), tuple(coverage_query_receipts), (),
     )
 
 
@@ -731,6 +873,7 @@ def _check_candidate_overlaps(
     *,
     enable_completed_recovery_proofs: bool,
     query_receipts: Optional[List[RecurrenceSMTQueryReceipt]] = None,
+    blocker_occurrences: Optional[List[SummaryReturnBlockerOccurrence]] = None,
 ) -> Tuple[str, ...]:
     blockers: List[str] = []
     active_preconditions = _active_preconditions(analysis)
@@ -738,28 +881,46 @@ def _check_candidate_overlaps(
     for candidate in candidate_list:
         candidate_return = candidate.return_info
         for exact_return in exact_returns:
-            blockers.extend(
-                _check_return_overlap_value_equality(
-                    candidate_return,
-                    exact_return,
-                    active_preconditions,
-                    analysis=analysis,
-                    enable_completed_recovery_proofs=enable_completed_recovery_proofs,
-                    query_receipts=query_receipts,
-                )
+            pair_blockers = _check_return_overlap_value_equality(
+                candidate_return,
+                exact_return,
+                active_preconditions,
+                analysis=analysis,
+                enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+                query_receipts=query_receipts,
             )
+            blockers.extend(pair_blockers)
+            if blocker_occurrences is not None:
+                blocker_occurrences.extend(
+                    _summary_blocker_occurrence(
+                        analysis,
+                        blocker,
+                        candidate=candidate,
+                        peer_return=exact_return,
+                    )
+                    for blocker in pair_blockers
+                )
     for left_index, left_candidate in enumerate(candidate_list):
         for right_candidate in candidate_list[left_index + 1:]:
-            blockers.extend(
-                _check_return_overlap_value_equality(
-                    left_candidate.return_info,
-                    right_candidate.return_info,
-                    active_preconditions,
-                    analysis=analysis,
-                    enable_completed_recovery_proofs=enable_completed_recovery_proofs,
-                    query_receipts=query_receipts,
-                )
+            pair_blockers = _check_return_overlap_value_equality(
+                left_candidate.return_info,
+                right_candidate.return_info,
+                active_preconditions,
+                analysis=analysis,
+                enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+                query_receipts=query_receipts,
             )
+            blockers.extend(pair_blockers)
+            if blocker_occurrences is not None:
+                blocker_occurrences.extend(
+                    _summary_blocker_occurrence(
+                        analysis,
+                        blocker,
+                        candidate=left_candidate,
+                        peer_return=right_candidate.return_info,
+                    )
+                    for blocker in pair_blockers
+                )
     return tuple(dict.fromkeys(blockers))
 
 

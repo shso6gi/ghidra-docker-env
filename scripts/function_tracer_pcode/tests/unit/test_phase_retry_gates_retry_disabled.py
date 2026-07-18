@@ -20,7 +20,7 @@ class TestRetryDisabledEarlyExit:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",
@@ -70,7 +70,7 @@ class TestRetryDisabledEarlyExit:
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
-        checker = EquivalenceChecker(debug=True)
+        checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",

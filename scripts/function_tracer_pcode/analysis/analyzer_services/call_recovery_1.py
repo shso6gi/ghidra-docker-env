@@ -1649,8 +1649,15 @@ def _impl__resolve_local_code_target_expansions(
         self._local_target_cache[cache_key] = None
         return None
 
-    decompiler = self._get_decompiler()
-    results = decompiler.decompileFunction(containing, 60, None)
+    from ..decompilation_broker import (
+        INLINE_REGION_SOURCE_CONTRACT,
+        decompile_function,
+    )
+    results = decompile_function(
+        self, containing, 60, None,
+        source_contract_id=INLINE_REGION_SOURCE_CONTRACT,
+        semantic_owner="subordinate",
+    )
     if not results.decompileCompleted():
         self._debug_print(
             f"Local target resolution failed: decompilation incomplete for 0x{address_value:x}"

@@ -428,8 +428,15 @@ def _impl_refresh_structural_recurrence_summary(
     if function is None:
         return analysis
 
-    decompiler = self._get_decompiler()
-    results = decompiler.decompileFunction(function, timeout, None)
+    from ..decompilation_broker import (
+        RECURRENCE_REFRESH_SOURCE_CONTRACT,
+        decompile_function,
+    )
+    results = decompile_function(
+        self, function, timeout, None,
+        source_contract_id=RECURRENCE_REFRESH_SOURCE_CONTRACT,
+        semantic_owner="subordinate",
+    )
     if not results.decompileCompleted():
         self._debug_print(
             f"Structural summary refresh decompilation failed for '{analysis.function_name}'"

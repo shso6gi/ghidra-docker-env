@@ -58,15 +58,30 @@ def _unary_solver_status(self, ctx: Mapping[str, Any], assertions: Sequence[str]
         "(check-sat)", "(get-model)",
     ))
     result = self.solver_runner.run_sequential(query)
+    from ...v2.return_outcome import capture_active_outcome_solver_result
+
+    capture_active_outcome_solver_result(
+        query=query,
+        parallel_result=result,
+        configured_timeout_ms=(
+            int(getattr(self.solver_runner, "timeout", 0) or 0) * 1000 or None
+        ),
+    )
     if result.is_equivalent is True:
         return "unsat"
     if result.is_equivalent is False:
         return "sat"
-    raw = str(getattr(result, "error_message", "") or getattr(result, "raw_output", "")).lower()
-    return "timeout" if "timeout" in raw or "timed out" in raw else "unknown"
+    raw_statuses = {
+        str(getattr(getattr(item, "status", None), "name", "")).lower()
+        for item in (getattr(result, "results", ()) or ())
+    }
+    # ParallelResult intentionally exposes only the decisive SAT/UNSAT view.
+    # Timeout is execution authority on each raw SolverResult and must not be
+    # reconstructed from an absent aggregate error string.
+    return "timeout" if "timeout" in raw_statuses else "unknown"
 
 
-def _unary_blocker_reason_id(blocker: str) -> UnknownReasonId:
+def _unary_blocker_reason_id(blocker: str):
     text = str(blocker or "")
     if "cfg_reachability" in text:
         return UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE
@@ -84,7 +99,7 @@ def _unary_blocker_reason_id(blocker: str) -> UnknownReasonId:
         return UnknownReasonId.OUTCOME_PARTITION_RESIDUAL_SAT
     if "residual_totality_timeout" in text:
         return UnknownReasonId.OUTCOME_PARTITION_TOTALITY_TIMEOUT
-    return UnknownReasonId.OUTCOME_PARTITION_UNKNOWN
+    return "outcome_partition_completion_unproven"
 
 
 def _prove_unary_outcome_for_analysis(
@@ -1284,7 +1299,7 @@ def _impl__analysis_requires_completed_return_coverage_proof(
     ignored_reason_ids: Sequence[Optional[UnknownReasonId]],
 ) -> Optional[UnknownReasonId]:
     ignored_reason_kinds = {
-        self._blocking_reason_kind(reason.value)
+        self._blocking_reason_kind(getattr(reason, "value", reason))
         for reason in ignored_reason_ids
         if reason is not None
     }
@@ -1913,12 +1928,12 @@ def _impl__outcome_partition_unknown_object_target_key(
 ) -> Optional[Tuple[Any, ...]]:
     label, _reason_text = self._split_blocking_reason(blocking_reason)
     reason_kind = self._blocking_reason_kind(blocking_reason)
-    if reason_kind != "outcome_partition_unknown" and not reason_kind.startswith("outcome_"):
+    if reason_kind != "outcome_partition_completion_unproven" and not reason_kind.startswith("outcome_"):
         return None
     analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
     if analysis is None:
         return None
-    if reason_kind == "outcome_partition_unknown":
+    if reason_kind == "outcome_partition_completion_unproven":
         target = (
             reason_kind,
             ("target_schema_version", 1),
@@ -2701,7 +2716,7 @@ def _impl__check_return_case_coverage_gap(
             status="inconclusive",
             reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
             detail=f"{label} return-case coverage query skipped: unresolved condition expression",
-            inconclusive_cause="unresolved_expression",
+            inconclusive_cause="expression_translation_incomplete",
         )
 
     query = self._build_return_case_coverage_query(

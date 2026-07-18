@@ -1,0 +1,26 @@
+{
+  "contract_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
+    "elapsed_seconds": 1.76,
+    "result": "30 passed"
+  },
+  "regression_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py",
+    "elapsed_seconds": 85.76,
+    "result": "101 passed"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/__init__.py": "7b9df03d16100aff18e2eac47449bb0a802cf5ebeb4fe489c1ecfb71a6f163aa",
+    "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "f32d51e0f551c169b586d2f289d4d53765f74f30b078ea56c1d001c30754f147",
+    "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "a1606d27122311198d378007c5e592d993c2cd5f40193af50ad8c67cf6ba08a6",
+    "scripts/function_tracer_pcode/equivalence/v2/decision.py": "105353c685527f101e3698dd5ad89e4e0cd01e9b7a92222ee473cebead1a41e2",
+    "scripts/function_tracer_pcode/equivalence/v2/frontier.py": "f22ed8bdb0f69e3c619003a1a700d783084f7866d39873b6c4fb53c26ca9a3b3",
+    "scripts/function_tracer_pcode/equivalence/v2/stream.py": "15e28f933b5013d49e2f8ad243dbce22b27c933d2b3449b5a518af2bb8618c67",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py": "3dbfae3189778aee851f496d3f1a34ee1928124303814fbaf8931eed71d4a3fa"
+  },
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "phase_status": "review_pending",
+  "production_integration_changed": false,
+  "schema_version": 1,
+  "validation_kind": "unknown_taxonomy_v2_phase1_contract_gate"
+}

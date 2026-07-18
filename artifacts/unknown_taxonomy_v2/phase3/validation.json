@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "validation_kind": "unknown_taxonomy_v2_phase3_shadow_reducer_gate",
+  "phase_status": "review_pending",
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
+  "production_decision_integration_changed": false,
+  "focused_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase3.py",
+    "elapsed_seconds": 1.79,
+    "result": "12 passed"
+  },
+  "regression_test": {
+    "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase3.py scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py scripts/function_tracer_pcode/tests/unit/test_unknown_reason_schema.py scripts/function_tracer_pcode/tests/unit/test_validation_unknown_reason_summary.py",
+    "elapsed_seconds": 85.44,
+    "result": "123 passed"
+  },
+  "files": {
+    "scripts/function_tracer_pcode/equivalence/v2/reducer.py": "316e9b7aa6e3933cc4fa9d93c69f21ff39310548adce602c8e6a106559d8dccc",
+    "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "2f374204da829a59b5aa0cda78955162738954afc9fdf399265eb761433f8c87",
+    "scripts/function_tracer_pcode/equivalence/v2/frontier.py": "f22ed8bdb0f69e3c619003a1a700d783084f7866d39873b6c4fb53c26ca9a3b3",
+    "scripts/function_tracer_pcode/equivalence/v2/registry.py": "c0ddf6359d345290bbc3ed05da92ac46bdbc40e2aa85d17dec50fdb7059a47d8",
+    "scripts/function_tracer_pcode/equivalence/v2/stream.py": "b74637ce188ad15e2238fa2a16f2387bf78be21b9ebf878a1fb086d512c8f8db",
+    "scripts/function_tracer_pcode/equivalence/v2/__init__.py": "d731554b434e140c900a3f4ada29da577ea8d0969289e91b2411c1f79827f416",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase3.py": "60e744f9804d5edce5b97bbf6e14cbf136c00133350e9f1545353e9dfde55850"
+  }
+}

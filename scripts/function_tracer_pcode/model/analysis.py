@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 import hashlib
 import json
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple, Mapping
@@ -1075,6 +1076,7 @@ class FunctionReturnAnalysis:
     effect_summary: Optional["EffectSummary"] = None
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     return_type_provenance: Dict[str, Any] = field(default_factory=dict)
+    return_abi_facts: Dict[str, Any] = field(default_factory=dict)
     comparison_surface: Optional[ComparisonSurface] = None
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
     program_is_big_endian: Optional[bool] = None
@@ -1151,6 +1153,7 @@ class FunctionReturnAnalysis:
             deferred_calls=dict(self.deferred_calls or {}),
             signature_hypotheses=list(self.signature_hypotheses or []),
             return_type_provenance=dict(self.return_type_provenance or {}),
+            return_abi_facts=deepcopy(self.return_abi_facts or {}),
             summary_return_candidates=tuple(summary_return_candidates or ()),
             return_outcomes=(),
             comparison_surface=None,
@@ -1192,6 +1195,7 @@ class FunctionReturnAnalysis:
             deferred_calls=dict(self.deferred_calls or {}),
             signature_hypotheses=list(self.signature_hypotheses or []),
             return_type_provenance=dict(self.return_type_provenance or {}),
+            return_abi_facts=deepcopy(self.return_abi_facts or {}),
             summary_return_candidates=tuple(summary_return_candidates or ()),
             analysis_view_identity=view_identity,
             partition_revision=next_revision,
@@ -1332,6 +1336,10 @@ class FunctionReturnAnalysis:
         if self.return_type_provenance:
             result["return_type_provenance"] = _jsonable_nested_tuple(
                 self.return_type_provenance
+            )
+        if self.return_abi_facts:
+            result["return_abi_facts"] = _jsonable_nested_tuple(
+                self.return_abi_facts
             )
         if self.comparison_surface is not None:
             result["comparison_surface"] = self.comparison_surface.to_dict()

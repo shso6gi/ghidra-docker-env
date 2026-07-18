@@ -106,7 +106,9 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    if reason_record.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value:
+    from ...v2.loop_recurrence import LOOP_REASON_SPECS
+
+    if reason_record.reason_id not in LOOP_REASON_SPECS:
         return
     object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
     if not self._method_b_closure_target_is_specific(object_target_key):
@@ -161,7 +163,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
             {
                 "object_derived": True,
                 "status": "complete",
-                "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+                "reason_id": reason_record.reason_id,
                 "proof_kind": action.proof_kind,
                 "recovery_proof_kind": action.proof_kind,
                 "proof_stage": action.proof_stage,

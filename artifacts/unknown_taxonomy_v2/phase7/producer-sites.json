@@ -1,0 +1,1032 @@
+{
+  "manifest_digest": "a019eb7be3661eaffd23e754be337881da9d32967b2566e9783f8e04c2f1bc40",
+  "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
+  "site_count": 25,
+  "sites": [
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "internal_typed_pure_direct_call_stage_producer"
+      ],
+      "branch_or_attempt_contract_id": "call-effect-producer-blocker:invocation",
+      "column": 8,
+      "domain": "expression_call_effect_memory",
+      "emitter": "emit_call_effect_signal",
+      "enclosing_function": "produce_pure_direct_call_proofs",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "pure_call_semantics_unproven"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "call_semantic_obligation",
+          "slot_id": "call-effect-producer-blocker:pure_call_semantics_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 2579,
+      "path": "scripts/function_tracer_pcode/equivalence/call_effect_producer.py",
+      "producer_site_manifest_id": "call-effect-producer-blocker",
+      "source_sha256": "fee9822da5e6266db2b5b8de0cd36963d1cc9b168409b1c844548a1186187541"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "call-effect-proof-batch-v2"
+      ],
+      "branch_or_attempt_contract_id": "checker-call-effect-proof-batch:invocation",
+      "column": 32,
+      "domain": "expression_call_effect_memory",
+      "emitter": "emit_call_effect_signal",
+      "enclosing_function": "_call_effect_shadow_manifest",
+      "expected_cause_slots": [],
+      "line": 2046,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "producer_site_manifest_id": "checker-call-effect-proof-batch",
+      "source_sha256": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-recurrence-proposal-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "checker-recurrence-proposal-blocker:invocation",
+      "column": 20,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_attach_recurrence_proposal_blockers",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "recurrence_proposal_validation_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "recurrence_proposal",
+          "slot_id": "checker-recurrence-proposal-blocker:recurrence_proposal_validation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 1690,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "producer_site_manifest_id": "checker-recurrence-proposal-blocker",
+      "source_sha256": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "equivalence_recurrence_validator"
+      ],
+      "branch_or_attempt_contract_id": "checker-recurrence-validation-completed:invocation",
+      "column": 32,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "check",
+      "expected_cause_slots": [],
+      "line": 1349,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "producer_site_manifest_id": "checker-recurrence-validation-completed",
+      "source_sha256": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE",
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "function-decompilation-artifact-producer-v2",
+        "function-decompilation-completion-producer-v2",
+        "function-decompilation-operational-error-producer-v2"
+      ],
+      "branch_or_attempt_contract_id": "decompilation-broker-operational-signal:invocation",
+      "column": 11,
+      "domain": "operational_extraction",
+      "emitter": "emit_operational_extraction_signal",
+      "enclosing_function": "_emit",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "function_decompilation_artifact_unavailable"
+          ],
+          "expected_domain": "operational_extraction",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_decompilation_target",
+          "slot_id": "decompilation-broker-operational-signal:function_decompilation_artifact_unavailable",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "high_function_ir_unavailable"
+          ],
+          "expected_domain": "operational_extraction",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_decompilation_target",
+          "slot_id": "decompilation-broker-operational-signal:high_function_ir_unavailable",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 52,
+      "path": "scripts/function_tracer_pcode/analysis/decompilation_broker.py",
+      "producer_site_manifest_id": "decompilation-broker-operational-signal",
+      "source_sha256": "0ca42be66179d0f92617ddf5e99b8011759a2b5341d09df07a64f31ea58c9a8f"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "verified_comparison_receipt"
+      ],
+      "branch_or_attempt_contract_id": "obligation-stage-final-eq-closure:invocation",
+      "column": 16,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_signal",
+      "enclosing_function": "run_obligation_branch_plan",
+      "expected_cause_slots": [],
+      "line": 564,
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
+      "producer_site_manifest_id": "obligation-stage-final-eq-closure",
+      "source_sha256": "51507f0a0cc4223dfae13e76068549674cdb8bb3a03459b4bd866e48d7768d79"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE",
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "reachable_outcome_producer_v1"
+      ],
+      "branch_or_attempt_contract_id": "outcome-partition-stage-result:invocation",
+      "column": 4,
+      "domain": "return_outcome",
+      "emitter": "emit_outcome_partition_signal",
+      "enclosing_function": "_emit_outcome_producer_pilot_signal",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "outcome_cfg_reachability_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_cfg_reachability_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_cross_kind_disjointness_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_cross_kind_disjointness_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_cross_kind_overlap_witnessed"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_cross_kind_overlap_witnessed",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_member_classification_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_member_classification_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_partition_completion_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_partition_completion_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_partition_guard_union_incomplete"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_partition_guard_union_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_partition_residual_sat_witnessed"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_partition_residual_sat_witnessed",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_partition_totality_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_partition_totality_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_path_region_completeness_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_path_region_completeness_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_return_value_conflict_witnessed"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_return_value_conflict_witnessed",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_same_kind_comparison_surface_missing"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_same_kind_comparison_surface_missing",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_same_kind_consistency_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_same_kind_consistency_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "outcome_termination_classification_unproven"
+          ],
+          "expected_domain": "return_outcome",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_outcome_stage",
+          "slot_id": "outcome-partition-stage-result:outcome_termination_classification_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 352,
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py",
+      "producer_site_manifest_id": "outcome-partition-stage-result",
+      "source_sha256": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "pair-disposition-safe-counterexample-v2"
+      ],
+      "branch_or_attempt_contract_id": "pair-disposition-safe-counterexample:invocation",
+      "column": 8,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_signal",
+      "enclosing_function": "from_pairwise_validation",
+      "expected_cause_slots": [],
+      "line": 280,
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py",
+      "producer_site_manifest_id": "pair-disposition-safe-counterexample",
+      "source_sha256": "566a46f9d6ae06b55e6752a9ec5a7599ea907376946ce4161969aa287cd72040"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-loop-pair-fallback-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-loop-fallback-blocker:invocation",
+      "column": 20,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_impl_check",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "loop_exact_summary_relation_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "exact_summary_pair",
+          "slot_id": "pairwise-loop-fallback-blocker:loop_exact_summary_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_guard_correspondence_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-loop-fallback-blocker:loop_summary_guard_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_semantic_equality_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-loop-fallback-blocker:loop_summary_semantic_equality_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_structure_correspondence_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-loop-fallback-blocker:loop_summary_structure_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 761,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "loop-exact-guard-partition-validator-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-loop-guard-completed:invocation",
+      "column": 16,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
+      "expected_cause_slots": [],
+      "line": 2049,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-loop-guard-completed",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "loop-exact-term-relation-validator-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-loop-term-completed:invocation",
+      "column": 12,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
+      "expected_cause_slots": [],
+      "line": 2007,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-loop-term-completed",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-loop-pair-fallback-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-pending-loop-blocker:invocation",
+      "column": 16,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_impl_check",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "loop_exact_summary_relation_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "exact_summary_pair",
+          "slot_id": "pairwise-pending-loop-blocker:loop_exact_summary_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_guard_correspondence_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-pending-loop-blocker:loop_summary_guard_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_semantic_equality_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-pending-loop-blocker:loop_summary_semantic_equality_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "loop_summary_structure_correspondence_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "loop_summary_pair",
+          "slot_id": "pairwise-pending-loop-blocker:loop_summary_structure_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 1527,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-pending-loop-blocker",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-readonly-member-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-readonly-correspondence-member:invocation",
+      "column": 32,
+      "domain": "readonly_identity",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "_impl_check",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "readonly_object_correspondence_unproven"
+          ],
+          "expected_domain": "readonly_identity",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "readonly_reduction_object_sets",
+          "slot_id": "pairwise-readonly-correspondence-member:readonly_object_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 828,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-readonly-member-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-readonly-identity-blocker:invocation",
+      "column": 32,
+      "domain": "readonly_identity",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "_impl_check",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "readonly_storage_identity_unproven"
+          ],
+          "expected_domain": "readonly_identity",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "readonly_load_site",
+          "slot_id": "pairwise-readonly-identity-blocker:readonly_storage_identity_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 805,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-return-observation-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-return-width-relation-blocker:invocation",
+      "column": 28,
+      "domain": "return_width",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "_impl_check",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_high_bit_relation_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "pairwise-return-width-relation-blocker:return_high_bit_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "return_observation_contract_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "pairwise-return-width-relation-blocker:return_observation_contract_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 897,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "producer_site_manifest_id": "pairwise-return-width-relation-blocker",
+      "source_sha256": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-summary-width-occurrence-v2"
+      ],
+      "branch_or_attempt_contract_id": "recurrence-summary-abi-width:invocation",
+      "column": 12,
+      "domain": "return_width",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "_prepare_side_for_proposal",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_width_provenance_unavailable"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "return_site_slot",
+          "slot_id": "recurrence-summary-abi-width:return_width_provenance_unavailable",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "return_width_relation_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "same_function_return_pair",
+          "slot_id": "recurrence-summary-abi-width:return_width_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 710,
+      "path": "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
+      "producer_site_manifest_id": "recurrence-summary-abi-width",
+      "source_sha256": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "internal_typed_pure_direct_call_stage_producer"
+      ],
+      "branch_or_attempt_contract_id": "recurrence-summary-call-effect:invocation",
+      "column": 12,
+      "domain": "expression_call_effect_memory",
+      "emitter": "emit_call_effect_signal",
+      "enclosing_function": "_prepare_side_for_proposal",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "callee_effect_summary_incomplete"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "callee_summary",
+          "slot_id": "recurrence-summary-call-effect:callee_effect_summary_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "effect_observation_coverage_incomplete"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "function_effect_census",
+          "slot_id": "recurrence-summary-call-effect:effect_observation_coverage_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "memory_effect_order_extraction_incomplete"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "memory_effect_set",
+          "slot_id": "recurrence-summary-call-effect:memory_effect_order_extraction_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "unsupported_call_effect_semantics"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "call_effect_object",
+          "slot_id": "recurrence-summary-call-effect:unsupported_call_effect_semantics",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 702,
+      "path": "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
+      "producer_site_manifest_id": "recurrence-summary-call-effect",
+      "source_sha256": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-summary-acceptance-signal-v2",
+        "typed-summary-candidate-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "recurrence-summary-loop:invocation",
+      "column": 12,
+      "domain": "loop_recurrence_summary",
+      "emitter": "emit_loop_recurrence_signal",
+      "enclosing_function": "_prepare_side_for_proposal",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "phi_cycle_lowering_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "phi_scc",
+          "slot_id": "recurrence-summary-loop:phi_cycle_lowering_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_effect_model_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_effect_surface",
+          "slot_id": "recurrence-summary-loop:summary_effect_model_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_recurrence_transition_validation_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_return_candidate",
+          "slot_id": "recurrence-summary-loop:summary_recurrence_transition_validation_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_extraction_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_return_extraction",
+          "slot_id": "recurrence-summary-loop:summary_return_extraction_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_memory_observation_mismatch"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "same_function_return_pair",
+          "slot_id": "recurrence-summary-loop:summary_return_memory_observation_mismatch",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_overlap_feasibility_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "same_function_return_pair",
+          "slot_id": "recurrence-summary-loop:summary_return_overlap_feasibility_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_overlap_input_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "same_function_return_pair",
+          "slot_id": "recurrence-summary-loop:summary_return_overlap_input_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_overlap_value_equality_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "same_function_return_pair",
+          "slot_id": "recurrence-summary-loop:summary_return_overlap_value_equality_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_partition_totality_unproven"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_return_partition",
+          "slot_id": "recurrence-summary-loop:summary_return_partition_totality_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_precondition_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_return_candidate",
+          "slot_id": "recurrence-summary-loop:summary_return_precondition_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "summary_return_value_extraction_incomplete"
+          ],
+          "expected_domain": "loop_recurrence_summary",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "summary_return_candidate",
+          "slot_id": "recurrence-summary-loop:summary_return_value_extraction_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 706,
+      "path": "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
+      "producer_site_manifest_id": "recurrence-summary-loop",
+      "source_sha256": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-return-observation-need-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "return-width-observation-contract-blocker:invocation",
+      "column": 12,
+      "domain": "return_width",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "build_top_level_observation_contract",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_observation_contract_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "return-width-observation-contract-blocker:return_observation_contract_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 1182,
+      "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
+      "producer_site_manifest_id": "return-width-observation-contract-blocker",
+      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-return-abi-fact-seed-v2",
+        "typed-return-observation-signal-v2",
+        "typed-same-function-width-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "return-width-pair-assessment:invocation",
+      "column": 12,
+      "domain": "abi",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "prepare_pair_return_observation",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_abi_provenance_unavailable"
+          ],
+          "expected_domain": "abi",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "return_site_slot",
+          "slot_id": "return-width-pair-assessment:return_abi_provenance_unavailable",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "return_abi_relation_unproven"
+          ],
+          "expected_domain": "abi",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "return-width-pair-assessment:return_abi_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 158,
+      "path": "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py",
+      "producer_site_manifest_id": "return-width-pair-assessment",
+      "source_sha256": "49382812f1ac3f40613cc375076d43b803c1fdf44c303d893d2b14a25f213542"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-return-observation-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "return-width-projection-relation-blocker:invocation",
+      "column": 16,
+      "domain": "return_width",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "build_top_level_observation_contract",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_high_bit_relation_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "return-width-projection-relation-blocker:return_high_bit_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "return_observation_contract_unproven"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "return_observation_pair",
+          "slot_id": "return-width-projection-relation-blocker:return_observation_contract_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 1225,
+      "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
+      "producer_site_manifest_id": "return-width-projection-relation-blocker",
+      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "typed-return-width-seed-signal-v2"
+      ],
+      "branch_or_attempt_contract_id": "return-width-unary-provenance-blocker:invocation",
+      "column": 24,
+      "domain": "return_width",
+      "emitter": "emit_abi_width_readonly_signal",
+      "enclosing_function": "build_top_level_observation_contract",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "return_width_provenance_unavailable"
+          ],
+          "expected_domain": "return_width",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "return_site_slot",
+          "slot_id": "return-width-unary-provenance-blocker:return_width_provenance_unavailable",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 1145,
+      "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
+      "producer_site_manifest_id": "return-width-unary-provenance-blocker",
+      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "sat_counterexample_ambiguity_resolution_producer"
+      ],
+      "branch_or_attempt_contract_id": "sat-safety-ambiguity-completed:invocation",
+      "column": 4,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_completion_if_observed",
+      "enclosing_function": "_emit_v2_sat_safety_ambiguity_if_observed",
+      "expected_cause_slots": [],
+      "line": 998,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "producer_site_manifest_id": "sat-safety-ambiguity-completed",
+      "source_sha256": "01c6523b6c07dd610f1eb752fa7ce763bb8ca26a3d019bbca68edb2aab5fc6a4"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "sat_counterexample_ambiguity_producer"
+      ],
+      "branch_or_attempt_contract_id": "sat-safety-ambiguity-observed:invocation",
+      "column": 4,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_signal",
+      "enclosing_function": "_emit_v2_sat_safety_ambiguity",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "counterexample_partition_replay_ambiguous"
+          ],
+          "expected_domain": "sat_safety",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "counterexample_safety_gate",
+          "slot_id": "sat-safety-ambiguity-observed:counterexample_partition_replay_ambiguous",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 975,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "producer_site_manifest_id": "sat-safety-ambiguity-observed",
+      "source_sha256": "01c6523b6c07dd610f1eb752fa7ce763bb8ca26a3d019bbca68edb2aab5fc6a4"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "sat_unsafety_reason_producer"
+      ],
+      "branch_or_attempt_contract_id": "sat-safety-blocker-observed:invocation",
+      "column": 8,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_signal",
+      "enclosing_function": "_emit_v2_sat_safety_blockers",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "counterexample_analysis_safety_unproven"
+          ],
+          "expected_domain": "sat_safety",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "counterexample_safety_gate",
+          "slot_id": "sat-safety-blocker-observed:counterexample_analysis_safety_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "counterexample_same_function_replay_unproven"
+          ],
+          "expected_domain": "sat_safety",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "counterexample_safety_gate",
+          "slot_id": "sat-safety-blocker-observed:counterexample_same_function_replay_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 951,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "producer_site_manifest_id": "sat-safety-blocker-observed",
+      "source_sha256": "01c6523b6c07dd610f1eb752fa7ce763bb8ca26a3d019bbca68edb2aab5fc6a4"
+    }
+  ]
+}

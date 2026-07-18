@@ -1755,7 +1755,7 @@ def test_unknown_outcome_partition_is_unknown_not_covered():
     ) == {"function1", "function2"}
 
 
-def test_outcome_partition_unknown_reason_maps_to_specific_reason_and_evidence():
+def test_outcome_partition_completion_reason_maps_to_specific_evidence():
     strategy = _strategy()
     left = _analysis(
         return_guards=[[_nonpositive()]],
@@ -1769,13 +1769,13 @@ def test_outcome_partition_unknown_reason_maps_to_specific_reason_and_evidence()
     )
 
     record = strategy._make_blocking_unsafety_unknown_reason(
-        "function1:outcome_partition_unknown",
+        "function1:outcome_partition_completion_unproven",
         left,
         right,
         stage="unit",
     )
 
-    assert record.reason_id == "outcome_partition_unknown"
+    assert record.reason_id == "outcome_partition_completion_unproven"
     assert record.object_evidence["unknown_outcomes"][0] == "unknown_outcomes"
     assert record.object_evidence["unknown_outcomes"][1][0][0] == "unknown_outcome"
 

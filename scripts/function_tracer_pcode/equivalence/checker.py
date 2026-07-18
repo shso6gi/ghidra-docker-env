@@ -27,8 +27,12 @@ from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
 from .obligations.snapshot import SnapshotFingerprintCodec
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
-from .workflow import run_check_from_binaries
-from .unknown_reason import build_unknown_recovery_actions, make_unknown_reason
+from .v2.production_boundary import run_check_from_binaries_with_v2_pilot as run_check_from_binaries
+from .unknown_reason import (
+    build_unknown_recovery_actions,
+    make_internal_v2_reason_diagnostic,
+    make_unknown_reason,
+)
 from .cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
@@ -43,7 +47,17 @@ from .call_effect_obligations import (
     build_call_effect_shadow_manifest,
     build_structural_coverage_certificate,
 )
-from .call_effect_producer import produce_pure_direct_call_proofs
+from .call_effect_producer import (
+    produce_pure_direct_call_proofs,
+    produce_v2_pure_direct_call_proofs,
+)
+from .v2.call_effect import CALL_EFFECT_PRODUCTION_STAGE_REGISTRY
+from .v2.production_signals import (
+    CallEffectProofBatchProductionSignal,
+    build_active_call_effect_execution_context,
+    emit_call_effect_signal,
+    record_production_pilot_shadow_error,
+)
 from .call_effect_preflight import (
     CallProofDecisionMode,
     PreparedDispatchFrame,
@@ -119,6 +133,7 @@ class EquivalenceChecker:
         observes_fenv: bool = False,
         observation_contract: Optional[EquivalenceObservationContract] = None,
         call_proof_decision_mode: str = "preflight_projection",
+        canonical_decision_cutover: bool = True,
     ):
         """
         Args:
@@ -147,6 +162,13 @@ class EquivalenceChecker:
             observe_fenv=observes_fenv,
         )
         self.call_proof_decision_mode = CallProofDecisionMode(call_proof_decision_mode)
+        if type(canonical_decision_cutover) is not bool:
+            raise TypeError("canonical decision cutover flag must be exact bool")
+        self.canonical_decision_cutover = canonical_decision_cutover
+        if canonical_decision_cutover:
+            from .v2.phase8_cutover import build_default_cutover_connector
+
+            self.v2_dual_write_pilot_connector = build_default_cutover_connector()
         self._call_proof_generation = 0
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
@@ -591,31 +613,10 @@ class EquivalenceChecker:
                 constrained_fragments=[],
                 rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
-                unknown_reasons=(
-                    [
-                        make_unknown_reason(
-                            "solver_unknown_timeout",
-                            stage="ABI_RETRY",
-                            evidence_refs=(
-                                str(parallel_result.results[0].status.name)
-                                if parallel_result.results
-                                else "no_solver_result",
-                            ),
-                            evidence_kind="query_hash",
-                            object_target_key=self.monolithic_strategy._solver_timeout_object_target_key(
-                                analysis1=analysis1,
-                                analysis2=analysis2,
-                                stage="ABI_RETRY",
-                                query=smt_formula,
-                                timeout_seconds=getattr(self.solver_runner, "timeout", None),
-                                parallel_result=parallel_result,
-                            ),
-                            detail="ABI retry solver query timed out",
-                        )
-                    ]
-                    if parallel_result.is_equivalent is None
-                    else []
-                ),
+                # Solver TIMEOUT/UNKNOWN is execution authority, not a
+                # semantic UNKNOWN reason.  The v2 finalizer joins its receipt
+                # to independently live requirements.
+                unknown_reasons=[],
             )
             return equivalence_result
 
@@ -1328,6 +1329,37 @@ class EquivalenceChecker:
                         or recurrence_attempt.right is not None
                         and recurrence_attempt.right.proposal is not None
                     ):
+                        for promoted_side in (
+                            recurrence_attempt.left,
+                            recurrence_attempt.right,
+                        ):
+                            if (
+                                promoted_side is None
+                                or promoted_side.proposal is None
+                            ):
+                                continue
+                            try:
+                                from .v2.loop_recurrence import (
+                                    RecurrenceValidationCompletionSignal,
+                                )
+                                from .v2.production_signals import (
+                                    emit_loop_recurrence_signal,
+                                )
+
+                                emit_loop_recurrence_signal(
+                                    RecurrenceValidationCompletionSignal.from_side_promotion(
+                                        promoted_side
+                                    ),
+                                    producer_site_manifest_id=(
+                                        "checker-recurrence-validation-completed"
+                                    ),
+                                )
+                            except Exception as exc:
+                                from .v2.production_signals import (
+                                    record_production_pilot_shadow_error,
+                                )
+
+                                record_production_pilot_shadow_error(exc)
                         self._obligation_runtime_session = recurrence_runtime
                         self._active_recurrence_promotion_authority = authority
                         try:
@@ -1413,6 +1445,9 @@ class EquivalenceChecker:
                 } if strategy_result.total_pairs > 0 else None,
                 pairwise_debug_stats=strategy_result.pairwise_debug_stats,
                 unknown_reasons=strategy_result.unknown_reasons,
+                error_message=strategy_result.error_message,
+                failure_status=strategy_result.error_kind,
+                failure_message=strategy_result.error_message,
                 sat_pair_info=strategy_result.sat_pair_info,
                 normalization_rules=strategy_result.normalization_rules,
                 completed_recovery_proof_evidence=completed_proofs,
@@ -1563,7 +1598,10 @@ class EquivalenceChecker:
         if not reasons:
             return None
         sat_reason_ids = {
-            "sat_unsafety", "sat_counterexample_ambiguous",
+            "counterexample_analysis_safety_unproven",
+            "counterexample_same_function_replay_unproven",
+            "counterexample_partition_replay_ambiguous",
+            "sat_counterexample_ambiguous",
         }
         if (
             int(getattr(strategy_result, "sat_pairs", 0) or 0) > 0
@@ -1584,11 +1622,14 @@ class EquivalenceChecker:
         }
         targeted = []
         for reason in reasons:
+            reason_id = getattr(reason, "reason_id", None)
+            if not isinstance(reason_id, str) or not reason_id:
+                continue
             proof_kind = str(getattr(reason, "recovery_proof_kind", "") or "")
             if proof_kind not in recurrence_proof_kinds:
                 continue
             payload = {
-                "reason_id": str(getattr(reason, "reason_id", "unknown") or "unknown"),
+                "reason_id": reason_id,
                 "recovery_proof_kind": proof_kind,
                 "proof_stage": str(getattr(reason, "proof_stage", "") or ""),
                 "object_target_key": getattr(reason, "object_target_key", None),
@@ -1642,6 +1683,24 @@ class EquivalenceChecker:
             for proposal in tuple(
                 getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
             ):
+                try:
+                    from .v2.loop_recurrence import LoopBlockerProductionSignal
+                    from .v2.production_signals import emit_loop_recurrence_signal
+
+                    emit_loop_recurrence_signal(
+                        LoopBlockerProductionSignal.from_recurrence_proposal(
+                            analysis, proposal
+                        ),
+                        producer_site_manifest_id=(
+                            "checker-recurrence-proposal-blocker"
+                        ),
+                    )
+                except Exception as exc:
+                    from .v2.production_signals import (
+                        record_production_pilot_shadow_error,
+                    )
+
+                    record_production_pilot_shadow_error(exc)
                 target = (
                     "quarantined_recurrence_proposal_blocker_v1",
                     side,
@@ -1650,8 +1709,8 @@ class EquivalenceChecker:
                 )
                 if target in known_targets:
                     continue
-                reasons.append(make_unknown_reason(
-                    "loop_summary_proof_missing",
+                reasons.append(make_internal_v2_reason_diagnostic(
+                    "recurrence_proposal_validation_unproven",
                     stage=str(branch_id),
                     recovery_proof_kind="loop_recurrence_proof",
                     proof_stage="recurrence_validation_complete",
@@ -1913,8 +1972,8 @@ class EquivalenceChecker:
                 if blocker in existing:
                     continue
                 strategy_result.unknown_reasons.append(
-                    make_unknown_reason(
-                        "equivalence_blocking_unsafety",
+                    make_internal_v2_reason_diagnostic(
+                        "pure_call_semantics_unproven",
                         stage="CALL_EFFECT_PREFLIGHT",
                         evidence_refs=(blocker,),
                         detail=f"Call/effect preflight veto: {blocker}",
@@ -1946,6 +2005,63 @@ class EquivalenceChecker:
                 solver_runner=self.solver_runner,
                 timeout_seconds=self.timeout,
             )
+            if not any(
+                signal.effect_stage_required
+                for signal in production.v2_blocker_signals
+            ):
+                try:
+                    v2_context = build_active_call_effect_execution_context(
+                        production.v2_blocker_signals,
+                        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+                    )
+                    if v2_context is not None:
+                        v2_production = produce_v2_pure_direct_call_proofs(
+                            manifest,
+                            analysis1,
+                            analysis2,
+                            execution_context=v2_context,
+                            timeout_seconds=self.timeout,
+                        )
+                        if (
+                            v2_production.failure_causes
+                            and v2_production.artifacts
+                            and all(
+                                artifact.record.status == "proven"
+                                for artifact in v2_production.artifacts
+                            )
+                        ):
+                            raise ValueError(
+                                "V2 call/effect proof has unmaterialized post-stage blockers"
+                            )
+                        artifacts_by_obligation: Dict[str, List[Any]] = {}
+                        for artifact in v2_production.artifacts:
+                            artifacts_by_obligation.setdefault(
+                                artifact.record.obligation_id, []
+                            ).append(artifact)
+                        for signal in production.v2_blocker_signals:
+                            artifacts = tuple(
+                                artifacts_by_obligation.get(signal.obligation_id, ())
+                            )
+                            if artifacts:
+                                emit_call_effect_signal(
+                                    CallEffectProofBatchProductionSignal(
+                                        signal, artifacts
+                                    ),
+                                    producer_site_manifest_id=(
+                                        "checker-call-effect-proof-batch"
+                                    ),
+                                )
+                        manifest["v2_call_effect_shadow_producer"] = {
+                            "mode": "pinned_execution_dual_write",
+                            "artifact_count": len(v2_production.artifacts),
+                            "failure_causes": list(v2_production.failure_causes),
+                        }
+                except Exception as exc:
+                    record_production_pilot_shadow_error(exc)
+                    manifest["v2_call_effect_shadow_producer"] = {
+                        "mode": "shadow_evidence_incomplete",
+                        "error_kind": type(exc).__name__,
+                    }
             self._last_internal_call_effect_artifacts = production.artifacts
             if production.artifacts:
                 manifest["mode"] = "typed_relational_call_effect_proof"
@@ -2114,8 +2230,10 @@ class EquivalenceChecker:
             gate["failure_cause"] = "legacy_blocker_replacement_not_ready"
             return
         raw_reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
+        from .v2.call_effect import CALL_EFFECT_REASON_SPECS
+
         if not raw_reasons or any(
-            str(getattr(reason, "reason_id", "")) != "equivalence_blocking_unsafety"
+            str(getattr(reason, "reason_id", "")) not in CALL_EFFECT_REASON_SPECS
             for reason in raw_reasons
         ):
             gate["failure_cause"] = "non_call_unknown_reason_present"
@@ -2229,7 +2347,9 @@ class EquivalenceChecker:
 
         specialized: List[Any] = []
         for reason in reasons:
-            if str(getattr(reason, "reason_id", "")) != "equivalence_blocking_unsafety":
+            from .v2.call_effect import CALL_EFFECT_REASON_SPECS
+
+            if str(getattr(reason, "reason_id", "")) not in CALL_EFFECT_REASON_SPECS:
                 specialized.append(reason)
                 continue
             stages = {
@@ -2311,7 +2431,7 @@ class EquivalenceChecker:
                 and (comparison_identity or {}).get("right_binary_content_identity")
             )
             specialized.append(
-                make_unknown_reason(
+                make_internal_v2_reason_diagnostic(
                     reason.reason_id,
                     count_kind=reason.count_kind,
                     reason_class=reason.reason_class,
@@ -2425,21 +2545,18 @@ class EquivalenceChecker:
         target: Tuple[Any, ...],
         comparison_identity: Mapping[str, Any],
     ) -> Any:
-        reason_id = str(getattr(reason, "reason_id", "unknown"))
-        discriminator = str(target[0]) if target else "unknown"
+        raw_reason_id = getattr(reason, "reason_id", None)
+        if not isinstance(raw_reason_id, str) or not raw_reason_id:
+            return None
+        reason_id = raw_reason_id
         side = cls._root_cause_side(target)
-        execution_reasons = {"solver_unknown_timeout"}
         relational_reasons = {
-            "sat_unsafety",
             "sat_counterexample_ambiguous",
             "return_width_bridge_missing",
         }
         unary_reasons = {
             "return_coverage_gap",
             "return_coverage_inconclusive",
-            "outcome_partition_unknown",
-            "method_b_closure_blocked",
-            "loop_summary_proof_missing",
             "phi_circular_replacement_unproven",
             "summary_return_candidate_invalid",
             "summary_return_overlap_unproven",
@@ -2447,16 +2564,6 @@ class EquivalenceChecker:
             "summary_precondition_incomplete",
             "summary_partition_not_total",
         }
-        if reason_id in execution_reasons or discriminator == "solver_timeout":
-            return ExecutionCauseKey(
-                cause_kind=reason_id,
-                comparison_domain=cls._root_comparison_domain(comparison_identity),
-                logical_query_identity=("object_target", target),
-                execution_semantics_identity=(
-                    "comparison_policy",
-                    tuple(comparison_identity.get("comparison_policy_fingerprint") or ()),
-                ),
-            )
         if side is not None:
             local_content = (
                 comparison_identity.get("left_binary_content_identity")
@@ -2482,10 +2589,9 @@ class EquivalenceChecker:
                     cls._strip_root_cause_side(target),
                 ),
             )
-        if reason_id in relational_reasons or reason_id in unary_reasons or reason_id in {
-            "unresolved_expression",
-            "unresolved_value_expression",
-        }:
+        if reason_id in relational_reasons or reason_id in unary_reasons or reason_id == (
+            "unresolved_value_expression"
+        ):
             function_identities = tuple(
                 comparison_identity.get("function_identity") or ()
             )

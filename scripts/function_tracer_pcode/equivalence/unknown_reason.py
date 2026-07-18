@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
@@ -1244,7 +1244,18 @@ class UnknownReasonRecord:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownReasonRecord":
-        return make_unknown_reason(
+        constructor = make_unknown_reason
+        raw_reason_id = _enum_value(payload.get("reason_id"))
+        if raw_reason_id not in _UNKNOWN_REASON_REGISTRY:
+            try:
+                from .v2.process_supervisor import PROCESS_DURABLE_REASON_REGISTRY
+
+                PROCESS_DURABLE_REASON_REGISTRY.get(raw_reason_id)
+            except KeyError:
+                pass
+            else:
+                constructor = make_internal_v2_reason_diagnostic
+        return constructor(
             payload.get("reason_id"),
             count_kind=payload.get("count_kind"),
             reason_class=payload.get("reason_class"),
@@ -1368,6 +1379,148 @@ def make_unknown_reason(
         recovery_action=recovery_action,
         action_status=normalized_action_status,
         target_regression=target_regression if target_regression is not None else definition.target_regression,
+        detail=detail,
+    )
+
+
+def make_internal_v2_reason_diagnostic(
+    reason_id: Any,
+    **kwargs: Any,
+) -> UnknownReasonRecord:
+    """Build an internal legacy diagnostic from one exact sealed v2 reason.
+
+    This value may support the pre-Phase-8 legacy decision path, but it is not a
+    typed result projection and must never be serialized as canonical v2
+    compatibility authority.
+    """
+    from .v2.phase7_cutover import RETIRED_UMBRELLA_REASON_IDS
+    from .v2.process_supervisor import PROCESS_DURABLE_REASON_REGISTRY
+
+    exact_reason_id = _enum_value(reason_id)
+    if exact_reason_id in RETIRED_UMBRELLA_REASON_IDS:
+        raise ValueError("retired UNKNOWN umbrella is reader-only")
+    definition = PROCESS_DURABLE_REASON_REGISTRY.get(exact_reason_id)
+    class_map = {
+        "proof_obligation": UnknownReasonClass.PROOF_OBLIGATION.value,
+        "unsupported_semantics": UnknownReasonClass.OPERATIONAL_GAP.value,
+        "semantic_safety_gate": UnknownReasonClass.UNSAFE_ANALYSIS.value,
+        "semantic_partition_blocker": UnknownReasonClass.PROOF_OBLIGATION.value,
+    }
+    projected_reason_class = class_map.get(
+        definition.reason_class, UnknownReasonClass.PROOF_OBLIGATION.value
+    )
+    provided_reason_class = _enum_value(kwargs.pop("reason_class", None))
+    provided_decision_effect = _enum_value(kwargs.pop("decision_effect", None))
+    provided_target_regression = kwargs.pop("target_regression", None)
+    if provided_reason_class not in {None, projected_reason_class}:
+        raise ValueError("typed compatibility reason class differs from v2 registry")
+    if provided_decision_effect not in {None, definition.decision_effect}:
+        raise ValueError("typed compatibility decision effect differs from v2 registry")
+    if provided_target_regression not in {None, definition.reason_id}:
+        raise ValueError("typed compatibility target differs from exact v2 reason")
+    provided_proof_obligation_id = _coerce_optional_tuple(
+        kwargs.get("proof_obligation_id")
+    )
+    projected = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION,
+        reason_class=projected_reason_class,
+        decision_effect=definition.decision_effect,
+        reason_scope=kwargs.pop("reason_scope", UnknownReasonScope.QUERY.value),
+        aggregation_unit=kwargs.pop(
+            "aggregation_unit", UnknownAggregationUnit.PAIR.value
+        ),
+        **kwargs,
+    )
+    exact_proof_obligation_id = projected.proof_obligation_id
+    if (
+        projected.proof_stage is not None
+        and projected.evidence_kind is not None
+        and projected.object_target_key is not None
+        and projected.recovery_proof_kind != UnknownRecoveryProofKind.NONE.value
+    ):
+        exact_proof_obligation_id = build_proof_obligation_id(
+            definition.reason_id,
+            projected.proof_stage,
+            projected.recovery_proof_kind,
+            projected.evidence_kind,
+            projected.object_target_key,
+        )
+        if (
+            provided_proof_obligation_id is not None
+            and provided_proof_obligation_id != exact_proof_obligation_id
+        ):
+            raise ValueError("typed compatibility proof ID differs from exact v2 reason")
+    diagnostic_cause_key = dict(projected.typed_cause_key or {})
+    diagnostic_cause_key["authority_class"] = "LEGACY_DIAGNOSTIC"
+    return replace(
+        projected,
+        reason_id=definition.reason_id,
+        reason_class=projected_reason_class,
+        decision_effect=definition.decision_effect,
+        proof_obligation_id=exact_proof_obligation_id,
+        typed_cause_key=diagnostic_cause_key,
+        target_regression=definition.reason_id,
+    )
+
+
+def make_production_unknown_reason(
+    projection_receipt: Any,
+    *,
+    projection_factory: Any,
+    detail: Optional[str] = None,
+) -> UnknownReasonRecord:
+    """Project one factory-owned active v2 cause to compatibility data."""
+
+    from .v2.phase7_cutover import (
+        TypedResultProjectionFactory,
+        TypedResultProjectionReceipt,
+    )
+
+    if type(projection_factory) is not TypedResultProjectionFactory:
+        raise TypeError("production compatibility projection requires exact issuer")
+    if type(projection_receipt) is not TypedResultProjectionReceipt:
+        raise TypeError("production compatibility projection requires exact receipt")
+    if not projection_factory.owns(projection_receipt):
+        raise ValueError("production compatibility projection is not issuer-owned")
+    receipt = projection_receipt
+    definition = projection_factory.reason_definition_for(receipt)
+    class_map = {
+        "proof_obligation": UnknownReasonClass.PROOF_OBLIGATION.value,
+        "unsupported_semantics": UnknownReasonClass.OPERATIONAL_GAP.value,
+        "semantic_safety_gate": UnknownReasonClass.UNSAFE_ANALYSIS.value,
+        "semantic_partition_blocker": UnknownReasonClass.PROOF_OBLIGATION.value,
+        "semantic": UnknownReasonClass.PROOF_OBLIGATION.value,
+    }
+    return UnknownReasonRecord(
+        count_kind=UnknownCountKind.REASON_RECORD.value,
+        reason_id=receipt.reason_id,
+        reason_class=class_map.get(
+            definition.reason_class, UnknownReasonClass.PROOF_OBLIGATION.value
+        ),
+        decision_effect=definition.decision_effect,
+        reason_scope=UnknownReasonScope.QUERY.value,
+        aggregation_unit=UnknownAggregationUnit.RESULT.value,
+        stage="V2_TYPED_RESULT_PROJECTION",
+        evidence_refs=(receipt.event_digest, receipt.receipt_digest),
+        typed_cause_key={
+            "authority_class": "V2_FACTORY_PROJECTION",
+            "projection_schema": receipt.projection_schema,
+            "activation_id": receipt.activation_id,
+            "expected_cause_slot_id": receipt.expected_cause_slot_id,
+            "result_occurrence_id": receipt.result_occurrence_id,
+            "occurrence_id": receipt.occurrence_id,
+            "cause_id": receipt.cause_id,
+            "reason_id": receipt.reason_id,
+            "source_snapshot_fingerprint": receipt.source_snapshot_fingerprint,
+            "event_digest": receipt.event_digest,
+            "event_stream_digest": receipt.event_stream_digest,
+            "semantic_projection_digest": receipt.semantic_projection_digest,
+            "lifecycle_projection_digest": receipt.lifecycle_projection_digest,
+            "reason_registry_digest": receipt.reason_registry_digest,
+            "recovery_registry_digest": receipt.recovery_registry_digest,
+            "receipt_digest": receipt.receipt_digest,
+        },
+        target_regression=receipt.reason_id,
         detail=detail,
     )
 

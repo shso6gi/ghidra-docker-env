@@ -421,7 +421,7 @@ def test_unknown_typed_cause_schema_has_specific_diagnostic():
     assert summary.diagnostics["unknown_typed_cause_schema"] == 1
 
 
-def test_call_effect_specialization_emits_typed_production_identity():
+def test_retired_call_effect_umbrella_is_not_promoted_to_typed_identity():
     reason = make_unknown_reason(
         "equivalence_blocking_unsafety",
         evidence_refs=("function1:callsite",),
@@ -460,9 +460,8 @@ def test_call_effect_specialization_emits_typed_production_identity():
         },
     )[0]
 
-    assert specialized.typed_cause_key["identity_scope"] == "relational"
-    assert specialized.typed_cause_key["cause_kind"] == "deferred_call_effect_relation"
-    assert len(specialized.proof_requirement_ids) == 1
+    assert specialized.typed_cause_key is None
+    assert specialized.proof_requirement_ids == ()
 
 
 def test_call_effect_specialization_refuses_typed_identity_without_content_hashes():
@@ -494,7 +493,7 @@ def test_call_effect_specialization_refuses_typed_identity_without_content_hashe
     assert specialized.proof_requirement_ids == ()
 
 
-def test_call_effect_typed_identity_changes_with_binary_content():
+def test_retired_call_effect_umbrella_does_not_gain_content_derived_identity():
     reason = make_unknown_reason(
         "equivalence_blocking_unsafety",
         evidence_refs=("function1:callsite",),
@@ -532,8 +531,9 @@ def test_call_effect_typed_identity_changes_with_binary_content():
         [reason], manifest, comparison_identity={**base, "right_binary_content_identity": ("sha256", "right-b")}
     )[0]
 
-    assert first.typed_cause_key != second.typed_cause_key
-    assert first.proof_requirement_ids != second.proof_requirement_ids
+    assert first.typed_cause_key is None
+    assert second.typed_cause_key is None
+    assert first.proof_requirement_ids == second.proof_requirement_ids == ()
 
 
 def test_registered_legacy_unary_cause_is_not_split_by_peer_domain():
@@ -725,20 +725,22 @@ def test_check_from_binaries_preserves_supplied_content_identities(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "reason_id",
+    ("reason_id", "expects_typed_identity"),
     [
-        "unresolved_expression",
-        "unresolved_value_expression",
-        "sat_unsafety",
-        "sat_counterexample_ambiguous",
-        "method_b_closure_blocked",
-        "loop_summary_proof_missing",
-        "phi_circular_replacement_unproven",
-        "outcome_partition_unknown",
-        "summary_precondition_incomplete",
+        ("unresolved_expression", False),
+        ("unresolved_value_expression", True),
+        ("sat_unsafety", False),
+        ("sat_counterexample_ambiguous", True),
+        ("method_b_closure_blocked", False),
+        ("loop_summary_proof_missing", False),
+        ("phi_circular_replacement_unproven", True),
+        ("outcome_partition_unknown", False),
+        ("summary_precondition_incomplete", True),
     ],
 )
-def test_major_reason_families_receive_typed_production_identity(reason_id):
+def test_only_exact_reason_families_receive_typed_legacy_identity(
+    reason_id, expects_typed_identity,
+):
     reason = make_unknown_reason(
         reason_id,
         object_target_key=("semantic_blocker", ("pair", "B10_B11"), ("object", "stable-key")),
@@ -758,5 +760,8 @@ def test_major_reason_families_receive_typed_production_identity(reason_id):
         [reason], comparison
     )[0]
 
-    assert enriched.typed_cause_key is not None
-    assert enriched.proof_requirement_ids or enriched.recovery_proof_kind == "none"
+    assert (enriched.typed_cause_key is not None) is expects_typed_identity
+    if expects_typed_identity:
+        assert enriched.proof_requirement_ids or enriched.recovery_proof_kind == "none"
+    else:
+        assert enriched.proof_requirement_ids == ()
