@@ -763,22 +763,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=os.environ.get("VALIDATION_HEALTH_SUMMARY_TEXT"),
         help="optional path for a compact human-readable run health summary",
     )
+    parser.add_argument(
+        "--log-list0",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "read additional log paths from a NUL-delimited file; may be repeated "
+            "to avoid operating-system command-line length limits"
+        ),
+    )
     parser.add_argument("logs", nargs="*")
     args = parser.parse_args(argv)
+    logs = list(args.logs)
+    for list_path_text in args.log_list0:
+        list_path = Path(list_path_text)
+        try:
+            raw_paths = list_path.read_bytes().split(b"\0")
+        except OSError as exc:
+            parser.error(f"cannot read --log-list0 {list_path}: {exc}")
+        logs.extend(os.fsdecode(raw_path) for raw_path in raw_paths if raw_path)
     compact = args.summary_level == "compact"
 
     if args.classify_log:
-        if len(args.logs) != 1:
+        if len(logs) != 1:
             parser.error("--classify-log requires exactly one log")
         print(classify_canonical_log_text(
-            Path(args.logs[0]).read_text(encoding="utf-8", errors="replace"),
+            Path(logs[0]).read_text(encoding="utf-8", errors="replace"),
             matrix_context=True,
         ))
         return 0
 
     if args.function_summary:
         aggregate = aggregate_validation_logs(
-            args.logs, canonical_only=args.canonical_only
+            logs, canonical_only=args.canonical_only
         )
         function_name = args.function_name or _single_function_name(aggregate.records) or "(unknown)"
         before_logs = sorted(Path(args.before_dir).glob("*.log")) if args.before_dir else ()
@@ -803,7 +821,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     overall = aggregate_validation_logs_by_function(
-        args.logs, canonical_only=args.canonical_only
+        logs, canonical_only=args.canonical_only
     )
     assert_aggregation_invariant(overall)
     before_logs = sorted(Path(args.before_dir).glob("*/*.log")) if args.before_dir else ()

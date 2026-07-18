@@ -82,18 +82,18 @@
     "scripts/function_tracer_pcode/equivalence/checker.py": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py": "feff61675f422640187fefc0fd2527e17f6d3643052d7b60403350291cc37137",
     "scripts/function_tracer_pcode/tests/unit/test_call_effect_obligations.py": "caa3c2fafbb047bbc8c743c56a713785e79b81462b9485f7f0e2154c169d9d97",
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "5ee6c228a2974e892fa22b57f73bd159d3ab75ca53eab3affe93c027f432af90"
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "95662ca02a08de6dd93832e129196b0f1be87c26fee6d34fb519b56e45e199f0"
   },
   "source_inventory": {
     "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
     "current_source": {
       "candidate_count": 594,
-      "candidate_set_digest": "7528de1d25b87b8542ceb1ed5952934cffa8d4c95b58753563057427b873dcac"
+      "candidate_set_digest": "2c69ef689bed7c893089818e84e434e1ccf3ec84aaba99457406e260bae02949"
     },
     "live_delta": {
       "added": 0,
       "removed": 0
     }
   },
-  "artifact_digest": "9e7b82d9c67b8efe08d50fe026719fd5bec63c4ed056f773957203d1a3894e70"
+  "artifact_digest": "b049f6e0382e7df37ddd8f085828a89972fd5aa325800a1d4a3438e4bab5e512"
 }

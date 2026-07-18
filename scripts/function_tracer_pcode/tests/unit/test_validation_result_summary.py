@@ -1043,6 +1043,73 @@ def test_matrix_runners_update_summary_outputs_only_after_success():
         assert '} | tee "$RESULT_FILE"' not in script
         assert '} | tee "$SUMMARY_FILE"' not in script
 
+
+def test_result_summary_reads_large_nul_delimited_log_manifest(tmp_path):
+    log_path = _write_log(
+        tmp_path,
+        "pair with spaces.log",
+        "Result: EQUIVALENT",
+    )
+    manifest_path = tmp_path / "logs.list0"
+    manifest_path.write_bytes((os.fsencode(log_path) + b"\0") * 20_000)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--overall-summary",
+            "--summary-level",
+            "compact",
+            "--log-list0",
+            str(manifest_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "TOTAL=20000" in result.stdout
+
+
+def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+
+    assert "write_log_list0()" in script
+    assert '--log-list0 "$function_log_list"' in script
+    assert '--log-list0 "$overall_log_list"' in script
+    assert '! -name "run_stdout.log"' in script
+    overall_summary_call = script.split(
+        'write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt"', 1
+    )[1].split("\nfi", 1)[0]
+    assert '"${ALL_LOG_FILES[@]}"' not in overall_summary_call
+
+
+def test_eqbench_summary_failure_preserves_actual_exit_status(tmp_path):
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    function_source = script[
+        script.index("write_summary_file() {"):script.index("write_log_list0() {")
+    ]
+    output_path = tmp_path / "summary.txt"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            function_source
+            + '\nwrite_summary_file "$1" bash -c "exit 23"',
+            "bash",
+            str(output_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 23
+    assert f"summary generation failed for {output_path} (exit=23)" in result.stderr
+    assert not output_path.exists()
+
     function_call_script = Path("func_call_run_matrix_all_parallel_multifunc.sh").read_text()
     assert "VALIDATION_BASELINE_MATCH_SCOPE=${VALIDATION_BASELINE_MATCH_SCOPE:-all}" in function_call_script
     assert "VALIDATION_BASELINE_MATCH_LEVEL=${VALIDATION_BASELINE_MATCH_LEVEL:-exact}" in function_call_script

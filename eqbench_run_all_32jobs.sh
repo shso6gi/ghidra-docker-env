@@ -239,17 +239,35 @@ binary_name_for_id() {
 write_summary_file() {
     local output_file="$1"
     shift
-    local tmp_file
+    local tmp_file status
     tmp_file="$(mktemp "${output_file}.tmp.XXXXXX")" || return 1
     if "$@" > "$tmp_file"; then
-        tee "$output_file" < "$tmp_file"
-        rm -f "$tmp_file"
-        return 0
+        if mv -f "$tmp_file" "$output_file"; then
+            if cat "$output_file"; then
+                return 0
+            else
+                status=$?
+                echo "Error: cannot display generated summary $output_file (exit=$status)" >&2
+                return "$status"
+            fi
+        else
+            status=$?
+            rm -f "$tmp_file"
+            echo "Error: cannot install generated summary $output_file (exit=$status)" >&2
+            return "$status"
+        fi
+    else
+        status=$?
     fi
-    local status=$?
     rm -f "$tmp_file"
     echo "Error: summary generation failed for $output_file (exit=$status)" >&2
     return "$status"
+}
+
+write_log_list0() {
+    local output_file="$1"
+    shift
+    printf '%s\0' "$@" > "$output_file"
 }
 
 mapfile -t SAMPLE_SOURCES < <(
@@ -438,21 +456,30 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
         function_logs=("$output_function_dir"/*.log)
         shopt -u nullglob
         if (( ${#function_logs[@]} > 0 )); then
+            function_log_list="$output_function_dir/.summary-log-paths.list0"
+            write_log_list0 "$function_log_list" "${function_logs[@]}"
             write_summary_file "$output_function_dir/results_summary.txt" \
                 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
                     --function-summary \
                     --canonical-only \
                     --function-name "$function_name" \
                     --summary-level "$VALIDATION_SUMMARY_LEVEL" \
-                    "${function_logs[@]}"
+                    --log-list0 "$function_log_list"
         fi
     done
 done
 
 wait_for_all_jobs
 
-mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" ! -name "compile_all.log" | sort)
+mapfile -t ALL_LOG_FILES < <(
+    find "$OUTPUT_BASE_DIR" -type f -name "*.log" \
+        ! -name "compile_all.log" \
+        ! -name "run_stdout.log" \
+        -print | sort
+)
 if (( ${#ALL_LOG_FILES[@]} > 0 )); then
+    overall_log_list="$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0"
+    write_log_list0 "$overall_log_list" "${ALL_LOG_FILES[@]}"
     write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt" \
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
             --overall-summary \
@@ -460,7 +487,7 @@ if (( ${#ALL_LOG_FILES[@]} > 0 )); then
             --summary-level "$VALIDATION_SUMMARY_LEVEL" \
             --health-summary-json "$OUTPUT_BASE_DIR/run_health_summary.json" \
             --health-summary-text "$OUTPUT_BASE_DIR/run_health_summary.txt" \
-            "${ALL_LOG_FILES[@]}"
+            --log-list0 "$overall_log_list"
 fi
 
 cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF

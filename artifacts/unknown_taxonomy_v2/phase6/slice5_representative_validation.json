@@ -7,7 +7,7 @@
   "source_inventory": {
     "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
     "current_source": {
-      "candidate_set_digest": "7528de1d25b87b8542ceb1ed5952934cffa8d4c95b58753563057427b873dcac",
+      "candidate_set_digest": "2c69ef689bed7c893089818e84e434e1ccf3ec84aaba99457406e260bae02949",
       "candidate_count": 594
     },
     "live_delta": {
@@ -313,7 +313,7 @@
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "dc454f5f8a2ec9f65b63d35f69ff22de56466b356780b4b910de1c997bcacbae",
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "5ee6c228a2974e892fa22b57f73bd159d3ab75ca53eab3affe93c027f432af90",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "95662ca02a08de6dd93832e129196b0f1be87c26fee6d34fb519b56e45e199f0",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
     "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
@@ -489,5 +489,5 @@
       "case_id": "eqbench_bess_SIGN_snippet_arm64_clang_o3_mips64_gcc_o3"
     }
   },
-  "artifact_digest": "42edcc0ab3f4aee98f4a8650055137b99927ce92568c216e33e8969782108d7a"
+  "artifact_digest": "0603474530ff55880c5ddcdbe1238857b54026927a8facd911fd7c85b6b53831"
 }
