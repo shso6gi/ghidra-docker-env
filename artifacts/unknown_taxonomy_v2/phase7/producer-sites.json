@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
+  "manifest_digest": "d67d05d674227cda5808b63576dbe7b437b050e6897e59662c487650a9a82bc2",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 25,
   "sites": [
@@ -137,7 +137,7 @@
       "line": 52,
       "path": "scripts/function_tracer_pcode/analysis/decompilation_broker.py",
       "producer_site_manifest_id": "decompilation-broker-operational-signal",
-      "source_sha256": "0ca42be66179d0f92617ddf5e99b8011759a2b5341d09df07a64f31ea58c9a8f"
+      "source_sha256": "4c07d658c5a82fc5403167a8d61b1d81bf70dd54b9fffc1b623bf576d4f1afce"
     },
     {
       "allowed_dispositions": [

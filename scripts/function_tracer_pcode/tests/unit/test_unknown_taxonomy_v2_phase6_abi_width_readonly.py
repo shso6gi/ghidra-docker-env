@@ -447,8 +447,8 @@ def _abi_relation_artifact(
         left_abi_artifact=artifacts[0],
         right_abi_artifact=artifacts[1],
         source_snapshot_fingerprint=source_snapshot,
-        same_abi_family=True,
-        related_storage=True,
+        calling_conventions_individually_valid=True,
+        storage_projection_related=True,
         observation_applicable=True,
     )
     if include_unary:
@@ -1300,8 +1300,8 @@ def test_exact_artifact_dependencies_reject_digest_side_slot_and_registry_bypass
             left_abi_artifact=unary[1],
             right_abi_artifact=unary[0],
             source_snapshot_fingerprint="source-snapshot",
-            same_abi_family=True,
-            related_storage=True,
+            calling_conventions_individually_valid=True,
+            storage_projection_related=True,
             observation_applicable=True,
         )
     missing = abi_seeds[0]
@@ -1545,8 +1545,19 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
         "ghidra_return_storage_v1",
         (("ghidra_return_storage_member_v1", "register", 8, 8),),
     )
-    unproven = assess_return_abi_pair(
+    right_analysis.return_abi_facts["calling_convention"]["value"] = (
+        "ghidra_calling_convention_v1", "different-architecture-abi"
+    )
+    cross_abi = assess_return_abi_pair(
         left_analysis, right_analysis, left, right, pair
+    )
+    assert cross_abi.relation_assessment.status is ReturnAbiRelationStatus.PROVED
+    assert cross_abi.signals == ()
+
+    narrow_right = replace(right, storage_width=16)
+    narrow_pair = replace(pair, right_seed_digest=narrow_right.digest)
+    unproven = assess_return_abi_pair(
+        left_analysis, right_analysis, left, narrow_right, narrow_pair
     )
     assert unproven.relation_assessment.status is ReturnAbiRelationStatus.UNPROVEN
     assert [signal.reason_id for signal in unproven.signals] == [
@@ -1575,7 +1586,7 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
     ("right_calling_status", "right_storage", "expected_reasons", "expected_errors"),
     (
         ("MISSING", "same", ("return_abi_provenance_unavailable",), ()),
-        ("PRESENT", "different", ("return_abi_relation_unproven",), ()),
+        ("PRESENT", "different", (), ()),
         ("PRESENT", "same", (), ()),
         ("MALFORMED", "same", (), ("ValueError",)),
     ),

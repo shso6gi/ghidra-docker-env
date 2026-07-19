@@ -568,8 +568,22 @@ class ReturnAbiCompatibilityAssessment:
             right_cc = right.fact("calling_convention")[1]
             left_storage = left.fact("return_storage_descriptor")[1]
             right_storage = right.fact("return_storage_descriptor")[1]
-            same_family = left_cc == right_cc
-            related_storage = left_storage == right_storage
+            # Binary equivalence intentionally spans architectures and ABIs.
+            # Physical calling-convention names and return registers therefore
+            # must not be compared for literal equality.  Each unary seed has
+            # already validated its own ABI facts; the relational question is
+            # whether both physical surfaces project to the same semantic
+            # payload observed by the comparison query.
+            calling_conventions_individually_valid = bool(left_cc) and bool(right_cc)
+            storage_projection_related = (
+                projection_seed.candidate_observation_width
+                == projection_seed.left_payload_width
+                == projection_seed.right_payload_width
+                and projection_seed.candidate_observation_width
+                <= projection_seed.left_storage_width
+                and projection_seed.candidate_observation_width
+                <= projection_seed.right_storage_width
+            )
             observation_applicable = (
                 projection_seed.candidate_observation_width
                 <= projection_seed.left_storage_width
@@ -577,14 +591,21 @@ class ReturnAbiCompatibilityAssessment:
                 <= projection_seed.right_storage_width
             )
             body = (
-                "return_abi_compatibility_predicates_v2",
-                ("same_return_abi_family", same_family),
-                ("abi_related_return_storage", related_storage),
+                "return_abi_semantic_projection_predicates_v3",
+                (
+                    "calling_conventions_individually_valid",
+                    calling_conventions_individually_valid,
+                ),
+                ("storage_projection_related", storage_projection_related),
                 ("observation_contract_applicable", observation_applicable),
             )
             status = (
                 ReturnAbiRelationStatus.PROVED
-                if all((same_family, related_storage, observation_applicable))
+                if all((
+                    calling_conventions_individually_valid,
+                    storage_projection_related,
+                    observation_applicable,
+                ))
                 else ReturnAbiRelationStatus.UNPROVEN
             )
         payload = {
@@ -2049,10 +2070,15 @@ class ReturnAbiRelationArtifact(_AbiWidthReadonlyCompletionArtifact):
 
     @classmethod
     def from_projection_seed(cls, blocker, seed, *, left_abi_artifact,
-                             right_abi_artifact, source_snapshot_fingerprint, same_abi_family,
-                             related_storage, observation_applicable):
+                             right_abi_artifact, source_snapshot_fingerprint,
+                             calling_conventions_individually_valid,
+                             storage_projection_related, observation_applicable):
         if type(seed) is not ReturnObservationProjectionSeed or not all(
-            value is True for value in (same_abi_family, related_storage, observation_applicable)
+            value is True for value in (
+                calling_conventions_individually_valid,
+                storage_projection_related,
+                observation_applicable,
+            )
         ):
             raise ValueError("ABI relation lacks its three-predicate conjunction")
         if type(left_abi_artifact) is not ReturnAbiProvenanceArtifact or type(
@@ -2069,7 +2095,12 @@ class ReturnAbiRelationArtifact(_AbiWidthReadonlyCompletionArtifact):
         return _artifact_values(cls, blocker, source_seed_digest=seed.seed_digest,
             source_snapshot_digest=source_snapshot_fingerprint,
             prepared_snapshot_digest=seed.prepared_snapshot_digest,
-            proof_body=("return_abi_relation_v2", same_abi_family, related_storage, observation_applicable),
+            proof_body=(
+                "return_abi_semantic_projection_v3",
+                calling_conventions_individually_valid,
+                storage_projection_related,
+                observation_applicable,
+            ),
             applicability_body=("active_guard", seed.guard_contract),
             dependency_artifact_digests=(left_abi_artifact.artifact_digest, right_abi_artifact.artifact_digest))
 

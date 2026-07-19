@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "4e99bdf68747b9f21837186285b757319d8baafe0cf20752491944ed3ea357b9",
+  "artifact_digest": "f4a7ffb331f85eb3da9b03c5e0b1c3206d3b3c7c9bebc43aa93080a1bfb2ab1a",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -114,8 +114,8 @@
       "right_source": "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c",
       "right_source_sha256": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
       "shared_authority_chain": {
-        "abi_completion_receipt_digest": "bbef0a5e7bded85aebea686c6162815494614743d8b7245e865f6c1ed41a324c",
-        "abi_relation_artifact_digest": "d8e9d670b74d418af46947a86d7501fabfa196b6d2680fac4b418f40dd5b8765",
+        "abi_completion_receipt_digest": "7a48b0130979ad1ab27f061eb8a63df27bdae60a88351b046e9ed1a86c400a8e",
+        "abi_relation_artifact_digest": "1a29ee0b86c90efb73f5f91de0ea7116a3c9e5d3a6432fd4f15a0ed65d28b921",
         "active_reason_ids": [
           "counterexample_analysis_safety_unproven",
           "return_high_bit_relation_unproven"
@@ -124,9 +124,9 @@
           "zero_extend",
           "zero_extend_or_mask:1099511627776"
         ],
-        "high_bit_cause_rows_digest": "867f322fcd6ff2d9a14c95ddb8c097c87da61a7f26d4112b68b5691ee1cc9b50",
-        "live_requirement_rows_digest": "6c8cd86c29441981bedb75479cf418a8e72833b66c4d244b917602c8aacf58c2",
-        "model_safety_handoff_digest": "16460584667e9094b74b691203bff3820c83ad35f3005be04ea4576b6a44dc9e",
+        "high_bit_cause_rows_digest": "0cb4ccac6b05bcd109bde383b94d92d8b4b9dfe1827521c06fe9152d89dd8576",
+        "live_requirement_rows_digest": "ca244b350c1a3d609dfc43c3a8690d063912d031828214ac7c115db8addbbc63",
+        "model_safety_handoff_digest": "bce36a7c58dd09a68d5c60adbeeaed7094281741b08345e0d4df0789391ecec2",
         "normalized_storage_widths": [
           64,
           64
@@ -160,13 +160,13 @@
             "0x2000"
           ]
         ],
-        "query_authority_digest": "751d570be1e25cf46a4fa46df8d39f6c650dffcd3eb6021a7481506bb809e4c6",
+        "query_authority_digest": "b604ef526da9c94cd5abb8408f4df411bf8e317807ddf13fa2ce63da7cb1c880",
         "raw_return_widths": [
           32,
           64
         ],
-        "sat_execution_receipt_digest": "a8f2065a28b26d22552919d017ffac15be79b26b4dbfe18a4f0346d352990e1c",
-        "solver_membership_digest": "a47c2d2b702800c3b789709558ae66bc450760577b81e7c5af562fc1fae12d8f"
+        "sat_execution_receipt_digest": "40f8da2c17b05333aca42ddcc78067acda5d22a5bd54b23e0e58736a5298eff6",
+        "solver_membership_digest": "154744d0b3e642e2f0ed2d170b39cbbb6aaf41be6b53c9857e538638e0353a3f"
       },
       "stored_left_binary": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/high_bit_projection_left.bin.gz.b64",
       "stored_result_output": "artifacts/unknown_taxonomy_v2/phase6/slice5_runs/high_bit_projection_pair.result.json.gz.b64",
@@ -215,14 +215,14 @@
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "49382812f1ac3f40613cc375076d43b803c1fdf44c303d893d2b14a25f213542",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7",
-    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "d8de164412b49ed691d37e1feda39e73057439c54aaac29860d43d02cb6b9ca0",
+    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "f03df3b06ed68cbcb1c835f934bc75a2ce2059955952c94813ca852aafe3ac99",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "73875e1ab915a3b66bec11f4ce23aeae243b5fa4dedc21c4f70cbabe565411d6",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "078b0a6981bb18a5be3d363739008898a013d8acaee6e2864789e0185080583a",
     "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b368c07824b7dd37bb8dd49df4b4b2a745b3ab36e6a1d77fef43ca875a3b033f",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "dc454f5f8a2ec9f65b63d35f69ff22de56466b356780b4b910de1c997bcacbae",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "19710ee6652a2464acce3b1c3a0a0f02c3361b45fe6bbda8407dd9f4ba66b246",
     "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
@@ -277,7 +277,7 @@
         "q_open": 1
       },
       "proof_kind": "return_abi_relation",
-      "sealed_event_stream_digest": "99d18b4d8527e4fa5781e423517db2e56e90d090df18903d41c59000e6126e4c"
+      "sealed_event_stream_digest": "6fa64fafa165f6d5e770a5189eb9f8232dbfa3e4b2b0f164e83a65668ca9fc4f"
     },
     "return_high_bit_relation_unproven": {
       "completed": {
@@ -290,7 +290,7 @@
         "q_open": 1
       },
       "proof_kind": "return_high_bit_relation",
-      "sealed_event_stream_digest": "8c0a16ee4f3d7f934ff636bf49a2c1f4b57731492b588b38bfc5fde4d5dd1880"
+      "sealed_event_stream_digest": "54522d220b7c70591ebf652d5623be02b1753d47a8e07c96e2ad41a645dbc5f8"
     },
     "return_observation_contract_unproven": {
       "completed": {

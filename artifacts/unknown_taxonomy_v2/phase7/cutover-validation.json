@@ -1,6 +1,6 @@
 {
   "active_cause_count": 6,
-  "artifact_digest": "134f4d64e3619a7519214144aa22aaaed62b5cadac88321a426187f9ec0b3c14",
+  "artifact_digest": "30beb3a62694a9e91f18b503e362c2cfe2369bed812bcf7a79c389b7efc47e89",
   "contract_fixture_coverage": {
     "covered_cause_slot_count": 6,
     "eligible_cause_slot_count": 6,
@@ -8,9 +8,9 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "cross_slice_validation": {
-    "artifact_digest": "fc249275db585019d41b2a694601b67beba92aff29399f2553567677c7d32aaa",
+    "artifact_digest": "dc34c76be32e1fb065e839cede0d96500f6ce43c95c52e66dc04ce8abad35ae9",
     "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-    "junit_sha256": "06db8acc3112ea35afa6032ff694f5e5f24d8e169e378e8ae403e2b02fb201e5",
+    "junit_sha256": "875ddf055e5f58c2faf018c90ec2a19ab67ceff93e939b5e2903bb34591a3a8a",
     "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v1",
     "pytest_selection": [
       "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -57,7 +57,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py",
-        "sha256": "dc454f5f8a2ec9f65b63d35f69ff22de56466b356780b4b910de1c997bcacbae"
+        "sha256": "19710ee6652a2464acce3b1c3a0a0f02c3361b45fe6bbda8407dd9f4ba66b246"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py",
@@ -69,7 +69,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_operational_extraction.py",
-        "sha256": "44c38387ea153caa062a2d7ff3db37f0429204a4d01ef30841872e7a55944bad"
+        "sha256": "fae8ff9e63946c1eed771eb7eb5204982ef26c2cc3c0ce0194ecc8571ddd8ebc"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_census.py",
@@ -118,8 +118,8 @@
     ],
     "test_count": 508
   },
-  "event_stream_digest": "c9d853467d321440cd3420f54c3bfa38ba023755760e165e330e6ce791d24f9d",
-  "expected_activation_ledger_digest": "e86f7aa49f374692258fb17d57519b564ddaffbfde9a9d741d778c6786215610",
+  "event_stream_digest": "973accd46c01ab0a5b2e06cb6e2227889deca8ef9dd1387356754ae282675947",
+  "expected_activation_ledger_digest": "8730aee61b812dfd861b3a44a828fcac02d6d84aa0187e53432be71b150d7915",
   "fixture_domains": [
     "operational_extraction",
     "expression_call_effect_memory",
@@ -131,10 +131,10 @@
   "inventory_manifest_digest": "265b11614335f56d93fa4f0feaad9d7998968109251d8fb27678fc076e31a752",
   "legacy_entry_count": 411,
   "legacy_manifest_digest": "6eb7031c243fd360aa6b271d9269be419848b59041c2f926f92052e5636dcb06",
-  "lifecycle_projection_digest": "4d78e53bd4a84e3210276efff8709a8d6c1dafe87db8d08e3f7608893c7745c3",
+  "lifecycle_projection_digest": "9b40eef1b5c68fa7b575366023af574582b679a38379bb311bc5a70d5ea4304f",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cutover-contract-fixture-v2",
   "open_requirement_count": 5,
-  "producer_site_manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
+  "producer_site_manifest_digest": "d67d05d674227cda5808b63576dbe7b437b050e6897e59662c487650a9a82bc2",
   "production_runtime_coverage": {
     "activated_domains": {
       "operational_extraction": {
@@ -294,7 +294,7 @@
   },
   "production_runtime_unknown": {
     "active_cause_count": 1,
-    "artifact_digest": "19f4010841b997f9ed66814af92b973eda0eb9c6bf600b760252201b72d87b33",
+    "artifact_digest": "b87ff2b7749fad174324e50e9fb6c83de2a347416d6392be7d35f08f5109743c",
     "binary_content_identities": [
       "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
       "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -308,9 +308,9 @@
         "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
         "decision_effect": "blocks_disequivalence",
         "domain": "sat_safety",
-        "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
+        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
         "reason_id": "counterexample_analysis_safety_unproven",
-        "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
+        "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
         "target_kind": "counterexample_safety_gate"
       }
     ],
@@ -326,33 +326,33 @@
       "v2_native_typed_cause_coverage": 1.0
     },
     "decision_receipt": {
-      "authority_input_digest": "6c89295ac9b4650a2a76e5ee7dac25fe8b424bbade72d36e77ea84600aff68e8",
-      "lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
+      "authority_input_digest": "98ae32f1e126b3d3bcc2c178d015c77fb786767cd5c41e4606b4ca1fbd34de93",
+      "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
       "outcome": "UNKNOWN",
-      "receipt_digest": "654cec5eba61cf3775861a88f094feb16f63519548a2c1934070a09a007f2a8e",
-      "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0"
+      "receipt_digest": "f3e34ab376728f3399c6d89b0b60557217c955c585b8a23b0dbcf07fd689feb7",
+      "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae"
     },
     "discovered_activation_count": 1,
     "expected_activation_count": 1,
-    "expected_activation_ledger_digest": "db24c7540d7adc900babaf64732c169eca063a40dcc2999389aab25f579a9154",
+    "expected_activation_ledger_digest": "e6a2ee10341851f9cdf64ee6c809c26884ede770e209942ca3b87a98e8a835f7",
     "final_outcome": "UNKNOWN",
     "function_pair": [
       "phase7_sat_witness",
       "phase7_sat_witness"
     ],
-    "junit_sha256": "0e73dee173745f8766c1580109dc758686f45e7362602945b2b39c2dbba034f6",
+    "junit_sha256": "d536015f6504a5bf976dc7bb8deda72fb57151b6a2d8e447bf6df11e2088536b",
     "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
     "not_reached_activation_count": 0,
     "open_requirement_count": 1,
-    "producer_manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
+    "producer_manifest_digest": "d67d05d674227cda5808b63576dbe7b437b050e6897e59662c487650a9a82bc2",
     "producer_site_count": 25,
     "q_open_rows": [
       {
         "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-        "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
+        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
         "proof_kind": "counterexample_safety",
         "proof_requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
-        "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
+        "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
         "semantic_target_digest": "74ff6d69bcb2bb282a5b6f7b4399df8a2f871ec874670660a12d2eda600a8068"
       }
     ],
@@ -362,7 +362,7 @@
         "disposition": "sat",
         "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
         "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-        "premise_digest": "6ab1edfa51f2e6166e5cf725bbfb6dd0a98ef2639bb191f2903de74dbdbbab58",
+        "premise_digest": "6bfc4ca54bec6ea84e85eb17393efeb8b76805b1486222f589e8fd281d9b84c1",
         "proof_kind": "monolithic_region_guard",
         "query_label": "monolithic.region:0:0:guard",
         "return_width_binding_receipt_digest": "",
@@ -374,7 +374,7 @@
         "disposition": "sat",
         "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
         "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-        "premise_digest": "6ca90b899b4dbd97d530dafca83564730e2fb699e7a396976a79ed2c92b85c0d",
+        "premise_digest": "9421bb882f069df9476c207092e97adc05035f7715b793cb916da0409893bcc7",
         "proof_kind": "monolithic_region_value_inequality",
         "query_label": "monolithic.region:0:0:value",
         "return_width_binding_receipt_digest": "",
@@ -403,24 +403,24 @@
       ]
     },
     "runtime_activation_count": 1,
-    "runtime_activation_ledger_digest": "16bfad4cc381b2ed8e27e12df07b6065f4af980f37a1c9c5e6905b81814b3ca1",
+    "runtime_activation_ledger_digest": "38f9cf5673fc02fef83efdb3cd40944a582b0522801f470c8d7e9dc58f1b7c49",
     "sealed_event_stream": {
       "object_type": "SealedEventStream",
       "payload": {
         "envelope": {
-          "authority_chain_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
+          "authority_chain_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
           "event_count": 1,
           "first_sequence": 1,
           "last_sequence": 1,
-          "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
+          "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
           "schema_version": 2,
           "sealed": true,
-          "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
-          "stream_id": "phase7-production-pilot-264e9992b95281f1feeb72d0"
+          "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
+          "stream_id": "phase7-production-pilot-eaa6e4bc25b7f07c5f867bae"
         },
         "events": [
           {
-            "authority_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
+            "authority_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
             "authority_payload": {
               "occurrence_authority": {
                 "bound_contract": {
@@ -443,7 +443,7 @@
                   ]
                 },
                 "occurrence": {
-                  "attempt_id": "de4fde4a2181b0104e4fbb5f6e831e79ce012890340f884d0d4724524279f3a5",
+                  "attempt_id": "9ef4c65cb4ebe014abe5ed83cb47d448d79adc8bbd7442eefe523b7a417c639c",
                   "bound_expression_digest": "7b3bd5586908c97c5512e011e60f7c029e7ce7700f17856b00c05ca61a27256d",
                   "bound_satisfaction_contract_id": "counterexample-safety-recovery",
                   "bound_satisfaction_contract_version": 1,
@@ -611,13 +611,13 @@
                   ],
                   "identity_scope": "RELATIONAL",
                   "normalized_expression_digest": "91b0cb6837755210c81acb5b5164bbe68c35ebdeb44046d4dbf431a65d5914d9",
-                  "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
+                  "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
                   "producer_id": "sat_unsafety_reason_producer",
                   "proof_requirement_ids": [
                     "sat-safety-ffcedc971e36fed8cacad3663557cdbd"
                   ],
                   "reason_id": "counterexample_analysis_safety_unproven",
-                  "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
+                  "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
                   "target_id": "13f32febbba1e9b9083f0ea1671195b516aa98967c6109298d0338f968768fac",
                   "target_kind": "counterexample_safety_gate"
                 }
@@ -625,19 +625,19 @@
             },
             "diagnostic_payload": null,
             "header": {
-              "authority_payload_digest": "0192118260fac748368fe2201928c8e7ed226880947980da6c29d7ad258cb148",
+              "authority_payload_digest": "83dffa67a1ef2f586321a90246b2df72fcea9fb6cc7fe081757dc50d82b238fa",
               "event_type": "CAUSE_OBSERVED",
               "predecessor_authority_digest": "0000000000000000000000000000000000000000000000000000000000000000",
-              "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
+              "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
               "schema_version": 2,
               "sequence_number": 1,
-              "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
-              "stream_id": "phase7-production-pilot-264e9992b95281f1feeb72d0"
+              "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
+              "stream_id": "phase7-production-pilot-eaa6e4bc25b7f07c5f867bae"
             }
           }
         ]
       },
-      "payload_digest": "2e010dc20381f6c9e198427e9b1d3ca2c5e034a9d4135264ad14978f583a8f0f",
+      "payload_digest": "61bde345d2e32515a1591e58a07bd8aeded2208e5d2ce06eeec8f6853bc8cb7f",
       "schema_version": 2
     },
     "selected_activation_count": 1,
@@ -655,40 +655,40 @@
     "terminal_timeout_receipt_count": 0,
     "test_source_sha256": "b7a2a639e6df35b0174f7ca534f3d9ec47ae015c49529fe9da272c4574c4aa31",
     "typed_projection_receipt": {
-      "activation_id": "discovered-8af1b59f8f9dd86adfcd61baabf82a34340eacd38f3cc22e991f16bdef04212f",
+      "activation_id": "discovered-6f0d9b2de5921e2f5b79374d6640b5d7472200515209d51032129f9ec469398d",
       "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-      "event_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
-      "event_stream_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
+      "event_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+      "event_stream_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
       "expected_cause_slot_id": "sat-safety-blocker-observed:counterexample_analysis_safety_unproven",
-      "lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
-      "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
+      "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
+      "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
       "projection_schema": "typed-result-projection-v1",
       "reason_id": "counterexample_analysis_safety_unproven",
       "reason_registry_digest": "296f58c5d2e0d34e29168e2db33ccb9e36a12232e67b5c8eb46afbe4d2050f4e",
-      "receipt_digest": "7cb3cc3c0948b84e5d8b885332fbd751cfad6d133165016f8b8092870fed4ff2",
+      "receipt_digest": "c2cf2c972fe8659934b3369ab0cd501f2427a4dc4aa6c6c663abdd9d575892c1",
       "recovery_registry_digest": "1aaff0390adee90244b8cbf6cee34151ab4fe9aeee8fa3d1b3153cd691b48270",
-      "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
-      "semantic_projection_digest": "8e11929247faf82280699673c53ce2e7647ee9195800ed47347e98652d5fc6d4",
-      "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9"
+      "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+      "semantic_projection_digest": "e01690afbb9e11d5fefb640ae87c9c15580837b908c475704fbdf6492b462464",
+      "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e"
     }
   },
   "production_umbrella_generation": 0,
   "production_umbrella_routing": 0,
   "projection_receipt_digests": [
-    "b7d3145b20e8ae603663a5879c24715627077e83c4912498d3fd9ca7e1158a3d",
-    "4bcdd1d28a67686f32b1380ff59660a5fa5c10709f43683c8e84d2a1b296e864",
-    "a6c2f2441fa1ec3aa0a3aacea7ccd2dda20dce1eb9f686f5f94ba403523be7a4",
-    "afd9b9252feaef0724e1ae055fb0c5dff80b56d3f34b7aafa5efa4a929378e1b",
-    "5bb7086aef91c93f2ab5561952c15bb5cfbbbd606c7e1b8a0cce6d5164fb666c",
-    "4c082297304ecc8811b01ebda9a90f4d5baef5cbc7795b4e0de27e24d2b2881f"
+    "2b664863842526dd3e12684d72be6e9c9c2f97ba236394712802489ff3ed148b",
+    "db68c330e3a184c9048e97db0bfaeee7cd7f3087694caab81360cdef9236092a",
+    "61a52a7d5f6ff4bc837fd9799b2f974471113113617058beeeb74d2a37aa5978",
+    "2efb8f21d41824fb7cb23dfd5b3f89a2d71fa66bb5017c12f785c4ec3e7a76db",
+    "570e96c5c9e1295ccc01a5b4b7cba3a0a84cc482cacdd627a82f6e5a8dde5c06",
+    "d5ab8200c45234f736a71a47a9a21c0bd1408ae9c4c906ff36792c9bee683118"
   ],
-  "runtime_activation_ledger_digest": "7724572b75f5acf68fea116a5de2d5e72db9ea43d7e98fa5c7fe86ea4615cb68",
+  "runtime_activation_ledger_digest": "9f4eeb5e4d1090330c203f96ac19d97a4558c16732a219190cbf944b2b380fe3",
   "semantic_projection_digest": "f2b7e8eadd1f2ade099b6913bbd274276f8124dc62fd2ecaedaad2be6c7ac791",
-  "site_registry_digest": "e63e75be2d7ec64abff961fcb42929c9301b27c5352a73e007abda4fcf268ff8",
+  "site_registry_digest": "05d36925591a91a9b1f6e33fdd6c28794f4ef2726ec7a08a8e77aeed2c7cf64d",
   "source_rows": [
     [
       "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
-      "d7e6748149e1817110448e5e167d41716d3e9dd9d7f067168f330a83ceefd980"
+      "67faee0320595f470e41ba0a3f365e422009cdfe2a2a4b0b76a658bbfd6945c3"
     ],
     [
       "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
@@ -711,7 +711,7 @@
       "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a"
     ]
   ],
-  "source_snapshot_fingerprint": "18fe7ba06561069dc89f93676de963e6f1a5f71aea86961c4facf086c84664f3",
+  "source_snapshot_fingerprint": "2a869398e410b7543e414f8f37ca8c441e664dd52d0a0abf2248fd03167a1927",
   "status": "phase7_integration_validation_pending_fixed_review",
   "validator_source_sha256": "2f74f405c083557cf41afd852551578a24cd0a8108d6461f899e7bd5b11b5f6e"
 }

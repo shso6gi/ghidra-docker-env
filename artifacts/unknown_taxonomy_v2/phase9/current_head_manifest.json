@@ -1,21 +1,21 @@
 {
-  "artifact_digest": "b08550ad6c8d0312388dd9ec217200c1f6421d413ded871ae6d65986747f44a3",
+  "artifact_digest": "6cbce68ae83f7c7a160d6b80cefe6c3a4aacea465698125fd61d470f82b9641b",
   "artifact_kind": "phase9-current-head-manifest-v2",
   "closeout_bindings": [
     {
-      "artifact_digest": "8f09efa6e82ba310e31bf2900e6a3835e5cb6ed71ba98e2f78e07f2ba90d2de0",
+      "artifact_digest": "e99a16b76e18c3db8d67e86e580fdc6b5293407db3bba4d5221b38286abc7436",
       "path": "cause_lifecycle_snapshot.json",
-      "sha256": "9d5898ef2020d14356d351f1a7db42819115db1fad922691c3ce0c2939cc7682"
+      "sha256": "a1839a0ece9f5d9e88a0331c926ac2c98066c49eaf23e50a2310af238d86d12b"
     },
     {
-      "artifact_digest": "cec799088fa6778fb9083d0f027a153dd71625790c546f09a4e12d3a84e8b796",
+      "artifact_digest": "49cbe6d38097ab0be6dd9f13a4d607012a084c26867ce65273e1509cd72e4a62",
       "path": "decision_receipt.json",
-      "sha256": "28111bbe5861155ee09ea8a1e3da20e3ce90ad690eb1f94280371293ca5fe5c4"
+      "sha256": "41eab577b2a27c6601af46a13346e1d4f1e2e74e6e545f1089a01efca9e60954"
     },
     {
-      "artifact_digest": "10d59f89bc9d6883ba2817046135bdc21f25bf60f1c81f4db4364a805e88b8bb",
+      "artifact_digest": "c30a88cab4015775044be4fa7447becb47b8d3502fab56d5f09c8200ad3e7174",
       "path": "decision_transition_matrix.json",
-      "sha256": "69d9bdfd8a5051e4b4015e79f58595c74217307d56d6ec5817e6ba70d2c83cfe"
+      "sha256": "9dd1c190a454632cb4256cd2e56146b7a91d0e1c0e078c85f1a67f7ca66f2d7a"
     },
     {
       "artifact_digest": "fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087",
@@ -23,30 +23,30 @@
       "sha256": "b6e264d30c9ac11cc48046e49b42940fc560040f745350273fb55661b67c7c41"
     },
     {
-      "artifact_digest": "32dd1fa607c81983e44b470745c94a75319e1a5cf319e977c5471ea366432dad",
+      "artifact_digest": "00a3eaf4b095b9ab9e8607b4c3f4891b8fa8c704176944307c09f2583b5c6e98",
       "path": "query_execution_receipts.json",
-      "sha256": "183916bc63083fb1f2e25c9e19bd08d82c8bfd27158d79461b1756456727344b"
+      "sha256": "1451aa3b11d5931d3ba2f1049d8519e90a20472ec1707f993d234ed232336574"
     },
     {
-      "artifact_digest": "854bd84836d2558e43f0368c09681296d0b67a9ded3ff26cc60e81723a614c38",
+      "artifact_digest": "906738cb898edb509389f56cb230803b765f88e9f4a5fb6b2c76df8c4e581a82",
       "path": "reason_before_after.json",
-      "sha256": "1deb1426b68f5840098dccc54d8d2c3624ff2b4150378251a1054e29bf23f154"
+      "sha256": "a3f915163a046e7dc3d2dcae1d5d03a3fb720ec7725642799ed471f99bdf362a"
     },
     {
-      "artifact_digest": "f737337d083aabb77e0b604d9bd82bd990c795eb556d78e886340c6500f81ba1",
+      "artifact_digest": "59e1c05bc42b3ececcf91a2827d97822eeb28410b7f66faeddf963f59397424c",
       "path": "validation_run.json",
-      "sha256": "2afe14bf32765e82b6beb1378bebd498dcadd12faeec49026729a0ee9457740a"
+      "sha256": "326b46bbbe6b5f7419dc8a006e02cbfee12d789007ea2ff01e71538d0689a144"
     }
   ],
-  "phase7_artifact_sha256": "928da33bd2844937673fe97c8399425f4584423726d66525bf43fe8383d7300f",
-  "phase8_artifact_sha256": "04f56193d4fc7a7d7eb3b3ed0db00d628be64d66750e59dabb712752d87cc6e6",
+  "phase7_artifact_sha256": "2f29595031b9408e75bc0c463208a4a01c49d2c6c9f690e127d2b4997429c027",
+  "phase8_artifact_sha256": "227221f268e6106965361c3c104cb3eb588ca52f861287bfae6ad65f04ff35ed",
   "phase9_focused_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase9/phase9-focused-validation.xml",
     "sha256": "4ccfe8087bd96e50416e4a0c98dfbb18d0ca5a4d2e45961304818cd4efe5b781",
     "test_count": 6
   },
-  "producer_manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
-  "repository_commit": "91dbd05b6b0d5d7725e497b5173959dc97434abd",
+  "producer_manifest_digest": "d67d05d674227cda5808b63576dbe7b437b050e6897e59662c487650a9a82bc2",
+  "repository_commit": "80d81d6ac20566539d389ade2443f223567f9500",
   "source_files": [
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/contracts.py",
@@ -85,5 +85,5 @@
       "sha256": "fb2acea1ddefe82a2e7798ce4e9e90d62f7af42f42b70b590f6c2952e9b6f8ff"
     }
   ],
-  "validation_run_log_sha256": "9787fd41b9ceacec49da902b7c30cd19d2b69d3ea7c662221cfe4bd8b1db33cc"
+  "validation_run_log_sha256": "eeaf52323f87099900dd8e59f3841a6015991691b2b3eef784f2fb2a72c5fb2b"
 }

@@ -1,12 +1,12 @@
 Phase 9 current-HEAD validation
-cause_lifecycle_snapshot.json: 8f09efa6e82ba310e31bf2900e6a3835e5cb6ed71ba98e2f78e07f2ba90d2de0
-decision_receipt.json: cec799088fa6778fb9083d0f027a153dd71625790c546f09a4e12d3a84e8b796
-decision_transition_matrix.json: 10d59f89bc9d6883ba2817046135bdc21f25bf60f1c81f4db4364a805e88b8bb
+cause_lifecycle_snapshot.json: e99a16b76e18c3db8d67e86e580fdc6b5293407db3bba4d5221b38286abc7436
+decision_receipt.json: 49cbe6d38097ab0be6dd9f13a4d607012a084c26867ce65273e1509cd72e4a62
+decision_transition_matrix.json: c30a88cab4015775044be4fa7447becb47b8d3502fab56d5f09c8200ad3e7174
 legacy_coverage.json: fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087
-query_execution_receipts.json: 32dd1fa607c81983e44b470745c94a75319e1a5cf319e977c5471ea366432dad
-reason_before_after.json: 854bd84836d2558e43f0368c09681296d0b67a9ded3ff26cc60e81723a614c38
-validation_run.json: f737337d083aabb77e0b604d9bd82bd990c795eb556d78e886340c6500f81ba1
-refactor_contract_command: ["/mnt/c/Users/saito/Git/ghidra-docker-env/.venv-pyghidra/bin/python", "/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py", "--manifest", "/mnt/c/Users/saito/Git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"]
+query_execution_receipts.json: 00a3eaf4b095b9ab9e8607b4c3f4891b8fa8c704176944307c09f2583b5c6e98
+reason_before_after.json: 906738cb898edb509389f56cb230803b765f88e9f4a5fb6b2c76df8c4e581a82
+validation_run.json: 59e1c05bc42b3ececcf91a2827d97822eeb28410b7f66faeddf963f59397424c
+refactor_contract_command: ["/usr/bin/python3", "/mnt/c/users/saito/git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py", "--manifest", "/mnt/c/users/saito/git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"]
 refactor_contract_exit_code: 1
 refactor_contract_stdout_begin
 symbols_changed

@@ -807,11 +807,29 @@ def test_encoder_emits_independent_cause_and_exact_artifact_completion():
         blocker_target,
         ("top-level-decompile",),
         "function-decompilation-artifact-producer-v2",
+        "encoder-invocation",
     )
     encoder = OperationalExtractionPilotEncoder(factory)
     observed = encoder(session, blocker)
     assert observed[0].event_type == EventType.CAUSE_OBSERVED
-    q_id = encoder.authority_for_signal(session, blocker).occurrence.proof_requirement_ids[0]
+    first_authority = encoder.authority_for_signal(session, blocker)
+    second_authority = encoder.authority_for_signal(
+        session,
+        OperationalBlockerSignal(
+            "function_decompilation_artifact_unavailable",
+            blocker_target,
+            ("top-level-decompile",),
+            "function-decompilation-artifact-producer-v2",
+            "encoder-invocation-2",
+        ),
+    )
+    assert first_authority.occurrence.cause_id == second_authority.occurrence.cause_id
+    assert first_authority.occurrence.occurrence_id != second_authority.occurrence.occurrence_id
+    assert (
+        first_authority.occurrence.proof_requirement_ids
+        != second_authority.occurrence.proof_requirement_ids
+    )
+    q_id = first_authority.occurrence.proof_requirement_ids[0]
     s = surface(factory=factory)
     inv = factory.issue_invocation(
         target=blocker_target, input_surface=s, proof_requirement_id=q_id,

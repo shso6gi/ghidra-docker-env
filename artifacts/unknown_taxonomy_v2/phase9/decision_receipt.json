@@ -10,11 +10,11 @@
     "focused_junit_sha256": "405f4374880f6e2e5b1245cb1e01fb83002c8455cf443e33b7385e4e4156c0fa",
     "focused_test_source_sha256": "7b60c6ef0b922d2772ae9f4b1f6135fae8a380f8214e57023d3e38469dc95c02",
     "outcome_case_count": 5,
-    "phase8_artifact_digest": "b54bcbce9d1ac17a9eee2101f547356fdda0d8efeaf439ad6a4fcada83b67a58",
-    "phase8_artifact_sha256": "04f56193d4fc7a7d7eb3b3ed0db00d628be64d66750e59dabb712752d87cc6e6",
+    "phase8_artifact_digest": "e05ec63d160d3f9b90c85d761fb0dec3cd85646e02dcccdbae705b0ead483bee",
+    "phase8_artifact_sha256": "227221f268e6106965361c3c104cb3eb588ca52f861287bfae6ad65f04ff35ed",
     "test_family": "test_decision_receipt_is_only_serialized_status_authority"
   },
-  "artifact_digest": "cec799088fa6778fb9083d0f027a153dd71625790c546f09a4e12d3a84e8b796",
+  "artifact_digest": "49cbe6d38097ab0be6dd9f13a4d607012a084c26867ce65273e1509cd72e4a62",
   "artifact_kind": "phase9-decision-receipt-census-v1",
   "observed_outcomes": [
     "UNKNOWN",
@@ -22,11 +22,11 @@
   ],
   "receipts": [
     {
-      "authority_input_digest": "6c89295ac9b4650a2a76e5ee7dac25fe8b424bbade72d36e77ea84600aff68e8",
-      "lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
+      "authority_input_digest": "98ae32f1e126b3d3bcc2c178d015c77fb786767cd5c41e4606b4ca1fbd34de93",
+      "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
       "outcome": "UNKNOWN",
-      "receipt_digest": "654cec5eba61cf3775861a88f094feb16f63519548a2c1934070a09a007f2a8e",
-      "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0"
+      "receipt_digest": "f3e34ab376728f3399c6d89b0b60557217c955c585b8a23b0dbcf07fd689feb7",
+      "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae"
     },
     {
       "authority_input_digest": "67904f56075d3a4d4da65dc8404219263947f9a153fe95e9d07aa6bb90546758",

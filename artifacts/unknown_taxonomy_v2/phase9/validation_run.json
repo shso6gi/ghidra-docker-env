@@ -1,10 +1,10 @@
 {
-  "artifact_digest": "f737337d083aabb77e0b604d9bd82bd990c795eb556d78e886340c6500f81ba1",
+  "artifact_digest": "59e1c05bc42b3ececcf91a2827d97822eeb28410b7f66faeddf963f59397424c",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "06db8acc3112ea35afa6032ff694f5e5f24d8e169e378e8ae403e2b02fb201e5",
+      "sha256": "875ddf055e5f58c2faf018c90ec2a19ab67ceff93e939b5e2903bb34591a3a8a",
       "test_count": 508
     },
     {
@@ -27,7 +27,7 @@
   "phase8_validator": "PASS",
   "refactor_contract": "EXACT_REPLACEMENT_PENDING_FIXED_REVIEW",
   "refactor_replacement_contract": {
-    "abi_width_readonly_line_count": 3530,
+    "abi_width_readonly_line_count": 3561,
     "added_private_imports": [
       [
         "scripts.function_tracer_pcode.analysis.bounded_refinement",
@@ -537,7 +537,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_1",
         "_sealed_return_abi_facts",
-        1687
+        1698
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
@@ -3080,13 +3080,13 @@
     "baseline_sha256": "29106b47b7e9dfdf797807dfe25eb12601cb5bbee607c754e41598f99a4207fb",
     "blanket_baseline_regeneration": false,
     "command": [
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/.venv-pyghidra/bin/python",
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py",
+      "/usr/bin/python3",
+      "/mnt/c/users/saito/git/ghidra-docker-env/scripts/function_tracer_pcode/validation/refactor_contract.py",
       "--manifest",
-      "/mnt/c/Users/saito/Git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"
+      "/mnt/c/users/saito/git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"
     ],
     "contract_kind": "phase9-exact-refactor-replacement-v1",
-    "current_contract_digest": "e75848a14862bf043b514f760b5b407392d96bfaa8153716f7315491fd3c329d",
+    "current_contract_digest": "db0c58d3ae3f9fb065ace14184c91b804e830ab8ead4fc96c5db1f8ed43df6e1",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -4040,7 +4040,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_1",
         "_sealed_return_abi_facts",
-        1687
+        1698
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
@@ -5783,7 +5783,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "96f9ea56bba85905628ba2d0002f0563fb8502b2e1bfb7132e5f5b267c62b7d8",
+    "current_source_tree_hash": "18043eac28523369b0aba8894fd24926c1167679d4d993b050394d7001a2cca0",
     "delta_classifications": [
       {
         "classification": "five_value_error_surface_contract",

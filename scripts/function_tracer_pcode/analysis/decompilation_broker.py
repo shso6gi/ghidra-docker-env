@@ -116,6 +116,7 @@ class _BrokeredDecompileResults:
                 self._target,
                 ("completed_decompilation_getHighFunction",),
                 "high-function-ir-validator-v2",
+                "high-function-ir:" + self._decompilation_artifact.artifact_digest,
             )
             _emit(self._session, blocker)
             authority = self._session.domain_signal_encoder.authority_for_signal(
@@ -362,11 +363,18 @@ def decompile_function(
         program_seed = _program_seed(session, factory, analyzer.program)
         target = factory.target_from_ghidra(program_seed, function)
         input_surface = factory.input_surface_from_ghidra(function)
+        ordinal = _next_ordinal(session)
+        invocation_identity = (
+            "decompile-invocation-"
+            + session.identity.result_occurrence_id
+            + f"-{ordinal}"
+        )
         blocker = OperationalBlockerSignal(
             "function_decompilation_artifact_unavailable",
             target,
             (source_contract_id,),
             "function-decompilation-artifact-producer-v2",
+            invocation_identity,
         )
         _emit(session, blocker)
         authority = session.domain_signal_encoder.authority_for_signal(session, blocker)
@@ -383,16 +391,11 @@ def decompile_function(
                 "proof_requirement_id"
             ] != decomp_q:
                 raise ValueError("process assignment differs from observed decompilation Q")
-        ordinal = _next_ordinal(session)
         invocation = factory.issue_invocation(
             target=target,
             input_surface=input_surface,
             proof_requirement_id=decomp_q,
-            invocation_identity=(
-                "decompile-invocation-"
-                + session.identity.result_occurrence_id
-                + f"-{ordinal}"
-            ),
+            invocation_identity=invocation_identity,
             invocation_ordinal=ordinal,
             configured_timeout_seconds=timeout,
         )

@@ -2119,6 +2119,7 @@ class OperationalBlockerSignal:
     target: FunctionDecompilationTarget
     evidence_refs: tuple[str, ...]
     producer_id: str
+    attempt_id: str = "legacy-single-attempt"
 
     def __post_init__(self) -> None:
         if self.reason_id not in OPERATIONAL_REASON_SPECS:
@@ -2129,6 +2130,7 @@ class OperationalBlockerSignal:
         if any(type(item) is not str or not item for item in self.evidence_refs):
             raise TypeError("operational evidence refs are invalid")
         _exact_string("operational producer", self.producer_id)
+        _exact_string("operational attempt", self.attempt_id)
         expected = OPERATIONAL_REASON_PRODUCER_CONSERVATION[self.reason_id][1]
         if self.producer_id != expected:
             raise ValueError("operational blocker producer differs from sealed registry")
@@ -2150,6 +2152,7 @@ class OperationalCompletionSignal:
             "target_digest": self.blocker.target.target_digest,
             "evidence_refs": self.blocker.evidence_refs,
             "producer_id": self.blocker.producer_id,
+            "attempt_id": self.blocker.attempt_id,
             "completion_artifact_type": type(self.artifact).__qualname__,
             "completion_artifact_digest": artifact_digest,
         }
@@ -2233,6 +2236,7 @@ class OperationalExtractionPilotEncoder:
             "operational-q-" + authority_digest({
                 "cause_id": cause.value,
                 "proof_kind": spec.proof_kind,
+                "attempt_id": signal.attempt_id,
             })[:32],
             spec.proof_kind,
             (
@@ -2250,6 +2254,7 @@ class OperationalExtractionPilotEncoder:
             "operational-occ-" + authority_digest({
                 "cause_id": cause.value,
                 "result_occurrence_id": session.identity.result_occurrence_id,
+                "attempt_id": signal.attempt_id,
             })[:32],
             cause,
             signal.reason_id,
@@ -2265,7 +2270,7 @@ class OperationalExtractionPilotEncoder:
             "operational_extraction_producer_signal",
             session.identity.source_snapshot_fingerprint,
             signal.producer_id,
-            session.identity.execution_identity_digest,
+            signal.attempt_id,
         )
         return CauseOccurrenceAuthority(occurrence, bound)
 

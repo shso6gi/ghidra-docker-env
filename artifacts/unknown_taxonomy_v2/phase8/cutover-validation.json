@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "b54bcbce9d1ac17a9eee2101f547356fdda0d8efeaf439ad6a4fcada83b67a58",
+  "artifact_digest": "e05ec63d160d3f9b90c85d761fb0dec3cd85646e02dcccdbae705b0ead483bee",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "928da33bd2844937673fe97c8399425f4584423726d66525bf43fe8383d7300f"
+    "sha256": "2f29595031b9408e75bc0c463208a4a01c49d2c6c9f690e127d2b4997429c027"
   },
   "policy": {
     "batch_resume": {
@@ -88,12 +88,12 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
+    "manifest_digest": "d67d05d674227cda5808b63576dbe7b437b050e6897e59662c487650a9a82bc2",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "d93bd38a3a7c43eeb474fa983a1b1703ae6c63924d7259c969ecec1572cd0f6b",
+    "sha256": "32c8d8e3001f1ccf1e05703386af420bf71af61d06e96b5139c9b5b38ba92f00",
     "site_count": 25
   },
-  "repository_commit": "91dbd05b6b0d5d7725e497b5173959dc97434abd",
+  "repository_commit": "80d81d6ac20566539d389ade2443f223567f9500",
   "source_files": [
     {
       "path": "Eq_new.sh",
