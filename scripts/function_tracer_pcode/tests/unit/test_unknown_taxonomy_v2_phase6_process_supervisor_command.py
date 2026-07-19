@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import sys
 from enum import Enum
@@ -180,6 +181,7 @@ def test_error_restart_rejects_every_checkpoint_authority_filename(tmp_path):
         "continuation.json", "continuation-stream.json", "ready.json",
         "recovery-resolution.json", "claimed.json", "timeout.json",
         "terminal-segment.json", "terminal-stream.json",
+        "child-exit.json",
     }
     assert set(CHECKPOINT_AUTHORITY_FILENAMES) == expected
     for index, filename in enumerate(CHECKPOINT_AUTHORITY_FILENAMES):
@@ -242,6 +244,25 @@ def test_launch_is_durable_before_child_exec_and_no_checkpoint_is_error(tmp_path
     assert ProcessSupervisorCommand(config).run() == 2
     conflicted = _projection(config.authority_output)
     assert conflicted["status"] == "INVALID"
+
+
+def test_whole_process_mode_resolves_signed_child_exit_without_checkpoint(tmp_path):
+    _authority, base_config = _config(
+        tmp_path, (sys.executable, "-c", "pass"), timeout=5.0
+    )
+    config = replace(base_config, allow_child_exit_resolution=True)
+
+    command = ProcessSupervisorCommand(config)
+    assert command.run() == 0
+    projection = _projection(config.authority_output)
+    assert projection["status"] == "RESOLVED"
+    assert projection["authority_kind"] == "SupervisorChildExitReceipt"
+    resolution = command.store.rematerialize_child_exit_resolution()
+    assert resolution.payload["child_returncode"] == 0
+
+    config.authority_output.unlink()
+    assert ProcessSupervisorCommand(config).run() == 0
+    assert _projection(config.authority_output) == projection
 
 
 def test_deadline_without_active_checkpoint_is_error_not_timeout(tmp_path):

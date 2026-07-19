@@ -998,9 +998,11 @@ class PinnedSolverExecutionIssuer:
         *,
         execution_payload_digest: str,
         startup_receipt_digests: Sequence[str],
+        occurrence_nonce: Optional[str] = None,
     ) -> SolverResultEntryOccurrenceReceipt:
         startup = tuple(sorted(startup_receipt_digests))
-        nonce = secrets.token_hex(24)
+        nonce = secrets.token_hex(24) if occurrence_nonce is None else occurrence_nonce
+        _exact_string(nonce, "result-entry occurrence nonce")
         occurrence_id = "solver-result-entry-" + authority_digest({
             "execution_payload_digest": execution_payload_digest,
             "startup_receipt_digests": startup,

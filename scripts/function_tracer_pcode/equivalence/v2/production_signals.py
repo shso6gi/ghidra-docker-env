@@ -552,6 +552,8 @@ def active_operational_authority_factory() -> Optional[Any]:
 
 
 def record_production_pilot_shadow_error(exc: Exception) -> None:
+    import traceback
+
     session = active_production_pilot_session()
     if session is not None:
         error_kinds = getattr(session, "domain_signal_error_kinds", None)
@@ -559,7 +561,17 @@ def record_production_pilot_shadow_error(exc: Exception) -> None:
             error_kinds.append(type(exc).__name__)
         details = getattr(session, "domain_signal_error_details", None)
         if isinstance(details, list):
-            details.append(str(exc))
+            frames = traceback.extract_tb(exc.__traceback__)
+            selected_frames = (
+                frames
+                if len(frames) <= 8
+                else frames[:6] + frames[-2:]
+            )
+            location = " <- ".join(
+                f"{frame.filename}:{frame.lineno}:{frame.name}"
+                for frame in selected_frames
+            ) or "unknown-catch-site"
+            details.append(f"{location}: {exc}")
 
 
 def production_signal_scope(session: Any) -> Iterator[None]:

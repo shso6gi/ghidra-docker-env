@@ -917,15 +917,38 @@ class TypedResultProjectionFactory:
                   == occurrence_id]
         snapshots = [authority for authority in bundle.lifecycle_snapshot.occurrence_authorities
                      if authority.occurrence.occurrence_id == occurrence_id]
-        if len(active) != 1 or len(events) != 1 or len(snapshots) != 1:
-            raise ValueError("projection requires one exact active observed occurrence")
-        row: CActiveBaseRow = active[0]
+        if len(active) > 1 or len(events) != 1 or len(snapshots) != 1:
+            raise ValueError("projection requires one exact observed occurrence")
         event = events[0]
         occurrence = snapshots[0].occurrence
+        reason_definition = self._finalization_factory._reason_registry.get(
+            occurrence.reason_id
+        )
+        if active:
+            row: CActiveBaseRow = active[0]
+            projected_identity = (
+                row.result_occurrence_id,
+                row.occurrence_id,
+                row.cause_id,
+                row.reason_id,
+            )
+        else:
+            # Producer coverage includes a cause that was observed and then
+            # discharged in the same verified lifecycle.  It must not re-enter
+            # C_active or the compatibility UNKNOWN projection.
+            projected_identity = (
+                activation.result_occurrence_id,
+                occurrence.occurrence_id,
+                occurrence.cause_id.value,
+                occurrence.reason_id,
+            )
         if (
-            row.result_occurrence_id != activation.result_occurrence_id
-            or (row.occurrence_id, row.cause_id, row.reason_id)
-            != (occurrence.occurrence_id, occurrence.cause_id.value, occurrence.reason_id)
+            projected_identity != (
+                activation.result_occurrence_id,
+                occurrence.occurrence_id,
+                occurrence.cause_id.value,
+                occurrence.reason_id,
+            )
             or event.authority_payload.occurrence_authority
             is not emission_binding.occurrence_authority
             or event.authority_digest != emitted_cause.event_digest
@@ -934,25 +957,25 @@ class TypedResultProjectionFactory:
             or authority_digest(event.authority_payload.occurrence_authority)
             != emission_binding.occurrence_authority_digest
             or occurrence.reason_id in RETIRED_UMBRELLA_REASON_IDS
-            or row.reason_id not in slot_contract.allowed_reason_ids
-            or row.domain != slot_contract.expected_domain
-            or row.target_kind != slot_contract.expected_target_kind
+            or occurrence.reason_id not in slot_contract.allowed_reason_ids
+            or reason_definition.domain != slot_contract.expected_domain
+            or occurrence.target_kind != slot_contract.expected_target_kind
             or occurrence.identity_scope.value != slot_contract.expected_identity_scope
             or occurrence.source_snapshot_fingerprint
             != bundle.sealed_event_stream.envelope.source_snapshot_fingerprint
         ):
             raise ValueError("projection occurrence join is not exact typed authority")
         slot_key = (activation.activation_id, expected_cause_slot_id)
-        occurrence_key = (row.result_occurrence_id, occurrence_id)
+        occurrence_key = (activation.result_occurrence_id, occurrence_id)
         if slot_key in self._covered_slots or occurrence_key in self._covered_occurrences:
             raise ValueError("projection slot/occurrence coverage is not one-to-one")
         payload = {
             "activation_id": activation.activation_id,
             "expected_cause_slot_id": expected_cause_slot_id,
-            "result_occurrence_id": row.result_occurrence_id,
-            "occurrence_id": row.occurrence_id,
-            "cause_id": row.cause_id,
-            "reason_id": row.reason_id,
+            "result_occurrence_id": activation.result_occurrence_id,
+            "occurrence_id": occurrence.occurrence_id,
+            "cause_id": occurrence.cause_id.value,
+            "reason_id": occurrence.reason_id,
             "source_snapshot_fingerprint": occurrence.source_snapshot_fingerprint,
             "event_digest": event.authority_digest,
             "event_stream_digest": bundle.sealed_event_stream.envelope.authority_chain_digest,

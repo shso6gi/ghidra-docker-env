@@ -360,14 +360,33 @@ def _call_exact_bool(obj: Any, name: str) -> bool:
     return value
 
 
+def _ghidra_integer(name: str, value: Any, *, nonnegative: bool = False) -> int:
+    """Losslessly project a JPype Java integral returned by a Ghidra API."""
+
+    if type(value) is bool or value is None or isinstance(
+        value, (str, bytes, bytearray, float, complex)
+    ):
+        raise TypeError(f"{name} is not a Ghidra integral value")
+    try:
+        projected = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{name} is not a Ghidra integral value") from exc
+    if str(value) != str(projected):
+        raise ValueError(f"{name} cannot be projected losslessly")
+    if nonnegative and projected < 0:
+        raise ValueError(f"{name} must be nonnegative")
+    return projected
+
+
 def _address_identity(address: Any) -> tuple[Any, ...]:
     if address is None:
         raise ValueError("stable address identity is unavailable")
     space = _call_noarg(address, "getAddressSpace")
     space_name = _call_noarg(space, "getName") if space is not None else None
-    offset = _call_noarg(address, "getOffset")
-    if type(space_name) is not str or type(offset) is not int:
+    raw_offset = _call_noarg(address, "getOffset")
+    if type(space_name) is not str:
         raise ValueError("stable address space/offset identity is unavailable")
+    offset = _ghidra_integer("address offset", raw_offset)
     return (space_name, offset)
 
 
@@ -375,12 +394,14 @@ def _data_type_identity(data_type: Any) -> Any:
     if data_type is None:
         return None
     name = _call_noarg(data_type, "getName")
-    length = _call_noarg(data_type, "getLength")
+    raw_length = _call_noarg(data_type, "getLength")
+    length = (
+        _ghidra_integer("data-type length", raw_length)
+        if raw_length is not None else None
+    )
     path = _call_noarg(data_type, "getPathName")
     if name is not None and type(name) is not str:
         raise TypeError("data-type name is not exact string")
-    if length is not None and type(length) is not int:
-        raise TypeError("data-type length is not exact integer")
     if path is not None and type(path) is not str:
         raise TypeError("data-type path is not exact string")
     return (name, length, path)
@@ -961,9 +982,9 @@ def _varnode_projection(varnode: Any, *, allow_none: bool = False) -> Any:
     address_identity = _address_identity(address) if address is not None else None
     high = _call_noarg(varnode, "getHigh")
     storage = _call_noarg(high, "getStorage") if high is not None else None
-    size = _call_noarg(varnode, "getSize")
-    if type(size) is not int or size < 0:
-        raise TypeError("varnode size is not an exact nonnegative integer")
+    size = _ghidra_integer(
+        "varnode size", _call_noarg(varnode, "getSize"), nonnegative=True
+    )
     flags = tuple(
         _call_exact_bool(varnode, name)
         for name in ("isConstant", "isRegister", "isUnique", "isAddress", "isAddrTied")
@@ -990,9 +1011,10 @@ def _varnode_projection_without_high(varnode: Any) -> Any:
     if varnode is None:
         raise ValueError("mandatory storage varnode is unavailable")
     address = _call_noarg(varnode, "getAddress")
-    size = _call_noarg(varnode, "getSize")
-    if type(size) is not int or size < 0:
-        raise TypeError("storage varnode size is not exact nonnegative integer")
+    size = _ghidra_integer(
+        "storage varnode size", _call_noarg(varnode, "getSize"),
+        nonnegative=True,
+    )
     flags = tuple(
         _call_exact_bool(varnode, name)
         for name in ("isConstant", "isRegister", "isUnique", "isAddress", "isAddrTied")
@@ -1010,9 +1032,10 @@ def _prototype_projection(prototype: Any) -> Any:
     model_name = _call_noarg(prototype, "getModelName")
     return_type = _call_noarg(prototype, "getReturnType")
     return_storage = _call_noarg(prototype, "getReturnStorage")
-    parameter_count = _call_noarg(prototype, "getNumParams")
-    if type(parameter_count) is not int or parameter_count < 0:
-        raise TypeError("prototype parameter count is not exact nonnegative integer")
+    parameter_count = _ghidra_integer(
+        "prototype parameter count", _call_noarg(prototype, "getNumParams"),
+        nonnegative=True,
+    )
     parameters = []
     get_param = getattr(prototype, "getParam", None)
     if parameter_count and not callable(get_param):
@@ -1024,7 +1047,10 @@ def _prototype_projection(prototype: Any) -> Any:
             _call_noarg(parameter, "getName"),
             _call_noarg(parameter, "getDataType") and (
                 _call_noarg(_call_noarg(parameter, "getDataType"), "getName"),
-                _call_noarg(_call_noarg(parameter, "getDataType"), "getLength"),
+                _ghidra_integer(
+                    "parameter data-type length",
+                    _call_noarg(_call_noarg(parameter, "getDataType"), "getLength"),
+                ),
             ),
             _storage_projection(_call_noarg(parameter, "getStorage")),
         ))
@@ -1033,7 +1059,9 @@ def _prototype_projection(prototype: Any) -> Any:
         model_name,
         (
             _call_noarg(return_type, "getName") if return_type is not None else None,
-            _call_noarg(return_type, "getLength") if return_type is not None else None,
+            _ghidra_integer(
+                "return data-type length", _call_noarg(return_type, "getLength")
+            ) if return_type is not None else None,
         ),
         _storage_projection(return_storage),
         tuple(parameters),
@@ -1060,23 +1088,26 @@ def canonical_high_function_projection(
     total_ops = 0
     total_inputs = 0
     for block in blocks_source:
-        block_index = _call_noarg(block, "getIndex")
-        if type(block_index) is not int or block_index < 0:
-            raise TypeError("HighFunction block index is invalid")
+        block_index = _ghidra_integer(
+            "HighFunction block index", _call_noarg(block, "getIndex"),
+            nonnegative=True,
+        )
         start = _address_identity(_call_noarg(block, "getStart"))
         block_key = (block_index, start)
         if block_key in seen_block_keys:
             raise ValueError("duplicate HighFunction block identity")
         seen_block_keys.add(block_key)
         outgoing = []
-        out_size = _call_noarg(block, "getOutSize")
-        if type(out_size) is not int or out_size < 0:
-            raise TypeError("HighFunction successor count is invalid")
+        out_size = _ghidra_integer(
+            "HighFunction successor count", _call_noarg(block, "getOutSize"),
+            nonnegative=True,
+        )
         for index in range(out_size):
             successor = getattr(block, "getOut", lambda _index: None)(index)
-            successor_index = _call_noarg(successor, "getIndex")
-            if type(successor_index) is not int or successor_index < 0:
-                raise TypeError("HighFunction successor index is invalid")
+            successor_index = _ghidra_integer(
+                "HighFunction successor index",
+                _call_noarg(successor, "getIndex"), nonnegative=True,
+            )
             outgoing.append((
                 successor_index,
                 _address_identity(_call_noarg(successor, "getStart")),
@@ -1090,23 +1121,28 @@ def canonical_high_function_projection(
         for operation in ops_source:
             sequence = _call_noarg(operation, "getSeqnum")
             seq_target = _address_identity(_call_noarg(sequence, "getTarget"))
-            seq_time = _call_noarg(sequence, "getTime")
-            if type(seq_time) is not int or seq_time < 0:
-                raise TypeError("P-code sequence time is invalid")
+            seq_time = _ghidra_integer(
+                "P-code sequence time", _call_noarg(sequence, "getTime"),
+                nonnegative=True,
+            )
             op_key = (block_key, seq_target, seq_time)
             if op_key in seen_op_keys:
                 raise ValueError("duplicate HighFunction operation identity")
             seen_op_keys.add(op_key)
-            input_count = _call_noarg(operation, "getNumInputs")
-            if type(input_count) is not int or input_count < 0:
-                raise TypeError("P-code input count is invalid")
+            input_count = _ghidra_integer(
+                "P-code input count", _call_noarg(operation, "getNumInputs"),
+                nonnegative=True,
+            )
             inputs = tuple(
                 _varnode_projection(getattr(operation, "getInput")(index))
                 for index in range(input_count)
             )
-            opcode = _call_noarg(operation, "getOpcode")
+            opcode = _ghidra_integer(
+                "P-code opcode", _call_noarg(operation, "getOpcode"),
+                nonnegative=True,
+            )
             mnemonic = _call_noarg(operation, "getMnemonic")
-            if type(opcode) is not int or type(mnemonic) is not str or not mnemonic:
+            if type(mnemonic) is not str or not mnemonic:
                 raise TypeError("P-code opcode identity is invalid")
             ops.append((
                 seq_target,
@@ -1498,7 +1534,7 @@ class OperationalExtractionAuthorityFactory:
     ) -> FunctionDecompilationTarget:
         if self._program_seeds.get(id(program_seed)) is not program_seed:
             raise ValueError("program seed is not exact factory membership")
-        if _call_noarg(function, "getProgram") is not program_seed.program:
+        if _call_noarg(function, "getProgram") != program_seed.program:
             raise ValueError("function is not owned by the seeded program")
         target = FunctionDecompilationTarget._from_ghidra(
             program_seed.program, function,
@@ -1928,7 +1964,7 @@ class OperationalExtractionAuthorityFactory:
         targets = []
         lookup_rows = []
         for function in iterator:
-            if _call_noarg(function, "getProgram") is not program_seed.program:
+            if _call_noarg(function, "getProgram") != program_seed.program:
                 raise ValueError("FunctionManager yielded foreign-program function")
             item_target = self.target_from_ghidra(
                 program_seed, function,
@@ -1977,7 +2013,7 @@ class OperationalExtractionAuthorityFactory:
             if self._program_seeds.get(id(program_seed)) is not program_seed:
                 raise ValueError("lookup program seed is not exact factory membership")
             if (
-                _call_noarg(function_object, "getProgram") is not program_seed.program
+                _call_noarg(function_object, "getProgram") != program_seed.program
                 or target.program_identity != program_seed.program_identity
             ):
                 raise ValueError("lookup function/target program differs from seed")
@@ -2102,6 +2138,21 @@ class OperationalBlockerSignal:
 class OperationalCompletionSignal:
     blocker: OperationalBlockerSignal
     artifact: Any
+
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        artifact_digest = getattr(self.artifact, "artifact_digest", None)
+        if type(artifact_digest) is not str or not artifact_digest:
+            raise TypeError(
+                "operational completion signal lacks artifact authority"
+            )
+        return {
+            "reason_id": self.blocker.reason_id,
+            "target_digest": self.blocker.target.target_digest,
+            "evidence_refs": self.blocker.evidence_refs,
+            "producer_id": self.blocker.producer_id,
+            "completion_artifact_type": type(self.artifact).__qualname__,
+            "completion_artifact_digest": artifact_digest,
+        }
 
 
 class OperationalExtractionPilotEncoder:

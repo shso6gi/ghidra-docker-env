@@ -35,6 +35,9 @@ _WORKER_ENVIRONMENT_KEYS = (
     CHILD_ENV_WORKER_KEY_ID,
     CHILD_ENV_WORKER_KEY_FILE,
 )
+PROCESS_WORKER_RUNTIME_DISABLED_ENV = (
+    "UNKNOWN_TAXONOMY_V2_DISABLE_PROCESS_WORKER_RUNTIME"
+)
 _PREPARED_TOKEN = object()
 _ACTIVE_TOKEN = object()
 _RUNTIME_TOKEN = object()
@@ -64,9 +67,16 @@ def require_canonical_supervisor_projection(
     expected = {
         "ERROR": "DurableErrorFinalizationBundle",
         "TIMEOUT": "DurableTimeoutFinalizationBundle",
-        "RESOLVED": "CheckpointStateTransitionReceipt",
+        "RESOLVED": {
+            "CheckpointStateTransitionReceipt", "SupervisorChildExitReceipt",
+        },
     }
-    if expected.get(body.get("status")) != body.get("authority_kind"):
+    expected_kind = expected.get(body.get("status"))
+    if (
+        body.get("authority_kind") not in expected_kind
+        if isinstance(expected_kind, set)
+        else expected_kind != body.get("authority_kind")
+    ):
         raise CanonicalCensusInvalid("supervisor projection status/authority differs")
     required = {
         "ERROR": {
@@ -218,6 +228,8 @@ class ProcessWorkerRuntime:
 
     @classmethod
     def from_environment(cls) -> Optional["ProcessWorkerRuntime"]:
+        if os.environ.get(PROCESS_WORKER_RUNTIME_DISABLED_ENV) == "1":
+            return None
         present = tuple(key in os.environ for key in _WORKER_ENVIRONMENT_KEYS)
         if not any(present):
             return None

@@ -79,6 +79,7 @@ class SupervisorCommandConfig:
     timeout_seconds: float
     kill_grace_seconds: float
     child_command: tuple[str, ...]
+    allow_child_exit_resolution: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -95,6 +96,8 @@ class SupervisorCommandConfig:
             or self.kill_grace_seconds < 0
         ):
             raise TypeError("process deadline/grace is invalid")
+        if type(self.allow_child_exit_resolution) is not bool:
+            raise TypeError("child exit resolution mode must be exact bool")
         if (
             type(self.child_command) is not tuple
             or not self.child_command
@@ -113,6 +116,7 @@ class SupervisorCommandConfig:
             "stream_id": self.stream_id,
             "execution_nonce": self.execution_nonce,
             "deadline_policy_digest": self.deadline_policy_digest,
+            "allow_child_exit_resolution": self.allow_child_exit_resolution,
             "working_directory": str(self.working_directory.resolve()),
             "child_command": canonical_value(self.child_command),
         })
@@ -191,7 +195,7 @@ class ProcessSupervisorCommand:
     def _resolved_projection(launch: Any, state: Any, returncode: Any) -> dict[str, Any]:
         return {
             "status": "RESOLVED",
-            "authority_kind": "CheckpointStateTransitionReceipt",
+            "authority_kind": state.receipt_kind,
             "launch_receipt_digest": launch.receipt_digest,
             "finalization_bundle_digest": state.receipt_digest,
             "child_returncode": returncode,
@@ -396,6 +400,13 @@ class ProcessSupervisorCommand:
     def _resume(self) -> int:
         launch = self._load_durable_launch()
         try:
+            if (self.store.directory / "child-exit.json").exists():
+                resolved = self.store.rematerialize_child_exit_resolution()
+                projection = self._resolved_projection(
+                    launch, resolved, resolved.payload["child_returncode"]
+                )
+                self._write_projection(projection)
+                return 0
             if (self.store.directory / "operational-error-bundle.json").exists():
                 bundle = self.store.rematerialize_operational_error_bundle()
                 if bundle.launch_receipt_digest != launch.receipt_digest:
@@ -474,6 +485,15 @@ class ProcessSupervisorCommand:
                         launch=launch, state=state,
                         child_returncode=return_code,
                     )
+                elif self.config.allow_child_exit_resolution:
+                    resolved = self.factory.issue_child_exit_resolution(
+                        launch=launch, child_returncode=return_code,
+                    )
+                    self.store.persist_child_exit_resolution(resolved)
+                    projection = self._resolved_projection(
+                        launch, resolved, return_code
+                    )
+                    exit_code = 0
                 else:
                     bundle = self.store.supervisor_finalize_operational_error(
                         launch=launch,
@@ -534,6 +554,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-signing-key-file", required=True)
     parser.add_argument("--timeout-seconds", required=True, type=float)
     parser.add_argument("--kill-grace-seconds", type=float, default=30.0)
+    parser.add_argument("--allow-child-exit-resolution", action="store_true")
     parser.add_argument("child_command", nargs=argparse.REMAINDER)
     return parser
 
@@ -561,6 +582,7 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         worker_signing_key_file=Path(args.worker_signing_key_file),
         timeout_seconds=args.timeout_seconds,
         kill_grace_seconds=args.kill_grace_seconds,
+        allow_child_exit_resolution=args.allow_child_exit_resolution,
         child_command=child_command,
     )
     return ProcessSupervisorCommand(config).run()

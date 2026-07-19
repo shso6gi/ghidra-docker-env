@@ -373,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--binary2-id")
     parser.add_argument("--function-name1")
     parser.add_argument("--function-name2")
+    parser.add_argument("--result-entry-occurrence-nonce")
     args = parser.parse_args(argv)
     if args.print_batch_resume_policy:
         raw = "EQUIVALENT" if args.outcome == "EQ" else args.outcome
@@ -386,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         required = (
             args.binary1_path, args.binary2_path,
             args.function_name1, args.function_name2,
+            args.result_entry_occurrence_nonce,
         )
         if not all(required):
             parser.error("production identity requires binary paths and functions")
@@ -412,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.binary2_path, args.function_name2
             ),
             "observation_contract_id": EquivalenceObservationContract().contract_id,
+            "result_entry_occurrence_nonce": (
+                args.result_entry_occurrence_nonce
+            ),
         })
         print("\t".join((
             identity.result_occurrence_id,

@@ -1,6 +1,6 @@
 {
   "active_cause_count": 1,
-  "artifact_digest": "0c42a81391f69015ebb0641b9631a7a14f857fc6b97ea94b57a969730a0b8032",
+  "artifact_digest": "19f4010841b997f9ed66814af92b973eda0eb9c6bf600b760252201b72d87b33",
   "binary_content_identities": [
     "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
     "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -14,9 +14,9 @@
       "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
       "decision_effect": "blocks_disequivalence",
       "domain": "sat_safety",
-      "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+      "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
       "reason_id": "counterexample_analysis_safety_unproven",
-      "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+      "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
       "target_kind": "counterexample_safety_gate"
     }
   ],
@@ -32,15 +32,15 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "decision_receipt": {
-    "authority_input_digest": "98ae32f1e126b3d3bcc2c178d015c77fb786767cd5c41e4606b4ca1fbd34de93",
-    "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
+    "authority_input_digest": "6c89295ac9b4650a2a76e5ee7dac25fe8b424bbade72d36e77ea84600aff68e8",
+    "lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
     "outcome": "UNKNOWN",
-    "receipt_digest": "f3e34ab376728f3399c6d89b0b60557217c955c585b8a23b0dbcf07fd689feb7",
-    "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae"
+    "receipt_digest": "654cec5eba61cf3775861a88f094feb16f63519548a2c1934070a09a007f2a8e",
+    "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0"
   },
   "discovered_activation_count": 1,
   "expected_activation_count": 1,
-  "expected_activation_ledger_digest": "7cc79ab38710d70dce0a3d4191f6fe71b61a632534b1a0dfe01e4de46321bd7c",
+  "expected_activation_ledger_digest": "db24c7540d7adc900babaf64732c169eca063a40dcc2999389aab25f579a9154",
   "final_outcome": "UNKNOWN",
   "function_pair": [
     "phase7_sat_witness",
@@ -49,15 +49,15 @@
   "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
   "not_reached_activation_count": 0,
   "open_requirement_count": 1,
-  "producer_manifest_digest": "a019eb7be3661eaffd23e754be337881da9d32967b2566e9783f8e04c2f1bc40",
+  "producer_manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
   "producer_site_count": 25,
   "q_open_rows": [
     {
       "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-      "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+      "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
       "proof_kind": "counterexample_safety",
       "proof_requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
-      "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+      "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
       "semantic_target_digest": "74ff6d69bcb2bb282a5b6f7b4399df8a2f871ec874670660a12d2eda600a8068"
     }
   ],
@@ -67,7 +67,7 @@
       "disposition": "sat",
       "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
       "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-      "premise_digest": "fac7d1a6875453c8b9f6e77ba176cf5bf45c6ba385fa3b2851e93fe5838c39aa",
+      "premise_digest": "6ab1edfa51f2e6166e5cf725bbfb6dd0a98ef2639bb191f2903de74dbdbbab58",
       "proof_kind": "monolithic_region_guard",
       "query_label": "monolithic.region:0:0:guard",
       "return_width_binding_receipt_digest": "",
@@ -79,7 +79,7 @@
       "disposition": "sat",
       "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
       "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-      "premise_digest": "a42a759834005b4282a388876bd8c73be28e305da3a1a978d8e876710f675829",
+      "premise_digest": "6ca90b899b4dbd97d530dafca83564730e2fb699e7a396976a79ed2c92b85c0d",
       "proof_kind": "monolithic_region_value_inequality",
       "query_label": "monolithic.region:0:0:value",
       "return_width_binding_receipt_digest": "",
@@ -108,24 +108,24 @@
     ]
   },
   "runtime_activation_count": 1,
-  "runtime_activation_ledger_digest": "e8729c4af0795ead1c04fff9a8d80155ee06abe4d57cae93ffd49303e06177db",
+  "runtime_activation_ledger_digest": "16bfad4cc381b2ed8e27e12df07b6065f4af980f37a1c9c5e6905b81814b3ca1",
   "sealed_event_stream": {
     "object_type": "SealedEventStream",
     "payload": {
       "envelope": {
-        "authority_chain_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+        "authority_chain_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
         "event_count": 1,
         "first_sequence": 1,
         "last_sequence": 1,
-        "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+        "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
         "schema_version": 2,
         "sealed": true,
-        "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
-        "stream_id": "phase7-production-pilot-eaa6e4bc25b7f07c5f867bae"
+        "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
+        "stream_id": "phase7-production-pilot-264e9992b95281f1feeb72d0"
       },
       "events": [
         {
-          "authority_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+          "authority_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
           "authority_payload": {
             "occurrence_authority": {
               "bound_contract": {
@@ -148,7 +148,7 @@
                 ]
               },
               "occurrence": {
-                "attempt_id": "9ef4c65cb4ebe014abe5ed83cb47d448d79adc8bbd7442eefe523b7a417c639c",
+                "attempt_id": "de4fde4a2181b0104e4fbb5f6e831e79ce012890340f884d0d4724524279f3a5",
                 "bound_expression_digest": "7b3bd5586908c97c5512e011e60f7c029e7ce7700f17856b00c05ca61a27256d",
                 "bound_satisfaction_contract_id": "counterexample-safety-recovery",
                 "bound_satisfaction_contract_version": 1,
@@ -316,13 +316,13 @@
                 ],
                 "identity_scope": "RELATIONAL",
                 "normalized_expression_digest": "91b0cb6837755210c81acb5b5164bbe68c35ebdeb44046d4dbf431a65d5914d9",
-                "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+                "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
                 "producer_id": "sat_unsafety_reason_producer",
                 "proof_requirement_ids": [
                   "sat-safety-ffcedc971e36fed8cacad3663557cdbd"
                 ],
                 "reason_id": "counterexample_analysis_safety_unproven",
-                "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
+                "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
                 "target_id": "13f32febbba1e9b9083f0ea1671195b516aa98967c6109298d0338f968768fac",
                 "target_kind": "counterexample_safety_gate"
               }
@@ -330,19 +330,19 @@
           },
           "diagnostic_payload": null,
           "header": {
-            "authority_payload_digest": "83dffa67a1ef2f586321a90246b2df72fcea9fb6cc7fe081757dc50d82b238fa",
+            "authority_payload_digest": "0192118260fac748368fe2201928c8e7ed226880947980da6c29d7ad258cb148",
             "event_type": "CAUSE_OBSERVED",
             "predecessor_authority_digest": "0000000000000000000000000000000000000000000000000000000000000000",
-            "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+            "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
             "schema_version": 2,
             "sequence_number": 1,
-            "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
-            "stream_id": "phase7-production-pilot-eaa6e4bc25b7f07c5f867bae"
+            "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9",
+            "stream_id": "phase7-production-pilot-264e9992b95281f1feeb72d0"
           }
         }
       ]
     },
-    "payload_digest": "61bde345d2e32515a1591e58a07bd8aeded2208e5d2ce06eeec8f6853bc8cb7f",
+    "payload_digest": "2e010dc20381f6c9e198427e9b1d3ca2c5e034a9d4135264ad14978f583a8f0f",
     "schema_version": 2
   },
   "selected_activation_count": 1,
@@ -359,20 +359,20 @@
   "terminal_timeout_assignment_count": 0,
   "terminal_timeout_receipt_count": 0,
   "typed_projection_receipt": {
-    "activation_id": "discovered-9f25d48d4f6b5ed249aedf8c0709006d657ba1356de2bbb06a3d0a950cddd4c0",
+    "activation_id": "discovered-8af1b59f8f9dd86adfcd61baabf82a34340eacd38f3cc22e991f16bdef04212f",
     "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-    "event_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
-    "event_stream_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+    "event_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
+    "event_stream_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d",
     "expected_cause_slot_id": "sat-safety-blocker-observed:counterexample_analysis_safety_unproven",
-    "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
-    "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+    "lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
+    "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
     "projection_schema": "typed-result-projection-v1",
     "reason_id": "counterexample_analysis_safety_unproven",
     "reason_registry_digest": "296f58c5d2e0d34e29168e2db33ccb9e36a12232e67b5c8eb46afbe4d2050f4e",
-    "receipt_digest": "2f2b133edab7fe20bff7dc4f53b49329028944b08ee759032d6495e251d8fcb4",
+    "receipt_digest": "7cb3cc3c0948b84e5d8b885332fbd751cfad6d133165016f8b8092870fed4ff2",
     "recovery_registry_digest": "1aaff0390adee90244b8cbf6cee34151ab4fe9aeee8fa3d1b3153cd691b48270",
-    "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
-    "semantic_projection_digest": "e01690afbb9e11d5fefb640ae87c9c15580837b908c475704fbdf6492b462464",
-    "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e"
+    "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
+    "semantic_projection_digest": "8e11929247faf82280699673c53ce2e7647ee9195800ed47347e98652d5fc6d4",
+    "source_snapshot_fingerprint": "264e9992b95281f1feeb72d0b16c8390d409d71e6bc3026269cdb071420093e9"
   }
 }

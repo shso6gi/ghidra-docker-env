@@ -93,7 +93,12 @@ class Phase7ProductionRuntime:
     def signal_digest(producer_site_manifest_id: str, signal: Any) -> str:
         if type(producer_site_manifest_id) is not str or not producer_site_manifest_id:
             raise TypeError("production signal requires audited producer site identity")
-        if (
+        authority_projection = getattr(
+            signal, "_phase7_signal_authority", None
+        )
+        if callable(authority_projection):
+            signal_authority = authority_projection()
+        elif (
             hasattr(signal, "target")
             and type(getattr(signal.target, "target_digest", None)) is str
         ):
@@ -205,7 +210,7 @@ class Phase7ProductionRuntime:
         projection_factory = self._activation_factory.open_projection_factory(
             finalization_factory
         )
-        projections = tuple(
+        coverage_projections = tuple(
             projection_factory.issue(
                 activation=activation,
                 expected_cause_slot_id=slot_id,
@@ -216,8 +221,16 @@ class Phase7ProductionRuntime:
             for activation, slot_id, binding, emitted in joined
             if activation.expected_disposition is ActivationDisposition.ELIGIBLE
         )
+        active_occurrence_ids = {
+            row.occurrence_id for row in bundle.lifecycle_projection.c_active_base
+        }
+        projections = tuple(
+            receipt for receipt in coverage_projections
+            if receipt.occurrence_id in active_occurrence_ids
+        )
         coverage = typed_cause_coverage(
-            ledger, self._activation_factory, projection_factory, projections,
+            ledger, self._activation_factory, projection_factory,
+            coverage_projections,
         )
         terminal_assignment = None
         terminal_receipts = ()

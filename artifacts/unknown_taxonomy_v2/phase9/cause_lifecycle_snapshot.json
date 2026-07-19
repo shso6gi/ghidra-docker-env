@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "e99a16b76e18c3db8d67e86e580fdc6b5293407db3bba4d5221b38286abc7436",
+  "artifact_digest": "8f09efa6e82ba310e31bf2900e6a3835e5cb6ed71ba98e2f78e07f2ba90d2de0",
   "artifact_kind": "phase9-cause-lifecycle-snapshot-v1",
   "base_relations_exclude_final_outcome": true,
   "lifecycle_replay_authority": {
@@ -9,10 +9,10 @@
     "lifecycle_inference_count": 0,
     "materialized_completion_receipt_count": 0,
     "materialized_transformation_receipt_count": 0,
-    "pilot_receipt_digest": "40336ebdb11f1934c495700ae0733f3cb3ec8a12a7ab6f26e40b7881e0bc924e",
-    "replayed_lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
-    "replayed_snapshot_digest": "7dcb0da2634310b49848d48c67dd21f3d5a84aeb31c268e62bf929aa2251db7e",
-    "sealed_event_stream_authority_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39"
+    "pilot_receipt_digest": "4087b704d3b0ece42341901658e4081ba510e7722a026cf74f2a509abc67de91",
+    "replayed_lifecycle_projection_digest": "449cc0bb1846fb4020164e00421009cee62d1deaf847e99f22470ac2c6bb5ab9",
+    "replayed_snapshot_digest": "8d054f493da063fe2c7891180170f442e7ec14f274a3d0b2f3a514af7f8c9918",
+    "sealed_event_stream_authority_digest": "5fbea8303d0ae102fd148f17dd9f6f68a2cfb0a05abf05fe52975a3da92e3b4d"
   },
   "semantic_cause_and_proof_backlog_are_separate": true,
   "timeout": {
@@ -45,9 +45,9 @@
         "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
         "decision_effect": "blocks_disequivalence",
         "domain": "sat_safety",
-        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+        "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
         "reason_id": "counterexample_analysis_safety_unproven",
-        "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+        "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
         "target_kind": "counterexample_safety_gate"
       }
     ],
@@ -55,10 +55,10 @@
     "q_open": [
       {
         "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+        "occurrence_id": "sat-safety-occ-17e2fa93ad7ac1bb67d53c7ce8f5c8f4",
         "proof_kind": "counterexample_safety",
         "proof_requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
-        "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
+        "result_occurrence_id": "production-pilot-264e9992b95281f1feeb72d0",
         "semantic_target_digest": "74ff6d69bcb2bb282a5b6f7b4399df8a2f871ec874670660a12d2eda600a8068"
       }
     ]

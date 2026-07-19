@@ -1,10 +1,10 @@
 {
-  "artifact_digest": "30b51dabd1e818d22c356818d30232c3e113d490d8cd914caf7babcedd7343cb",
+  "artifact_digest": "f737337d083aabb77e0b604d9bd82bd990c795eb556d78e886340c6500f81ba1",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "f7d83c70a10234da9cbf5efbfc68f441f22f04481ff6979ac8e9f6539c6e8eff",
+      "sha256": "06db8acc3112ea35afa6032ff694f5e5f24d8e169e378e8ae403e2b02fb201e5",
       "test_count": 508
     },
     {
@@ -14,12 +14,12 @@
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml",
-      "sha256": "09efbe04e4ff90855b0337d618f1500893ecd094f653939773c9e4220e35083b",
+      "sha256": "405f4374880f6e2e5b1245cb1e01fb83002c8455cf443e33b7385e4e4156c0fa",
       "test_count": 23
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-      "sha256": "37515fac622410c47f197f25f22ecf1dc6862cf2048c234129d75b5e2c7ca63b",
+      "sha256": "24eb40fcbb8a30c0def17b4f24a85aa64b96520945cf321d3ae9aa34c5832b00",
       "test_count": 162
     }
   ],
@@ -213,7 +213,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        861
+        873
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -693,13 +693,13 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_active_process_authority",
-        32
+        33
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_completed_continuation",
-        32
+        33
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
@@ -3086,7 +3086,7 @@
       "/mnt/c/Users/saito/Git/ghidra-docker-env/artifacts/refactor/current-head-fc11037/contract.json"
     ],
     "contract_kind": "phase9-exact-refactor-replacement-v1",
-    "current_contract_digest": "a8465c5375aec665fbb6e07a6ab03cd9a63660385ec4fbf9931adee2d7389e3b",
+    "current_contract_digest": "e75848a14862bf043b514f760b5b407392d96bfaa8153716f7315491fd3c329d",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3362,7 +3362,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        861
+        873
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -4196,13 +4196,13 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_active_process_authority",
-        32
+        33
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_completed_continuation",
-        32
+        33
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
@@ -5783,7 +5783,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "d23ad218f9b9cd86bef7a39af13645176b2bcca902e3ab2ec00cc50bff7fe59e",
+    "current_source_tree_hash": "96f9ea56bba85905628ba2d0002f0563fb8502b2e1bfb7132e5f5b267c62b7d8",
     "delta_classifications": [
       {
         "classification": "five_value_error_surface_contract",

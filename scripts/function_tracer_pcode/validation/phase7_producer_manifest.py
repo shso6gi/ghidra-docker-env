@@ -104,8 +104,8 @@ _PRODUCER_IDS_BY_SITE = {
     ),
     "decompilation-broker-operational-signal": (
         "function-decompilation-artifact-producer-v2",
-        "function-decompilation-completion-producer-v2",
         "function-decompilation-operational-error-producer-v2",
+        "high-function-ir-validator-v2",
     ),
 }
 

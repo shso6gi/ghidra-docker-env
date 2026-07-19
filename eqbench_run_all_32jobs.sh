@@ -68,6 +68,45 @@ export TMPDIR="$EQBENCH_TMPDIR"
 export TEMP="$EQBENCH_TMPDIR"
 export TMP="$EQBENCH_TMPDIR"
 
+cleanup_stale_codex_ghidra_tmp() {
+    local root="$EQBENCH_TMPDIR/codex-ghidra"
+    local candidate basename pid
+
+    [[ -d "$root" && ! -L "$root" ]] || return 0
+    while IFS= read -r -d '' candidate; do
+        basename="${candidate##*/}"
+        [[ "$basename" =~ ^pid-([0-9]+)$ ]] || continue
+        pid="${BASH_REMATCH[1]}"
+        if [[ ! -d "/proc/$pid" ]]; then
+            rm -rf -- "$candidate" || \
+                echo "Warning: could not remove stale PyGhidra temp directory: $candidate" >&2
+        fi
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'pid-*' -print0)
+    rmdir "$root" 2>/dev/null || true
+}
+
+cleanup_stale_codex_ghidra_tmp
+
+EQBENCH_RUN_TMPDIR="$(mktemp -d "$EQBENCH_TMPDIR/eqbench-run.XXXXXX")"
+cleanup_eqbench_run_tmpdir() {
+    local run_tmpdir="${EQBENCH_RUN_TMPDIR:-}"
+    [[ -n "$run_tmpdir" ]] || return 0
+    [[ "${run_tmpdir%/*}" == "$EQBENCH_TMPDIR" ]] || return 0
+    [[ "${run_tmpdir##*/}" == eqbench-run.* ]] || return 0
+    rm -rf -- "$run_tmpdir"
+    EQBENCH_RUN_TMPDIR=""
+}
+handle_eqbench_signal() {
+    local exit_status="$1"
+    trap - EXIT HUP INT TERM
+    cleanup_eqbench_run_tmpdir
+    exit "$exit_status"
+}
+trap cleanup_eqbench_run_tmpdir EXIT
+trap 'handle_eqbench_signal 129' HUP
+trap 'handle_eqbench_signal 130' INT
+trap 'handle_eqbench_signal 143' TERM
+
 IDS=(B1 B2 B3 B4 B5 B6 B7 B8 B9 B10 B11 B12 B13 B14 B15 B16)
 declare -A ARCH_BY_ID=(
     [B1]=arm64 [B2]=arm64 [B3]=arm64 [B4]=arm64
@@ -131,13 +170,19 @@ run_pair() {
     local count="$8"
     local total="$9"
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
+    local pair_tmpdir
+    pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
+    local result_entry_occurrence_nonce
+    result_entry_occurrence_nonce="$("$PYTHON_BIN" -c \
+        'import secrets; print(secrets.token_hex(24))')"
     local identity_line result_occurrence_id source_snapshot_fingerprint stream_id
     identity_line="$(PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
         --print-production-execution-identity \
         --binary1-path "$left_bin" --binary2-path "$right_bin" \
         --binary1-id "$left_id" --binary2-id "$right_id" \
-        --function-name1 "$function_name" --function-name2 "$function_name")"
+        --function-name1 "$function_name" --function-name2 "$function_name" \
+        --result-entry-occurrence-nonce "$result_entry_occurrence_nonce")"
     IFS=$'\t' read -r result_occurrence_id source_snapshot_fingerprint stream_id \
         <<< "$identity_line"
     local execution_nonce checkpoint_root authority_output
@@ -147,6 +192,9 @@ run_pair() {
     mkdir -p "$checkpoint_root"
 
     local -a equiv_cmd=(
+        env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
+        "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce"
+        "UNKNOWN_TAXONOMY_V2_DISABLE_PROCESS_WORKER_RUNTIME=1"
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main
         --equiv "$left_bin" "$right_bin" \
         --binary-ids "$left_id" "$right_id" \
@@ -174,11 +222,13 @@ run_pair() {
         --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
         --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" \
         --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" \
+        --allow-child-exit-resolution \
         -- "${equiv_cmd[@]}" > "$log_file" 2>&1; then
         ec=0
     else
         ec=$?
     fi
+    rm -rf -- "$pair_tmpdir"
 
     if (( ec == 124 || ec == 137 )); then
         {
@@ -338,6 +388,7 @@ echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
 echo "Skip completed results: $SKIP_COMPLETED_RESULTS"
 echo "Temporary directory: $EQBENCH_TMPDIR"
+echo "Run temporary directory: $EQBENCH_RUN_TMPDIR"
 echo "Target sources: ${#SAMPLE_SOURCES[@]}"
 echo "Dry run: $DRY_RUN"
 echo "============================================================"

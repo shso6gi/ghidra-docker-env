@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "a019eb7be3661eaffd23e754be337881da9d32967b2566e9783f8e04c2f1bc40",
+  "manifest_digest": "07217c05fa12dbacc4a5d41aaefa8351298bde738dfec8664c94970621ec362d",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 25,
   "sites": [
@@ -104,8 +104,8 @@
       ],
       "allowed_producer_ids": [
         "function-decompilation-artifact-producer-v2",
-        "function-decompilation-completion-producer-v2",
-        "function-decompilation-operational-error-producer-v2"
+        "function-decompilation-operational-error-producer-v2",
+        "high-function-ir-validator-v2"
       ],
       "branch_or_attempt_contract_id": "decompilation-broker-operational-signal:invocation",
       "column": 11,

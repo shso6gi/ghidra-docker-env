@@ -72,6 +72,7 @@ CHECKPOINT_AUTHORITY_FILENAMES = (
     "timeout.json",
     "terminal-segment.json",
     "terminal-stream.json",
+    "child-exit.json",
 )
 
 _OPERATIONAL_PROCESS_ROWS = {
@@ -312,6 +313,7 @@ class ProcessSupervisorAuthorityFactory:
             "SupervisorLaunchReceipt": "supervisor",
             "SupervisorTimeoutReceipt": "supervisor",
             "SupervisorOperationalErrorReceipt": "supervisor",
+            "SupervisorChildExitReceipt": "supervisor",
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
             "OperationalCheckpointReceipt": "worker",
@@ -381,6 +383,22 @@ class ProcessSupervisorAuthorityFactory:
         if not all(type(value) is str and value for key, value in payload.items() if key != "child_pid"):
             raise TypeError("supervisor launch identity is incomplete")
         return self._issue("SupervisorLaunchReceipt", payload, signer_role="supervisor")
+
+    def issue_child_exit_resolution(
+        self, *, launch: SignedProcessAuthorityReceipt, child_returncode: int,
+    ) -> SignedProcessAuthorityReceipt:
+        self.validate(launch)
+        if type(child_returncode) is not int:
+            raise TypeError("supervisor child exit code must be an exact integer")
+        return self._issue("SupervisorChildExitReceipt", {
+            "result_occurrence_id": launch.payload["result_occurrence_id"],
+            "launch_receipt_digest": launch.receipt_digest,
+            "child_pid": launch.payload["child_pid"],
+            "child_start_token": launch.payload["child_start_token"],
+            "child_returncode": child_returncode,
+            "deadline_policy_digest": launch.payload["deadline_policy_digest"],
+            "issuer_id": PROCESS_SUPERVISOR_ISSUER_ID,
+        }, signer_role="supervisor")
 
     def issue_live_assignment(
         self, *, prefix: EventStreamPrefixView,
@@ -1536,6 +1554,31 @@ class DurableCheckpointStore:
             raise ValueError("launch execution nonce differs from checkpoint directory")
         with self._locked():
             self._atomic_write(self.directory / "launch.json", self._bytes(receipt))
+
+    def persist_child_exit_resolution(
+        self, receipt: SignedProcessAuthorityReceipt,
+    ) -> None:
+        self.factory.validate(receipt)
+        if receipt.receipt_kind != "SupervisorChildExitReceipt":
+            raise ValueError("child exit store requires SupervisorChildExitReceipt")
+        with self._locked():
+            launch = self.factory.decode(json.loads(
+                (self.directory / "launch.json").read_text(encoding="utf-8")
+            ))
+            if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
+                raise ValueError("child exit resolution differs from durable launch")
+            self._atomic_write(
+                self.directory / "child-exit.json", self._bytes(receipt),
+                identical_ok=True,
+            )
+
+    def rematerialize_child_exit_resolution(self) -> SignedProcessAuthorityReceipt:
+        receipt = self.factory.decode(json.loads(
+            (self.directory / "child-exit.json").read_text(encoding="utf-8")
+        ))
+        if receipt.receipt_kind != "SupervisorChildExitReceipt":
+            raise ValueError("durable child exit resolution kind is invalid")
+        return receipt
 
     def persist_active(
         self, receipt: SignedProcessAuthorityReceipt,

@@ -1076,6 +1076,11 @@ def test_result_summary_reads_large_nul_delimited_log_manifest(tmp_path):
 def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     script = Path("eqbench_run_all_32jobs.sh").read_text()
 
+    assert 'EQBENCH_RUN_TMPDIR="$(mktemp -d "$EQBENCH_TMPDIR/eqbench-run.XXXXXX")"' in script
+    assert 'pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"' in script
+    assert 'env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"' in script
+    assert 'trap cleanup_eqbench_run_tmpdir EXIT' in script
+    assert 'rm -rf -- "$pair_tmpdir"' in script
     assert "write_log_list0()" in script
     assert '--log-list0 "$function_log_list"' in script
     assert '--log-list0 "$overall_log_list"' in script

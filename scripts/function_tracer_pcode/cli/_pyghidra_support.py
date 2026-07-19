@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from importlib import import_module
 from pathlib import Path
@@ -70,6 +72,7 @@ def _ensure_headless_ghidra_user_dirs() -> None:
 
     config_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    atexit.register(shutil.rmtree, base_dir, ignore_errors=True)
 
     # Parallel equivalence runs launch multiple isolated Python/JVM processes.
     # Sharing a single Ghidra XDG/cache root across those processes can race on

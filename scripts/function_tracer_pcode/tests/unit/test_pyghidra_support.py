@@ -9,9 +9,16 @@ from scripts.function_tracer_pcode.cli._pyghidra_support import (
 
 
 def test_ensure_headless_ghidra_user_dirs_uses_per_process_paths(monkeypatch, tmp_path):
+    registered_cleanups = []
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.cli._pyghidra_support.tempfile.gettempdir",
         lambda: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.cli._pyghidra_support.atexit.register",
+        lambda function, *args, **kwargs: registered_cleanups.append(
+            (function, args, kwargs)
+        ),
     )
     monkeypatch.setattr("scripts.function_tracer_pcode.cli._pyghidra_support.os.getpid", lambda: 4242)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -24,6 +31,11 @@ def test_ensure_headless_ghidra_user_dirs_uses_per_process_paths(monkeypatch, tm
     assert Path(os.environ["XDG_CACHE_HOME"]) == expected_base / "cache"
     assert (expected_base / "config").is_dir()
     assert (expected_base / "cache").is_dir()
+    assert len(registered_cleanups) == 1
+
+    cleanup, args, kwargs = registered_cleanups[0]
+    cleanup(*args, **kwargs)
+    assert not expected_base.exists()
 
 
 def test_ensure_headless_ghidra_user_dirs_overrides_shared_environment(monkeypatch, tmp_path):

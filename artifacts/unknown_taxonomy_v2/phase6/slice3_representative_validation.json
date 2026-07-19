@@ -1,99 +1,99 @@
 {
-  "schema_version": 1,
-  "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
-  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
-  "status": "fixed_review_go",
+  "artifact_digest": "859f4dac4fe9a2b300caef2a808bb7be19ac0adaf3d974cb85ee961fa8f3ddda",
   "authority_contract": {
+    "all_observed_solver_histories_materialized": true,
+    "ambiguous_q_open_refusal_persisted": true,
+    "issuer_ledger_drives_finish": true,
+    "issuer_owned_result_entry_occurrence": true,
     "prefix_final_exact_type_split": true,
     "semantic_arm_auto_completion": false,
     "startup_census_selection_persisted_and_rematerialized": true,
-    "issuer_owned_result_entry_occurrence": true,
-    "issuer_ledger_drives_finish": true,
-    "ambiguous_q_open_refusal_persisted": true,
-    "all_observed_solver_histories_materialized": true,
     "typed_effect_facts_drive_memory_eligibility": true
   },
-  "representative_cases": [
-    {
-      "test": "test_v2_call_effect_live_solver_timeout_finalizes_as_timeout",
-      "final_outcome": "TIMEOUT",
-      "census_events": 1,
-      "terminal_selection_count": 1,
-      "nonterminal_timeout_count": 0
-    },
-    {
-      "test": "test_v2_call_effect_persists_nonselected_timeout_history",
-      "final_outcome": "UNKNOWN",
-      "census_events": 6,
-      "terminal_selection_count": 0,
-      "nonterminal_timeout_count": 3
-    },
-    {
-      "test": "test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences",
-      "run_count": 2,
-      "distinct_result_entry_occurrences": 2,
-      "census_events_per_run": 3
-    },
-    {
-      "test": "test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger",
-      "post_finish_open_ledger_count": 0,
-      "sealed_census_events": 3
-    },
-    {
-      "test": "test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists",
-      "produced_stages": [
-        "guard_relation"
-      ],
-      "effect_stage_required": true
-    }
-  ],
+  "cross_phase_test": {
+    "elapsed_seconds": null,
+    "result": "295 passed"
+  },
+  "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
+  "files": {
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "06ebfef4d80651e564a1559f55af7037dfcca83a324716a0d94fa5c391d8062a",
+    "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "fee9822da5e6266db2b5b8de0cd36963d1cc9b168409b1c844548a1186187541",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a",
+    "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "4c9cbf5e67d59303388980bb514218ea3434869e85a1e270e55c300c591818d6",
+    "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "5396aab77e1b344813dda109fe6c09b24814b302fb0b7de5bf28c87fa4ce9c08",
+    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "73875e1ab915a3b66bec11f4ce23aeae243b5fa4dedc21c4f70cbabe565411d6",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "078b0a6981bb18a5be3d363739008898a013d8acaee6e2864789e0185080583a",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b368c07824b7dd37bb8dd49df4b4b2a745b3ab36e6a1d77fef43ca875a3b033f",
+    "scripts/function_tracer_pcode/equivalence/v2/reducer.py": "0d73924839fe034b152a2a23711df79087be49e801f0d16908b7e27ee179732c",
+    "scripts/function_tracer_pcode/equivalence/v2/stream.py": "97bacabf3828c372008b649ec6a1e746234db3ee5ebad35de21b7a6eb5a6afc2",
+    "scripts/function_tracer_pcode/tests/unit/test_call_effect_obligations.py": "caa3c2fafbb047bbc8c743c56a713785e79b81462b9485f7f0e2154c169d9d97",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py": "feff61675f422640187fefc0fd2527e17f6d3643052d7b60403350291cc37137"
+  },
   "focused_test": {
     "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py scripts/function_tracer_pcode/tests/unit/test_call_effect_obligations.py",
-    "result": "133 passed",
-    "elapsed_seconds": null
+    "elapsed_seconds": null,
+    "result": "133 passed"
   },
-  "cross_phase_test": {
-    "result": "295 passed",
-    "elapsed_seconds": null
-  },
+  "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
   "inventory": {
+    "current_source": {
+      "candidate_count": 597,
+      "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655"
+    },
+    "live_delta": {
+      "added": 0,
+      "removed": 0
+    },
     "previous_snapshot": {
       "candidate_count": 598,
       "candidate_set_digest": "c253d5763a7392015273a169bd211227d03e61459a1d98095c554f238ffe31d2"
-    },
-    "current_source": {
-      "candidate_set_digest": "0e81d89f278846746ba01d7676a84e297a76faecca7b1457cfc080695ce3d655",
-      "candidate_count": 597
-    },
-    "live_delta": {
-      "added": 0,
-      "removed": 0
     }
   },
-  "files": {
-    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "f2bb30e002211dd81df664a07500ff3179524e94cde4efeae160f79a05f02e65",
-    "scripts/function_tracer_pcode/equivalence/v2/stream.py": "97bacabf3828c372008b649ec6a1e746234db3ee5ebad35de21b7a6eb5a6afc2",
-    "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "5396aab77e1b344813dda109fe6c09b24814b302fb0b7de5bf28c87fa4ce9c08",
-    "scripts/function_tracer_pcode/equivalence/v2/reducer.py": "0d73924839fe034b152a2a23711df79087be49e801f0d16908b7e27ee179732c",
-    "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "4c9cbf5e67d59303388980bb514218ea3434869e85a1e270e55c300c591818d6",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f8a9a0b9d28e042d1ef08adc139f576c466e8b2f4cb3df892d11fd0ca53e5b22",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "9805e267be863a9df2d8e25b6d9958aec3fb9e258dd4ea0f97f2177512ef10a5",
-    "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "fee9822da5e6266db2b5b8de0cd36963d1cc9b168409b1c844548a1186187541",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py": "feff61675f422640187fefc0fd2527e17f6d3643052d7b60403350291cc37137",
-    "scripts/function_tracer_pcode/tests/unit/test_call_effect_obligations.py": "caa3c2fafbb047bbc8c743c56a713785e79b81462b9485f7f0e2154c169d9d97",
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "95662ca02a08de6dd93832e129196b0f1be87c26fee6d34fb519b56e45e199f0"
-  },
+  "representative_cases": [
+    {
+      "census_events": 1,
+      "final_outcome": "TIMEOUT",
+      "nonterminal_timeout_count": 0,
+      "terminal_selection_count": 1,
+      "test": "test_v2_call_effect_live_solver_timeout_finalizes_as_timeout"
+    },
+    {
+      "census_events": 6,
+      "final_outcome": "UNKNOWN",
+      "nonterminal_timeout_count": 3,
+      "terminal_selection_count": 0,
+      "test": "test_v2_call_effect_persists_nonselected_timeout_history"
+    },
+    {
+      "census_events_per_run": 3,
+      "distinct_result_entry_occurrences": 2,
+      "run_count": 2,
+      "test": "test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences"
+    },
+    {
+      "post_finish_open_ledger_count": 0,
+      "sealed_census_events": 3,
+      "test": "test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger"
+    },
+    {
+      "effect_stage_required": true,
+      "produced_stages": [
+        "guard_relation"
+      ],
+      "test": "test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists"
+    }
+  ],
+  "schema_version": 1,
   "source_inventory": {
-    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
     "current_source": {
-      "candidate_count": 594,
-      "candidate_set_digest": "2c69ef689bed7c893089818e84e434e1ccf3ec84aaba99457406e260bae02949"
+      "candidate_count": 596,
+      "candidate_set_digest": "a261edbab1e276ada0efd67e1858db143220e852faa4fce220a35b2a842386bc"
     },
     "live_delta": {
       "added": 0,
       "removed": 0
-    }
+    },
+    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json"
   },
-  "artifact_digest": "b049f6e0382e7df37ddd8f085828a89972fd5aa325800a1d4a3438e4bab5e512"
+  "status": "fixed_review_go"
 }

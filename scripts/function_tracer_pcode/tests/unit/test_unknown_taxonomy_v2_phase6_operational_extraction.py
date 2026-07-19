@@ -2,6 +2,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import scripts.function_tracer_pcode.equivalence.v2.operational_extraction as operational_extraction
 
 from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
     EXPECTED_OPERATIONAL_COMMON_REGISTRY_DIGEST,
@@ -30,6 +31,7 @@ from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import 
     OperationalErrorArtifact,
     OperationalExtractionAuthorityFactory,
     OperationalExtractionPilotEncoder,
+    authority_digest,
     canonical_high_function_projection,
     completed_result_structural_identity,
     validate_operational_registry_conservation,
@@ -56,6 +58,29 @@ class AddressSpace:
 
     def getName(self):
         return self.name
+
+
+class JavaIntegralLike:
+    def __init__(self, value):
+        self.value = value
+
+    def __int__(self):
+        return self.value
+
+    def __str__(self):
+        return str(self.value)
+
+
+def test_ghidra_integer_losslessly_projects_jpype_style_values():
+    assert operational_extraction._ghidra_integer(
+        "offset", JavaIntegralLike(0x1000)
+    ) == 0x1000
+    with pytest.raises(TypeError, match="not a Ghidra integral"):
+        operational_extraction._ghidra_integer("offset", 1.0)
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        operational_extraction._ghidra_integer(
+            "offset", JavaIntegralLike(-1), nonnegative=True
+        )
 
 
 class Address:
@@ -594,6 +619,37 @@ def test_program_seed_rejects_same_name_entry_foreign_function_for_census_and_fo
         )
 
 
+def test_program_seed_accepts_equal_jpype_proxy_for_same_java_program():
+    class Manager:
+        def getFunctions(self, forward):
+            assert forward is True
+            return iter(())
+
+    class EqualProgramProxy:
+        def __init__(self, program):
+            self.program = program
+
+        def __eq__(self, other):
+            return other is self.program
+
+    program = Program(Manager())
+    factory = OperationalExtractionAuthorityFactory(
+        result_occurrence_id="result-1",
+        source_snapshot_fingerprint="source-snapshot",
+        execution_identity_digest="execution-1",
+    )
+    seed = factory.issue_program_seed(
+        program, binary_content_identity="sha256:binary",
+    )
+    function = Function(
+        name="f", entry=0x1000, program=EqualProgramProxy(program),
+    )
+
+    observed = factory.target_from_ghidra(seed, function)
+
+    assert observed.binary_content_identity == "sha256:binary"
+
+
 def test_empty_census_and_missing_outcome_remain_cross_binary_distinct():
     class EmptyManager:
         def getFunctions(self, forward):
@@ -776,6 +832,26 @@ def test_encoder_emits_independent_cause_and_exact_artifact_completion():
         blocker, artifact,
     ))
     assert completed[0].event_type == EventType.REQUIREMENT_COMPLETED
+
+
+def test_phase7_digest_for_operational_completion_uses_public_authority_only():
+    factory, owned_target, _surface, _inv, _result, _obs, _attempt, artifact = (
+        completed_chain()
+    )
+    blocker = OperationalBlockerSignal(
+        "function_decompilation_artifact_unavailable",
+        owned_target,
+        ("top-level-decompile",),
+        "function-decompilation-artifact-producer-v2",
+    )
+    signal = OperationalCompletionSignal(blocker, artifact)
+
+    authority = signal._phase7_signal_authority()
+    digest = authority_digest(authority)
+
+    assert len(digest) == 64
+    assert authority["target_digest"] == owned_target.target_digest
+    assert authority["completion_artifact_digest"] == artifact.artifact_digest
 
 
 def test_encoder_rejects_cross_factory_artifact_and_session_identity():

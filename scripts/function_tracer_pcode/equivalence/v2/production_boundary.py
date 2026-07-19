@@ -14,6 +14,23 @@ from .phase8_cutover import (
 )
 
 
+def _operational_binary_content_identity(value: Any) -> str:
+    """Project the CLI content tuple into the operational authority contract."""
+
+    if type(value) is str and value:
+        return value
+    if (
+        type(value) is tuple
+        and len(value) == 2
+        and value[0] == "sha256"
+        and type(value[1]) is str
+        and len(value[1]) == 64
+        and all(character in "0123456789abcdef" for character in value[1])
+    ):
+        return f"sha256:{value[1]}"
+    raise ValueError("binary content identity is not canonical")
+
+
 def run_check_from_binaries_with_v2_pilot(
     checker: Any,
     program1: Any,
@@ -84,13 +101,27 @@ def run_check_from_binaries_with_v2_pilot(
             ),
         )
         return result
-    content_identities = getattr(
-        checker, "_active_binary_content_identities", (None, None)
+    operational_factory_resolver = getattr(
+        session.domain_signal_encoder,
+        "operational_authority_factory_for_session",
+        None,
     )
-    session.domain_signal_state["operational_program_binary_identities"] = {
-        id(program1): content_identities[0],
-        id(program2): content_identities[1],
-    }
+    if callable(operational_factory_resolver):
+        operational_factory = operational_factory_resolver(session)
+        if operational_factory is not None:
+            content_identities = getattr(
+                checker, "_active_binary_content_identities", (None, None)
+            )
+            session.domain_signal_state[
+                "operational_program_binary_identities"
+            ] = {
+                id(program1): _operational_binary_content_identity(
+                    content_identities[0]
+                ),
+                id(program2): _operational_binary_content_identity(
+                    content_identities[1]
+                ),
+            }
     previous_session = getattr(checker, "_active_v2_dual_write_pilot_session", None)
     previous_emit = getattr(checker, "emit_v2_dual_write_pilot_event", None)
     previous_terminalize = getattr(
@@ -146,6 +177,8 @@ def run_check_from_binaries_with_v2_pilot(
                 result.unknown_reasons = []
                 result.unknown_recovery_actions = []
                 result.error_message = "V2_PROJECTION_AUTHORITY_INVALID"
+                result.failure_status = "canonical_projection_exception"
+                result.failure_message = f"{type(exc).__name__}: {exc}"
             result_occurrence_id = session.identity.result_occurrence_id
             error_artifact_digest = authority_digest({
                 "result_occurrence_id": result_occurrence_id,

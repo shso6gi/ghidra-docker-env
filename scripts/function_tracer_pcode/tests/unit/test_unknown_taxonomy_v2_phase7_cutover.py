@@ -781,6 +781,45 @@ def test_production_boundary_fails_closed_when_expected_activation_is_missing(
     assert actual.v2_dual_write_pilot["status"] == "SHADOW_EVIDENCE_INCOMPLETE"
 
 
+def test_operational_binary_identity_projects_real_cli_sha256_tuple():
+    digest = "a" * 64
+
+    assert production_boundary._operational_binary_content_identity(
+        ("sha256", digest)
+    ) == f"sha256:{digest}"
+    with pytest.raises(ValueError, match="not canonical"):
+        production_boundary._operational_binary_content_identity(
+            ("sha256", "short")
+        )
+    with pytest.raises(ValueError, match="not canonical"):
+        production_boundary._operational_binary_content_identity(
+            ("md5", digest)
+        )
+
+
+def test_supervisor_nonce_prebinds_production_identity(monkeypatch):
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        RESULT_ENTRY_OCCURRENCE_NONCE_ENV,
+    )
+
+    nonce = "a" * 48
+    monkeypatch.setenv(RESULT_ENTRY_OCCURRENCE_NONCE_ENV, nonce)
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        )
+    )
+
+    session = connector.begin({"case": "supervisor-prebound-identity"})
+    expected = ProductionPilotExecutionIdentity.create({
+        "case": "supervisor-prebound-identity",
+        "result_entry_occurrence_nonce": nonce,
+    })
+
+    assert session.identity == expected
+
+
 def test_coverage_denominator_is_expected_cause_slot_not_surviving_occurrence():
     activation_factory, ledger, activation = activation_authority()
     reason_registry, recovery_registry = registries()

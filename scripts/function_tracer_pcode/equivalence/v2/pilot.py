@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import secrets
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 from .candidate import CandidateDecisionProjection, build_candidate_projection
@@ -44,7 +46,10 @@ PILOT_TYPED_CAUSE_KINDS = frozenset({
     if reason_id is not None
 ) | frozenset(CALL_EFFECT_REASON_SPECS) | frozenset(LOOP_REASON_SPECS) | frozenset(
     ABI_WIDTH_READONLY_REASON_SPECS
-)
+) | frozenset({
+    "function_decompilation_artifact_unavailable",
+    "high_function_ir_unavailable",
+})
 
 PILOT_EVENT_TYPES = frozenset({
     EventType.CAUSE_OBSERVED,
@@ -60,6 +65,10 @@ PILOT_EVENT_TYPES = frozenset({
     EventType.COUNTEREXAMPLE,
     EventType.ERROR,
 })
+
+RESULT_ENTRY_OCCURRENCE_NONCE_ENV = (
+    "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE"
+)
 
 
 @dataclass(frozen=True)
@@ -485,7 +494,9 @@ class ProductionDualWritePilotSession:
             return len(intents)
         except Exception as exc:
             self.domain_signal_error_kinds.append(type(exc).__name__)
-            self.domain_signal_error_details.append(str(exc))
+            self.domain_signal_error_details.append(
+                f"{type(signal).__name__}: {exc}"
+            )
             return 0
 
     def emit_domain_signal_if_observed(
@@ -653,8 +664,13 @@ class ProductionDualWritePilotConnector:
             else:
                 startup_receipts = (validated,)
         identity_payload = dict(execution_payload)
+        occurrence_nonce = os.environ.get(RESULT_ENTRY_OCCURRENCE_NONCE_ENV)
+        if occurrence_nonce is not None or startup_receipts:
+            occurrence_nonce = occurrence_nonce or secrets.token_hex(24)
+            identity_payload["result_entry_occurrence_nonce"] = occurrence_nonce
         occurrence_receipt = None
         if startup_receipts:
+            assert occurrence_nonce is not None
             startup_digests = tuple(
                 sorted(receipt.receipt_digest for receipt in startup_receipts)
             )
@@ -664,16 +680,8 @@ class ProductionDualWritePilotConnector:
                 PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
                     execution_payload_digest=authority_digest(execution_payload),
                     startup_receipt_digests=startup_digests,
+                    occurrence_nonce=occurrence_nonce,
                 )
-            )
-            identity_payload["execution_authority_startup_receipt_digests"] = (
-                startup_digests
-            )
-            identity_payload["result_entry_occurrence_id"] = (
-                occurrence_receipt.result_entry_occurrence_id
-            )
-            identity_payload["result_entry_occurrence_receipt_digest"] = (
-                occurrence_receipt.receipt_digest
             )
         identity = ProductionPilotExecutionIdentity.create(identity_payload)
         session = ProductionDualWritePilotSession(
@@ -736,7 +744,13 @@ class ProductionDualWritePilotConnector:
             execution_history_finalizer(session)
         if session.domain_signal_error_kinds and session.recorder.event_count == 0:
             session.closed = True
-            raise ValueError("production domain signal encoding is incomplete")
+            raise ValueError(
+                "production domain signal encoding is incomplete: "
+                + repr(tuple(zip(
+                    session.domain_signal_error_kinds,
+                    session.domain_signal_error_details,
+                )))
+            )
         if session.phase7_runtime is not None:
             session.phase7_runtime_result = session.phase7_runtime.finalize(
                 stream_id=f"phase7-{session.identity.result_occurrence_id}",
@@ -771,7 +785,13 @@ class ProductionDualWritePilotConnector:
                 session.terminalize(sequence_number, requirement_id)
         if session.domain_signal_error_kinds:
             session.closed = True
-            raise ValueError("production domain signal encoding is incomplete")
+            raise ValueError(
+                "production domain signal encoding is incomplete: "
+                + repr(tuple(zip(
+                    session.domain_signal_error_kinds,
+                    session.domain_signal_error_details,
+                )))
+            )
         pilot_result = run_dual_write_pilot(
             legacy_outcome=before_outcome,
             reducer=session.reducer,
