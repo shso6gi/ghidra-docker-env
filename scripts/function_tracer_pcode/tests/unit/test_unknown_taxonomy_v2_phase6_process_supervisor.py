@@ -546,7 +546,7 @@ def test_before_checkpoint_deadline_forms_durable_empty_prefix_error(tmp_path):
     store.persist_launch(authority["launch"])
     bundle = store.supervisor_finalize_operational_error(
         launch=authority["launch"],
-        error_kind="process_deadline_without_checkpoint",
+        error_kind="operational_authority_invalid",
         deadline_stage="BEFORE_CHECKPOINT",
         child_exit_disposition="SIGKILL_BEFORE_CHECKPOINT",
     )
@@ -583,7 +583,7 @@ def test_before_checkpoint_error_can_join_verified_nonterminal_prefix(tmp_path):
     store.persist_launch(authority["launch"])
     bundle = store.supervisor_finalize_operational_error(
         launch=authority["launch"],
-        error_kind="process_deadline_without_checkpoint",
+        error_kind="operational_authority_invalid",
         deadline_stage="BEFORE_CHECKPOINT",
         child_exit_disposition="SIGKILL_AFTER_PREFIX_BEFORE_CHECKPOINT",
         prefix=authority["prefix"],
@@ -595,7 +595,7 @@ def test_before_checkpoint_error_can_join_verified_nonterminal_prefix(tmp_path):
     )
     reduction = authority["session"].reducer.replay(stream)
     assert reduction.snapshot.error_event_bindings == ((
-        "process_deadline_without_checkpoint", bundle.error_receipt_digest,
+        "operational_authority_invalid", bundle.error_receipt_digest,
     ),)
     rematerialized = store.rematerialize_operational_error_bundle()
     assert rematerialized.bundle_digest == bundle.bundle_digest
@@ -617,7 +617,7 @@ def test_operational_error_requires_durable_launch_and_no_checkpoint(tmp_path):
     with pytest.raises(ValueError, match="durable launch"):
         missing.supervisor_finalize_operational_error(
             launch=authority["launch"],
-            error_kind="process_deadline_without_checkpoint",
+            error_kind="operational_authority_invalid",
             deadline_stage="BEFORE_CHECKPOINT",
             child_exit_disposition="SIGKILL",
         )
@@ -629,7 +629,7 @@ def test_operational_error_requires_durable_launch_and_no_checkpoint(tmp_path):
     with pytest.raises(ValueError, match="cannot replace checkpoint"):
         active.supervisor_finalize_operational_error(
             launch=authority["launch"],
-            error_kind="process_deadline_without_checkpoint",
+            error_kind="operational_authority_invalid",
             deadline_stage="BEFORE_CHECKPOINT",
             child_exit_disposition="SIGKILL",
         )
@@ -646,23 +646,23 @@ def test_operational_error_rejects_foreign_prefix_and_persisted_tamper(tmp_path)
     with pytest.raises(ValueError):
         store.supervisor_finalize_operational_error(
             launch=authority["launch"],
-            error_kind="process_deadline_without_checkpoint",
+            error_kind="operational_authority_invalid",
             deadline_stage="BEFORE_CHECKPOINT",
             child_exit_disposition="SIGKILL",
             prefix=foreign["prefix"],
         )
     bundle = store.supervisor_finalize_operational_error(
         launch=authority["launch"],
-        error_kind="process_deadline_without_checkpoint",
+        error_kind="operational_authority_invalid",
         deadline_stage="BEFORE_CHECKPOINT",
         child_exit_disposition="SIGKILL",
     )
-    assert bundle.error_kind == "process_deadline_without_checkpoint"
+    assert bundle.error_kind == "operational_authority_invalid"
     stream_path = store.directory / "operational-error-stream.json"
     stream_path.write_text(
         stream_path.read_text(encoding="utf-8").replace(
-            "process_deadline_without_checkpoint",
             "operational_authority_invalid",
+            "forged_operational_error_kind",
             1,
         ),
         encoding="utf-8",
@@ -682,7 +682,7 @@ def test_operational_error_rejects_torn_signed_launch(tmp_path):
     with pytest.raises(ValueError, match="durable launch"):
         store.supervisor_finalize_operational_error(
             launch=authority["launch"],
-            error_kind="process_deadline_without_checkpoint",
+            error_kind="operational_authority_invalid",
             deadline_stage="BEFORE_CHECKPOINT",
             child_exit_disposition="SIGKILL",
         )
@@ -707,7 +707,7 @@ def test_operational_error_rejects_already_decisive_prefix(
     with pytest.raises(ValueError, match="prefix differs from launch"):
         store.supervisor_finalize_operational_error(
             launch=authority["launch"],
-            error_kind="process_deadline_without_checkpoint",
+            error_kind="operational_authority_invalid",
             deadline_stage="BEFORE_CHECKPOINT",
             child_exit_disposition="SIGKILL",
             prefix=decisive_prefix,

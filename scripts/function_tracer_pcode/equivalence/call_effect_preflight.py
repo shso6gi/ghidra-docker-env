@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import inspect
+import marshal
 import re
 from threading import Lock
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
@@ -1698,7 +1699,17 @@ def register_builtin_receipt_executor(role: str, executor: Any) -> None:
         raise RuntimeError("comparison_receipt_executor_code_missing")
     existing = _TRUSTED_BUILTIN_EXECUTOR_CODES.get(role)
     if existing is not None and existing is not code:
-        raise RuntimeError("comparison_receipt_executor_replacement_rejected")
+        bytecode_equal = marshal.dumps(existing) == marshal.dumps(code)
+        try:
+            source_equal = (
+                existing.co_filename == code.co_filename
+                and existing.co_name == code.co_name
+                and inspect.getsource(existing) == inspect.getsource(code)
+            )
+        except (OSError, TypeError):
+            source_equal = False
+        if not bytecode_equal and not source_equal:
+            raise RuntimeError("comparison_receipt_executor_replacement_rejected")
     _TRUSTED_BUILTIN_EXECUTOR_CODES[role] = code
 
 

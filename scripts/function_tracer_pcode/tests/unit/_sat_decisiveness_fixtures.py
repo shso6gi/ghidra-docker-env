@@ -39,6 +39,8 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
+    get_unknown_recovery_plan,
+    make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
 
@@ -703,10 +705,18 @@ def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
         ("effect_ordinal", 9),
         "target_identity_unavailable",
     )
+    target_reason_ids = {
+        "unsupported_call_effect": "unsupported_call_effect_semantics",
+        "call_effect_blocker": "unsupported_call_effect_semantics",
+        "call_argument_evidence": "call_argument_extraction_incomplete",
+        "call_target_resolution_evidence": "call_target_resolution_unproven",
+    }
     evidence = {
         "object_derived": True,
         "status": "complete",
-        "reason_id": UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        "reason_id": target_reason_ids.get(
+            object_target_key[0], "unsupported_call_effect_semantics"
+        ),
         "recovery_proof_kind": UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
         "proof_stage": "object_evidence_collected",
         "evidence_kind": "call_effect_summary",
@@ -1025,7 +1035,7 @@ def _analysis_with_call_effect_summary_proof_evidence(**evidence_overrides) -> F
 
 def _expected_call_effect_summary_proof_id(evidence):
     return build_proof_obligation_id(
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        evidence["reason_id"],
         evidence["proof_stage"],
         evidence["recovery_proof_kind"],
         evidence["evidence_kind"],
@@ -1199,7 +1209,7 @@ def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrid
     evidence = {
         "object_derived": True,
         "status": "complete",
-        "reason_id": UnknownReasonId.SAT_UNSAFETY.value,
+        "reason_id": action.reason_id,
         "recovery_proof_kind": UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
         "proof_stage": action.proof_stage,
         "evidence_kind": action.evidence_kind,
@@ -1577,11 +1587,14 @@ def _readonly_identity_evidence(action, **overrides):
     return evidence
 
 def _method_b_reason(target=None):
-    return make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+    return make_internal_v2_reason_diagnostic(
+        "loop_summary_semantic_equality_unproven",
         stage="S_PAIRWISE",
         pair_or_case="(0,0)",
         evidence_refs=("loop_summary_guard_mismatch",),
+        recovery_proof_obligations=get_unknown_recovery_plan(
+            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED
+        ).proof_obligations,
         object_target_key=target or _method_b_closure_target(),
     )
 
@@ -1635,7 +1648,7 @@ def _method_b_evidence(action, **overrides):
     evidence = {
         "object_derived": True,
         "status": "complete",
-        "reason_id": UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value,
+        "reason_id": action.reason_id,
         "proof_kind": action.proof_kind,
         "recovery_proof_kind": action.proof_kind,
         "proof_stage": action.proof_stage,

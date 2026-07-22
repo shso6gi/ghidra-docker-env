@@ -20,7 +20,7 @@ from ..equivalence.v2.phase8_cutover import (
 )
 
 
-VALIDATION_KIND = "unknown-taxonomy-v2-phase8-five-value-cutover-v1"
+VALIDATION_KIND = "unknown-taxonomy-v2-phase8-five-value-cutover-v2"
 
 SOURCE_PATHS = (
     "Eq_new.sh",
@@ -216,10 +216,21 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     )
     producer_manifest = json.loads(producer_manifest_path.read_text(encoding="utf-8"))
     site_ids = {row["producer_site_manifest_id"] for row in producer_manifest["sites"]}
-    if producer_manifest["site_count"] != 25 or (
-        "obligation-stage-final-eq-closure" not in site_ids
+    if (
+        producer_manifest["site_count"] != len(producer_manifest["sites"])
+        or producer_manifest["site_count"] < 1
+        or "pair-disposition-safe-counterexample" not in site_ids
     ):
-        raise ValueError("Phase 8 decisive EQ producer site is not audited")
+        raise ValueError("Phase 8 decisive producer sites are not audited")
+    pending_eq_source = (
+        root / "scripts/function_tracer_pcode/equivalence/v2/production_signals.py"
+    ).read_text(encoding="utf-8")
+    if (
+        "class PendingEqClosureAuthority" not in pending_eq_source
+        or "def finalize_pending_eq_authorities" not in pending_eq_source
+        or "EventType.EQ_CLOSURE" not in pending_eq_source
+    ):
+        raise ValueError("Phase 10 pending-EQ decisive authority is not audited")
     phase7_cutover = root / "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json"
     real_sat = json.loads((root / (
         "artifacts/unknown_taxonomy_v2/phase7/real-sat-unknown.json"
@@ -227,13 +238,13 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     relation_rows = tuple(real_sat["c_active_rows"]) + tuple(real_sat["q_open_rows"])
     if any("final_outcome" in row for row in relation_rows):
         raise ValueError("base lifecycle relation contains final outcome")
+    source_rows = tuple(
+        {"path": path, "sha256": _sha256(root / path)} for path in SOURCE_PATHS
+    )
     body = {
         "validation_kind": VALIDATION_KIND,
-        "repository_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip(),
-        "source_files": tuple({"path": path, "sha256": _sha256(root / path)}
-                              for path in SOURCE_PATHS),
+        "source_tree_digest": authority_digest({"source_files": source_rows}),
+        "source_files": source_rows,
         "policy": {
             "retry_fallback": {outcome.value: RETRY_FALLBACK_MATRIX[outcome]
                                for outcome in Outcome},

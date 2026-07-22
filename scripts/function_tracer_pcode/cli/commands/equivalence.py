@@ -223,6 +223,38 @@ def _emit_import_error_result(
             }),
         ),
     )
+    from ...equivalence.v2.canonical_result import (
+        attach_durable_error_finalization,
+        build_canonical_result_finalization_bundle,
+        persist_canonical_result_envelope,
+    )
+
+    error_artifact_digest = authority_digest({
+        "result_occurrence_id": result_occurrence_id,
+        "error_message": error_message,
+    })
+    attach_durable_error_finalization(
+        result,
+        execution_payload={
+            "binary1_id": binary1_path,
+            "binary2_id": binary2_path,
+            "binary1_content_identity": binary1_content_identity,
+            "binary2_content_identity": binary2_content_identity,
+            "function_name1": func_name1,
+            "function_name2": func_name2,
+            "error_stage": "cli_import",
+        },
+        error_kind=error_kind,
+        error_artifact_digest=error_artifact_digest,
+    )
+    result_payload = result.to_dict()
+    evidence, session = result._canonical_finalization_context
+    bundle = build_canonical_result_finalization_bundle(
+        result_payload_preimage=result_payload, evidence=evidence, session=session
+    )
+    result.canonical_result_finalization_bundle = bundle
+    result_payload["canonical_result_finalization_bundle"] = bundle
+    persist_canonical_result_envelope(result_payload)
     output_result(
         result.to_string(
             verbose=getattr(args, "verbose", False),
@@ -231,7 +263,7 @@ def _emit_import_error_result(
         args.output,
         args.quiet,
     )
-    json_payload = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+    json_payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
     output_result(
         "\n".join(
             (
@@ -490,7 +522,27 @@ def run_equivalence_check(args):
     output_result(output_content, args.output, args.quiet)
 
     if _get_bool_arg("emit_result_json", False):
-        json_payload = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+        result_payload = result.to_dict()
+        from ...equivalence.v2.canonical_result import (
+            build_canonical_result_finalization_bundle,
+            persist_canonical_result_envelope,
+        )
+
+        finalization_context = getattr(
+            result, "_canonical_finalization_context", None
+        )
+        if finalization_context is not None:
+            evidence, session = finalization_context
+            bundle = build_canonical_result_finalization_bundle(
+                result_payload_preimage=result_payload,
+                evidence=evidence,
+                session=session,
+            )
+            result.canonical_result_finalization_bundle = bundle
+            result_payload["canonical_result_finalization_bundle"] = bundle
+
+        persist_canonical_result_envelope(result_payload)
+        json_payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
         json_content = "\n".join(
             (
                 "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",

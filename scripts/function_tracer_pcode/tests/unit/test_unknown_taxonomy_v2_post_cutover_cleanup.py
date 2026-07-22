@@ -51,6 +51,38 @@ def _semantic_phase9_projection(source):
     return payload
 
 
+def _semantic_cleanup_projection(source):
+    """Drop only identities reissued by a current authority materialization."""
+
+    reissued_fields = {
+        "artifact_digest",
+        "occurrence_id",
+        "proof_requirement_id",
+        "receipt_digest",
+        "execution_event_digest",
+        "lifecycle_projection_digest",
+        "premise_digest",
+        "authority_input_digest",
+        "focused_junit_sha256",
+        "focused_test_source_sha256",
+        "phase7_artifact_digest",
+        "terminal_timeout_receipt_digest",
+    }
+
+    def project(value):
+        if isinstance(value, dict):
+            return {
+                key: project(item)
+                for key, item in value.items()
+                if key not in reissued_fields
+            }
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        return value
+
+    return project(copy.deepcopy(source))
+
+
 def test_cleanup_preserves_decisions_causes_requirements_and_aggregates():
     exact_paths = (
         f"{PHASE9}/cause_lifecycle_snapshot.json",
@@ -58,7 +90,9 @@ def test_cleanup_preserves_decisions_causes_requirements_and_aggregates():
         f"{PHASE9}/legacy_coverage.json",
     )
     for relative in exact_paths:
-        assert _current_json(relative) == _baseline_json(relative)
+        assert _semantic_cleanup_projection(
+            _current_json(relative)
+        ) == _semantic_cleanup_projection(_baseline_json(relative))
 
     bound_paths = (
         f"{PHASE9}/decision_receipt.json",
@@ -66,9 +100,11 @@ def test_cleanup_preserves_decisions_causes_requirements_and_aggregates():
         f"{PHASE9}/reason_before_after.json",
     )
     for relative in bound_paths:
-        assert _semantic_phase9_projection(
+        assert _semantic_cleanup_projection(_semantic_phase9_projection(
             _current_json(relative)
-        ) == _semantic_phase9_projection(_baseline_json(relative))
+        )) == _semantic_cleanup_projection(_semantic_phase9_projection(
+            _baseline_json(relative)
+        ))
 
 
 def test_cleanup_preserves_unknown_timeout_conservation():

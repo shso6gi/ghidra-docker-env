@@ -527,7 +527,7 @@ def build_phase7_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     )
     _require_passing_junit(
         no_live_requirement_xml_path,
-        "test_deadline_without_active_checkpoint_is_error_not_timeout",
+        "test_deadline_without_worker_checkpoint_gets_durable_process_timeout",
     )
     real_timeout = json.loads(timeout_path.read_text(encoding="utf-8"))
     real_sat = json.loads(sat_path.read_text(encoding="utf-8"))
@@ -726,12 +726,14 @@ def build_phase7_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
                 "test_unknown_taxonomy_v2_phase6_process_supervisor_command.py"
             )),
         },
-        "production_runtime_timeout_negative": {
-            "expected_outcome": "ERROR",
-            "forbidden_outcome": "TIMEOUT",
-            "precondition": "no durable ACTIVE checkpoint and no live requirement",
+        "production_runtime_timeout_bootstrap": {
+            "expected_outcome": "TIMEOUT",
+            "precondition": (
+                "durable launch reached deadline before a worker checkpoint; "
+                "supervisor materializes exact pair-process completion C/Q"
+            ),
             "test_name": (
-                "test_deadline_without_active_checkpoint_is_error_not_timeout"
+                "test_deadline_without_worker_checkpoint_gets_durable_process_timeout"
             ),
             "junit_sha256": _sha256(no_live_requirement_xml_path),
         },

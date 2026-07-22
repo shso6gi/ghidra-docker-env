@@ -193,6 +193,37 @@ def test_broker_worker_runtime_persists_active_then_resolves(
     }[expected_kind]
 
 
+def test_worker_runtime_chains_sequential_decompile_checkpoints(tmp_path):
+    session, store, analyzer, function = _runtime_case(
+        tmp_path, result=Result(timed_out=True), case="sequential-checkpoints",
+    )
+    with production_signal_scope(session):
+        decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        )
+        first_resolved = store.read_state()
+        completed = Result(completed=True)
+        completed.function = function
+        analyzer.decompiler.result = completed
+        decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        )
+    second_resolved = store.read_state()
+    assert session.domain_signal_error_details == []
+    assert second_resolved.receipt_digest != first_resolved.receipt_digest
+    checkpoint = process_factory_receipt(store, "checkpoint.json")
+    assert checkpoint.payload["prior_resolved_receipt_digest"] == (
+        first_resolved.receipt_digest
+    )
+    history = (
+        store.directory / "checkpoint-history" / first_resolved.receipt_digest
+    )
+    assert (history / "checkpoint.json").is_file()
+    assert (history / "state.json").is_file()
+
+
 def process_factory_receipt(store, filename):
     import json
 

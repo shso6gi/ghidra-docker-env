@@ -145,6 +145,7 @@ class PreparedWorkerCheckpoint:
             "operational_factory": self.operational_factory,
             "worker_pid": os.getpid(),
             "worker_start_token": self.runtime.worker_start_token,
+            "prior_resolved": self.runtime.store.resolved_predecessor(),
         }
         if self.subordinate:
             arguments["assignment_factory"] = self.assignment_factory
@@ -275,6 +276,7 @@ class ProcessWorkerRuntime:
 
     def prepare(
         self, *, session: Any, operational_factory: Any, reason_id: str,
+        proof_requirement_id: Optional[str] = None,
     ) -> PreparedWorkerCheckpoint:
         prefix = session.recorder.prefix_view()
         projection = session.reducer.replay_prefix(prefix)
@@ -288,6 +290,7 @@ class ProcessWorkerRuntime:
             raise ValueError("worker session identity differs from supervisor launch")
         assignment = self.process_factory.issue_live_assignment(
             prefix=prefix, projection=projection, reason_id=reason_id,
+            proof_requirement_id=proof_requirement_id,
         )
         return PreparedWorkerCheckpoint(
             self, session, operational_factory, prefix, projection, assignment,

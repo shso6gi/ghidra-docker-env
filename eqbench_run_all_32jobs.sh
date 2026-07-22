@@ -24,8 +24,12 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-32}"
 VALIDATION_SUMMARY_LEVEL="${VALIDATION_SUMMARY_LEVEL:-compact}"
 EQBENCH_MAX_SAMPLES="${EQBENCH_MAX_SAMPLES:-0}"
+EQBENCH_SAMPLE_FILTER="${EQBENCH_SAMPLE_FILTER:-}"
+EQBENCH_PAIR_FILTER="${EQBENCH_PAIR_FILTER:-}"
+EQBENCH_RUN_SCOPE="${EQBENCH_RUN_SCOPE:-REPRESENTATIVE}"
+EQBENCH_BUILD_POLICY="${EQBENCH_BUILD_POLICY:-REUSE_OR_COMPILE}"
 DRY_RUN="${DRY_RUN:-0}"
-PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-300s}"
+PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-600s}"
 PAIR_PROCESS_KILL_AFTER="${PAIR_PROCESS_KILL_AFTER:-30s}"
 PAIR_PROCESS_TIMEOUT_SECONDS="${PAIR_PROCESS_TIMEOUT%s}"
 PAIR_PROCESS_KILL_AFTER_SECONDS="${PAIR_PROCESS_KILL_AFTER%s}"
@@ -34,14 +38,17 @@ DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
 PAIRWISE_TIMEOUT_HARD="${PAIRWISE_TIMEOUT_HARD:-30}"
 SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
+EQBENCH_DEBUG="${EQBENCH_DEBUG:-0}"
 DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
 if [[ -d /workspace && -w /workspace ]]; then
     DEFAULT_TMPDIR="/workspace/tmp"
 fi
 EQBENCH_TMPDIR="${EQBENCH_TMPDIR:-$DEFAULT_TMPDIR}"
+EQBENCH_PRIVATE_AUTHORITY_ROOT="${EQBENCH_PRIVATE_AUTHORITY_ROOT:-$EQBENCH_TMPDIR/eqbench-private-authority}"
 
 COMPILE_TEMPLATE="$SCRIPT_DIR/scripts/eqbench/compile_all_arm_mips.sh"
 FUNCTION_LISTER="$SCRIPT_DIR/scripts/eqbench/list_c_functions.py"
+FULL_SCOPE_EXPECTATION="$SCRIPT_DIR/scripts/function_tracer_pcode/validation/eqbench_full_scope.json"
 
 if [[ ! -f "$COMPILE_TEMPLATE" ]]; then
     echo "Error: compile template not found: $COMPILE_TEMPLATE" >&2
@@ -49,6 +56,28 @@ if [[ ! -f "$COMPILE_TEMPLATE" ]]; then
 fi
 if [[ ! -f "$FUNCTION_LISTER" ]]; then
     echo "Error: function lister not found: $FUNCTION_LISTER" >&2
+    exit 1
+fi
+if [[ ! -f "$FULL_SCOPE_EXPECTATION" ]]; then
+    echo "Error: full EqBench scope expectation not found: $FULL_SCOPE_EXPECTATION" >&2
+    exit 1
+fi
+if [[ "$EQBENCH_RUN_SCOPE" != "REPRESENTATIVE" && "$EQBENCH_RUN_SCOPE" != "FULL_EQBENCH" ]]; then
+    echo "Error: EQBENCH_RUN_SCOPE must be REPRESENTATIVE or FULL_EQBENCH" >&2
+    exit 1
+fi
+if [[ "$EQBENCH_BUILD_POLICY" != "REUSE_OR_COMPILE" \
+    && "$EQBENCH_BUILD_POLICY" != "PREBUILT_ONLY" \
+    && "$EQBENCH_BUILD_POLICY" != "FRESH_ONLY" ]]; then
+    echo "Error: EQBENCH_BUILD_POLICY must be REUSE_OR_COMPILE, PREBUILT_ONLY, or FRESH_ONLY" >&2
+    exit 1
+fi
+if [[ ! "$EQBENCH_DEBUG" =~ ^[01]$ || ! "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ ]]; then
+    echo "Error: EQBENCH_DEBUG and SKIP_COMPLETED_RESULTS must be 0 or 1" >&2
+    exit 1
+fi
+if [[ ! "$EQBENCH_MAX_SAMPLES" =~ ^[0-9]+$ ]]; then
+    echo "Error: EQBENCH_MAX_SAMPLES must be a non-negative integer" >&2
     exit 1
 fi
 if [[ ! "$PAIR_PROCESS_TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
@@ -129,10 +158,17 @@ declare -A OPT_BY_ID=(
 
 active_jobs=0
 RUN_PAIR_FAILURES=0
+RUN_COMPILE_FAILURES=0
+FUNCTION_CENSUS_FAILURES=0
+MISSING_BINARY_COUNT=0
+EXPECTED_BINARY_COUNT=0
+COMPILED_BINARY_COUNT=0
 TOTAL_PAIR_JOBS=0
+TOTAL_SCHEDULED_PAIR_JOBS=0
 TOTAL_SKIPPED_PAIR_JOBS=0
 TOTAL_FUNCTIONS=0
 TOTAL_SAMPLES=0
+COMPLETED_SAMPLES=0
 SKIPPED_SAMPLES=0
 
 status_from_log() {
@@ -159,6 +195,42 @@ status_from_log() {
     esac
 }
 
+signed_pair_status_is_complete() {
+    local log_file="$1"
+    local pair_target_file="$2"
+    local pair_status_file="${log_file%.log}.pair-status.json"
+    [[ -s "$log_file" && -s "$pair_status_file" ]] || return 1
+    "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        --validate-pair-status "$pair_status_file" \
+        --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
+        --expected-pair-target "$pair_target_file" \
+        --resume-disposition 2>/dev/null | grep -q '^COMPLETE_'
+}
+
+pair_is_selected() {
+    local pair_id="$1"
+    [[ -z "$EQBENCH_PAIR_FILTER" ]] && return 0
+    [[ ",$EQBENCH_PAIR_FILTER," == *",$pair_id,"* ]]
+}
+
+required_binary_ids() {
+    local -A selected=()
+    local i j left_id right_id
+    for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
+        left_id="${IDS[$i]}"
+        for ((j = i + 1; j < ${#IDS[@]}; j++)); do
+            right_id="${IDS[$j]}"
+            pair_is_selected "${left_id}_${right_id}" || continue
+            selected["$left_id"]=1
+            selected["$right_id"]=1
+        done
+    done
+    for left_id in "${IDS[@]}"; do
+        [[ -n "${selected[$left_id]:-}" ]] && printf '%s\n' "$left_id"
+    done
+}
+
 run_pair() {
     local sample_label="$1"
     local function_name="$2"
@@ -169,6 +241,7 @@ run_pair() {
     local output_dir="$7"
     local count="$8"
     local total="$9"
+    local pair_target_file="${10}"
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
     local pair_tmpdir
     pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
@@ -194,16 +267,18 @@ run_pair() {
     local -a equiv_cmd=(
         env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
         "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce"
-        "UNKNOWN_TAXONOMY_V2_DISABLE_PROCESS_WORKER_RUNTIME=1"
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main
         --equiv "$left_bin" "$right_bin" \
         --binary-ids "$left_id" "$right_id" \
-        -f "$function_name" -d --emit-result-json
+        -f "$function_name" --emit-result-json
         --equiv-timeout "$EQUIV_TIMEOUT"
         --timeout "$DECOMPILE_TIMEOUT"
         --pairwise-timeout "$PAIRWISE_TIMEOUT"
         --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD"
     )
+    if [[ "$EQBENCH_DEBUG" == "1" ]]; then
+        equiv_cmd+=( -d )
+    fi
 
     local ec
     if "$PYTHON_BIN" -m \
@@ -237,29 +312,43 @@ run_pair() {
             echo "Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER"
             echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
         } >> "$log_file"
-        PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
-            --emit-process-timeout-json \
-            --checkpoint-root "$checkpoint_root" \
-            --execution-nonce "$execution_nonce" \
-            --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID" \
-            --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
-            --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
-            --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
-            >> "$log_file"
     fi
 
-    validation_ensure_final_result_line "$log_file" "$ec"
-
-    local status
-    status="$(status_from_log "$log_file")"
+    local pair_status_file classification_ec status error_kind child_returncode
+    pair_status_file="${output_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
+    if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.canonical_result \
+        --classify-pair-log "$log_file" \
+        --supervisor-projection "$authority_output" \
+        --checkpoint-root "$checkpoint_root" \
+        --execution-nonce "$execution_nonce" \
+        --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID" \
+        --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
+        --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
+        --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
+        --pair-status-signing-private-key-file "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+        --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
+        --pair-execution-target-file "$pair_target_file" \
+        > "$pair_status_file"; then
+        classification_ec=0
+    else
+        classification_ec=$?
+    fi
+    status="$("$PYTHON_BIN" -c \
+        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("canonical_outcome", "ERROR"))' \
+        "$pair_status_file")"
+    error_kind="$("$PYTHON_BIN" -c \
+        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' \
+        "$pair_status_file")"
+    child_returncode="$("$PYTHON_BIN" -c \
+        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' \
+        "$pair_status_file")"
     printf '[%s] [%s %s/%s] %s <-> %s : %s' \
         "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id" "$status"
-    if (( ec != 0 )); then
-        printf ' (exit=%s)' "$ec"
-    fi
+    printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
+        "$error_kind" "$child_returncode" "$ec"
     printf '\n'
-    return 0
+    return "$classification_ec"
 }
 
 wait_for_slot() {
@@ -320,60 +409,185 @@ write_log_list0() {
     printf '%s\0' "$@" > "$output_file"
 }
 
-mapfile -t SAMPLE_SOURCES < <(
+mapfile -t ALL_SAMPLE_SOURCES < <(
     find "$EQBENCH_ROOT" \
         -path '*/Eq/source/*' -prune -o \
         \( -path '*/Eq/newV.c' -o -path '*/Eq/new.c' \) \
         -type f -print | sort
 )
+PREFILTER_SOURCE_PATHS=()
+for source_path in "${ALL_SAMPLE_SOURCES[@]}"; do
+    PREFILTER_SOURCE_PATHS+=("${source_path#$EQBENCH_ROOT/}")
+done
+PREFILTER_SOURCE_CENSUS_FILE="$EQBENCH_RUN_TMPDIR/prefilter_source_paths.txt"
+printf '%s\n' "${PREFILTER_SOURCE_PATHS[@]}" > "$PREFILTER_SOURCE_CENSUS_FILE"
+PREFILTER_SOURCE_CENSUS_DIGEST="$(sha256sum "$PREFILTER_SOURCE_CENSUS_FILE" | awk '{print $1}')"
 
+if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
+    if (( EQBENCH_MAX_SAMPLES != 0 )) || [[ -n "$EQBENCH_SAMPLE_FILTER" || -n "$EQBENCH_PAIR_FILTER" ]]; then
+        echo "Error: FULL_EQBENCH requires EQBENCH_MAX_SAMPLES=0 and empty sample/pair filters" >&2
+        exit 1
+    fi
+    mapfile -t EXPECTED_FULL_SOURCES < <(
+        "$PYTHON_BIN" -c \
+            'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["source_paths"]))' \
+            "$FULL_SCOPE_EXPECTATION"
+    )
+    if (( ${#PREFILTER_SOURCE_PATHS[@]} != ${#EXPECTED_FULL_SOURCES[@]} )); then
+        echo "Error: FULL_EQBENCH source count differs from frozen expectation" >&2
+        exit 1
+    fi
+    for ((source_index = 0; source_index < ${#EXPECTED_FULL_SOURCES[@]}; source_index++)); do
+        if [[ "${PREFILTER_SOURCE_PATHS[$source_index]}" != "${EXPECTED_FULL_SOURCES[$source_index]}" ]]; then
+            echo "Error: FULL_EQBENCH source census differs at index $source_index" >&2
+            exit 1
+        fi
+    done
+    declare -A EXPECTED_FUNCTIONS_BY_SOURCE=()
+    while IFS=$'\t' read -r expected_source expected_functions; do
+        EXPECTED_FUNCTIONS_BY_SOURCE["$expected_source"]="$expected_functions"
+    done < <(
+        "$PYTHON_BIN" -c \
+            'import json,sys; p=json.load(open(sys.argv[1])); [print(k+"\t"+",".join(v)) for k,v in p["expected_functions"].items()]' \
+            "$FULL_SCOPE_EXPECTATION"
+    )
+fi
+
+SAMPLE_SOURCES=("${ALL_SAMPLE_SOURCES[@]}")
+
+if [[ -n "$EQBENCH_SAMPLE_FILTER" ]]; then
+    mapfile -t SAMPLE_SOURCES < <(printf '%s\n' "${SAMPLE_SOURCES[@]}" | grep -E -- "$EQBENCH_SAMPLE_FILTER" || true)
+fi
 if (( EQBENCH_MAX_SAMPLES > 0 && ${#SAMPLE_SOURCES[@]} > EQBENCH_MAX_SAMPLES )); then
     SAMPLE_SOURCES=("${SAMPLE_SOURCES[@]:0:EQBENCH_MAX_SAMPLES}")
 fi
 
 mkdir -p "$OUTPUT_BASE_DIR"
-PROCESS_AUTHORITY_ROOT="$OUTPUT_BASE_DIR/.process-authority-keys"
-mkdir -p "$PROCESS_AUTHORITY_ROOT"
-chmod 700 "$PROCESS_AUTHORITY_ROOT"
+OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
+EQBENCH_PRIVATE_AUTHORITY_ROOT="$(realpath -m "$EQBENCH_PRIVATE_AUTHORITY_ROOT")"
+if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" \
+    || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then
+    echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
+    exit 1
+fi
+AUTHORITY_KEYSET_ID="${EQBENCH_AUTHORITY_KEYSET_ID:-$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')}"
+if [[ ! "$AUTHORITY_KEYSET_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: EQBENCH_AUTHORITY_KEYSET_ID contains unsafe characters" >&2
+    exit 1
+fi
+PROCESS_AUTHORITY_ROOT="$EQBENCH_PRIVATE_AUTHORITY_ROOT/$AUTHORITY_KEYSET_ID"
 PROCESS_SUPERVISOR_KEY_ID="eqbench-phase8-supervisor-v1"
 PROCESS_WORKER_KEY_ID="eqbench-phase8-worker-v1"
 PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
 PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
-if [[ ! -s "$PROCESS_SUPERVISOR_KEY_FILE" ]]; then
-    umask 077
-    head -c 32 /dev/urandom > "$PROCESS_SUPERVISOR_KEY_FILE"
+PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/pair-status-ed25519.key"
+PAIR_STATUS_VERIFICATION_KEY_FILE="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
+existing_authority_evidence="$(find "$OUTPUT_BASE_DIR" \
+    \( -name '*.pair-status.json' -o -name 'pair-status-verification-key.json' \
+       -o -path '*/.process-authority/*' \) -print -quit)"
+if [[ -n "$existing_authority_evidence" ]]; then
+    if [[ ! -s "$PROCESS_SUPERVISOR_KEY_FILE" \
+        || ! -s "$PROCESS_WORKER_KEY_FILE" \
+        || ! -s "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+        || ! -s "$PAIR_STATUS_VERIFICATION_KEY_FILE" ]]; then
+        echo "Error: existing authority evidence has no complete retained private keyset" >&2
+        echo "Authority keyset: $AUTHORITY_KEYSET_ID" >&2
+        exit 1
+    fi
 fi
-if [[ ! -s "$PROCESS_WORKER_KEY_FILE" ]]; then
+mkdir -p "$PROCESS_AUTHORITY_ROOT"
+chmod 700 "$PROCESS_AUTHORITY_ROOT"
+if [[ -z "$existing_authority_evidence" ]]; then
     umask 077
-    head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
+    [[ -s "$PROCESS_SUPERVISOR_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_SUPERVISOR_KEY_FILE"
+    [[ -s "$PROCESS_WORKER_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
+    if [[ ! -s "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" ]]; then
+        "$PYTHON_BIN" -m \
+            scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            --generate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
+    elif [[ ! -s "$PAIR_STATUS_VERIFICATION_KEY_FILE" ]]; then
+        "$PYTHON_BIN" -m \
+            scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            --export-public-from-private "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
+    fi
 fi
+"$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+    --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+    --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
+while IFS= read -r -d '' existing_pair_status; do
+    if ! "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        --validate-pair-status "$existing_pair_status" \
+        --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null; then
+        echo "Error: existing signed pair status failed resume preflight: $existing_pair_status" >&2
+        exit 1
+    fi
+done < <(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print0)
+EXPECTED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"
+: > "$EXPECTED_PAIR_STATUS_PATHS_FILE"
+VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/verified_skipped_pair_status_paths.txt"
+: > "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
+cp "$PREFILTER_SOURCE_CENSUS_FILE" "$OUTPUT_BASE_DIR/prefilter_source_paths.txt"
+COMPILE_FAILURE_SAMPLES_FILE="$OUTPUT_BASE_DIR/compile_failure_samples.txt"
+: > "$COMPILE_FAILURE_SAMPLES_FILE"
+MISSING_BINARY_AXES_FILE="$OUTPUT_BASE_DIR/missing_binary_axes.txt"
+: > "$MISSING_BINARY_AXES_FILE"
+FUNCTION_CENSUS_FAILURES_FILE="$OUTPUT_BASE_DIR/function_census_failures.txt"
+: > "$FUNCTION_CENSUS_FAILURES_FILE"
+USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
+: > "$USED_BUILD_RECEIPTS_FILE"
+ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.validation.execution_identity \
+    --repo-root "$SCRIPT_DIR" --print-source-digest)"
 PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
     "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
     | sha256sum | awk '{print $1}')"
 export PROCESS_SUPERVISOR_KEY_ID PROCESS_WORKER_KEY_ID
 export PROCESS_SUPERVISOR_KEY_FILE PROCESS_WORKER_KEY_FILE
+export PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE PAIR_STATUS_VERIFICATION_KEY_FILE
 export PAIR_PROCESS_DEADLINE_POLICY_DIGEST
 
-cat > "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
+RUN_MANIFEST_FILE="$OUTPUT_BASE_DIR/run_manifest.txt"
+cat > "$RUN_MANIFEST_FILE" <<EOF
 run_kind=eqbench_all_eq_matrix_current
+run_scope=$EQBENCH_RUN_SCOPE
+build_policy=$EQBENCH_BUILD_POLICY
 eqbench_root=$EQBENCH_ROOT
 output_base_dir=$OUTPUT_BASE_DIR
 python_bin=$PYTHON_BIN
 parallel_jobs=$PARALLEL_JOBS
+validation_summary_level=$VALIDATION_SUMMARY_LEVEL
 pair_process_timeout=$PAIR_PROCESS_TIMEOUT
 pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
+pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
+pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
 equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
 skip_completed_results=$SKIP_COMPLETED_RESULTS
+debug=$EQBENCH_DEBUG
 eqbench_tmpdir=$EQBENCH_TMPDIR
+authority_keyset_id=$AUTHORITY_KEYSET_ID
 compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
+prefilter_source_count=${#PREFILTER_SOURCE_PATHS[@]}
+prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
+max_samples=$EQBENCH_MAX_SAMPLES
 target_sources=${#SAMPLE_SOURCES[@]}
 function_policy=all top-level source-defined functions except main
-binary_policy=pairwise among B1..B16 when both binaries exist
+binary_policy=verified build receipt first; isolated fresh build fallback
+sample_filter=$EQBENCH_SAMPLE_FILTER
+pair_filter=$EQBENCH_PAIR_FILTER
+analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
 dry_run=$DRY_RUN
 EOF
+ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.validation.execution_receipt \
+    --run-manifest "$RUN_MANIFEST_FILE" --print-analysis-config-digest)"
+printf 'analysis_config_digest=%s\n' "$ANALYSIS_CONFIG_DIGEST" >> "$RUN_MANIFEST_FILE"
 
 echo "============================================================"
 echo "EqBench all-sample matrix"
@@ -390,6 +604,8 @@ echo "Skip completed results: $SKIP_COMPLETED_RESULTS"
 echo "Temporary directory: $EQBENCH_TMPDIR"
 echo "Run temporary directory: $EQBENCH_RUN_TMPDIR"
 echo "Target sources: ${#SAMPLE_SOURCES[@]}"
+echo "Run scope: $EQBENCH_RUN_SCOPE (prefilter census: ${#PREFILTER_SOURCE_PATHS[@]})"
+echo "Build policy: $EQBENCH_BUILD_POLICY"
 echo "Dry run: $DRY_RUN"
 echo "============================================================"
 
@@ -398,6 +614,7 @@ if (( DRY_RUN != 0 )); then
     echo "Dry run wrote: $OUTPUT_BASE_DIR/dry_run_sources.txt"
     exit 0
 fi
+mapfile -t REQUIRED_BINARY_IDS < <(required_binary_ids)
 
 for source_path in "${SAMPLE_SOURCES[@]}"; do
     eq_dir="$(dirname "$source_path")"
@@ -426,12 +643,19 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
     echo "Output dir: $output_sample_dir"
     echo "============================================================"
 
-    if ! (cd "$source_dir" && ./compile_all.sh "$source_name") > "$compile_log" 2>&1; then
-        echo "Compile finished with failures; missing binaries will be skipped. Log: $compile_log" >&2
-    fi
-
     mapfile -t FUNCTIONS < <("$PYTHON_BIN" "$FUNCTION_LISTER" "$source_dir/$source_name" | sort -u)
     printf '%s\n' "${FUNCTIONS[@]}" > "$functions_file"
+    if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
+        actual_functions="$(IFS=,; echo "${FUNCTIONS[*]}")"
+        source_census_path="${source_path#$EQBENCH_ROOT/}"
+        expected_functions="${EXPECTED_FUNCTIONS_BY_SOURCE[$source_census_path]:-}"
+        if [[ "$actual_functions" != "$expected_functions" ]]; then
+            printf '%s\n' "$sample_label" >> "$FUNCTION_CENSUS_FAILURES_FILE"
+            FUNCTION_CENSUS_FAILURES=$((FUNCTION_CENSUS_FAILURES + 1))
+            RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
+            echo "Function census authority failure: sample=$sample_label" >&2
+        fi
+    fi
 
     if (( ${#FUNCTIONS[@]} == 0 )); then
         echo "No non-main functions found; skipping sample."
@@ -441,24 +665,157 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
 
     echo "Functions: ${FUNCTIONS[*]}"
 
+    sample_expected_pairs=0
     for function_name in "${FUNCTIONS[@]}"; do
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         output_function_dir="$output_sample_dir/$function_name"
         mkdir -p "$output_function_dir"
+        for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
+            left_id="${IDS[$i]}"
+            for ((j = i + 1; j < ${#IDS[@]}; j++)); do
+                right_id="${IDS[$j]}"
+                pair_is_selected "${left_id}_${right_id}" || continue
+                pair_status_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
+                printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$EXPECTED_PAIR_STATUS_PATHS_FILE"
+                TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
+                sample_expected_pairs=$((sample_expected_pairs + 1))
+            done
+        done
+    done
+
+    validation_binary_ids=("${REQUIRED_BINARY_IDS[@]}")
+    if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
+        validation_binary_ids=("${IDS[@]}")
+    fi
+    build_receipt_file="$source_dir/.${source_base}.eqbench-build-receipt.json"
+    build_receipt_args=()
+    for binary_id in "${validation_binary_ids[@]}"; do
+        build_receipt_args+=(--binary-id "$binary_id")
+    done
+    require_fresh_args=()
+    if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
+        require_fresh_args+=(--require-fresh)
+    fi
+    build_ready=0
+    compile_exit_status=0
+    receipt_json=""
+
+    if [[ "$EQBENCH_BUILD_POLICY" != "FRESH_ONLY" && -s "$build_receipt_file" ]]; then
+        if receipt_json="$("$PYTHON_BIN" -m \
+            scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+            --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --validate \
+            "${require_fresh_args[@]}" "${build_receipt_args[@]}" 2>/dev/null)"; then
+            build_ready=1
+            printf 'build_resolution=VERIFIED_RECEIPT_REUSE\ncompile_invoked=0\n' > "$compile_log"
+        fi
+    fi
+
+    if (( build_ready == 0 )) && [[ "$EQBENCH_RUN_SCOPE" == "REPRESENTATIVE" \
+        && "$EQBENCH_BUILD_POLICY" != "FRESH_ONLY" ]]; then
+        adopted_inputs_complete=1
+        for binary_id in "${validation_binary_ids[@]}"; do
+            binary_name="$(binary_name_for_id "$source_base" "$binary_id")"
+            [[ -f "$source_dir/$binary_name" ]] || adopted_inputs_complete=0
+        done
+        if (( adopted_inputs_complete != 0 )); then
+            if receipt_json="$("$PYTHON_BIN" -m \
+                scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --materialize \
+                --provenance-kind ADOPTED_PREBUILT --sample-identity "$sample_label" \
+                --source "$source_path" --compile-script "$COMPILE_TEMPLATE" \
+                --binary-root "$source_dir" --target-binary-root "$source_dir" \
+                "${build_receipt_args[@]}")"; then
+                build_ready=1
+                printf 'build_resolution=ADOPTED_PREBUILT\ncompile_invoked=0\n' > "$compile_log"
+            fi
+        fi
+    fi
+
+    if (( build_ready == 0 )) && [[ "$EQBENCH_BUILD_POLICY" != "PREBUILT_ONLY" ]]; then
+        fresh_build_dir="$EQBENCH_RUN_TMPDIR/fresh-builds/$TOTAL_SAMPLES"
+        mkdir -p "$fresh_build_dir"
+        cp "$source_path" "$fresh_build_dir/$source_name"
+        cp "$COMPILE_TEMPLATE" "$fresh_build_dir/compile_all.sh"
+        chmod +x "$fresh_build_dir/compile_all.sh"
+        (cd "$fresh_build_dir" && ./compile_all.sh "$source_name") > "$compile_log" 2>&1 || compile_exit_status=$?
+        if (( compile_exit_status == 0 )); then
+            fresh_receipt="$fresh_build_dir/build-receipt.json"
+            fresh_receipt_args=()
+            for binary_id in "${IDS[@]}"; do
+                fresh_receipt_args+=(--binary-id "$binary_id")
+            done
+            if "$PYTHON_BIN" -m \
+                scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                --repo-root "$SCRIPT_DIR" --receipt "$fresh_receipt" --materialize \
+                --provenance-kind FRESH_COMPILE --sample-identity "$sample_label" \
+                --source "$source_path" --compile-script "$COMPILE_TEMPLATE" \
+                --binary-root "$fresh_build_dir" --target-binary-root "$source_dir" \
+                "${fresh_receipt_args[@]}" >/dev/null; then
+                install_failed=0
+                for binary_id in "${IDS[@]}"; do
+                    binary_name="$(binary_name_for_id "$source_base" "$binary_id")"
+                    install_path="$source_dir/.${binary_name}.eqbench-new"
+                    if ! cp "$fresh_build_dir/$binary_name" "$install_path" \
+                        || ! mv -f -- "$install_path" "$source_dir/$binary_name"; then
+                        install_failed=1
+                        break
+                    fi
+                done
+                if (( install_failed == 0 )) \
+                    && cp "$fresh_receipt" "${build_receipt_file}.new" \
+                    && mv -f -- "${build_receipt_file}.new" "$build_receipt_file"; then
+                    if receipt_json="$("$PYTHON_BIN" -m \
+                        scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                        --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --validate \
+                        "${require_fresh_args[@]}" "${build_receipt_args[@]}")"; then
+                        build_ready=1
+                    fi
+                else
+                    compile_exit_status=1
+                fi
+            else
+                compile_exit_status=1
+            fi
+        fi
+    elif (( build_ready == 0 )); then
+        compile_exit_status=125
+        printf 'build_resolution=PREBUILT_AUTHORITY_UNAVAILABLE\ncompile_invoked=0\n' > "$compile_log"
+    fi
+
+    sample_missing_binary_count=0
+    EXPECTED_BINARY_COUNT=$((EXPECTED_BINARY_COUNT + ${#validation_binary_ids[@]}))
+    for binary_id in "${validation_binary_ids[@]}"; do
+        binary_name="$(binary_name_for_id "$source_base" "$binary_id")"
+        binary_path="$source_dir/$binary_name"
+        if [[ ! -f "$binary_path" ]]; then
+            printf '%s/%s\n' "$sample_label" "$binary_id" >> "$MISSING_BINARY_AXES_FILE"
+            sample_missing_binary_count=$((sample_missing_binary_count + 1))
+        fi
+    done
+    MISSING_BINARY_COUNT=$((MISSING_BINARY_COUNT + sample_missing_binary_count))
+    if (( build_ready == 0 )); then
+        printf '%s\n' "$sample_label" >> "$COMPILE_FAILURE_SAMPLES_FILE"
+        RUN_COMPILE_FAILURES=$((RUN_COMPILE_FAILURES + 1))
+        failure_jobs=$sample_expected_pairs
+        (( failure_jobs > 0 )) || failure_jobs=1
+        RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + failure_jobs))
+        echo "Build authority failure: sample=$sample_label exit=$compile_exit_status missing=$sample_missing_binary_count/${#validation_binary_ids[@]}; existing binaries were not moved. Log: $compile_log" >&2
+        continue
+    fi
+    COMPILED_BINARY_COUNT=$((COMPILED_BINARY_COUNT + ${#validation_binary_ids[@]}))
+    printf '%s\n' "$receipt_json" >> "$USED_BUILD_RECEIPTS_FILE"
+    COMPLETED_SAMPLES=$((COMPLETED_SAMPLES + 1))
+
+    for function_name in "${FUNCTIONS[@]}"; do
+        output_function_dir="$output_sample_dir/$function_name"
         pair_count=0
         total_pairs=0
 
         for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
             left_id="${IDS[$i]}"
-            left_name="$(binary_name_for_id "$source_base" "$left_id")"
-            left_bin="$source_dir/$left_name"
-            [[ -f "$left_bin" ]] || continue
-
             for ((j = i + 1; j < ${#IDS[@]}; j++)); do
                 right_id="${IDS[$j]}"
-                right_name="$(binary_name_for_id "$source_base" "$right_id")"
-                right_bin="$source_dir/$right_name"
-                [[ -f "$right_bin" ]] || continue
+                pair_is_selected "${left_id}_${right_id}" || continue
                 total_pairs=$((total_pairs + 1))
             done
         done
@@ -473,26 +830,40 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             left_id="${IDS[$i]}"
             left_name="$(binary_name_for_id "$source_base" "$left_id")"
             left_bin="$source_dir/$left_name"
-            [[ -f "$left_bin" ]] || continue
 
             for ((j = i + 1; j < ${#IDS[@]}; j++)); do
                 right_id="${IDS[$j]}"
                 right_name="$(binary_name_for_id "$source_base" "$right_id")"
                 right_bin="$source_dir/$right_name"
-                [[ -f "$right_bin" ]] || continue
+                pair_is_selected "${left_id}_${right_id}" || continue
 
                 pair_count=$((pair_count + 1))
                 log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
-                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && validation_result_log_is_complete "$log_file"; then
+                pair_status_file="${log_file%.log}.pair-status.json"
+                pair_target_file="$EQBENCH_RUN_TMPDIR/${TOTAL_PAIR_JOBS}-${function_name}-${left_id}-${right_id}.pair-target.json"
+                "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity \
+                    --repo-root "$SCRIPT_DIR" --build-pair-target \
+                    --sample-identity "$sample_label" \
+                    --output-sample-relative-path "$rel_eq_dir/$source_base" \
+                    --function-name "$function_name" \
+                    --left-binary-id "$left_id" --right-binary-id "$right_id" \
+                    --source-path "$source_path" \
+                    --left-binary-path "$left_bin" --right-binary-path "$right_bin" \
+                    --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
+                    --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
+                    > "$pair_target_file"
+                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && signed_pair_status_is_complete "$log_file" "$pair_target_file"; then
                     skipped_completed_pairs=$((skipped_completed_pairs + 1))
                     TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                    printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
                     continue
                 fi
 
-                TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
+                TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
                 wait_for_slot
                 run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
-                    "$left_bin" "$right_bin" "$output_function_dir" "$pair_count" "$total_pairs" &
+                    "$left_bin" "$right_bin" "$output_function_dir" "$pair_count" "$total_pairs" \
+                    "$pair_target_file" &
                 active_jobs=$((active_jobs + 1))
             done
         done
@@ -542,16 +913,61 @@ if (( ${#ALL_LOG_FILES[@]} > 0 )); then
 fi
 
 cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
-completed_samples=$TOTAL_SAMPLES
+completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
 total_functions=$TOTAL_FUNCTIONS
 total_pair_jobs=$TOTAL_PAIR_JOBS
+total_scheduled_pair_jobs=$TOTAL_SCHEDULED_PAIR_JOBS
 total_skipped_pair_jobs=$TOTAL_SKIPPED_PAIR_JOBS
+expected_pairs_per_function=120
+expected_binary_count=$EXPECTED_BINARY_COUNT
+compiled_binary_count=$COMPILED_BINARY_COUNT
+compile_failure_count=$RUN_COMPILE_FAILURES
+missing_binary_count=$MISSING_BINARY_COUNT
+function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
+analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
+
+FINAL_RUN_EXIT_STATUS=0
+if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 )); then
+    FINAL_RUN_EXIT_STATUS=1
+fi
+
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt \
+    --repo-root "$SCRIPT_DIR" \
+    --private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
+    --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
+    --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" \
+    --matrix-root "$OUTPUT_BASE_DIR" \
+    --source-digest-start "$ANALYSIS_SOURCE_DIGEST_START" \
+    --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
+    --exit-status "$FINAL_RUN_EXIT_STATUS" \
+    -- "env" "PARALLEL_JOBS=$PARALLEL_JOBS" \
+    "EQBENCH_RUN_SCOPE=$EQBENCH_RUN_SCOPE" \
+    "EQBENCH_BUILD_POLICY=$EQBENCH_BUILD_POLICY" \
+    "EQBENCH_MAX_SAMPLES=$EQBENCH_MAX_SAMPLES" \
+    "EQBENCH_SAMPLE_FILTER=$EQBENCH_SAMPLE_FILTER" \
+    "EQBENCH_PAIR_FILTER=$EQBENCH_PAIR_FILTER" \
+    "EQBENCH_DEBUG=$EQBENCH_DEBUG" \
+    "DRY_RUN=$DRY_RUN" \
+    "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" \
+    "VALIDATION_SUMMARY_LEVEL=$VALIDATION_SUMMARY_LEVEL" \
+    "EQUIV_TIMEOUT=$EQUIV_TIMEOUT" \
+    "DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT" \
+    "PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT" \
+    "PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD" \
+    "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
+    "PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER" \
+    "./eqbench_run_all_32jobs.sh"
 
 echo ""
 echo "EqBench all-sample matrix finished."
 echo "Output directory: $OUTPUT_BASE_DIR"
 echo "Overall summary: $OUTPUT_BASE_DIR/overall_summary.txt"
 echo "Run manifest: $OUTPUT_BASE_DIR/run_manifest.txt"
+
+if (( FINAL_RUN_EXIT_STATUS > 0 )); then
+    echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification." >&2
+    exit "$FINAL_RUN_EXIT_STATUS"
+fi

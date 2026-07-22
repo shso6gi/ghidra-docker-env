@@ -180,7 +180,7 @@ def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monk
     assert result.is_equivalent is None
     assert result.unknown_reasons
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.reason_id == "call_target_resolution_unproven"
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.detail == "function1:effect_call_target_resolution_evidence"
     assert reason.object_target_key[0] == "call_target_resolution_evidence"
@@ -924,7 +924,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
     assert result.is_equivalent is None
     assert len(result.unknown_reasons) == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.reason_id == "call_argument_extraction_incomplete"
     assert reason.recovery_proof_kind == UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
     assert reason.proof_stage == "object_evidence_collected"
     assert reason.evidence_kind == "call_effect_summary"
@@ -1072,7 +1072,7 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
     assert reason.object_target_key[5] == ("effect_ordinal", 9)
     assert _object_target_key_is_specific(reason.object_target_key) is True
     assert reason.proof_obligation_id == build_proof_obligation_id(
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        reason.reason_id,
         "object_evidence_collected",
         UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
         "call_effect_summary",

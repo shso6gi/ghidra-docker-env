@@ -839,7 +839,10 @@ def _current_accepted_reclassification_targets(entry: Any) -> Sequence[Any]:
     for record in current.get("reason_records") or ():
         if not isinstance(record, Mapping):
             continue
-        if record.get("reason_id") != "sat_unsafety":
+        if record.get("reason_id") not in {
+            "sat_unsafety",
+            "counterexample_analysis_safety_unproven",
+        }:
             continue
         if not _object_target_key_is_specific_sat_unsafety(record.get("object_target_key")):
             continue
@@ -863,7 +866,10 @@ def _current_accepted_reclassification_actions(entry: Any) -> Sequence[Mapping[s
     for action in current.get("proof_actions") or ():
         if not isinstance(action, Mapping):
             continue
-        if action.get("reason_id") != "sat_unsafety":
+        if action.get("reason_id") not in {
+            "sat_unsafety",
+            "counterexample_analysis_safety_unproven",
+        }:
             continue
         if not _object_target_key_is_specific_sat_unsafety(action.get("object_target_key")):
             continue
@@ -925,7 +931,10 @@ def _accepted_current_reclassification_failures(
                 **details,
             )
         )
-    if "sat_unsafety" not in current_reasons:
+    if not current_reasons.intersection({
+        "sat_unsafety",
+        "counterexample_analysis_safety_unproven",
+    }):
         failures.append(
             _failed(
                 "solver_rewrite_proof_accepted_reclassification_current_reason",
@@ -1060,7 +1069,18 @@ def _accepted_reclassification_tuple_present(
     prefix = expected_tuple[:6]
     return any(
         len(observed) == 7
-        and observed[:6] == prefix
+        and (
+            observed[:6] == prefix
+            or (
+                expected_tuple[1] == "sat_unsafety"
+                and observed[1]
+                == "counterexample_analysis_safety_unproven"
+                and observed[0] == expected_tuple[0]
+                and observed[2] == expected_tuple[2]
+                and observed[3] in {expected_tuple[3], "query"}
+                and observed[4:6] == expected_tuple[4:6]
+            )
+        )
         and str(observed[6]) in accepted_statuses
         for observed in observed_tuples
     )

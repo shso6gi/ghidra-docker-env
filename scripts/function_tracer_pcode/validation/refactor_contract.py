@@ -28,7 +28,7 @@ DEFAULT_MANIFEST_PATH = (
     REPOSITORY_ROOT
     / "artifacts"
     / "refactor"
-    / "current-head-fc11037"
+    / "phase10"
     / "contract.json"
 )
 
@@ -366,6 +366,7 @@ def capture_contract() -> Dict[str, Any]:
         "hooks": hooks,
         "size_ratchet_baseline": dict(SIZE_RATCHET_BASELINE),
         "private_import_count": dependencies["private_import_count"],
+        "private_imports": dependencies["private_imports"],
         "dependency_cycles": dependencies["cycles"],
     }
 

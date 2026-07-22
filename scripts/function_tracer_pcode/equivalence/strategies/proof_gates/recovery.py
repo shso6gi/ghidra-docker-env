@@ -85,11 +85,11 @@ def _impl__method_b_closure_proof_is_complete(
 
     if reason_record.reason_id not in LOOP_REASON_SPECS:
         return False
-    if reason_record.recovery_proof_kind not in {
-        UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value,
-        UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION.value,
-    }:
-        return False
+    # A typed loop reason can require more than one recovery action.  Its
+    # reason-level recovery_proof_kind is therefore deliberately ``none``;
+    # the authoritative proof kinds live on the action set materialized from
+    # the reason.  Validate every action below instead of applying the legacy
+    # single-proof-kind gate here.
     return self._all_recovery_actions_have_completed_proofs(reason_record, analysis1, analysis2)
 
 def _impl__all_recovery_actions_have_completed_proofs(

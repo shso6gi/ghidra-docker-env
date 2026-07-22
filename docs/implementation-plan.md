@@ -2,7 +2,15 @@
 
 ## 1. Status and operating constraints
 
-- Plan status: approved for implementation.
+- Phase 0-9 baseline status: approved and historically completed under the
+  recorded phase gates.
+- Phase 10 plan / implementation-start status: `GO`. The reviewed Phase-10
+  design authorizes implementation to begin at slice 10.0 and proceed in the
+  required order; this start approval does not assert that any implementation
+  or acceptance gate has already passed.
+- Phase 10 completion status: `NO-GO` until slices 10.0 through 10.5, including
+  the current-head real-EqBench gates, pass in order and the independent
+  read-only completion review reports no unresolved P0/P1 findings.
 - Review baseline: repository HEAD `29376ea` at the time this plan was frozen.
 - Scope: UNKNOWN/TIMEOUT/ERROR reason taxonomy, lifecycle authority, decision authority, canonical census, legacy compatibility, and migration validation.
 - Soundness rule: never reduce UNKNOWN by weakening an equivalence or disequivalence proof gate.
@@ -2240,7 +2248,11 @@ Cut over together:
 Gate:
 
 - `DecisionReceipt` is the sole final-status authority;
-- legacy contradiction is a validation error;
+- legacy contradiction is a validation error. This is the historical Phase-8
+  cutover gate; Phase 10.3 partially supersedes it only for valid,
+  non-conflicting UNKNOWN/TIMEOUT candidates under the exhaustive typed
+  reconciliation table. Malformed authority, internal failure, legacy ERROR,
+  and opposite decisive outcomes remain ERROR;
 - retry/fallback matrix is explicit for all five outcomes;
 - batch/resume distinguishes UNKNOWN and TIMEOUT;
 - EQ/NOT_EQ decisive authority matches the pre-cutover implementation.
@@ -2287,13 +2299,781 @@ Completion requires:
 - EQ/NOT_EQ soundness gates and decisive receipts are unchanged;
 - legacy saved summaries remain readable through the legacy diagnostic path.
 
+### Phase 10: post-cutover return-width closure and EqBench runner correction
+
+This phase corrects the current-head `V2_LEGACY_DECISION_CONTRADICTION`
+regression without weakening any equivalence, disequivalence, return-width, or
+counterexample-safety proof gate. It is one reviewed change unit with ordered
+slices; removing the blanket contradiction canary before the typed completion
+and C/Q-preservation slices are proven is forbidden.
+
+#### 10.0 Freeze the regression and authority inventory
+
+Before editing production behavior:
+
+1. Save a current-head supervisor-backed reproduction for
+   `CLEVER/Comp/Eq/newV/foo B1_B2`, including the source/binary hashes, command,
+   human log, canonical result payload, DecisionReceipt, supervisor projection,
+   child return code, `C_active_base`, and `Q_open_base`.
+2. Record separately:
+   - the verified base comparison closure and its exact comparison receipt;
+   - every return-width cause observation and proof requirement;
+   - every completion artifact and completion receipt;
+   - the legacy diagnostic outcome;
+   - the pre-reconciliation v2 candidate outcome;
+   - the final published outcome.
+3. Inventory every production producer of
+   `return_width_provenance_unavailable`,
+   `return_width_relation_unproven`,
+   `return_abi_provenance_unavailable`,
+   `return_observation_contract_unproven`,
+   `return_high_bit_relation_unproven`, and
+   `return_abi_relation_unproven`, including the direct producer in
+   `return_width_surface.py` and the pairwise producer in
+   `strategies/pairwise_services/orchestration_1.py`.
+4. Inventory every production caller of
+   `complete_return_width_provenance()`,
+   `complete_same_function_return_width_relation()`,
+   `complete_return_abi_provenance()`,
+   `complete_return_abi_relation()`,
+   `complete_return_high_bit_relation()`, and
+   `complete_return_observation_contract()`. A unit-test-only caller counts as
+   missing production wiring, not coverage.
+5. Inventory both seed outcomes at every production adapter:
+   `ReturnObservationNeedSeed` when no positive common observation width is
+   formable, and `ReturnObservationProjectionSeed` when the exact pair seed has
+   a positive projection. Record every `ProjectionNotFormable` transition and
+   prove that it cannot silently fall into the projection DAG.
+6. Inventory every canonical-result serialization and supervisor persistence
+   boundary, including `EquivalenceResult.to_dict()`, result-file writers,
+   `SupervisorChildExitReceipt`, supervisor state/checkpoint stores, timeout
+   and error bundle stores, and `supervisor-projection.json`. Record which
+   boundary currently persists each replay input rather than assuming a digest
+   can reconstruct an authority that was never serialized.
+
+The frozen evidence is diagnostic baseline only. Historical pre-cutover logs
+and the Phase-8 EqBench dry run are not current-head behavioral evidence.
+
+Gate:
+
+- the reproduction is current-source/current-binary bound;
+- the legacy, candidate, and published outcomes are not conflated;
+- producer multiplicity and missing production completion edges are explicit;
+- no implementation begins from a human-log-only diagnosis.
+
+#### 10.1 Establish one canonical return-observation producer
+
+The canonical semantic owner is the typed ABI/width surface in
+`equivalence/v2/abi_width_readonly.py`, reached through one production adapter
+at the return-observation contract boundary. Pairwise orchestration may consume
+the resulting structured seed/view, but must not independently reconstruct and
+emit the same semantic causes.
+
+The canonical adapter has two disjoint, factory-selected paths. Callers cannot
+select the path from a reason string or retry state.
+
+```text
+pair semantic seed
+  -> ReturnObservationNeedSeed
+       -> observation-contract C/Q only
+       -> no solver candidate and no synthetic projection
+       -> UNKNOWN until new positive width authority exists
+
+pair semantic seed
+  -> ReturnObservationProjectionSeed
+  -> required unary ABI provenance requirements
+  -> return ABI relation requirement
+  -> high-bit relation requirement
+  -> observation contract requirement
+```
+
+`ReturnObservationNeedSeed` is the canonical result when declared widths do not
+agree, validated payload widths do not agree, required extension evidence is
+missing, or `ReturnObservationProjectionSeed.from_pair_seed()` raises
+`ProjectionNotFormable`. Its observation-contract cause and requirement remain
+live. It cannot create an ABI-relation/high-bit solver candidate and cannot be
+completed merely because a later retry rendered a different width string.
+
+If new object-derived positive width authority becomes available in the same
+result occurrence, a factory-owned atomic lifecycle transformation must:
+
+1. bind the exact NeedSeed occurrence, live C/Q, new unary width artifacts, and
+   resulting ProjectionSeed;
+2. complete the NeedSeed observation requirement;
+3. observe the ProjectionSeed DAG causes and requirements;
+4. record one N-to-M transformation receipt so no gap or double-live semantic
+   cause exists.
+
+Without that exact transformation, the NeedSeed path remains UNKNOWN. The
+ProjectionSeed path alone may enter the ABI/high-bit completion DAG.
+
+Each semantic cause has one factory-owned occurrence and one live requirement.
+The same seed/reason emitted twice, emission from the removed orchestration
+path, a different seed under the same occurrence, or a solver candidate without
+its canonical cause observation is INVALID. Producer activation/cause-slot
+manifests must be refreshed from the surviving site rather than preserving a
+deleted site as a compatibility alias.
+
+Deletion in this slice is limited to:
+
+- the duplicate pairwise return-width blocker-emission branch;
+- adapters and imports used only by that duplicate branch;
+- manifest rows made obsolete by the removed producer, after inventory proves
+  that they have no other production consumer.
+
+Do not delete `_run_legacy_check_from_binaries` or the current analysis engine.
+It still creates the Ghidra analysis, structured comparison surfaces, and
+verified comparison receipts consumed by v2.
+
+Gate:
+
+- exactly one production activation exists per canonical seed/reason;
+- NeedSeed and ProjectionSeed activations are disjoint and conserve every
+  adapter invocation;
+- NeedSeed cannot schedule high-bit work or become EQ without a positive-width
+  transformation receipt;
+- wrong-site, duplicate, replayed, and seed-drift emissions fail closed;
+- pairwise and monolithic/replay consumers either consume the canonical surface
+  or retain an explicit conservative fallback;
+- no result changes are accepted in this slice solely because a producer was
+  removed.
+
+#### 10.2 Complete the typed return-width proof DAG in production
+
+Production must drive the following dependency graph to a fixed point before
+candidate finalization:
+
+```text
+left/right object-derived width and ABI facts
+  -> ReturnWidthProvenanceArtifact(s), when required
+  -> SameFunctionReturnWidthRelationArtifact(s), when required
+  -> ReturnAbiProvenanceArtifact(s)
+  -> ReturnAbiRelationArtifact
+  -> return ABI relation REQUIREMENT_COMPLETED
+  -> high-bit structural theorem or receipt-bound solver query
+       UNSAT -> ReturnHighBitRelationProofArtifact
+                -> high-bit REQUIREMENT_COMPLETED
+       SAT   -> model-bound refutation
+                -> factory-owned CauseTransformed
+                   old high-bit C/Q retired
+                   new counterexample-safety C/Q observed
+                -> safe counterexample proof
+                   complete -> NOT_EQ authority
+                   incomplete -> retain transformed C/Q
+       UNKNOWN/TIMEOUT/ERROR -> keep the exact high-bit C/Q live
+  -> ReturnObservationContractArtifact
+       identity projection: no fabricated high-bit dependency
+       non-identity projection: exact high-bit artifact dependency required
+  -> observation-contract REQUIREMENT_COMPLETED
+```
+
+`complete_return_width_provenance()`,
+`complete_same_function_return_width_relation()`,
+`complete_return_abi_provenance()`,
+`complete_return_abi_relation()`,
+`complete_return_high_bit_relation()`, and
+`complete_return_observation_contract()` must be invoked by production code
+only with exact factory-issued artifacts bound to the current result,
+projection seed, prepared snapshot, active occurrence, and live requirement.
+Completion order is dependency order; chronology alone never proves a
+dependency. Missing Ghidra facts, unformable projection, SAT without safe
+counterexample authority, solver UNKNOWN/TIMEOUT, source drift, or any receipt
+join failure leaves the corresponding `C_active_base`/`Q_open_base` rows live.
+
+A receipt-bound SAT result does not complete the high-bit requirement and does
+not itself authorize `NOT_EQ`. The SAT lane must use one atomic, factory-owned
+N-to-M lifecycle transformation that binds the exact high-bit cause and live
+requirement, solver-query receipt, formula digest, SAT model/refutation receipt,
+and newly issued counterexample-safety cause/requirement. On commit it emits a
+typed `CauseTransformed` receipt, retires the original high-bit C/Q, and makes
+the counterexample-safety C/Q live without any gap or double-live interval. If
+the transformation cannot validate or commit, the original high-bit C/Q stays
+live and no successor cause or decisive authority is published.
+
+Only an exact safe-counterexample proof may complete the transformed C/Q and
+issue `NOT_EQ` authority. An incomplete or inconclusive safety proof retains
+the transformed C/Q; the eventual DecisionFinalizer, not this transformation,
+decides whether the overall result is UNKNOWN, TIMEOUT, or ERROR in the
+presence of other terminal authority.
+
+The current `stage_runner.py` behavior that immediately issues and emits
+`EQ_CLOSURE` when a strategy returns EQ must be replaced. Before dispatch-frame
+cleanup, the stage runner validates the exact comparison receipt/frame/session
+join and asks one factory to issue a typed `PendingEqClosureAuthority`. It emits
+no `EQ_CLOSURE` event at that point.
+
+The pending authority is an issuer-owned, one-shot lifecycle object and receipt
+ledger entry. It binds at least:
+
+```text
+result_occurrence_id
+execution_identity_digest
+comparison_receipt_id and exact receipt authority digest
+comparison_session_id, branch_id, generation
+dispatch-frame authority digest
+base runtime view_id and premise digest
+dispatch cleanup/successor binding needed for post-cleanup replay
+pending authority nonce and receipt digest
+state: PENDING | CONSUMED | DISCARDED
+```
+
+Issuance must seal immutable authority sufficient to revalidate the comparison
+after the mutable dispatch frame has been cleaned up. Retaining an object
+reference to the old frame or reconstructing authority from diagnostic
+provenance is insufficient.
+
+After all domain encoders have driven their proof DAGs to a fixed point and a
+fresh verified lifecycle projection exists, one terminal pending-authority
+finalizer performs exactly one transition:
+
+- consume the exact pending authority through the existing EQ-closure
+  issuer/encoder boundary and emit `EQ_CLOSURE` only if the base comparison
+  authority revalidates, no blocking C/Q remains, and the verified terminal
+  candidate view contains no safe-counterexample candidate, terminal-timeout
+  candidate, ERROR authority, or competing decisive authority;
+- otherwise issue a typed discard receipt bound to the pre-closure projection
+  and terminal candidate view, destroy the one-shot capability, and emit no EQ
+  event. Discard is outcome-neutral: it removes only the unpromoted EQ
+  capability and never publishes or implies UNKNOWN;
+- if replay, cleanup, receipt, view, or ownership validation fails, emit a
+  canonical authority ERROR rather than EQ or UNKNOWN.
+
+Before this transition, every timeout-capable encoder must freeze its open
+terminal-timeout candidates in a typed resolver ledger included in the
+verified terminal candidate view. This preview does not terminalize TIMEOUT,
+but prevents pending EQ consumption when the post-seal timeout resolver can
+later bind a terminal timeout. Safe-counterexample, ERROR, and other decisive
+candidates are likewise exact-type and receipt gated; diagnostic flags do not
+participate. The post-seal resolver may bind only candidates in that frozen
+ledger; a newly appearing, omitted, replaced, or foreign timeout candidate is
+an authority ERROR, never grounds for retaining an already emitted EQ.
+
+`connector.finish()` must preserve this exact order:
+
+```text
+close/finalize every domain proof encoder to a fixed point
+  -> build and verify a fresh pre-closure lifecycle projection
+     plus the frozen terminal candidate view
+  -> terminally consume or discard PendingEqClosureAuthority
+  -> if consumed, issue and encode the one EQ_CLOSURE event
+  -> seal the production stream
+  -> resolve and bind terminal timeout candidates against that sealed stream
+  -> replay/reduce the sealed stream plus terminalizations
+  -> DecisionFinalizer alone chooses EQ/NOT_EQ/UNKNOWN/TIMEOUT/ERROR
+  -> build the final DecisionReceipt
+```
+
+The pre-closure projection is used only to authorize that one terminal
+transition; it is not the published final projection. After an EQ event is
+issued, the sealed stream must be replayed again so the final projection and
+DecisionReceipt include that exact event. No reducer or candidate builder may
+observe an intermediate stream and later reuse it as final authority.
+Discarded pending EQ authority is recorded as lifecycle evidence only; it is
+not a decision event and is not an input that biases the DecisionFinalizer
+toward UNKNOWN.
+
+The session cannot seal while any pending EQ authority is live. Copied, stale,
+foreign-session, replayed, already-consumed, already-discarded, or
+post-cleanup-unverifiable pending authorities are rejected.
+
+The existing verified base comparison closure is therefore retained as a
+nonterminal pending authority while typed requirements remain open. It is
+promoted only after a fresh verified projection proves:
+
+```text
+C_active_base has no row that blocks equivalence
+AND
+Q_open_base has no live requirement for such a row
+AND
+the base comparison receipt still validates against the final runtime view
+AND
+there is no safe-counterexample candidate
+AND
+there is no terminal-timeout candidate
+AND
+there is no ERROR authority
+AND
+there is no competing decisive authority
+```
+
+No caller may synthesize or unconditionally emit a new `EQ_CLOSURE`. If any
+consume condition fails, the pending authority is explicitly discarded and no
+decisive EQ event is emitted. The sealed stream, terminalizations, completed
+counterexample-safety proofs, ERROR receipts, and other decisive authorities
+remain intact so the DecisionFinalizer can independently return UNKNOWN,
+TIMEOUT, NOT_EQ, or ERROR. A completed proof must close v2 C/Q; removing a
+legacy diagnostic string is neither completion authority nor an acceptance
+criterion.
+
+Gate:
+
+- unit tests prove every DAG edge and dependency digest;
+- completion without a live C/Q row, out-of-order completion, foreign artifact,
+  stale projection, copied receipt, and duplicate completion are rejected;
+- stage completion emits no immediate EQ event; pending issuance, final
+  consumption, and final discard are separately tested;
+- dispatch cleanup cannot invalidate a legitimately sealed pending authority,
+  while copied/stale/replayed pending authority is rejected;
+- session sealing rejects every unconsumed and undiscarded pending authority;
+- UNSAT is the only solver status that completes the high-bit requirement;
+- SAT atomically transforms the original high-bit C/Q into exact
+  counterexample-safety C/Q; successful transformation retires the old cause,
+  creates the new cause, and never leaves both live after commit;
+- transformation failure leaves only the original high-bit C/Q live, while
+  SAT alone can neither complete it nor directly become `NOT_EQ`;
+- only completed safe-counterexample proof closes the transformed C/Q and
+  issues NOT_EQ; incomplete proof retains the transformed C/Q;
+- pending-EQ discard is outcome-neutral, and fixtures prove that terminal
+  timeout, safe counterexample, ERROR, and competing decisive candidates
+  prevent EQ consumption without being rewritten to UNKNOWN;
+- post-seal terminal-timeout binding precedes final replay and decision;
+- a provable fixture closes all relevant C/Q before the existing verified base
+  closure becomes final EQ;
+- an unprovable near-miss retains nonempty blocking C/Q and finishes UNKNOWN;
+- no proof gate or observation width is weakened to recover EQ.
+
+#### 10.3 Replace blanket contradiction handling with typed reconciliation
+
+After 10.1 and 10.2 pass, replace the blanket
+`decision_delta -> V2_LEGACY_DECISION_CONTRADICTION -> ERROR` canary with an
+exact, exhaustively tested reconciliation policy. The v2 candidate
+DecisionReceipt and verified lifecycle projection are authoritative; the
+legacy outcome is a compatibility diagnostic, except that opposite decisive
+outcomes remain a fail-closed migration conflict.
+
+Required policy for results that reach `connector.finish()` without a legacy
+ERROR:
+
+| Legacy diagnostic | Valid v2 candidate | Published result |
+|---|---|---|
+| EQ or NOT_EQ | UNKNOWN | candidate UNKNOWN with its exact C/Q |
+| EQ or NOT_EQ | TIMEOUT | candidate TIMEOUT with terminal receipt and live C/Q |
+| decisive | same decisive | candidate receipt |
+| EQ | NOT_EQ | `DECISIVE_OUTCOME_DISAGREEMENT` ERROR for this phase |
+| NOT_EQ | EQ | `DECISIVE_OUTCOME_DISAGREEMENT` ERROR for this phase |
+| any | malformed/foreign/tampered authority | ERROR |
+| any | canonical internal/strategy exception | ERROR |
+| UNKNOWN or TIMEOUT | valid non-conflicting candidate | candidate receipt |
+
+Phase 10 does not introduce a compatibility-only diagnostic ERROR class.
+Therefore every legacy `error_message` continues to take the early canonical
+ERROR path before `connector.finish()`. Strategy/internal exceptions,
+function/decompilation failures, compatibility-shaped errors, and authority
+errors cannot be distinguished by prose and cannot be overwritten by candidate
+EQ/NOT_EQ/UNKNOWN/TIMEOUT. A future relaxation requires a separately reviewed,
+factory-issued, sealed exact error type and receipt; string labels or
+`failure_status` aliases are insufficient.
+
+This is a pre-reconciliation boundary, not another candidate-matrix cell:
+
+| Legacy boundary state | Candidate handling | Published result |
+|---|---|---|
+| ERROR of any legacy class | do not call `connector.finish()` and do not reconcile a candidate | preserve canonical ERROR |
+
+Opposite decisive outcomes may become a typed disagreement UNKNOWN only in a
+separately reviewed extension that observes a factory-owned disagreement cause
+before final projection and binds a live requirement. This phase must not
+fabricate that cause after candidate finalization.
+
+Canonical relations are attached whenever the published result uses a valid
+candidate receipt, including UNKNOWN and TIMEOUT. They must not be suppressed
+merely because the legacy diagnostic differs. The serialized
+`c_active_base`/`q_open_base` must equal the candidate projection; rendering or
+compatibility fields cannot replace, clear, or reconstruct them. ERROR caused
+by invalid authority must not publish fabricated canonical C/Q.
+
+Only after the table is the sole production reconciliation path may the old
+generic contradiction canary and dual-write-only diagnostics with no remaining
+consumer be removed. Deletion requires an import/caller/artifact inventory and
+negative tests; the legacy analysis body remains in scope and is retained.
+
+This slice explicitly updates the historical Phase-8 expectation rather than
+silently changing it. Its implementation/review scope includes:
+
+- `production_boundary.py` and the typed reconciliation policy;
+- Phase-8 cutover and production-boundary tests, including the complete legacy
+  diagnostic by candidate matrix;
+- Phase-8 validation artifact builders/validators and their source maps;
+- canonical result/summary fixtures whose expected contradiction ERROR becomes
+  a valid UNKNOWN or TIMEOUT;
+- negative fixtures that prove legacy ERROR and opposite decisive outcomes
+  remain ERROR.
+
+Gate:
+
+- every reachable legacy-by-candidate matrix cell is tested, and the legacy
+  ERROR pre-reconciliation bypass is tested separately;
+- valid UNKNOWN/TIMEOUT disagreement preserves the exact candidate receipt and
+  C/Q digests through JSON, CLI, summary, and replay;
+- opposite decisive outcomes remain explicit ERROR rather than silently
+  preferring either side;
+- every legacy ERROR bypasses candidate reconciliation and remains canonical
+  ERROR unless a future exact typed compatibility-error authority is approved;
+- malformed receipts, authority drift, and internal exceptions remain ERROR;
+- refreshed Phase-8 tests and validation artifacts explicitly encode the
+  partially superseded contradiction gate;
+- no `V2_LEGACY_DECISION_CONTRADICTION` is emitted for a valid non-conflicting
+  candidate.
+
+#### 10.4 Make EqBench runner outcomes and failures structural
+
+The runner must classify a pair from the canonical result payload together
+with a verified `supervisor-projection.json`; human `Result:` lines and grep are
+diagnostics only. Introduce one structured pair-status projection containing at
+least:
+
+```text
+canonical_outcome
+decision_receipt_digest
+result_occurrence_id
+result-entry occurrence receipt digest
+execution_nonce
+stream_id
+source_snapshot_fingerprint
+launch_receipt_digest
+canonical_result_bundle_digest
+canonical_result_bundle_kind
+supervisor_final_authority_digest
+supervisor_authority_kind
+semantic_projection_digest
+error_kind
+child_returncode
+supervisor_status
+supervisor_projection_digest
+classification_valid
+```
+
+The current result JSON is not sufficient for this verification. Phase 10.4
+must introduce and atomically persist one exact-type
+`CanonicalResultFinalizationBundle` containing the material required for
+independent replay, not merely its digests:
+
+```text
+schema/version and exact bundle authority kind
+execution identity and result-entry occurrence receipt
+sealed canonical event stream plus its digest
+terminalization records and terminal timeout receipt, when present
+final VerifiedLifecycleProjection plus its authority/receipt
+all decisive EQ or safe-counterexample proof receipts required by the outcome
+ErrorReceipt with sealed error_kind for ERROR, including early legacy ERROR
+final DecisionReceipt
+canonical result payload-preimage digest
+CanonicalSemanticResultProjection payload and digest
+bundle digest and factory signature/seal
+```
+
+Outcome-inapplicable receipt slots are exactly null; omitting a required slot,
+supplying an extra conflicting decisive receipt, or storing only a diagnostic
+rendering is invalid. The serialized event stream, terminalizations,
+projection, and receipts must be sufficient to rerun the reducer and
+DecisionFinalizer and reproduce the embedded DecisionReceipt. A digest alone
+cannot stand in for missing replay material.
+
+Serialization must avoid a self-referential digest. First create a
+schema-versioned canonical result payload preimage that excludes only the
+outer bundle locator/digest fields, then bind its digest into the bundle. The
+final result envelope stores that unchanged payload plus the bundle locator
+and bundle digest. The bundle digest covers the payload-preimage digest and
+all replay authorities; validators reject any noncanonical exclusion or
+post-bundle payload mutation.
+
+Early legacy ERROR takes no candidate reconciliation path, but it is not exempt
+from durable authority. Its originating typed error boundary must issue an
+exact `ErrorReceipt`; an error finalization factory seals the available stream,
+projection/terminal material, ERROR DecisionReceipt, and that receipt into a
+`CanonicalResultFinalizationBundle`. `error_kind` is taken only from the sealed
+receipt. Missing typed error authority is itself a fail-closed canonical error
+finalization failure and must never be repaired by parsing `error_message`.
+
+The canonical bundle is written atomically alongside the result envelope and
+is part of the result-output contract implemented by `result.py` and its
+writers. Durable supervisor timeout/error finalizers must also create or adopt
+the exact canonical bundle and bind it to their existing supervisor-owned
+finalization authority. Cleanup must not remove bundle inputs before the
+runner has rematerialized and verified them.
+
+The pair-status projection is issued only after rematerializing and
+independently validating the launch receipt, canonical finalization bundle,
+result-entry occurrence receipt, exact supervisor final authority, supervisor
+projection, and canonical DecisionReceipt. Field presence is not a join. The
+verifier requires:
+
+```text
+DecisionReceipt.result_occurrence_id
+  == result-entry occurrence authority.result_entry_occurrence_id
+  == launch receipt.result_occurrence_id
+
+supervisor_projection.launch_receipt_digest
+  == verified launch receipt.receipt_digest
+
+supervisor_projection.canonical_result_bundle_digest
+  == verified CanonicalResultFinalizationBundle.bundle_digest
+
+canonical result payload.bundle_digest
+  == verified CanonicalResultFinalizationBundle.bundle_digest
+
+CanonicalResultFinalizationBundle.canonical_result_payload_preimage_digest
+  == independently rebuilt canonical payload-preimage digest
+
+execution_nonce, stream_id, source_snapshot_fingerprint
+  == the exact values bound by launch, production execution identity,
+     result-entry authority/execution-payload digest, canonical bundle,
+     and DecisionReceipt
+
+supervisor_projection.supervisor_final_authority_digest
+  == digest of the exact rematerialized supervisor final authority
+
+supervisor_projection.supervisor_authority_kind
+  == exact runtime type/receipt kind of that supervisor authority
+
+supervisor_projection.canonical_result_bundle_kind
+  == exact runtime type/receipt kind of the rematerialized canonical bundle
+```
+
+The result-entry occurrence receipt's execution-payload digest must be
+independently reconstructed from the canonical result identity; matching only
+its occurrence ID is insufficient. Any missing join, digest drift, duplicate
+candidate authority, or self-consistent foreign launch/result pair makes the
+pair status invalid.
+
+Supervisor disposition is outcome-aware and exact-type gated:
+
+- normal resolved-child execution accepts only a new exact
+  `SupervisorCanonicalResultResolvedReceipt` issued after the supervisor has
+  read and verified the child's canonical result envelope and
+  `CanonicalResultFinalizationBundle`. It binds the launch receipt digest,
+  result occurrence and execution identity, child return code, canonical
+  bundle digest, payload-preimage digest, and DecisionReceipt digest. Its
+  `child_returncode` must equal `CLI_EXIT_MATRIX[canonical_outcome]`;
+- the existing `SupervisorChildExitReceipt` may prove only that a launched
+  process exited. Without the new resolved receipt and bound canonical bundle,
+  it is never accepted as canonical-result RESOLVED authority, even when the
+  child return code is zero;
+- durable process TIMEOUT accepts only a rematerialized
+  `DurableTimeoutFinalizationBundle` whose terminal timeout receipt, stream,
+  assignment, final C/Q, DecisionReceipt, and canonical result bundle all
+  join. Signal/kill exit codes are validated under the timeout disposition
+  contract and are never compared as ordinary CLI exits;
+- durable supervisor ERROR accepts only a rematerialized
+  `DurableErrorFinalizationBundle` whose sealed `error_kind`, terminal error
+  event, stream, ERROR DecisionReceipt, and canonical result bundle join;
+- an authority kind or supervisor status not allowed for the canonical outcome
+  is invalid even if its digests are internally self-consistent.
+
+For canonical ERROR, sealed `error_kind` is mandatory and is taken from the
+verified ERROR authority/DecisionReceipt join. For every non-ERROR outcome,
+`error_kind` is exactly null. `error_message` may be retained as a separate
+diagnostic field but is never an authority field or aggregation key.
+
+This slice's implementation scope therefore includes `result.py` and every
+canonical result writer/reader, canonical bundle factories and validators,
+production-boundary early-error finalization, supervisor factories/stores and
+recovery, `process_supervisor_command.py`, supervisor projection schemas, and
+runner classification. Updating only the shell runner or projection parser is
+insufficient.
+
+`run_pair()` returns nonzero for canonical ERROR, INCOMPLETE/missing canonical
+payload, invalid or missing supervisor projection, receipt/projection mismatch,
+and unclassifiable output. It returns zero for valid EQ, NOT_EQ, UNKNOWN, and
+TIMEOUT. A supervisor exit of zero must not hide a recorded child exit or a
+canonical ERROR. The parent `wait -n` path remains the sole increment owner for
+`RUN_PAIR_FAILURES`, so background subshells do not attempt to mutate the parent
+counter.
+
+At completion the manifest and health summary record counts by canonical
+outcome, `error_kind`, child return code, and supervisor status. The script
+itself exits nonzero when `RUN_PAIR_FAILURES > 0` after installing its summaries
+atomically. Documentation for piped invocation must require `set -o pipefail`
+when the caller needs the pipeline exit status.
+
+Remove forced debug mode. Build the CLI argument array without `-d` by default
+and add it only when `EQBENCH_DEBUG=1`. Debug selection must not change semantic
+arguments or result classification.
+
+Debug equivalence is not tested by removing fields from an already computed
+cryptographic digest. Define a separately factory-built, schema-versioned
+`CanonicalSemanticResultProjection`. During production, its factory derives
+the projection from the already validated final replay inputs before bundle
+sealing and stores both its canonical payload and digest in the bundle. During
+verification, the validator first validates the complete bundle, then
+independently reconstructs this projection and requires an exact payload and
+digest match. Its closed normalization schema excludes only enumerated
+nonsemantic execution fields (`result_occurrence_id`, execution nonce, stream
+ID, process IDs, timestamps, launch/supervisor receipt identities, and outer
+bundle/receipt digests). It retains source/binary/function fingerprints,
+canonical outcome, normalized C/Q semantic identities, proof-formula and model
+semantics, decisive proof kind, terminal outcome semantics, and sealed
+`error_kind`. Its own `semantic_projection_digest` is persisted in the bundle
+and pair-status projection.
+
+Debug on/off runs may have different full DecisionReceipt and bundle digests;
+both full authorities must validate independently. The regression compares
+their canonical semantic projection payloads and digests. No verifier may
+claim equality by applying an ad hoc field subtraction to either full digest,
+and any field not explicitly excluded by the versioned schema remains
+semantic.
+
+Gate:
+
+- child 4/supervisor 0/canonical ERROR increments failure count;
+- normal resolved-child outcomes reject every child return code that differs
+  from `CLI_EXIT_MATRIX`, while durable timeout kill/signal codes use only the
+  timeout-specific rule;
+- result/entry/launch identity mismatch, foreign self-consistent authority,
+  canonical payload/bundle mismatch, missing replay material, supervisor
+  final-authority drift, and wrong authority-kind/outcome combinations
+  increment failure count;
+- bundle-less `SupervisorChildExitReceipt` is never canonical RESOLVED;
+- independently replaying the persisted stream plus terminalizations reproduces
+  the bundle's projection and DecisionReceipt for EQ, NOT_EQ, UNKNOWN, TIMEOUT,
+  ordinary ERROR, and early legacy ERROR;
+- canonical ERROR without a sealed `error_kind`, or non-ERROR with a non-null
+  `error_kind`, is invalid;
+- invalid supervisor projection and missing result payload increment it;
+- valid UNKNOWN and TIMEOUT do not count as runner infrastructure failures;
+- final script and piped-command exit behavior are tested;
+- debug on/off full bundles validate independently and produce identical
+  versioned `CanonicalSemanticResultProjection` payloads and digests; full
+  authority digests are never compared modulo fields;
+- status output includes structured `error_kind` and child return code without
+  parsing diagnostic prose.
+
+#### 10.5 Layered regression and EqBench acceptance
+
+Validation order is mandatory:
+
+1. focused unit tests for NeedSeed/ProjectionSeed conservation, unary and
+   relational producer uniqueness, proof-DAG completion, high-bit-SAT
+   cause transformation, pending-EQ issue/consume/outcome-neutral-discard
+   lifecycle, post-seal timeout terminalization, reconciliation, C/Q
+   serialization, canonical bundle replay, result-entry/launch/finalization
+   joins, supervisor projection, semantic debug projection, and runner failure
+   counting;
+2. the Phase-8 decision/cutover and Phase-6 ABI/width suites;
+3. `compileall`, `env PYTHONPATH=. ./.venv-pyghidra/bin/python
+   scripts/function_tracer_pcode/validation/refactor_contract.py`, and
+   `git diff --check`;
+4. the full unit suite;
+5. current-head supervisor-backed real binaries using
+   `./.venv-pyghidra/bin/python`;
+6. the affected return-width category matrix;
+7. full EqBench only after all narrower gates pass.
+
+The real-binary manifest must cover at least:
+
+- narrowed `int` return, same ABI: ARM clang, ARM GCC, MIPS clang, MIPS GCC;
+- representative ARM/MIPS cross-ABI pairs;
+- a provable high-bit relation that reaches EQ only after complete typed C/Q
+  closure;
+- an unprovable or SAT near-miss that remains UNKNOWN or follows validated
+  counterexample safety, never false EQ;
+- a SAT high-bit case whose original C/Q is atomically replaced by
+  counterexample-safety C/Q, including both incomplete-UNKNOWN and
+  safe-proof-NOT_EQ variants;
+- pending EQ combined separately with terminal timeout, safe counterexample,
+  ERROR, and competing decisive authority, proving discard is neutral and the
+  DecisionFinalizer preserves TIMEOUT/NOT_EQ/ERROR precedence;
+- an injected opposite-decisive reconciliation conflict;
+- a NeedSeed case with no positive-width transformation that remains UNKNOWN;
+- child 4 / supervisor 0 / runner-failure accounting, plus normal-exit,
+  durable-timeout, durable-error, early-legacy-error, and bundle-bound resolved
+  authority-kind joins;
+
+Use the actual available B IDs discovered from the fixture tree and bind every
+selection to source and binary hashes. `CLEVER/Comp/foo B1_B2` is required but
+is not sufficient. Run the complete `CLEVER/Comp` function matrix plus at least
+one independently selected narrowed-return category before the full census.
+
+Full-EqBench evidence reports outcomes and ERRORs by `error_kind`, function,
+ABI/compiler stratum, and pair. Completion does not require hiding legitimate
+ERRORs; it requires:
+
+- zero unexpected `V2_LEGACY_DECISION_CONTRADICTION`;
+- zero invalid/missing canonical bundles or supervisor projections;
+- zero live pending-EQ authorities at session seal, with every pending authority
+  exactly consumed or discarded;
+- every remaining ERROR explained by typed current-head evidence;
+- every canonical outcome independently replayable from its durable
+  `CanonicalResultFinalizationBundle`, with resolved supervisor authority bound
+  to the exact bundle digest;
+- every published UNKNOWN/TIMEOUT retaining valid canonical C/Q and receipts;
+- every recovered EQ carrying the original verified base comparison closure
+  plus the complete return-width dependency chain;
+- no EQ/NOT_EQ soundness regression in the selected matrices or full census;
+- repo-local signed JSON publication manifest, receipts, verified pair-status
+  census, runner health summary, public verification keys, selected input
+  source/binaries, and source hashes sufficient for independent replay. Raw
+  `.log` and `.txt` files are diagnostic only and are not canonical completion
+  dependencies.
+
+Publication evidence uses the exact target source-file set and content digest
+as its canonical source identity. `HEAD`, base commit and dirty-patch hashes may
+be retained only as non-canonical history; committing unchanged source and
+evidence must not invalidate Phase-9 or Phase-10 reconstruction. Matrix
+execution receipts record the normalized executable command and runner's actual
+final exit status. A nonzero runner status is signed but is ineligible for a
+green completion root. Publication uses an exact path/SHA-256 allowlist; broad
+staging of the Phase-10 directory and publication of `.process-authority`, raw
+logs, text summaries, or private keys are prohibited. The root, Phase-6 and
+Phase-9 validators must pass from a clean checkout containing only the intended
+source/evidence files plus the allowlisted Phase-10 artifacts.
+
+EqBench execution authority is scope-typed. `REPRESENTATIVE` evidence may use
+filters or a bounded sample count and is permanently ineligible for Phase-10
+completion. `FULL_EQBENCH` requires `EQBENCH_MAX_SAMPLES=0`, empty sample and
+pair filters, and exact equality with the frozen 147-source / 411-function /
+49,320-pair expectation in `validation/eqbench_full_scope.json`. Full execution
+uses `REUSE_OR_COMPILE` by default: an existing B1..B16 set is reused only when
+a valid `FRESH_COMPILE` build receipt binds the current source SHA-256, compile
+script SHA-256 and argv, toolchain executable/version identities, all 16 typed
+arch/compiler/optimization axes, and every binary SHA-256. Missing or drifted
+authority falls back to a fresh compile; `PREBUILT_ONLY` fails closed instead.
+An `ADOPTED_PREBUILT` receipt may support bounded representative evidence but
+is permanently ineligible for `FULL_EQBENCH` completion.
+
+Fresh compilation writes exclusively below the run temporary build directory;
+it never moves, deletes, or quarantines existing B1..B16 outputs. Only after a
+successful compile, 16-axis receipt materialization and validation are the new
+binaries installed through per-file temporary names, with the receipt installed
+last. A signal or helper failure therefore leaves the prior binaries in place;
+an interrupted partial install invalidates the old receipt and forces the next
+run to rebuild rather than consuming an unbound mixture. A nonzero compile exit
+or missing axis schedules no analysis for that sample and produces a signed
+nonzero matrix receipt with typed compile/build-authority counters.
+
+The signed matrix publication manifest persists a normalized typed
+`analysis_config`, not only an opaque digest. It includes scope, build policy,
+limits and filters, debug/resume/dry-run settings, parallelism, summary level,
+all equivalence/decompile/pairwise/process timeout values, kill grace, and the
+full-scope expectation digest. Validators recompute `analysis_config_digest`
+from this exact projection. The signed executable command records the same
+operational settings so a published run can be reconstructed independently.
+
+The publication allowlist names itself, separates normal and force-added exact
+paths, and provides a staged-index validator. A publication-only evidence index
+must contain exactly the allowlisted artifacts plus the allowlist JSON itself,
+with identical SHA-256 content. Ignored EqBench inputs use `git add -f --` only
+for the enumerated paths; historical Phase-10 attempts and checkpoints are
+rejected as extra staged paths. Code and Phase-5--9 source evidence are staged
+and committed separately from this publication-only evidence index; combining
+them intentionally fails the exact-index gate.
+
+Phase 10 completion remains `NO-GO` until slices 10.0 through 10.5 pass in order
+and an independent read-only completion review reports no unresolved P0/P1
+findings. This completion status does not revoke the implementation-start `GO`.
+Unit tests or dry-run evidence alone cannot close the phase.
+
 ## 12. Progress and review workflow
 
 For every phase:
 
 1. Main agent reads this plan and current progress.
 2. Main agent records intended files, tests, and acceptance evidence in `docs/implementation-progress.md`.
-3. Main agent implements only the current approved phase/slice.
+3. Main agent implements only a phase whose plan / implementation-start status
+   is `GO`, and only the earliest incomplete slice in its required order. For
+   Phase 10, the implementation-start `GO` authorizes slice 10.0 immediately;
+   passing each slice's local gate authorizes the next slice but does not imply
+   Phase-10 completion `GO`.
 4. Main agent runs focused tests, then the proportionate broader validation.
 5. Main agent records exact commands, results, artifact paths, and known limitations.
 6. Main agent requests an independent read-only review from the fixed `plan-reviewer`.
@@ -2301,7 +3081,10 @@ For every phase:
 8. Reviewer returns findings and a phase GO/NO-GO; it changes no files.
 9. Main agent records each finding in `docs/review-response-log.md` as accepted, rejected-with-evidence, deferred-with-gate, or resolved.
 10. Main agent fixes accepted blockers and repeats tests/review.
-11. Main agent advances only after the phase gate and reviewer GO are both satisfied.
+11. Main agent marks the phase complete or advances to a later phase only after
+    the completion gate and completion-review `GO` are both satisfied. This
+    completion rule does not block work inside an implementation-start-`GO`
+    phase under step 3.
 
 Suggested progress states:
 

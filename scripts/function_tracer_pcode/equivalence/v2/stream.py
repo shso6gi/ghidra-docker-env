@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from .contracts import SCHEMA_VERSION, authority_digest, canonical_value
 from .contracts import (
@@ -94,6 +94,24 @@ class SolverExecutionEventAuthority:
             raise TypeError("solver timeout budget must be a positive exact integer")
 
 
+def outcome_stage_requirement_id(authority: Mapping[str, Any]) -> str:
+    """Derive the lifecycle requirement from the exact outcome-stage authority."""
+
+    return "outcome-stage-" + authority_digest({
+        "typed_requirement": canonical_value(
+            authority["proof_requirement_identity"]
+        ),
+        "function_identity": canonical_value(authority["function_identity"]),
+        "function_snapshot_fingerprint": authority[
+            "function_snapshot_fingerprint"
+        ],
+        "outcome_seed_digest": authority["outcome_seed_digest"],
+        "outcome_seed_revision": authority["outcome_seed_revision"],
+        "premise_digest": authority["premise_digest"],
+        "stage": authority["stage"],
+    })[:32]
+
+
 @dataclass(frozen=True)
 class ReceiptBoundSolverExecutionEventAuthority:
     proof_requirement_id: str
@@ -110,10 +128,7 @@ class ReceiptBoundSolverExecutionEventAuthority:
         status = receipt["observed_status"]
         if self.terminal_candidate and status != "timeout":
             raise ValueError("only a TIMEOUT receipt may be a terminal candidate")
-        typed_requirement = receipt["proof_requirement_identity"]
-        expected_requirement_id = "outcome-stage-" + authority_digest({
-            "typed_requirement": canonical_value(typed_requirement),
-        })[:32]
+        expected_requirement_id = outcome_stage_requirement_id(receipt)
         if self.proof_requirement_id != expected_requirement_id:
             raise ValueError("solver event v2/typed requirement join differs")
 
@@ -665,28 +680,62 @@ class EventRecorder:
         return len(self._events)
 
     def append(self, intent: EventIntent) -> RecordedEvent:
+        return self.append_many((intent,))[0]
+
+    def append_many(
+        self,
+        intents: Iterable[EventIntent],
+        commit_callback: Optional[Callable[[], None]] = None,
+    ) -> Tuple[RecordedEvent, ...]:
+        """Validate, commit producer state, and append one atomic transaction."""
+
         if self._sealed:
             raise ValueError("sealed event recorder is immutable")
-        validate_event_authority_payload(intent.event_type, intent.authority_payload)
-        payload = intent.authority_payload
+        batch = tuple(intents)
+        if not batch:
+            if commit_callback is not None:
+                if not callable(commit_callback):
+                    raise TypeError(
+                        "event transaction commit callback is not callable"
+                    )
+                commit_callback()
+            return ()
+        staged: list[RecordedEvent] = []
         predecessor = self._events[-1].authority_digest if self._events else "0" * 64
-        header = EventHeader(
-            stream_id=self._stream_id,
-            result_occurrence_id=self._result_occurrence_id,
-            source_snapshot_fingerprint=self._source_snapshot_fingerprint,
-            sequence_number=len(self._events) + 1,
-            predecessor_authority_digest=predecessor,
-            authority_payload_digest=authority_digest(payload),
-            event_type=intent.event_type,
-        )
-        event = RecordedEvent(
-            header=header,
-            authority_payload=payload,
-            diagnostic_payload=canonical_value(intent.diagnostic_payload),
-            authority_digest=_event_digest(header, payload),
-        )
-        self._events.append(event)
-        return event
+        for offset, intent in enumerate(batch, 1):
+            if type(intent) is not EventIntent:
+                raise TypeError("event transaction requires exact EventIntent rows")
+            validate_event_authority_payload(
+                intent.event_type, intent.authority_payload
+            )
+            payload = intent.authority_payload
+            header = EventHeader(
+                stream_id=self._stream_id,
+                result_occurrence_id=self._result_occurrence_id,
+                source_snapshot_fingerprint=self._source_snapshot_fingerprint,
+                sequence_number=len(self._events) + offset,
+                predecessor_authority_digest=predecessor,
+                authority_payload_digest=authority_digest(payload),
+                event_type=intent.event_type,
+            )
+            event = RecordedEvent(
+                header=header,
+                authority_payload=payload,
+                diagnostic_payload=canonical_value(intent.diagnostic_payload),
+                authority_digest=_event_digest(header, payload),
+            )
+            staged.append(event)
+            predecessor = event.authority_digest
+        # The producer callback runs only after every event has been staged and
+        # validated, but before the stream becomes observable.  A callback
+        # failure therefore leaves both the event stream and producer ledger at
+        # their pre-transaction state (the caller owns ledger rollback).
+        if commit_callback is not None:
+            if not callable(commit_callback):
+                raise TypeError("event transaction commit callback is not callable")
+            commit_callback()
+        self._events.extend(staged)
+        return tuple(staged)
 
     def seal(self) -> SealedEventStream:
         if self._sealed:

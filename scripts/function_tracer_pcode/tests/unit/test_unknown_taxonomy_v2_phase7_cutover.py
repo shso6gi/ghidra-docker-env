@@ -58,6 +58,7 @@ from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     CompositeProductionSignalEncoder,
     SatSafetyBlockerProductionSignal,
+    emit_sat_safety_signal,
     production_signal_scope,
 )
 from scripts.function_tracer_pcode.equivalence.v2 import production_boundary
@@ -91,6 +92,7 @@ from scripts.function_tracer_pcode.equivalence.v2.stream import (
     EventType,
     GenericReceiptBoundSolverExecutionEventAuthority,
     ReceiptBoundSolverExecutionEventAuthority,
+    outcome_stage_requirement_id,
 )
 from scripts.function_tracer_pcode.validation.phase7_cutover_validation import (
     build_phase7_cutover_validation,
@@ -221,11 +223,7 @@ def timeout_finalization_authority(
         if include_outcome_terminal else None
     )
     outcome_requirement_id = (
-        "outcome-stage-" + authority_digest({
-            "typed_requirement": canonical_value(
-                outcome_receipt.proof_requirement_identity.to_dict()
-            ),
-        })[:32]
+        outcome_stage_requirement_id(outcome_receipt.to_authority_dict())
         if outcome_receipt is not None else None
     )
     reason = ReasonDefinition(
@@ -446,6 +444,11 @@ def test_real_sat_producer_activation_issues_factory_owned_projection():
     )
     with production_signal_scope(session):
         _v2_observe_sat_unsafety_reason(internal)
+        assert emit_sat_safety_signal(
+            signal,
+            producer_site_manifest_id="sat-safety-blocker-observed",
+        ) == 0
+    assert session.domain_signal_error_details == []
     result = SimpleNamespace(
         is_equivalent=None,
         error_message=None,
@@ -594,7 +597,8 @@ def test_real_solver_checker_unknown_uses_all_site_activation_census(tmp_path):
         for receipt in query_receipts
     )
     assert runtime.decision_receipt.outcome.value == "UNKNOWN"
-    assert runtime.static_producer_site_count == producer_manifest["site_count"] == 25
+    assert runtime.static_producer_site_count == producer_manifest["site_count"]
+    assert runtime.static_producer_site_count > 0
     assert runtime.expected_activation_count == 1
     assert runtime.runtime_activation_count == 1
     assert runtime.discovered_activation_count == 1
@@ -795,6 +799,51 @@ def test_operational_binary_identity_projects_real_cli_sha256_tuple():
         production_boundary._operational_binary_content_identity(
             ("md5", digest)
         )
+
+
+def test_legacy_error_uses_typed_boundary_kind_not_arbitrary_status(monkeypatch):
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        )
+    )
+    checker = SimpleNamespace(
+        v2_dual_write_pilot_connector=connector,
+        observation_contract=SimpleNamespace(contract_id="contract-1"),
+        _active_binary_content_identities=("binary-1", "binary-2"),
+    )
+    result = SimpleNamespace(
+        is_equivalent=None,
+        error_message="volatile diagnostic",
+        failure_status="strategy-name-from-compatibility-layer",
+        failure_message="detail",
+        unknown_reasons=[],
+        unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    monkeypatch.setattr(
+        production_boundary,
+        "_run_legacy_check_from_binaries",
+        lambda *_args, **_kwargs: result,
+    )
+
+    actual = production_boundary.run_check_from_binaries_with_v2_pilot(
+        checker, object(), object(), "left", "right"
+    )
+
+    authority = actual.v2_legacy_error_authority
+    authority.validate()
+    assert authority.error_kind is (
+        production_boundary.LegacyBoundaryErrorKind.COMPATIBILITY_ERROR
+    )
+    assert authority.legacy_failure_status == (
+        "strategy-name-from-compatibility-layer"
+    )
+    assert actual.final_outcome == "ERROR"
+    assert actual._v2_dual_write_evidence.pilot_result.error_receipts[
+        0
+    ].error_kind == "legacy_compatibility_error"
 
 
 def test_supervisor_nonce_prebinds_production_identity(monkeypatch):

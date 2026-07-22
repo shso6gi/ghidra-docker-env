@@ -49,9 +49,24 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     build_unknown_recovery_actions,
+    get_unknown_recovery_plan,
+    make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+
+
+def _typed_method_b_reason(target):
+    return make_internal_v2_reason_diagnostic(
+        "loop_summary_semantic_equality_unproven",
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=("loop_summary_guard_mismatch",),
+        recovery_proof_obligations=get_unknown_recovery_plan(
+            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED
+        ).proof_obligations,
+        object_target_key=target,
+    )
 from scripts.function_tracer_pcode.equivalence.formula.returns import _readonly_refs_share_surface
 from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
@@ -1420,13 +1435,7 @@ def test_method_b_covering_case_producer_records_only_covering_evidence():
         case2=summary_case,
         pair_id="(0,1)",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,1)",
-        evidence_refs=("loop_summary_guard_mismatch",),
-        object_target_key=target,
-    )
+    reason = _typed_method_b_reason(target)
 
     strategy._record_completed_method_b_covering_case_proof_if_safe(
         reason,
@@ -1492,13 +1501,7 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
         case2=summary_case,
         pair_id="(0,1)",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,1)",
-        evidence_refs=("loop_summary_guard_mismatch",),
-        object_target_key=target,
-    )
+    reason = _typed_method_b_reason(target)
 
     strategy._record_completed_method_b_covering_case_proof_if_safe(
         reason,
@@ -1567,13 +1570,7 @@ def test_method_b_guard_partition_producer_records_count_membership_when_range_i
         case2=summary_case,
         pair_id="(0,1)",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,1)",
-        evidence_refs=("loop_summary_guard_mismatch",),
-        object_target_key=target,
-    )
+    reason = _typed_method_b_reason(target)
 
     strategy._record_completed_method_b_covering_case_proof_if_safe(
         reason,
@@ -1638,13 +1635,7 @@ def test_method_b_guard_partition_producer_rejects_open_count_range():
         case2=summary_case,
         pair_id="(0,1)",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,1)",
-        evidence_refs=("loop_summary_guard_mismatch",),
-        object_target_key=target,
-    )
+    reason = _typed_method_b_reason(target)
 
     strategy._record_completed_method_b_covering_case_proof_if_safe(
         reason,
@@ -1699,13 +1690,7 @@ def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
         case2=summary_case,
         pair_id="(0,1)",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
-        stage="S_PAIRWISE",
-        pair_or_case="(0,1)",
-        evidence_refs=("loop_summary_guard_mismatch",),
-        object_target_key=target,
-    )
+    reason = _typed_method_b_reason(target)
 
     strategy._record_completed_method_b_covering_case_proof_if_safe(
         reason,
@@ -2903,20 +2888,13 @@ def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
     assert result.is_equivalent is None
     assert len(result.unknown_reasons) == 1
     record = result.unknown_reasons[0]
-    assert record.reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
+    assert record.reason_id == "loop_summary_semantic_equality_unproven"
     assert record.object_target_key is not None
     assert record.object_target_key[0] == "method_b_closure"
     assert not _nested_has_tag(record.object_target_key, "reason")
 
     actions = build_unknown_recovery_actions(result.unknown_reasons)
-    assert {(action.proof_kind, action.proof_stage, action.evidence_kind) for action in actions} == {
-        ("proof_backed_covering_case", "method_b_covering_case", "seed_compensation"),
-        ("guard_partition_completion", "method_b_guard_partition", "guard_partition"),
-    }
-    for action in actions:
-        assert action.object_target_key == record.object_target_key
-        assert action.proof_obligation_id is not None
-        assert action.proof_obligation_id[-1] == record.object_target_key
+    assert actions == ()
 
 
 def test_monkeypatched_method_b_full_path_uses_canonical_solver_authority():

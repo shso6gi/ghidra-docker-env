@@ -833,79 +833,9 @@ def _impl_check(
                                         "pairwise-readonly-correspondence-member"
                                     ),
                                 )
-                    elif classification.disposition is (
-                        AbiWidthReadonlyDisposition.TYPED_SLICE5_CAUSE
-                    ) and classification.reason_ids == (
-                        "return_observation_contract_unproven",
-                        "return_high_bit_relation_unproven",
-                    ):
-                        from ...return_width_surface import (
-                            build_pair_return_observation_seed,
-                            extract_function_return_width_seed,
-                        )
-                        from ...v2.abi_width_readonly import (
-                            ProjectionNotFormable,
-                            ReturnObservationNeedSeed,
-                            ReturnObservationProjectionSeed,
-                        )
-
-                        left_width_seed = extract_function_return_width_seed(
-                            base_ctx.get("analysis1"), case1
-                        )
-                        right_width_seed = extract_function_return_width_seed(
-                            base_ctx.get("analysis2"), case2
-                        )
-                        pair_width_seed = build_pair_return_observation_seed(
-                            left_width_seed, right_width_seed
-                        )
-                        try:
-                            pair_semantic_seed = (
-                                ReturnObservationProjectionSeed.from_pair_seed(
-                                    left_width_seed,
-                                    right_width_seed,
-                                    pair_width_seed,
-                                )
-                            )
-                            signal_factory = (
-                                AbiWidthReadonlyBlockerSignal.from_projection_seed
-                            )
-                            emitted_reason_ids = classification.reason_ids
-                        except ProjectionNotFormable:
-                            pair_semantic_seed = ReturnObservationNeedSeed.from_pair_seed(
-                                left_width_seed,
-                                right_width_seed,
-                                pair_width_seed,
-                            )
-                            signal_factory = (
-                                lambda _reason_id, seed: (
-                                    AbiWidthReadonlyBlockerSignal.from_observation_need_seed(
-                                        seed
-                                    )
-                                )
-                            )
-                            # Without one positive observation projection the
-                            # high-bit proposition is not yet addressable.  The
-                            # observation Q remains live and a later exact
-                            # projection seed may introduce high-bit work.
-                            emitted_reason_ids = (
-                                "return_observation_contract_unproven",
-                            )
-                        for slice5_reason_id in emitted_reason_ids:
-                            signal = signal_factory(
-                                slice5_reason_id, pair_semantic_seed
-                            )
-                            emit_abi_width_readonly_signal(
-                                signal,
-                                producer_site_manifest_id=(
-                                    "pairwise-return-width-relation-blocker"
-                                ),
-                            )
-                            if slice5_reason_id == (
-                                "return_high_bit_relation_unproven"
-                            ):
-                                register_abi_width_solver_candidate(
-                                    signal, pair_semantic_seed
-                                )
+                    # Return-observation ABI/width causes are owned exclusively
+                    # by return_width_surface.py.  Pairwise fallback classification
+                    # remains diagnostic and must not reconstruct the same C/Q.
                 except Exception as exc:
                     from ...v2.production_signals import (
                         record_production_pilot_shadow_error,

@@ -14,7 +14,12 @@ from pathlib import Path
 import tempfile
 from typing import Any, Iterator, Mapping, Optional
 
-from .contracts import VerifiedLifecyclePrefixProjection, authority_digest
+from .contracts import (
+    CauseOccurrence, CauseOccurrenceAuthority, IdentityScope, Outcome,
+    ProofRequirement, ReasonDefinition, RecoveryAddressability,
+    RequirementSlotDefinition, SatisfactionContractDefinition,
+    VerifiedLifecyclePrefixProjection, authority_digest, requirement_slot,
+)
 from .stream import (
     CauseObservedEventAuthority,
     EventIntent,
@@ -44,7 +49,14 @@ from .abi_width_readonly import (
     ABI_WIDTH_READONLY_REASON_REGISTRY,
     ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
 )
-from .registry import SealedReasonRegistry, SealedRecoveryRegistry
+from .production_signals import (
+    COMPARISON_CLOSURE_REASON_REGISTRY,
+    COMPARISON_CLOSURE_RECOVERY_REGISTRY,
+)
+from .registry import (
+    SatisfactionBindingFactory, SealedReasonRegistry, SealedRecoveryRegistry,
+    SemanticCauseIdentityFactory,
+)
 from .subordinate_decompilation import (
     SubordinateProcessAssignmentFactory,
     SubordinateProcessAssignmentReceipt,
@@ -83,6 +95,34 @@ _OPERATIONAL_PROCESS_ROWS = {
     ),
 }
 
+PROCESS_COMPLETION_REASON_ID = "pair_process_completion_unavailable"
+PROCESS_COMPLETION_PROOF_KIND = "pair_process_completion"
+PROCESS_COMPLETION_CONTRACT_ID = "pair-process-completion-recovery"
+PROCESS_COMPLETION_REASON_REGISTRY = SealedReasonRegistry.build((
+    ReasonDefinition(
+        PROCESS_COMPLETION_REASON_ID,
+        "process_execution",
+        "proof_obligation",
+        "blocks_decision",
+        frozenset(("pair_process_execution",)),
+        ("durable_launch", "deadline_policy", "missing_terminal_result"),
+        frozenset((PROCESS_COMPLETION_PROOF_KIND,)),
+        True,
+        "pair_process_execution_v1",
+        RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+))
+PROCESS_COMPLETION_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
+    SatisfactionContractDefinition(
+        PROCESS_COMPLETION_CONTRACT_ID,
+        1,
+        (RequirementSlotDefinition(
+            "completion", frozenset((PROCESS_COMPLETION_PROOF_KIND,))
+        ),),
+        requirement_slot("completion"),
+    ),
+))
+
 PROCESS_DURABLE_REASON_REGISTRY = SealedReasonRegistry.build((
     *OPERATIONAL_REASON_REGISTRY.snapshot(),
     *CALL_EFFECT_REASON_REGISTRY.snapshot(),
@@ -90,6 +130,8 @@ PROCESS_DURABLE_REASON_REGISTRY = SealedReasonRegistry.build((
     *RETURN_OUTCOME_REASON_REGISTRY.snapshot(),
     *SAT_SAFETY_REASON_REGISTRY.snapshot(),
     *ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot(),
+    *COMPARISON_CLOSURE_REASON_REGISTRY.snapshot(),
+    *PROCESS_COMPLETION_REASON_REGISTRY.snapshot(),
 ))
 PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     *OPERATIONAL_RECOVERY_REGISTRY.snapshot(),
@@ -98,10 +140,11 @@ PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     *RETURN_OUTCOME_RECOVERY_REGISTRY.snapshot(),
     *SAT_SAFETY_RECOVERY_REGISTRY.snapshot(),
     *ABI_WIDTH_READONLY_RECOVERY_REGISTRY.snapshot(),
+    *COMPARISON_CLOSURE_RECOVERY_REGISTRY.snapshot(),
+    *PROCESS_COMPLETION_RECOVERY_REGISTRY.snapshot(),
 ))
 
 SUPERVISOR_OPERATIONAL_ERROR_KINDS = frozenset({
-    "process_deadline_without_checkpoint",
     "operational_authority_invalid",
 })
 SUPERVISOR_DEADLINE_STAGES = frozenset({
@@ -205,9 +248,12 @@ class DurableTimeoutFinalizationBundle:
     result_occurrence_id: str
     proof_requirement_id: str
     invocation_identity: str
+    child_exit_disposition: str
     composite_stream_authority_digest: str
+    canonical_result_bundle_digest: str
     bundle_digest: str
     terminal_segment: SupervisorTerminalSegment = field(repr=False, compare=False)
+    canonical_result_bundle: Mapping[str, Any] = field(repr=False, compare=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
 
 
@@ -230,11 +276,14 @@ class DurableErrorFinalizationBundle:
     result_occurrence_id: str
     error_kind: str
     deadline_stage: str
+    child_exit_disposition: str
     composite_stream_authority_digest: str
+    canonical_result_bundle_digest: str
     bundle_digest: str
     terminal_segment: SupervisorErrorTerminalSegment = field(
         repr=False, compare=False
     )
+    canonical_result_bundle: Mapping[str, Any] = field(repr=False, compare=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
 
 
@@ -317,6 +366,7 @@ class ProcessSupervisorAuthorityFactory:
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
             "OperationalCheckpointReceipt": "worker",
+            "SupervisorBootstrapCheckpointReceipt": "supervisor",
             "WorkerContinuationReceipt": "worker",
         }
         expected_role = expected_roles.get(receipt.receipt_kind)
@@ -343,6 +393,25 @@ class ProcessSupervisorAuthorityFactory:
             or not hmac.compare_digest(receipt.signature, signature)
         ):
             raise ValueError("process authority receipt signature/digest mismatch")
+
+    def _validate_supervisor_canonical_bundle(
+        self, bundle: Mapping[str, Any], *, launch: SignedProcessAuthorityReceipt,
+        outcome: Outcome, error_kind: Optional[str],
+    ) -> Mapping[str, Any]:
+        from .canonical_result import (
+            supervisor_canonical_result_payload_preimage,
+            validate_canonical_result_finalization_bundle,
+        )
+
+        self.validate(launch)
+        return validate_canonical_result_finalization_bundle(
+            bundle,
+            result_payload_preimage=supervisor_canonical_result_payload_preimage(
+                launch, outcome=outcome, error_kind=error_kind
+            ),
+            bundle_verification_key_id=self.supervisor_signing_key_id,
+            bundle_verification_key=self.__keys["supervisor"],
+        )
 
     def decode(self, payload: Mapping[str, Any]) -> SignedProcessAuthorityReceipt:
         required = {
@@ -384,6 +453,142 @@ class ProcessSupervisorAuthorityFactory:
             raise TypeError("supervisor launch identity is incomplete")
         return self._issue("SupervisorLaunchReceipt", payload, signer_role="supervisor")
 
+    def issue_deadline_bootstrap_checkpoint(
+        self, *, launch: SignedProcessAuthorityReceipt,
+        prior_resolved: Optional[SignedProcessAuthorityReceipt] = None,
+    ) -> tuple[SignedProcessAuthorityReceipt, EventStreamPrefixView]:
+        """Materialize the exact process-completion C/Q when no worker prefix exists."""
+
+        self.validate(launch)
+        if prior_resolved is not None:
+            self.validate(prior_resolved)
+            if (
+                prior_resolved.payload.get("state")
+                != CheckpointState.RESOLVED.value
+                or prior_resolved.payload.get("launch_receipt_digest")
+                != launch.receipt_digest
+            ):
+                raise ValueError(
+                    "deadline bootstrap predecessor is not a resolved child checkpoint"
+                )
+        target = (
+            "pair_process_execution_v1",
+            launch.payload["manifest_entry_preimage_digest"],
+            launch.payload["execution_nonce"],
+            launch.payload["deadline_policy_digest"],
+        )
+        cause = SemanticCauseIdentityFactory(
+            PROCESS_COMPLETION_REASON_REGISTRY
+        ).create(
+            reason_id=PROCESS_COMPLETION_REASON_ID,
+            identity_scope=IdentityScope.RELATIONAL,
+            target_kind="pair_process_execution",
+            canonical_target_key=target,
+            missing_semantic_fact=("terminal_pair_result", "unavailable_at_deadline"),
+            semantic_proposition=("pair_process_has_terminal_result", target),
+            observation_surface=(
+                launch.payload["manifest_entry_preimage_digest"],
+                launch.payload["deadline_policy_digest"],
+            ),
+            active_semantic_precondition=(
+                "process_launch_is_durable", launch.receipt_digest
+            ),
+            correspondence_contract=None,
+        )
+        requirement = ProofRequirement(
+            "process-completion-q-" + authority_digest(target)[:32],
+            PROCESS_COMPLETION_PROOF_KIND,
+            target,
+        )
+        bound = SatisfactionBindingFactory(
+            PROCESS_COMPLETION_RECOVERY_REGISTRY
+        ).bind(
+            contract_definition_id=PROCESS_COMPLETION_CONTRACT_ID,
+            contract_version=1,
+            bindings={"completion": requirement},
+        )
+        occurrence = CauseOccurrence(
+            "process-completion-occ-" + authority_digest({
+                "result_occurrence_id": launch.payload["result_occurrence_id"],
+                "target": target,
+            })[:32],
+            cause,
+            PROCESS_COMPLETION_REASON_ID,
+            authority_digest(target),
+            "pair_process_execution",
+            IdentityScope.RELATIONAL,
+            bound.contract_definition_id,
+            bound.contract_version,
+            bound.normalized_expression_digest,
+            bound.bound_expression_digest,
+            (requirement.requirement_id,),
+            (launch.receipt_digest, launch.payload["deadline_policy_digest"]),
+            "process_supervisor_deadline_bootstrap",
+            launch.payload["source_snapshot_fingerprint"],
+            "pair-process-supervisor-v1",
+            launch.payload["execution_nonce"],
+        )
+        recorder = EventRecorder(
+            stream_id=launch.payload["stream_id"],
+            result_occurrence_id=launch.payload["result_occurrence_id"],
+            source_snapshot_fingerprint=(
+                launch.payload["source_snapshot_fingerprint"]
+            ),
+        )
+        observed = recorder.append(EventIntent(
+            EventType.CAUSE_OBSERVED,
+            CauseObservedEventAuthority(CauseOccurrenceAuthority(occurrence, bound)),
+        ))
+        prefix = EventStreamPrefixView.from_sealed_stream(recorder.seal())
+        from .reducer import ShadowLifecycleReducer
+
+        projection = ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        ).replay_prefix(prefix)
+        assignment_digest = authority_digest({
+            "assignment_kind": "SUPERVISOR_DEADLINE",
+            "launch_receipt_digest": launch.receipt_digest,
+            "proof_requirement_id": requirement.requirement_id,
+            "prefix_digest": prefix.prefix_authority_digest,
+        })
+        invocation_identity = "pair-process-" + authority_digest(target)[:32]
+        checkpoint = self._issue("SupervisorBootstrapCheckpointReceipt", {
+            "state": CheckpointState.ACTIVE.value,
+            "launch_receipt_digest": launch.receipt_digest,
+            "result_occurrence_id": prefix.result_occurrence_id,
+            "stream_id": prefix.stream_id,
+            "prefix_digest": prefix.prefix_authority_digest,
+            "last_event_authority_digest": observed.authority_digest,
+            "lifecycle_prefix_projection_digest": projection.prefix_projection_digest,
+            "q_open_base_digest": projection.q_open_base_digest,
+            "assignment_kind": "SUPERVISOR_DEADLINE",
+            "assignment_receipt_digest": assignment_digest,
+            "proof_requirement_id": requirement.requirement_id,
+            "invocation_receipt_digest": assignment_digest,
+            "invocation_identity": invocation_identity,
+            "invocation_ordinal": 1,
+            "target_digest": authority_digest(target),
+            "worker_pid": launch.payload["child_pid"],
+            "worker_start_token": launch.payload["child_start_token"],
+            "registry_digest": authority_digest({
+                "reason": PROCESS_COMPLETION_REASON_REGISTRY.snapshot(),
+                "recovery": PROCESS_COMPLETION_RECOVERY_REGISTRY.snapshot(),
+            }),
+            "input_surface_digest": launch.payload[
+                "manifest_entry_preimage_digest"
+            ],
+            "operational_authority_root_digest": launch.receipt_digest,
+            "configured_timeout_seconds": 0,
+            "deadline_policy_digest": launch.payload["deadline_policy_digest"],
+            "issuer_id": PROCESS_SUPERVISOR_ISSUER_ID,
+            "prior_resolved_receipt_digest": (
+                prior_resolved.receipt_digest
+                if prior_resolved is not None else None
+            ),
+        }, signer_role="supervisor")
+        return checkpoint, prefix
+
     def issue_child_exit_resolution(
         self, *, launch: SignedProcessAuthorityReceipt, child_returncode: int,
     ) -> SignedProcessAuthorityReceipt:
@@ -404,6 +609,7 @@ class ProcessSupervisorAuthorityFactory:
         self, *, prefix: EventStreamPrefixView,
         projection: VerifiedLifecyclePrefixProjection,
         reason_id: str,
+        proof_requirement_id: Optional[str] = None,
     ) -> SignedProcessAuthorityReceipt:
         prefix.validate()
         projection.validate()
@@ -423,6 +629,10 @@ class ProcessSupervisorAuthorityFactory:
                     and c_row.cause_id == q_row.cause_id
                     and c_row.reason_id == reason_id
                     and c_row.domain == "operational_extraction"
+                    and (
+                        proof_requirement_id is None
+                        or q_row.proof_requirement_id == proof_requirement_id
+                    )
                 ):
                     authorities = tuple(
                         event.authority_payload.occurrence_authority
@@ -466,12 +676,22 @@ class ProcessSupervisorAuthorityFactory:
         assignment: SignedProcessAuthorityReceipt,
         invocation: Any, operational_factory: Any,
         worker_pid: int, worker_start_token: str,
+        prior_resolved: Optional[SignedProcessAuthorityReceipt] = None,
     ) -> SignedProcessAuthorityReceipt:
         self.validate(launch)
         self.validate(assignment)
         operational_factory.validate_invocation_membership(invocation)
         prefix.validate()
         projection.validate()
+        if prior_resolved is not None:
+            self.validate(prior_resolved)
+            if (
+                prior_resolved.payload.get("state")
+                != CheckpointState.RESOLVED.value
+                or prior_resolved.payload.get("launch_receipt_digest")
+                != launch.receipt_digest
+            ):
+                raise ValueError("ACTIVE checkpoint predecessor is not resolved")
         if (
             launch.receipt_kind != "SupervisorLaunchReceipt"
             or prefix.result_occurrence_id != launch.payload["result_occurrence_id"]
@@ -520,6 +740,9 @@ class ProcessSupervisorAuthorityFactory:
             "configured_timeout_seconds": invocation.configured_timeout_seconds,
             "deadline_policy_digest": launch.payload["deadline_policy_digest"],
             "issuer_id": PROCESS_WORKER_ISSUER_ID,
+            "prior_resolved_receipt_digest": (
+                prior_resolved.receipt_digest if prior_resolved is not None else None
+            ),
         }
         return self._issue("OperationalCheckpointReceipt", payload, signer_role="worker")
 
@@ -530,6 +753,7 @@ class ProcessSupervisorAuthorityFactory:
         assignment: Any, assignment_factory: Any,
         invocation: Any, operational_factory: Any,
         worker_pid: int, worker_start_token: str,
+        prior_resolved: Optional[SignedProcessAuthorityReceipt] = None,
     ) -> SignedProcessAuthorityReceipt:
         """Persist one adapter-owned parent-Q process assignment without relabeling it."""
         self.validate(launch)
@@ -542,6 +766,15 @@ class ProcessSupervisorAuthorityFactory:
         operational_factory.validate_invocation_membership(invocation)
         prefix.validate()
         projection.validate()
+        if prior_resolved is not None:
+            self.validate(prior_resolved)
+            if (
+                prior_resolved.payload.get("state")
+                != CheckpointState.RESOLVED.value
+                or prior_resolved.payload.get("launch_receipt_digest")
+                != launch.receipt_digest
+            ):
+                raise ValueError("subordinate checkpoint predecessor is not resolved")
         if (
             launch.receipt_kind != "SupervisorLaunchReceipt"
             or prefix.result_occurrence_id != launch.payload["result_occurrence_id"]
@@ -589,6 +822,9 @@ class ProcessSupervisorAuthorityFactory:
             "configured_timeout_seconds": invocation.configured_timeout_seconds,
             "deadline_policy_digest": launch.payload["deadline_policy_digest"],
             "issuer_id": PROCESS_WORKER_ISSUER_ID,
+            "prior_resolved_receipt_digest": (
+                prior_resolved.receipt_digest if prior_resolved is not None else None
+            ),
         }
         return self._issue(
             "OperationalCheckpointReceipt", payload, signer_role="worker"
@@ -1048,6 +1284,22 @@ class ProcessSupervisorAuthorityFactory:
             or final_transition.payload["terminal_segment_digest"] != segment.segment_digest
         ):
             raise ValueError("timeout finalization chain is not exact")
+        from .canonical_result import (
+            build_supervisor_canonical_result_finalization_bundle,
+        )
+
+        canonical_bundle = build_supervisor_canonical_result_finalization_bundle(
+            launch=launch,
+            sealed_event_stream=segment.composite_stream,
+            terminalizations=((
+                segment.terminal_event_sequence,
+                checkpoint.payload["proof_requirement_id"],
+            ),),
+            expected_outcome=Outcome.TIMEOUT,
+            error_kind=None,
+            seal_key_id=self.supervisor_signing_key_id,
+            seal_key=self.__keys["supervisor"],
+        )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
             "checkpoint_receipt_digest": checkpoint.receipt_digest,
@@ -1058,13 +1310,16 @@ class ProcessSupervisorAuthorityFactory:
             "result_occurrence_id": checkpoint.payload["result_occurrence_id"],
             "proof_requirement_id": checkpoint.payload["proof_requirement_id"],
             "invocation_identity": checkpoint.payload["invocation_identity"],
+            "child_exit_disposition": timeout.payload["kill_disposition"],
             "composite_stream_authority_digest": (
                 segment.composite_stream.envelope.authority_chain_digest
             ),
+            "canonical_result_bundle_digest": canonical_bundle["bundle_digest"],
         }
         bundle = DurableTimeoutFinalizationBundle(
             **payload, bundle_digest=authority_digest(payload),
-            terminal_segment=segment, _factory_token=_TIMEOUT_BUNDLE_TOKEN,
+            terminal_segment=segment, canonical_result_bundle=canonical_bundle,
+            _factory_token=_TIMEOUT_BUNDLE_TOKEN,
         )
         self._bundles[id(bundle)] = bundle
         self.validate_timeout_bundle(
@@ -1093,9 +1348,18 @@ class ProcessSupervisorAuthorityFactory:
         for receipt in (launch, checkpoint, claimed, timeout, final_transition):
             self.validate(receipt)
         segment.validate(prefix, timeout)
+        canonical = self._validate_supervisor_canonical_bundle(
+            bundle.canonical_result_bundle,
+            launch=launch,
+            outcome=Outcome.TIMEOUT,
+            error_kind=None,
+        )
         payload = {
             name: getattr(bundle, name) for name in bundle.__dataclass_fields__
-            if name not in {"bundle_digest", "terminal_segment", "_factory_token"}
+            if name not in {
+                "bundle_digest", "terminal_segment", "canonical_result_bundle",
+                "_factory_token",
+            }
         }
         if (
             bundle.bundle_digest != authority_digest(payload)
@@ -1103,11 +1367,16 @@ class ProcessSupervisorAuthorityFactory:
             or bundle.launch_receipt_digest != launch.receipt_digest
             or bundle.checkpoint_receipt_digest != checkpoint.receipt_digest
             or bundle.claimed_transition_digest != claimed.receipt_digest
+            or bundle.child_exit_disposition
+            != timeout.payload["kill_disposition"]
             or bundle.timeout_receipt_digest != timeout.receipt_digest
             or bundle.terminal_segment_digest != segment.segment_digest
             or bundle.final_transition_digest != final_transition.receipt_digest
             or bundle.composite_stream_authority_digest
             != segment.composite_stream.envelope.authority_chain_digest
+            or bundle.canonical_result_bundle_digest
+            != bundle.canonical_result_bundle["bundle_digest"]
+            or canonical["outcome"] != Outcome.TIMEOUT.value
         ):
             raise ValueError("timeout finalization bundle integrity mismatch")
 
@@ -1122,7 +1391,10 @@ class ProcessSupervisorAuthorityFactory:
             raise TypeError("timeout bundle is not exact supervisor-factory membership")
         payload = {
             name: getattr(bundle, name) for name in bundle.__dataclass_fields__
-            if name not in {"bundle_digest", "terminal_segment", "_factory_token"}
+            if name not in {
+                "bundle_digest", "terminal_segment", "canonical_result_bundle",
+                "_factory_token",
+            }
         }
         segment = bundle.terminal_segment
         segment.composite_stream.validate()
@@ -1160,6 +1432,21 @@ class ProcessSupervisorAuthorityFactory:
         )
         for receipt in timeout_receipts:
             self.validate(receipt)
+        launches_by_digest = {
+            receipt.receipt_digest: receipt
+            for receipt in self._issued.values()
+            if receipt.receipt_digest == bundle.launch_receipt_digest
+            and receipt.receipt_kind == "SupervisorLaunchReceipt"
+        }
+        if set(launches_by_digest) != {bundle.launch_receipt_digest}:
+            raise ValueError("timeout bundle launch authority is not unique")
+        launch = launches_by_digest[bundle.launch_receipt_digest]
+        canonical = self._validate_supervisor_canonical_bundle(
+            bundle.canonical_result_bundle,
+            launch=launch,
+            outcome=Outcome.TIMEOUT,
+            error_kind=None,
+        )
         if (
             bundle.bundle_digest != authority_digest(payload)
             or bundle.terminal_segment_digest != segment.segment_digest
@@ -1168,6 +1455,9 @@ class ProcessSupervisorAuthorityFactory:
             or segment.segment_digest != authority_digest(segment_payload)
             or segment.worker_prefix_digest != prefix_digest
             or segment.timeout_receipt_digest != bundle.timeout_receipt_digest
+            or bundle.canonical_result_bundle_digest
+            != bundle.canonical_result_bundle["bundle_digest"]
+            or canonical["outcome"] != Outcome.TIMEOUT.value
             or not timeout_receipts
             or any(
                 receipt.receipt_kind != "SupervisorTimeoutReceipt"
@@ -1428,6 +1718,19 @@ class ProcessSupervisorAuthorityFactory:
         self._validate_operational_error_segment(
             launch=launch, error=error, segment=segment, prefix=prefix
         )
+        from .canonical_result import (
+            build_supervisor_canonical_result_finalization_bundle,
+        )
+
+        canonical_bundle = build_supervisor_canonical_result_finalization_bundle(
+            launch=launch,
+            sealed_event_stream=segment.composite_stream,
+            terminalizations=(),
+            expected_outcome=Outcome.ERROR,
+            error_kind=error.payload["error_kind"],
+            seal_key_id=self.supervisor_signing_key_id,
+            seal_key=self.__keys["supervisor"],
+        )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
             "error_receipt_digest": error.receipt_digest,
@@ -1435,13 +1738,18 @@ class ProcessSupervisorAuthorityFactory:
             "result_occurrence_id": launch.payload["result_occurrence_id"],
             "error_kind": error.payload["error_kind"],
             "deadline_stage": error.payload["deadline_stage"],
+            "child_exit_disposition": error.payload[
+                "child_exit_disposition"
+            ],
             "composite_stream_authority_digest": (
                 segment.composite_stream.envelope.authority_chain_digest
             ),
+            "canonical_result_bundle_digest": canonical_bundle["bundle_digest"],
         }
         bundle = DurableErrorFinalizationBundle(
             **payload, bundle_digest=authority_digest(payload),
-            terminal_segment=segment, _factory_token=_ERROR_BUNDLE_TOKEN,
+            terminal_segment=segment, canonical_result_bundle=canonical_bundle,
+            _factory_token=_ERROR_BUNDLE_TOKEN,
         )
         self._error_bundles[id(bundle)] = bundle
         self.validate_operational_error_bundle(
@@ -1465,18 +1773,32 @@ class ProcessSupervisorAuthorityFactory:
         self._validate_operational_error_segment(
             launch=launch, error=error, segment=segment, prefix=prefix
         )
+        canonical = self._validate_supervisor_canonical_bundle(
+            bundle.canonical_result_bundle,
+            launch=launch,
+            outcome=Outcome.ERROR,
+            error_kind=error.payload["error_kind"],
+        )
         payload = {
             name: getattr(bundle, name) for name in bundle.__dataclass_fields__
-            if name not in {"bundle_digest", "terminal_segment", "_factory_token"}
+            if name not in {
+                "bundle_digest", "terminal_segment", "canonical_result_bundle",
+                "_factory_token",
+            }
         }
         if (
             bundle.bundle_digest != authority_digest(payload)
             or bundle.terminal_segment is not segment
             or bundle.launch_receipt_digest != launch.receipt_digest
             or bundle.error_receipt_digest != error.receipt_digest
+            or bundle.child_exit_disposition
+            != error.payload["child_exit_disposition"]
             or bundle.terminal_segment_digest != segment.segment_digest
             or bundle.composite_stream_authority_digest
             != segment.composite_stream.envelope.authority_chain_digest
+            or bundle.canonical_result_bundle_digest
+            != bundle.canonical_result_bundle["bundle_digest"]
+            or canonical["outcome"] != Outcome.ERROR.value
         ):
             raise ValueError("operational ERROR bundle integrity mismatch")
 
@@ -1572,6 +1894,45 @@ class DurableCheckpointStore:
                 identical_ok=True,
             )
 
+    def resolved_predecessor(self) -> Optional[SignedProcessAuthorityReceipt]:
+        """Return the exact completed checkpoint that a new ACTIVE must extend."""
+
+        with self._locked():
+            state_path = self.directory / "state.json"
+            if not state_path.exists():
+                return None
+            state = self.factory.decode(json.loads(
+                state_path.read_text(encoding="utf-8")
+            ))
+            if state.payload.get("state") != CheckpointState.RESOLVED.value:
+                raise ValueError("new checkpoint requires a resolved predecessor")
+            return state
+
+    def _archive_resolved_checkpoint_locked(
+        self, resolved: SignedProcessAuthorityReceipt,
+    ) -> None:
+        history = self.directory / "checkpoint-history" / resolved.receipt_digest
+        if history.exists():
+            raise ValueError("resolved checkpoint history already exists")
+        history.mkdir(parents=True)
+        names = (
+            "checkpoint-prefix-stream.json",
+            "checkpoint.json",
+            "continuation-stream.json",
+            "continuation.json",
+            "ready.json",
+            "state.json",
+        )
+        for name in names:
+            source = self.directory / name
+            if source.exists():
+                os.replace(source, history / name)
+        directory_fd = os.open(history, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
     def rematerialize_child_exit_resolution(self) -> SignedProcessAuthorityReceipt:
         receipt = self.factory.decode(json.loads(
             (self.directory / "child-exit.json").read_text(encoding="utf-8")
@@ -1600,6 +1961,25 @@ class DurableCheckpointStore:
                 raise ValueError("ACTIVE checkpoint lacks durable launch authority") from exc
             if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
                 raise ValueError("ACTIVE checkpoint launch binding differs")
+            state_path = self.directory / "state.json"
+            predecessor_digest = receipt.payload.get(
+                "prior_resolved_receipt_digest"
+            )
+            if state_path.exists():
+                predecessor = self.factory.decode(json.loads(
+                    state_path.read_text(encoding="utf-8")
+                ))
+                if (
+                    predecessor.payload.get("state")
+                    != CheckpointState.RESOLVED.value
+                    or predecessor.receipt_digest != predecessor_digest
+                ):
+                    raise ValueError(
+                        "ACTIVE checkpoint does not extend durable resolved state"
+                    )
+                self._archive_resolved_checkpoint_locked(predecessor)
+            elif predecessor_digest is not None:
+                raise ValueError("first ACTIVE checkpoint carries a predecessor")
             prefix_stream = SealedEventStream(
                 EventStreamEnvelope(
                     prefix.stream_id, prefix.result_occurrence_id,
@@ -2186,7 +2566,9 @@ class DurableCheckpointStore:
         if (
             metadata["composite_stream_authority_digest"]
             != stream.envelope.authority_chain_digest
-            or stored_bundle != expected_bundle
+            or stored_bundle != json.loads(json.dumps(
+                expected_bundle, sort_keys=True, separators=(",", ":")
+            ))
         ):
             raise ValueError("persisted operational ERROR bundle integrity mismatch")
         return bundle

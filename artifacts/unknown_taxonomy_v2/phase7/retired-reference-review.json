@@ -1,5 +1,5 @@
 {
-  "candidate_set_digest": "15a4a6d9a6d59dd6f1cc6394f764f7fe9a599d0f1a8a46de43335c06baa47dcf",
+  "candidate_set_digest": "d54893d8e6d58be38e5b31176680e4c982c918c39487ad5232881b5bfb322858",
   "entries": [
     {
       "ast_node_kind": "ShellToken",
@@ -288,11 +288,11 @@
     },
     {
       "ast_node_kind": "Phase0DataFlowSite",
-      "candidate_id": "ea32052cbb666dc81543d8fd9ae477a3a06949b9b532ce732bdb1a0aaf1fe7a2",
+      "candidate_id": "59635d2d0453748de7d9cd4dc79acdc12b0f0105a66d6bd822578d74fc066dfe",
       "column": 0,
       "context_node_kind": "reason_constructor",
       "context_source": "make_unknown_reason(",
-      "line": 1455,
+      "line": 1385,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
       "phase0_resolution_basis": {
@@ -301,7 +301,7 @@
           "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py:_impl_check"
         ]
       },
-      "phase0_site_id": "190d82aa0d5e9f540a643daf555e265f9e0f22c80a2e125163e11c8914f2616c",
+      "phase0_site_id": "9d5ac7e2253be53153022df474eef5abf5c6fbb7c6f75ad3d97b64eed8758cca",
       "proposed_finite_reason_set": [
         "unknown"
       ],
@@ -318,11 +318,11 @@
     },
     {
       "ast_node_kind": "Phase0DataFlowSite",
-      "candidate_id": "ca2630e16821714df0ffd7e5299c74a37eaa83c8ea06f9c4999417488bd1b418",
+      "candidate_id": "75246cfca0a2704a475e850ad0727527b7cab2324880cf1b3695a852d9e120ae",
       "column": 0,
       "context_node_kind": "reason_constructor",
       "context_source": "unknown_reasons.append(make_unknown_reason(",
-      "line": 1544,
+      "line": 1474,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
       "phase0_resolution_basis": {
@@ -331,7 +331,7 @@
           "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py:_impl_check"
         ]
       },
-      "phase0_site_id": "a221b725d56c835be1e8c9efcc4fd29523e3762a67ab58f148f5363f5cbfaed2",
+      "phase0_site_id": "880de55041c1b2a862d310349fc8d6897380c0bcb2aeda3cb00f2f5eaca09006",
       "proposed_finite_reason_set": [
         "unknown"
       ],
@@ -348,11 +348,11 @@
     },
     {
       "ast_node_kind": "Phase0DataFlowSite",
-      "candidate_id": "e8a0008af22ac870fbc62fbdd4d765669c2abaff6e9b5aaaa257a8e089f64fc8",
+      "candidate_id": "c702990390e0374395ba72ba4c52ad8294a1ed82a1a2a5888de321867c60825b",
       "column": 0,
       "context_node_kind": "reason_constructor",
       "context_source": "return make_unknown_reason(",
-      "line": 1348,
+      "line": 1353,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py",
       "phase0_resolution_basis": {
@@ -361,7 +361,7 @@
           "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/return_coverage.py:_impl__make_return_coverage_unknown_reason"
         ]
       },
-      "phase0_site_id": "8f63ac18648eb1c86908f750776928fde0799ae7688688a737aba3816f66f3c8",
+      "phase0_site_id": "321aef6495334e14c0bf561049a6459a780f9a0b0abe9c0617f8e5e213f73f26",
       "proposed_finite_reason_set": [
         "unknown"
       ],
@@ -553,11 +553,36 @@
     },
     {
       "ast_node_kind": "Attribute",
+      "candidate_id": "7bc85e74a9c62532964cfa19e9f4da9dc9b18addd8d60542b3e80efd4aadb590",
+      "column": 24,
+      "context_node_kind": "Compare",
+      "context_source": "reason_id == UnknownReasonId.UNKNOWN.value",
+      "line": 289,
+      "occurrence_ordinal": 0,
+      "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
+      "proposed_finite_reason_set": [
+        "unknown"
+      ],
+      "reason_id": "unknown",
+      "reference_kind": "typed_enum_member",
+      "review_status": "reviewed",
+      "reviewed_finite_reason_set": [
+        "unknown"
+      ],
+      "reviewed_in_scope": true,
+      "reviewed_relation": "L_decode",
+      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
+      "source_fingerprint": "cbafd1cdec34b8c0a95fe9af5bd7918f9963f3a3fc9a578682611ba93bbbee73",
+      "suggested_relation": "L_decode",
+      "symbol": "UnknownRecoveryAction.from_dict"
+    },
+    {
+      "ast_node_kind": "Attribute",
       "candidate_id": "60a4f189bf74fbdf896ccdaff7a7f8d85a59a517856d5fab5d066f49935fdfbd",
-      "column": 47,
+      "column": 25,
       "context_node_kind": "Compare",
       "context_source": "reason_id != UnknownReasonId.UNKNOWN.value",
-      "line": 289,
+      "line": 303,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -582,7 +607,7 @@
       "column": 48,
       "context_node_kind": "Call",
       "context_source": "cls(\n            reason_id=_enum_value(reason_id) or UnknownReasonId.UNKNOWN.value,\n            reason_class=_enum_value(reason_class) or UnknownReasonClass.DIAGNOSTIC.value,\n            decision_effect=_enum_value(decision_effect) or UnknownDecisionEffect.DIAGNOSTIC_ONLY.value,\n            reason_scope=_enum_value(reason_scope) or UnknownReasonScope.GLOBAL.value,\n            aggregation_unit=_enum_value(aggregation_unit) or UnknownAggregationUnit.RESULT.value,\n            recovery_proof_kind=_enum_value(recovery_proof_kind) or UnknownRecoveryProofKind.NONE.value,\n            target_regression=target_regression,\n        )",
-      "line": 361,
+      "line": 377,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -607,7 +632,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.STAGE,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE,\n            target_regression=\"method_b_closure_blocked\",\n        )",
-      "line": 415,
+      "line": 431,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -632,7 +657,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.STAGE,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE,\n            target_regression=\"method_b_closure_blocked\",\n        )",
-      "line": 421,
+      "line": 437,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -657,7 +682,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.PAIR,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n            target_regression=\"loop_summary_proof_missing\",\n        )",
-      "line": 424,
+      "line": 440,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -682,7 +707,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.PAIR,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n            target_regression=\"loop_summary_proof_missing\",\n        )",
-      "line": 430,
+      "line": 446,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -707,7 +732,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.FUNCTION,\n            UnknownAggregationUnit.FUNCTION,\n            recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n            target_regression=\"outcome_partition_unknown\",\n        )",
-      "line": 451,
+      "line": 467,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -732,7 +757,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,\n            UnknownReasonClass.PROOF_OBLIGATION,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.FUNCTION,\n            UnknownAggregationUnit.FUNCTION,\n            recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n            target_regression=\"outcome_partition_unknown\",\n        )",
-      "line": 457,
+      "line": 473,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -757,7 +782,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,\n            UnknownReasonClass.UNSAFE_ANALYSIS,\n            UnknownDecisionEffect.BLOCKS_EQUIVALENCE,\n            UnknownReasonScope.FUNCTION,\n            UnknownAggregationUnit.FUNCTION,\n        )",
-      "line": 535,
+      "line": 551,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -782,7 +807,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.SAT_UNSAFETY,\n            UnknownReasonClass.UNSAFE_ANALYSIS,\n            UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE,\n            UnknownReasonScope.PAIR,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,\n            target_regression=\"sat_unsafety\",\n        )",
-      "line": 542,
+      "line": 558,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -807,7 +832,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.SAT_UNSAFETY,\n            UnknownReasonClass.UNSAFE_ANALYSIS,\n            UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE,\n            UnknownReasonScope.PAIR,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,\n            target_regression=\"sat_unsafety\",\n        )",
-      "line": 548,
+      "line": 564,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -832,7 +857,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.UNRESOLVED_EXPRESSION,\n            UnknownReasonClass.OPERATIONAL_GAP,\n            UnknownDecisionEffect.BLOCKS_DECISION,\n            UnknownReasonScope.EXPRESSION,\n            UnknownAggregationUnit.PAIR,\n            target_regression=\"unresolved_expression\",\n        )",
-      "line": 560,
+      "line": 576,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -857,7 +882,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.UNRESOLVED_EXPRESSION,\n            UnknownReasonClass.OPERATIONAL_GAP,\n            UnknownDecisionEffect.BLOCKS_DECISION,\n            UnknownReasonScope.EXPRESSION,\n            UnknownAggregationUnit.PAIR,\n            target_regression=\"unresolved_expression\",\n        )",
-      "line": 565,
+      "line": 581,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -882,7 +907,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,\n            UnknownReasonClass.SOLVER_LIMITATION,\n            UnknownDecisionEffect.RETRYABLE,\n            UnknownReasonScope.QUERY,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n            target_regression=\"solver_unknown_timeout\",\n        )",
-      "line": 575,
+      "line": 591,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -907,7 +932,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,\n            UnknownReasonClass.SOLVER_LIMITATION,\n            UnknownDecisionEffect.RETRYABLE,\n            UnknownReasonScope.QUERY,\n            UnknownAggregationUnit.PAIR,\n            recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n            target_regression=\"solver_unknown_timeout\",\n        )",
-      "line": 581,
+      "line": 597,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -932,7 +957,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownReasonDefinition.create(\n            UnknownReasonId.UNKNOWN,\n            UnknownReasonClass.DIAGNOSTIC,\n            UnknownDecisionEffect.BLOCKS_DECISION,\n            UnknownReasonScope.GLOBAL,\n            UnknownAggregationUnit.RESULT,\n        )",
-      "line": 648,
+      "line": 664,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -957,7 +982,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE,\n                    \"method_b_covering_case\",\n                    required_evidence=(\n                        \"seed_compensation\",\n                        \"term_sequence\",\n                        \"pure_side_effect_profile\",\n                    ),\n                    description=\"Prove a Method-B covering case from seed compensation and terms.\",\n                ),\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"method_b_guard_partition\",\n                    required_evidence=(\n                        \"guard_partition\",\n                        \"partition_coverage_proof\",\n                    ),\n                    description=\"Complete the guard partition that justifies the covering case.\",\n                ),\n            ),\n            target_regression=\"method_b_closure_blocked\",\n            description=\"Recover Method-B closure only when covering case and guard partition proofs exist.\",\n        )",
-      "line": 726,
+      "line": 742,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -982,7 +1007,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE,\n                    \"method_b_covering_case\",\n                    required_evidence=(\n                        \"seed_compensation\",\n                        \"term_sequence\",\n                        \"pure_side_effect_profile\",\n                    ),\n                    description=\"Prove a Method-B covering case from seed compensation and terms.\",\n                ),\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"method_b_guard_partition\",\n                    required_evidence=(\n                        \"guard_partition\",\n                        \"partition_coverage_proof\",\n                    ),\n                    description=\"Complete the guard partition that justifies the covering case.\",\n                ),\n            ),\n            target_regression=\"method_b_closure_blocked\",\n            description=\"Recover Method-B closure only when covering case and guard partition proofs exist.\",\n        )",
-      "line": 748,
+      "line": 764,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1007,7 +1032,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"loop_summary_guard_partition\",\n                    required_evidence=(\n                        \"loop_summary_seed\",\n                        \"term_sequence\",\n                        \"case_guard_disjunction\",\n                        \"pure_side_effect_profile\",\n                    ),\n                    description=\"Complete the loop-summary guard partition before using it as proof.\",\n                ),\n            ),\n            target_regression=\"loop_summary_proof_missing\",\n            description=\"Recover generic loop-summary proof gaps by completing the guard partition.\",\n        )",
-      "line": 752,
+      "line": 768,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1032,7 +1057,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"loop_summary_guard_partition\",\n                    required_evidence=(\n                        \"loop_summary_seed\",\n                        \"term_sequence\",\n                        \"case_guard_disjunction\",\n                        \"pure_side_effect_profile\",\n                    ),\n                    description=\"Complete the loop-summary guard partition before using it as proof.\",\n                ),\n            ),\n            target_regression=\"loop_summary_proof_missing\",\n            description=\"Recover generic loop-summary proof gaps by completing the guard partition.\",\n        )",
-      "line": 766,
+      "line": 782,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1057,7 +1082,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"outcome_partition_resolution\",\n                    required_evidence=(\n                        \"unknown_outcome_guard\",\n                        \"unknown_outcome_reason\",\n                        \"must_diverge_or_return_proof\",\n                    ),\n                    description=\"Resolve UnknownOutcome members into proved return/divergence outcomes.\",\n                ),\n            ),\n            target_regression=\"outcome_partition_unknown\",\n            description=\"Recover unknown outcome partitions by proving the unknown member semantics.\",\n        )",
-      "line": 814,
+      "line": 830,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1082,7 +1107,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,\n                    \"outcome_partition_resolution\",\n                    required_evidence=(\n                        \"unknown_outcome_guard\",\n                        \"unknown_outcome_reason\",\n                        \"must_diverge_or_return_proof\",\n                    ),\n                    description=\"Resolve UnknownOutcome members into proved return/divergence outcomes.\",\n                ),\n            ),\n            target_regression=\"outcome_partition_unknown\",\n            description=\"Recover unknown outcome partitions by proving the unknown member semantics.\",\n        )",
-      "line": 827,
+      "line": 843,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1107,7 +1132,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.SAT_UNSAFETY,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,\n                    \"sat_counterexample_safety\",\n                    required_evidence=(\n                        \"counterexample_replay\",\n                        \"active_unsafety_discharge\",\n                        \"coverage_effect_safety\",\n                    ),\n                    description=(\n                        \"Accept a SAT counterexample only after replay and all active \"\n                        \"coverage/effect unsafety blockers are discharged.\"\n                    ),\n                ),\n            ),\n            target_regression=\"sat_unsafety\",\n            description=\"Recover SAT unsafety only with replay plus coverage/effect safety proof.\",\n        )",
-      "line": 962,
+      "line": 978,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1132,7 +1157,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.SAT_UNSAFETY,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,\n                    \"sat_counterexample_safety\",\n                    required_evidence=(\n                        \"counterexample_replay\",\n                        \"active_unsafety_discharge\",\n                        \"coverage_effect_safety\",\n                    ),\n                    description=(\n                        \"Accept a SAT counterexample only after replay and all active \"\n                        \"coverage/effect unsafety blockers are discharged.\"\n                    ),\n                ),\n            ),\n            target_regression=\"sat_unsafety\",\n            description=\"Recover SAT unsafety only with replay plus coverage/effect safety proof.\",\n        )",
-      "line": 978,
+      "line": 994,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1157,7 +1182,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"solver_timeout_retry\",\n                    required_evidence=(\n                        \"query_hash\",\n                        \"timeout_budget\",\n                        \"solver_options\",\n                        \"normalized_query\",\n                    ),\n                    description=\"Retry the timed-out query with traceable options and normalized terms.\",\n                ),\n            ),\n            target_regression=\"solver_unknown_timeout\",\n            description=\"Recover solver timeouts by retrying a normalized query with explicit solver settings.\",\n        )",
-      "line": 1002,
+      "line": 1018,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1182,7 +1207,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"solver_timeout_retry\",\n                    required_evidence=(\n                        \"query_hash\",\n                        \"timeout_budget\",\n                        \"solver_options\",\n                        \"normalized_query\",\n                    ),\n                    description=\"Retry the timed-out query with traceable options and normalized terms.\",\n                ),\n            ),\n            target_regression=\"solver_unknown_timeout\",\n            description=\"Recover solver timeouts by retrying a normalized query with explicit solver settings.\",\n        )",
-      "line": 1016,
+      "line": 1032,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1207,7 +1232,7 @@
       "column": 12,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.UNRESOLVED_EXPRESSION,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"typed_expression_lowering\",\n                    required_evidence=(\n                        \"object_target_key\",\n                        \"typed_expression_key\",\n                        \"lowering_rule\",\n                    ),\n                    description=(\n                        \"Lower the object-derived unresolved expression into a typed SMT term \"\n                        \"without erasing provenance.\"\n                    ),\n                ),\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"type_normalization\",\n                    required_evidence=(\n                        \"operand_widths\",\n                        \"signedness_policy\",\n                        \"normalized_expression\",\n                    ),\n                    description=(\n                        \"Normalize operand widths and signedness before retrying the affected query.\"\n                    ),\n                ),\n            ),\n            target_regression=\"unresolved_expression\",\n            description=(\n                \"Recover unresolved expressions by typed lowering and type normalization before \"\n                \"any solver retry can affect equivalence decisions.\"\n            ),\n        )",
-      "line": 1020,
+      "line": 1036,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1232,7 +1257,7 @@
       "column": 30,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryPlan.create(\n            UnknownReasonId.UNRESOLVED_EXPRESSION,\n            (\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"typed_expression_lowering\",\n                    required_evidence=(\n                        \"object_target_key\",\n                        \"typed_expression_key\",\n                        \"lowering_rule\",\n                    ),\n                    description=(\n                        \"Lower the object-derived unresolved expression into a typed SMT term \"\n                        \"without erasing provenance.\"\n                    ),\n                ),\n                UnknownRecoveryProofObligation.create(\n                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,\n                    \"type_normalization\",\n                    required_evidence=(\n                        \"operand_widths\",\n                        \"signedness_policy\",\n                        \"normalized_expression\",\n                    ),\n                    description=(\n                        \"Normalize operand widths and signedness before retrying the affected query.\"\n                    ),\n                ),\n            ),\n            target_regression=\"unresolved_expression\",\n            description=(\n                \"Recover unresolved expressions by typed lowering and type normalization before \"\n                \"any solver retry can affect equivalence decisions.\"\n            ),\n        )",
-      "line": 1048,
+      "line": 1064,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1257,7 +1282,7 @@
       "column": 36,
       "context_node_kind": "Assign",
       "context_source": "raw = _enum_value(reason_id) or UnknownReasonId.UNKNOWN.value",
-      "line": 1120,
+      "line": 1136,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1282,7 +1307,7 @@
       "column": 11,
       "context_node_kind": "Return",
       "context_source": "return UnknownReasonId.UNKNOWN.value",
-      "line": 1126,
+      "line": 1142,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1307,7 +1332,7 @@
       "column": 36,
       "context_node_kind": "Return",
       "context_source": "return _UNKNOWN_REASON_REGISTRY[UnknownReasonId.UNKNOWN.value]",
-      "line": 1134,
+      "line": 1150,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1332,7 +1357,7 @@
       "column": 32,
       "context_node_kind": "Compare",
       "context_source": "definition.reason_id == UnknownReasonId.UNKNOWN.value",
-      "line": 1314,
+      "line": 1330,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1357,7 +1382,7 @@
       "column": 34,
       "context_node_kind": "Compare",
       "context_source": "original_reason_id != UnknownReasonId.UNKNOWN.value",
-      "line": 1316,
+      "line": 1332,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1382,7 +1407,7 @@
       "column": 18,
       "context_node_kind": "Call",
       "context_source": "UnknownRecoveryAction(\n        count_kind=UnknownCountKind.PROOF_ACTION.value,\n        reason_id=UnknownReasonId.UNKNOWN.value,\n        decision_effect=UnknownDecisionEffect.DIAGNOSTIC_ONLY.value,\n        reason_scope=UnknownReasonScope.GLOBAL.value,\n        proof_kind=UnknownRecoveryProofKind.NONE.value,\n        proof_stage=\"unspecified\",\n        status=UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,\n        aggregation_unit=UnknownAggregationUnit.RESULT.value,\n        detail=str(value),\n    )",
-      "line": 1547,
+      "line": 1563,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/unknown_reason.py",
       "proposed_finite_reason_set": [
@@ -1403,11 +1428,11 @@
     },
     {
       "ast_node_kind": "Phase0DataFlowSite",
-      "candidate_id": "64fc5c22ec946068a6818f9a3f770371f5c86124f3ef1cb1271f35b0f915bb39",
+      "candidate_id": "5284cce54fac77ef645315bcb95ce2c9663c5a975f07e1f730a6e5e51ec3fe7e",
       "column": 0,
       "context_node_kind": "reason_selection_assignment",
       "context_source": "reason_id = _LOOP_FALLBACK_REASONS.get(source_code)",
-      "line": 328,
+      "line": 329,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py",
       "phase0_resolution_basis": {
@@ -1416,7 +1441,7 @@
           "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py:classify_loop_fallback"
         ]
       },
-      "phase0_site_id": "279e3f412ec53ff4180b4263381a4f2059ce191a391d7ad3bfad6d5d4367dcda",
+      "phase0_site_id": "39f1537c30d1f60c4c791b7386fbbe98c44ec9b0ad7b17108c506ff240479969",
       "proposed_finite_reason_set": [
         "unknown"
       ],
@@ -1433,11 +1458,11 @@
     },
     {
       "ast_node_kind": "Phase0DataFlowSite",
-      "candidate_id": "5068ade58903cfefdb4d3aa260efa940d91ea10c22972e70213f24212e07badc",
+      "candidate_id": "4e0fe4583806b7c08af63b1061ea12ae7aa6e5787dc9b1ed0e6b5876559bb552",
       "column": 0,
       "context_node_kind": "reason_selection_assignment",
       "context_source": "reason_id = _SUMMARY_BLOCKER_REASONS.get(source_code)",
-      "line": 360,
+      "line": 361,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py",
       "phase0_resolution_basis": {
@@ -1446,7 +1471,7 @@
           "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py:classify_summary_blocker"
         ]
       },
-      "phase0_site_id": "3af8c4e5565824a08b26a8bd48ec1ba97f6038d773cbf23cc3544cbcc030cb64",
+      "phase0_site_id": "2709f767d373bfbb9e77e5f65ea487559d192314d02a198066785db6d0e62a03",
       "proposed_finite_reason_set": [
         "unknown"
       ],
@@ -3189,11 +3214,36 @@
     },
     {
       "ast_node_kind": "Constant",
+      "candidate_id": "afd92e48680a76f4ae61e1db61d2195d1ca9efe1a4d9018297b3ced981d91a4b",
+      "column": 4,
+      "context_node_kind": "Set",
+      "context_source": "{\n    \"sat_unsafety\",\n    \"counterexample_analysis_safety_unproven\",\n}",
+      "line": 59,
+      "occurrence_ordinal": 0,
+      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
+      "proposed_finite_reason_set": [
+        "sat_unsafety"
+      ],
+      "reason_id": "sat_unsafety",
+      "reference_kind": "exact_string_constant",
+      "review_status": "reviewed",
+      "reviewed_finite_reason_set": [
+        "sat_unsafety"
+      ],
+      "reviewed_in_scope": true,
+      "reviewed_relation": "D_legacy",
+      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
+      "source_fingerprint": "b4b585f8637b579d56154da2f38297b42d1eb301222e99868b1926f757fa3f0c",
+      "suggested_relation": "D_legacy",
+      "symbol": "<module>"
+    },
+    {
+      "ast_node_kind": "Constant",
       "candidate_id": "9957c3498cd48cb63a29cf8e063c037b8037e6ee554e0abdc5dd94482b38a0fa",
       "column": 4,
       "context_node_kind": "Tuple",
       "context_source": "(\n    UnknownCountKind.REASON_RECORD.value,\n    \"sat_unsafety\",\n    \"blocks_disequivalence\",\n    \"pair\",\n    SAT_PROOF_KIND,\n    SAT_PROOF_STAGE,\n    \"pending_proof\",\n)",
-      "line": 69,
+      "line": 73,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3218,7 +3268,7 @@
       "column": 4,
       "context_node_kind": "Tuple",
       "context_source": "(\n    UnknownCountKind.PROOF_ACTION.value,\n    \"sat_unsafety\",\n    \"blocks_disequivalence\",\n    \"pair\",\n    SAT_PROOF_KIND,\n    SAT_PROOF_STAGE,\n    \"pending_proof\",\n)",
-      "line": 78,
+      "line": 82,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3243,7 +3293,7 @@
       "column": 39,
       "context_node_kind": "Dict",
       "context_source": "{\n        \"id\": movement_id,\n        \"count_kind\": UnknownCountKind.REASON_RECORD.value,\n        \"tuple\": list(SAT_REASON_TUPLE),\n        \"aggregation_unit\": \"pair\",\n        \"stage\": \"S_PAIRWISE\",\n        \"pair_or_case\": MISSING_SENTINEL,\n        \"expected_evidence_refs\": [\"active_sat_unsafety\"],\n        \"required_object_target_kind\": \"sat_unsafety\",\n        \"require_proof_obligation_id\": True,\n    }",
-      "line": 111,
+      "line": 115,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3268,7 +3318,7 @@
       "column": 39,
       "context_node_kind": "Dict",
       "context_source": "{\n        \"id\": movement_id,\n        \"count_kind\": UnknownCountKind.PROOF_ACTION.value,\n        \"tuple\": list(SAT_ACTION_TUPLE),\n        \"aggregation_unit\": \"pair\",\n        \"stage\": \"S_PAIRWISE\",\n        \"pair_or_case\": MISSING_SENTINEL,\n        \"expected_evidence_refs\": [SAT_EVIDENCE_KIND],\n        \"required_evidence\": list(SAT_REQUIRED_EVIDENCE),\n        \"required_object_target_kind\": \"sat_unsafety\",\n        \"require_proof_obligation_id\": True,\n    }",
-      "line": 126,
+      "line": 130,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3293,7 +3343,7 @@
       "column": 32,
       "context_node_kind": "List",
       "context_source": "[\"sat_unsafety\"]",
-      "line": 139,
+      "line": 143,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3318,7 +3368,7 @@
       "column": 28,
       "context_node_kind": "Dict",
       "context_source": "{\n        \"lane_id\": \"phase3_sat_unsafety_lane5\",\n        \"target_reason_id\": \"sat_unsafety\",\n        \"baseline_mode\": \"pending_proof_or_completed_not_eq_against_pre_fix_manifest\",\n        \"expected_movement_entries\": _canonical_movements(\n            movement\n            for entry in entries\n            for movement in (entry.get(\"expected_movements\") or ())\n        ),\n        \"expected_sat_unsafety_targets\": _canonical_targets(\n            [\n                target\n                for entry in entries\n                for target in (entry.get(\"target_object_keys\") or ())\n            ]\n        ),\n        \"required_completion_actions\": _canonical_actions(\n            action\n            for entry in entries\n            for action in (entry.get(\"required_completion_actions\") or ())\n        ),\n    }",
-      "line": 715,
+      "line": 719,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3339,11 +3389,11 @@
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "8d54eea73db0605b8d79b8807e9f9d7a80310f12c58f08cf4433678024a2276e",
-      "column": 73,
-      "context_node_kind": "Compare",
-      "context_source": "record.get(\"reason_id\") != \"sat_unsafety\"",
-      "line": 743,
+      "candidate_id": "e236896fe17582193ded973aa761cff2d8912adda1d1b4cfe17284cdec29e748",
+      "column": 29,
+      "context_node_kind": "Set",
+      "context_source": "{\"sat_unsafety\", \"counterexample_safety_gate\"}",
+      "line": 1079,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
       "proposed_finite_reason_set": [
@@ -3358,107 +3408,7 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "1edc28e659e13a7dc2cfbd5af528c50bffc785e36791b9f59bdfdbdaeafbb766",
-      "suggested_relation": "D_legacy",
-      "symbol": "_current_targets"
-    },
-    {
-      "ast_node_kind": "Constant",
-      "candidate_id": "d0ca45b549da14a736158d2d1551571bcec3ceb3d8a471c05ad38668286e59e2",
-      "column": 38,
-      "context_node_kind": "Compare",
-      "context_source": "action.get(\"reason_id\") != \"sat_unsafety\"",
-      "line": 759,
-      "occurrence_ordinal": 0,
-      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
-      "proposed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reason_id": "sat_unsafety",
-      "reference_kind": "exact_string_constant",
-      "review_status": "reviewed",
-      "reviewed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reviewed_in_scope": true,
-      "reviewed_relation": "D_legacy",
-      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "da23c759d1b1d4b0027f9adb57b9de4ba8f1fd0719adcb67cac3757f43e18175",
-      "suggested_relation": "D_legacy",
-      "symbol": "_current_sat_actions"
-    },
-    {
-      "ast_node_kind": "Constant",
-      "candidate_id": "89d6bfceb5400e51df556b79a3b6a8fef5ee37fa3c1031dfb40f4b6d750dcf72",
-      "column": 8,
-      "context_node_kind": "Call",
-      "context_source": "build_proof_obligation_id(\n        \"sat_unsafety\",\n        action.get(\"proof_stage\"),\n        action.get(\"proof_kind\"),\n        action.get(\"evidence_kind\"),\n        object_target_key,\n    )",
-      "line": 1043,
-      "occurrence_ordinal": 0,
-      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
-      "proposed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reason_id": "sat_unsafety",
-      "reference_kind": "exact_string_constant",
-      "review_status": "reviewed",
-      "reviewed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reviewed_in_scope": true,
-      "reviewed_relation": "D_legacy",
-      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "546f7e75c19bb047875dbef9891f24061d98d0695a51462cd457e700b4817573",
-      "suggested_relation": "D_legacy",
-      "symbol": "_expected_proof_obligation_id"
-    },
-    {
-      "ast_node_kind": "Constant",
-      "candidate_id": "338903e69e2b23129e0b1e09f60820b40a7981f0d3e001aafbf1f15a8a3fd251",
-      "column": 39,
-      "context_node_kind": "Compare",
-      "context_source": "action.get(\"reason_id\") == \"sat_unsafety\"",
-      "line": 1054,
-      "occurrence_ordinal": 0,
-      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
-      "proposed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reason_id": "sat_unsafety",
-      "reference_kind": "exact_string_constant",
-      "review_status": "reviewed",
-      "reviewed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reviewed_in_scope": true,
-      "reviewed_relation": "D_legacy",
-      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "b1a420ddf80b1ac8763bab39211e96d55ff776b97ca39b1de8246ef427b689d0",
-      "suggested_relation": "D_legacy",
-      "symbol": "_proof_action_matches_lane_definition"
-    },
-    {
-      "ast_node_kind": "Constant",
-      "candidate_id": "525feb985f6e4c5e5c0da767f1bc4329241e3af64d5597c9a3848565d0809315",
-      "column": 73,
-      "context_node_kind": "Compare",
-      "context_source": "target[0] != \"sat_unsafety\"",
-      "line": 1069,
-      "occurrence_ordinal": 0,
-      "path": "scripts/function_tracer_pcode/validation/phase3_sat_unsafety_lane5.py",
-      "proposed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reason_id": "sat_unsafety",
-      "reference_kind": "exact_string_constant",
-      "review_status": "reviewed",
-      "reviewed_finite_reason_set": [
-        "sat_unsafety"
-      ],
-      "reviewed_in_scope": true,
-      "reviewed_relation": "D_legacy",
-      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "bb2975a31f69e4ea2783043592445ec35b64cd67169002a7f91951a4459d446e",
+      "source_fingerprint": "9a740a3f04b648531f445a9eb1e190d4488b1110707019bcb168e5b8d7aba40a",
       "suggested_relation": "D_legacy",
       "symbol": "_object_target_key_is_specific_sat_unsafety"
     },
@@ -3564,11 +3514,11 @@
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "57606f0421740555f0127effb180f78d782b02abf2fed9d796a58bbcd8b60441",
-      "column": 38,
-      "context_node_kind": "Compare",
-      "context_source": "record.get(\"reason_id\") != \"sat_unsafety\"",
-      "line": 842,
+      "candidate_id": "0ad5ab6451fdb71a6fb55924c36e7934115a749715f9ae2b48dae71333e24665",
+      "column": 12,
+      "context_node_kind": "Set",
+      "context_source": "{\n            \"sat_unsafety\",\n            \"counterexample_analysis_safety_unproven\",\n        }",
+      "line": 843,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
       "proposed_finite_reason_set": [
@@ -3583,17 +3533,17 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "a46973e9d0564f46e2a3122c9ea03c81fe19bbda18c94c0740a2deaa4cdc113f",
+      "source_fingerprint": "832b692c04c8dc36d796aa11053239fa981e5fa0444ace92c4a110949e4ec5e5",
       "suggested_relation": "D_legacy",
       "symbol": "_current_accepted_reclassification_targets"
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "fb5911580321b5652f5f85cc008bb57819d8de966c30cd5a50bd150b3d9a546a",
-      "column": 38,
-      "context_node_kind": "Compare",
-      "context_source": "action.get(\"reason_id\") != \"sat_unsafety\"",
-      "line": 866,
+      "candidate_id": "a6fb8531740b9b43c118645e9a679050b5a0d10d82884486af97a186191d5cfd",
+      "column": 12,
+      "context_node_kind": "Set",
+      "context_source": "{\n            \"sat_unsafety\",\n            \"counterexample_analysis_safety_unproven\",\n        }",
+      "line": 870,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
       "proposed_finite_reason_set": [
@@ -3608,17 +3558,17 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "a415195ea1219c95f73eb605f65f320d3763071366a86406a70f602e6db766bd",
+      "source_fingerprint": "3894d48621cad290a887da079d3446df58c389c60027e6a06a44eee66b0dc53e",
       "suggested_relation": "D_legacy",
       "symbol": "_current_accepted_reclassification_actions"
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "220ccab885539e4de4bd069a850aa65fcbb429f9e3aa8a5841dea13c5fba251a",
-      "column": 7,
-      "context_node_kind": "Compare",
-      "context_source": "\"sat_unsafety\" not in current_reasons",
-      "line": 928,
+      "candidate_id": "24de4cd4f758c726eb25c1d712cf9a4f91726547a2f0499b3dbffea3167d4f87",
+      "column": 8,
+      "context_node_kind": "Set",
+      "context_source": "{\n        \"sat_unsafety\",\n        \"counterexample_analysis_safety_unproven\",\n    }",
+      "line": 935,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
       "proposed_finite_reason_set": [
@@ -3633,7 +3583,7 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "627c50e783b8eaf58d3960398e4f776d3f1f6ec573cf43a85d64ca3dc806f062",
+      "source_fingerprint": "60ac9ed950da2086e0d3334c30ad2e2c8fe09c0344db4e2ad22a80a0716bcad8",
       "suggested_relation": "D_legacy",
       "symbol": "_accepted_current_reclassification_failures"
     },
@@ -3643,7 +3593,7 @@
       "column": 25,
       "context_node_kind": "Call",
       "context_source": "_failed(\n                \"solver_rewrite_proof_accepted_reclassification_current_reason\",\n                expected=\"sat_unsafety\",\n                actual=sorted(current_reasons),\n                **details,\n            )",
-      "line": 932,
+      "line": 941,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
       "proposed_finite_reason_set": [
@@ -3661,6 +3611,31 @@
       "source_fingerprint": "aec70b063ab01c59240f2af9940e1c27ba33509bb279e31f3e5f7c7368696a5a",
       "suggested_relation": "D_legacy",
       "symbol": "_accepted_current_reclassification_failures"
+    },
+    {
+      "ast_node_kind": "Constant",
+      "candidate_id": "7fc408e11002570ae03569e151e2836b8b2ba1964502989d92c1a7e90ed56303",
+      "column": 37,
+      "context_node_kind": "Compare",
+      "context_source": "expected_tuple[1] == \"sat_unsafety\"",
+      "line": 1075,
+      "occurrence_ordinal": 0,
+      "path": "scripts/function_tracer_pcode/validation/phase3_solver_rewrite_proof_lane8.py",
+      "proposed_finite_reason_set": [
+        "sat_unsafety"
+      ],
+      "reason_id": "sat_unsafety",
+      "reference_kind": "exact_string_constant",
+      "review_status": "reviewed",
+      "reviewed_finite_reason_set": [
+        "sat_unsafety"
+      ],
+      "reviewed_in_scope": true,
+      "reviewed_relation": "D_legacy",
+      "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
+      "source_fingerprint": "ed62c20a08ae7fa61516206f89bfa298e43b8a0fefcd4783fad03898f49d5168",
+      "suggested_relation": "D_legacy",
+      "symbol": "_accepted_reclassification_tuple_present"
     },
     {
       "ast_node_kind": "Constant",
@@ -4497,11 +4472,11 @@
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "84e05f827209fb3925e0b0acd2f9765f2eeddef59dcf578d64d8be139a3f254c",
-      "column": 73,
-      "context_node_kind": "Compare",
-      "context_source": "record.get(\"reason_id\") != \"unresolved_expression\"",
-      "line": 2807,
+      "candidate_id": "60ee48b3d4de83c7b15384b76688202d6b67275a4b6199a393389bb9ca63eaa1",
+      "column": 16,
+      "context_node_kind": "Set",
+      "context_source": "{\n                \"unresolved_expression\",\n                \"expression_translation_incomplete\",\n            }",
+      "line": 2810,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
       "proposed_finite_reason_set": [
@@ -4516,17 +4491,17 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "1be2314859bc51907cc814aafd49670fc0930ab1089026bd9c0306ca93ba3a18",
+      "source_fingerprint": "d3c2d43cb7d2450ee40494d3664fc80bb9e6a1d4c7a6ed01cf5d983c3b5f7549",
       "suggested_relation": "D_legacy",
       "symbol": "_current_targets"
     },
     {
       "ast_node_kind": "Constant",
-      "candidate_id": "00a397efdd55b4909c778969878e4df271643fa2bbe8188a42797e05e5f4202d",
-      "column": 82,
-      "context_node_kind": "Compare",
-      "context_source": "target[0] != \"unresolved_expression\"",
-      "line": 2825,
+      "candidate_id": "e9f62d2c340fa411a131ccd226d51a283e9b5c69216e1b64b16f7327e45365cd",
+      "column": 12,
+      "context_node_kind": "Set",
+      "context_source": "{\n            \"unresolved_expression\",\n            \"expression_translation_incomplete\",\n        }",
+      "line": 2835,
       "occurrence_ordinal": 0,
       "path": "scripts/function_tracer_pcode/validation/phase3_unresolved_expression_lane6.py",
       "proposed_finite_reason_set": [
@@ -4541,7 +4516,7 @@
       "reviewed_in_scope": true,
       "reviewed_relation": "D_legacy",
       "reviewer_disposition": "main-agent AST authority-role review; fixed read-only review required",
-      "source_fingerprint": "ba8b6add318c4fbb8c24af7b892f7cba9cee64dd0d6766183e313fd8d15065f8",
+      "source_fingerprint": "c97606fdb91e4ea47e1164fdea239948b09a8ac5b4a331031b9cef734da2532e",
       "suggested_relation": "D_legacy",
       "symbol": "_object_target_key_is_specific_unresolved_expression"
     },

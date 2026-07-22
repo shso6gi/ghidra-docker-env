@@ -15,6 +15,8 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from .contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
+    CauseTransformationEvent,
+    CauseTransformationProofReceipt,
     IdentityScope,
     ProofRequirement,
     ReasonDefinition,
@@ -22,6 +24,7 @@ from .contracts import (
     RequirementCompletionReceipt,
     RequirementSlotDefinition,
     SatisfactionContractDefinition,
+    TransformationKind,
     authority_digest,
     canonical_value,
     requirement_slot,
@@ -35,6 +38,7 @@ from .registry import (
 )
 from .stream import (
     CauseObservedEventAuthority,
+    CauseTransformedEventAuthority,
     EventIntent,
     EventType,
     GenericReceiptBoundSolverExecutionEventAuthority,
@@ -2069,6 +2073,52 @@ class ReturnAbiRelationArtifact(_AbiWidthReadonlyCompletionArtifact):
     ENCODING_VERSION = "return-abi-relation-encoding-v2"
 
     @classmethod
+    def from_assessment(
+        cls,
+        blocker,
+        seed,
+        assessment,
+        left_abi_seed,
+        right_abi_seed,
+        *,
+        source_snapshot_fingerprint,
+    ):
+        if (
+            type(seed) is not ReturnObservationProjectionSeed
+            or type(assessment) is not ReturnAbiCompatibilityAssessment
+            or type(left_abi_seed) is not FunctionReturnAbiSeed
+            or type(right_abi_seed) is not FunctionReturnAbiSeed
+            or assessment.status is not ReturnAbiRelationStatus.PROVED
+            or assessment.projection_seed_digest != seed.seed_digest
+            or assessment.left_abi_seed_digest != left_abi_seed.seed_digest
+            or assessment.right_abi_seed_digest != right_abi_seed.seed_digest
+            or not left_abi_seed.complete
+            or not right_abi_seed.complete
+        ):
+            raise ValueError("ABI relation assessment authority is incomplete")
+        expected = ReturnAbiCompatibilityAssessment.assess(
+            seed, left_abi_seed, right_abi_seed
+        )
+        if expected != assessment:
+            raise ValueError("ABI relation assessment does not replay")
+        return _artifact_values(
+            cls,
+            blocker,
+            source_seed_digest=seed.seed_digest,
+            source_snapshot_digest=source_snapshot_fingerprint,
+            prepared_snapshot_digest=seed.prepared_snapshot_digest,
+            proof_body=(
+                "return_abi_relation_assessment_v1",
+                assessment.assessment_digest,
+                assessment.predicate_body,
+                left_abi_seed.slot_facts,
+                right_abi_seed.slot_facts,
+            ),
+            applicability_body=("active_guard", seed.guard_contract),
+            dependency_artifact_digests=(),
+        )
+
+    @classmethod
     def from_projection_seed(cls, blocker, seed, *, left_abi_artifact,
                              right_abi_artifact, source_snapshot_fingerprint,
                              calling_conventions_individually_valid,
@@ -2937,8 +2987,14 @@ class AbiWidthReadonlyPilotEncoder:
             receipt for receipt in batch.execution_receipts
             if receipt.receipt_digest not in seen
         )
-        for receipt in fresh:
-            seen.add(receipt.receipt_digest)
+        commit_payload = {
+            "fresh_receipt_digests": tuple(
+                receipt.receipt_digest for receipt in fresh
+            ),
+            "decisive_conflict": None,
+            "model_artifacts": [],
+            "sat_transformations": [],
+        }
         sat_receipts = tuple(
             receipt for receipt in fresh if receipt.observed_status == "sat"
         )
@@ -2947,9 +3003,7 @@ class AbiWidthReadonlyPilotEncoder:
         )
         decisive_conflict = bool(sat_receipts and unsat_receipts)
         if decisive_conflict:
-            session.domain_signal_state.setdefault(
-                "abi_width_solver_decisive_conflicts", []
-            ).append({
+            commit_payload["decisive_conflict"] = {
                 "query_authority_digest": batch.query_authority.authority_digest,
                 "sat_receipt_digests": tuple(sorted(
                     item.receipt_digest for item in sat_receipts
@@ -2957,7 +3011,7 @@ class AbiWidthReadonlyPilotEncoder:
                 "unsat_receipt_digests": tuple(sorted(
                     item.receipt_digest for item in unsat_receipts
                 )),
-            })
+            }
         selected_decisive_digest = None
         if not decisive_conflict:
             decisive = unsat_receipts or sat_receipts
@@ -3031,12 +3085,8 @@ class AbiWidthReadonlyPilotEncoder:
                     ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY,
                     batch.membership,
                 )
-                session.domain_signal_state.setdefault(
-                    "abi_width_model_bound_refutation_artifacts", []
-                ).append(artifact)
-                session.domain_signal_state.setdefault(
-                    "abi_width_sat_safety_handoffs", []
-                ).append(SatSafetyBlockerProductionSignal(
+                commit_payload["model_artifacts"].append(artifact)
+                handoff = SatSafetyBlockerProductionSignal(
                     "OBSERVED",
                     "counterexample_analysis_safety_unproven",
                     (
@@ -3055,7 +3105,68 @@ class AbiWidthReadonlyPilotEncoder:
                         replay.replay_receipt_digest,
                     ),
                     "abi-width-model-bound-refutation-handoff-v1",
-                ))
+                )
+                prepare = getattr(
+                    session.domain_signal_encoder,
+                    "prepare_sat_safety_transformation",
+                    None,
+                )
+                commit = getattr(
+                    session.domain_signal_encoder,
+                    "commit_sat_safety_transformed_observation",
+                    None,
+                )
+                if not callable(prepare) or not callable(commit):
+                    raise ValueError(
+                        "ABI/width SAT lacks atomic counterexample-safety route"
+                    )
+                replacement_authority = prepare(session, handoff)
+                if type(replacement_authority) is not CauseOccurrenceAuthority:
+                    raise TypeError("SAT safety replacement authority is not exact")
+                old_occurrence = authority.occurrence
+                new_occurrence = replacement_authority.occurrence
+                transformation_receipt_id = authority_digest({
+                    "transformation_kind": "high_bit_sat_to_counterexample_safety_v1",
+                    "result_occurrence_id": session.identity.result_occurrence_id,
+                    "old_occurrence_id": old_occurrence.occurrence_id,
+                    "old_requirement_id": requirement.requirement_id,
+                    "new_occurrence_id": new_occurrence.occurrence_id,
+                    "new_requirement_ids": new_occurrence.proof_requirement_ids,
+                    "query_authority_digest": batch.query_authority.authority_digest,
+                    "execution_receipt_digest": receipt.receipt_digest,
+                    "model_refutation_artifact_digest": artifact.artifact_digest,
+                    "replay_receipt_digest": replay.replay_receipt_digest,
+                })
+                transformation = CauseTransformationEvent(
+                    TransformationKind.REPLACEMENT,
+                    (old_occurrence.occurrence_id,),
+                    (new_occurrence.occurrence_id,),
+                    transformation_receipt_id,
+                    "abi-width-high-bit-sat-safety-v1",
+                    session.identity.source_snapshot_fingerprint,
+                )
+                proof = CauseTransformationProofReceipt(
+                    transformation_receipt_id,
+                    ((old_occurrence.occurrence_id, old_occurrence.cause_id.value),),
+                    ((new_occurrence.occurrence_id, new_occurrence.cause_id.value),),
+                    (),
+                    session.identity.source_snapshot_fingerprint,
+                    False,
+                )
+                transformed_intents = (
+                    EventIntent(
+                        EventType.CAUSE_OBSERVED,
+                        CauseObservedEventAuthority(replacement_authority),
+                    ),
+                    EventIntent(
+                        EventType.CAUSE_TRANSFORMED,
+                        CauseTransformedEventAuthority(transformation, proof),
+                    ),
+                )
+                commit_payload["sat_transformations"].append(
+                    (transformation, proof, artifact, handoff)
+                )
+                observations.extend(transformed_intents)
                 continue
             if receipt.observed_status != "unsat":
                 raise ValueError("ABI/width solver status is not sealed")
@@ -3090,7 +3201,89 @@ class AbiWidthReadonlyPilotEncoder:
                 completions.append(self.complete_readonly_object_correspondence(
                     session, batch.blocker, artifact
                 ))
-        return tuple((*observations, *completions))
+        intents = tuple((*observations, *completions))
+        pending = session.domain_signal_state.setdefault(
+            "abi_width_pending_emission_transactions", {}
+        )
+        if id(batch) in pending:
+            raise ValueError("ABI/width signal already owns an emission transaction")
+        pending[id(batch)] = (intents, commit_payload)
+        return intents
+
+    def commit_emitted_signal(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
+    ) -> None:
+        if type(signal) is not AbiWidthReadonlySolverExecutionBatchSignal:
+            return
+        pending = session.domain_signal_state.setdefault(
+            "abi_width_pending_emission_transactions", {}
+        )
+        try:
+            expected_intents, payload = pending[id(signal)]
+        except KeyError as exc:
+            raise ValueError("ABI/width emission transaction is missing") from exc
+        if tuple(intents) != expected_intents:
+            raise ValueError("ABI/width emission transaction intents changed")
+        state = session.domain_signal_state
+        mutated_keys = (
+            "abi_width_solver_execution_receipts",
+            "abi_width_solver_decisive_conflicts",
+            "abi_width_model_bound_refutation_artifacts",
+            "sat_safety_observed",
+            "abi_width_high_bit_sat_transformations",
+        )
+        snapshots = {}
+        for key in mutated_keys:
+            if key not in state:
+                snapshots[key] = (False, None)
+            elif type(state[key]) is set:
+                snapshots[key] = (True, set(state[key]))
+            elif type(state[key]) is list:
+                snapshots[key] = (True, list(state[key]))
+            else:
+                raise TypeError(
+                    f"ABI/width transaction ledger has invalid type: {key}"
+                )
+        try:
+            state.setdefault(
+                "abi_width_solver_execution_receipts", set()
+            ).update(payload["fresh_receipt_digests"])
+            conflict = payload["decisive_conflict"]
+            if conflict is not None:
+                state.setdefault(
+                    "abi_width_solver_decisive_conflicts", []
+                ).append(conflict)
+            if payload["model_artifacts"]:
+                state.setdefault(
+                    "abi_width_model_bound_refutation_artifacts", []
+                ).extend(payload["model_artifacts"])
+            commit = getattr(
+                session.domain_signal_encoder,
+                "commit_sat_safety_transformed_observation", None,
+            )
+            if payload["sat_transformations"] and not callable(commit):
+                raise ValueError("ABI/width SAT safety commit route disappeared")
+            for transformation, proof, artifact, handoff in payload[
+                "sat_transformations"
+            ]:
+                commit(session, handoff)
+                state.setdefault(
+                    "abi_width_high_bit_sat_transformations", []
+                ).append((transformation, proof, artifact, handoff))
+        except Exception:
+            for key, (existed, snapshot) in snapshots.items():
+                if existed:
+                    state[key] = snapshot
+                else:
+                    state.pop(key, None)
+            raise
+        pending.pop(id(signal))
+
+    def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
+            session.domain_signal_state.setdefault(
+                "abi_width_pending_emission_transactions", {}
+            ).pop(id(signal), None)
 
     def _completion_intent(
         self,
@@ -3110,7 +3303,11 @@ class AbiWidthReadonlyPilotEncoder:
         if artifact.registry_digest != ABI_WIDTH_READONLY_PRODUCER_STAGE_REGISTRY_DIGEST:
             raise ValueError("completion artifact uses another sealed registry")
         if int(getattr(session.recorder, "event_count", 0)) == 0:
-            raise ValueError("completion artifact does not bind one live C_active row")
+            raise ValueError(
+                "completion artifact does not bind one live C_active row: "
+                f"reason={blocker.reason_id}, occurrence={occurrence.occurrence_id}, "
+                "event_count=0"
+            )
         projection = session.preview_lifecycle_projection()
         active_rows = tuple(row for row in projection.c_active_base if (
             row.occurrence_id == occurrence.occurrence_id
@@ -3118,7 +3315,11 @@ class AbiWidthReadonlyPilotEncoder:
             and row.reason_id == blocker.reason_id
         ))
         if len(active_rows) != 1:
-            raise ValueError("completion artifact does not bind one live C_active row")
+            raise ValueError(
+                "completion artifact does not bind one live C_active row: "
+                f"reason={blocker.reason_id}, occurrence={occurrence.occurrence_id}, "
+                f"matching_rows={len(active_rows)}"
+            )
         if authority.bound_contract is None or len(authority.bound_contract.slot_bindings) != 1:
             raise ValueError("completion authority does not own one atomic Q")
         requirement = authority.bound_contract.slot_bindings[0][1]
@@ -3227,6 +3428,95 @@ class AbiWidthReadonlyPilotEncoder:
         session.domain_signal_state.setdefault(
             "abi_width_pending_solver_candidates", {}
         ).setdefault((blocker.reason_id, seed.seed_digest), (blocker, seed))
+
+    def register_return_observation_proof_plan(
+        self,
+        session: Any,
+        projection_seed: ReturnObservationProjectionSeed,
+        assessment: "ReturnAbiProductionAssessment",
+    ) -> None:
+        if (
+            type(projection_seed) is not ReturnObservationProjectionSeed
+            or type(assessment) is not ReturnAbiProductionAssessment
+            or assessment.relation_assessment is None
+            or assessment.relation_assessment.projection_seed_digest
+            != projection_seed.seed_digest
+        ):
+            raise TypeError("return-observation proof plan authority is invalid")
+        pending = session.domain_signal_state.setdefault(
+            "return_observation_proof_plans", {}
+        )
+        existing = pending.setdefault(
+            projection_seed.seed_digest, (projection_seed, assessment)
+        )
+        if existing != (projection_seed, assessment):
+            raise ValueError("return-observation proof plan drifted")
+
+    def _complete_registered_return_abi_relations(self, session: Any) -> None:
+        plans = session.domain_signal_state.get("return_observation_proof_plans", {})
+        completed = session.domain_signal_state.setdefault(
+            "return_observation_abi_relation_completed", set()
+        )
+        for seed_digest, (seed, assessment) in tuple(sorted(plans.items())):
+            if seed_digest in completed:
+                continue
+            relation = assessment.relation_assessment
+            if relation.status is not ReturnAbiRelationStatus.PROVED:
+                continue
+            blocker = AbiWidthReadonlyBlockerSignal.from_projection_seed(
+                "return_abi_relation_unproven", seed
+            )
+            artifact = ReturnAbiRelationArtifact.from_assessment(
+                blocker,
+                seed,
+                relation,
+                assessment.left_seed,
+                assessment.right_seed,
+                source_snapshot_fingerprint=(
+                    session.identity.source_snapshot_fingerprint
+                ),
+            )
+            session.emit(self.complete_return_abi_relation(
+                session, blocker, artifact
+            ))
+            completed.add(seed_digest)
+
+    def _complete_registered_observation_contracts(self, session: Any) -> None:
+        plans = session.domain_signal_state.get("return_observation_proof_plans", {})
+        candidates = tuple(session.domain_signal_state.get(
+            "abi_width_readonly_completion_candidates", ()
+        ))
+        completed = session.domain_signal_state.setdefault(
+            "return_observation_contract_completed", set()
+        )
+        for seed_digest, (seed, _assessment) in tuple(sorted(plans.items())):
+            if seed_digest in completed:
+                continue
+            high_bit_rows = tuple(
+                row for row in candidates
+                if type(row[1]) is ReturnHighBitRelationProofArtifact
+                and row[1].source_seed_digest == seed.seed_digest
+            )
+            if len(high_bit_rows) != 1:
+                continue
+            high_bit_artifact = high_bit_rows[0][1]
+            blocker = AbiWidthReadonlyBlockerSignal.from_projection_seed(
+                "return_observation_contract_unproven", seed
+            )
+            artifact = ReturnObservationContractArtifact.from_projection_seed(
+                blocker,
+                seed,
+                derivation=seed.derivation,
+                projection_policy="abi_extension",
+                source_snapshot_fingerprint=(
+                    session.identity.source_snapshot_fingerprint
+                ),
+                high_bit_dependency=high_bit_artifact,
+            )
+            session.emit(self.complete_return_observation_contract(
+                session, blocker, artifact
+            ))
+            completed.add(seed_digest)
 
     def finalize_derived_promotions(self, session: Any) -> None:
         pending = session.domain_signal_state.get(
@@ -3366,12 +3656,24 @@ class AbiWidthReadonlyPilotEncoder:
             session.domain_signal_state["abi_width_next_invocation_ordinal"] = (
                 max(receipt.invocation_ordinal for receipt in receipts) + 1
             )
-            session.emit_domain_signal(
-                AbiWidthReadonlySolverExecutionBatchSignal.from_issuer_results(
-                    blocker, query, seed, dependency_artifacts,
-                    membership, receipts, context.lifecycle_projection,
-                )
+            batch = AbiWidthReadonlySolverExecutionBatchSignal.from_issuer_results(
+                blocker, query, seed, dependency_artifacts,
+                membership, receipts, context.lifecycle_projection,
             )
+            # This is an issuer-derived execution receipt batch, not a fresh
+            # source producer activation.  Encode it at the owning domain
+            # boundary so Phase 7 does not require a fabricated source site,
+            # while preserving the same atomic producer-state transaction as
+            # ProductionDualWritePilotSession.emit_domain_signal().
+            intents = tuple(self._solver_batch_intents(session, batch))
+            try:
+                session.emit_many(
+                    intents,
+                    lambda: self.commit_emitted_signal(session, batch, intents),
+                )
+            except Exception:
+                self.rollback_emitted_signal(session, batch)
+                raise
             handoffs = tuple(session.domain_signal_state.pop(
                 "abi_width_sat_safety_handoffs", ()
             ))
@@ -3392,7 +3694,9 @@ class AbiWidthReadonlyPilotEncoder:
         from .execution_authority import PINNED_SOLVER_EXECUTION_ISSUER
 
         self.finalize_derived_promotions(session)
+        self._complete_registered_return_abi_relations(session)
         self._execute_pending_solver_queries(session)
+        self._complete_registered_observation_contracts(session)
         result_id = session.identity.result_occurrence_id
         if PINNED_SOLVER_EXECUTION_ISSUER.has_open_result_ledger(
             ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY, result_id
@@ -3540,17 +3844,23 @@ def assess_return_abi_pair(
     ]
     relation = None
     if left.complete and right.complete:
-        try:
-            projection = ReturnObservationProjectionSeed.from_pair_seed(
-                left_width_seed, right_width_seed, pair_width_seed
-            )
-        except ProjectionNotFormable:
+        if not left_width_seed.complete or not right_width_seed.complete:
             projection = None
+        else:
+            try:
+                projection = ReturnObservationProjectionSeed.from_pair_seed(
+                    left_width_seed, right_width_seed, pair_width_seed
+                )
+            except ProjectionNotFormable:
+                projection = None
         if projection is not None:
             relation = ReturnAbiCompatibilityAssessment.assess(
                 projection, left, right
             )
-            if relation.status is ReturnAbiRelationStatus.UNPROVEN:
+            if relation.status in {
+                ReturnAbiRelationStatus.PROVED,
+                ReturnAbiRelationStatus.UNPROVEN,
+            }:
                 signals.append(
                     AbiWidthReadonlyBlockerSignal.from_projection_seed(
                         "return_abi_relation_unproven", projection

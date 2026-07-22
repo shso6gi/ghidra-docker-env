@@ -557,15 +557,11 @@ def run_obligation_branch_plan(
                 )
             else:
                 from ..v2.production_signals import (
-                    emit_sat_safety_signal,
-                    issue_eq_closure_signal,
+                    issue_pending_eq_closure_authority,
                 )
 
-                emit_sat_safety_signal(
-                    issue_eq_closure_signal(
-                        active_production_pilot_session(), receipt, dispatch_frame,
-                    ),
-                    producer_site_manifest_id="obligation-stage-final-eq-closure",
+                issue_pending_eq_closure_authority(
+                    active_production_pilot_session(), receipt, dispatch_frame,
                 )
         last_result = result
         attempt_outcome, cutover_actions, continue_fallback = (

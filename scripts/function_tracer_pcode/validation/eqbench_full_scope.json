@@ -1,0 +1,880 @@
+{
+  "schema": "eqbench-full-scope-v1",
+  "authority_kind": "EqBenchFullScopeExpectation",
+  "expected_source_count": 147,
+  "expected_binary_ids": [
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B9",
+    "B10",
+    "B11",
+    "B12",
+    "B13",
+    "B14",
+    "B15",
+    "B16"
+  ],
+  "expected_pairs_per_function": 120,
+  "source_paths": [
+    "CLEVER/Add/Eq/newV.c",
+    "CLEVER/Comp/Eq/newV.c",
+    "CLEVER/Const/Eq/newV.c",
+    "CLEVER/LoopMult10/Eq/new.c",
+    "CLEVER/LoopMult15/Eq/new.c",
+    "CLEVER/LoopMult2/Eq/new.c",
+    "CLEVER/LoopMult20/Eq/new.c",
+    "CLEVER/LoopMult5/Eq/new.c",
+    "CLEVER/LoopSub/Eq/new.c",
+    "CLEVER/LoopUnreach10/Eq/new.c",
+    "CLEVER/LoopUnreach15/Eq/new.c",
+    "CLEVER/LoopUnreach2/Eq/new.c",
+    "CLEVER/LoopUnreach20/Eq/new.c",
+    "CLEVER/LoopUnreach5/Eq/new.c",
+    "CLEVER/Sub/Eq/new.c",
+    "CLEVER/UnchLoop/Eq/new.c",
+    "CLEVER/divide/Eq/newV.c",
+    "CLEVER/factorial/Eq/newV.c",
+    "CLEVER/fib/Eq/newV.c",
+    "CLEVER/getSign2/Eq/newV.c",
+    "CLEVER/is_prime1/Eq/newV.c",
+    "CLEVER/is_prime2/Eq/newV.c",
+    "CLEVER/is_prime3/Eq/newV.c",
+    "CLEVER/ltfive/Eq/newV.c",
+    "CLEVER/multiple/Eq/newV.c",
+    "CLEVER/odd/Eq/newV.c",
+    "CLEVER/oneBound/Eq/newV.c",
+    "CLEVER/oneN2/Eq/newV.c",
+    "CLEVER/pos/Eq/newV.c",
+    "REVE/ackermann/Eq/newV.c",
+    "REVE/addhorn/Eq/newV.c",
+    "REVE/average/Eq/newV.c",
+    "REVE/barthe/Eq/newV.c",
+    "REVE/barthe2/Eq/newV.c",
+    "REVE/barthe2big/Eq/new.c",
+    "REVE/barthe2big2/Eq/newV.c",
+    "REVE/bug15/Eq/newV.c",
+    "REVE/digits10/Eq/newV.c",
+    "REVE/inlining/Eq/newV.c",
+    "REVE/limit1/Eq/newV.c",
+    "REVE/limit2/Eq/newV.c",
+    "REVE/limit3/Eq/newV.c",
+    "REVE/loop/Eq/newV.c",
+    "REVE/loop2/Eq/newV.c",
+    "REVE/loop3/Eq/newV.c",
+    "REVE/loop5/Eq/newV.c",
+    "REVE/mccarthy91/Eq/newV.c",
+    "REVE/nestedwhile/Eq/newV.c",
+    "REVE/simpleloop/Eq/newV.c",
+    "REVE/triangular/Eq/newV.c",
+    "REVE/triangularMod/Eq/newV.c",
+    "REVE/whileif/Eq/newV.c",
+    "airy/MAX/Eq/newV.c",
+    "airy/Sign/Eq/newV.c",
+    "airy/airy/Eq/newV.c",
+    "airy/beschb/Eq/newV.c",
+    "airy/chebev_c1d/Eq/newV.c",
+    "airy/sphbes/Eq/newV.c",
+    "bess/SIGN/Eq/newV.c",
+    "bess/SQR/Eq/newV.c",
+    "bess/bess/Eq/newV.c",
+    "bess/bessi/Eq/newV.c",
+    "bess/bessi0/Eq/newV.c",
+    "bess/bessi1/Eq/newV.c",
+    "bess/bessj/Eq/newV.c",
+    "bess/bessj0/Eq/newV.c",
+    "bess/bessj1/Eq/newV.c",
+    "bess/bessk/Eq/newV.c",
+    "bess/bessk0/Eq/newV.c",
+    "bess/bessk1/Eq/newV.c",
+    "bess/bessy/Eq/newV.c",
+    "bess/bessy0/Eq/newV.c",
+    "bess/bessy1/Eq/newV.c",
+    "bess/dawson/Eq/newV.c",
+    "bess/probks/Eq/newV.c",
+    "bess/pythag/Eq/newV.c",
+    "caldat/badluk/Eq/newV.c",
+    "caldat/caldat/Eq/newV.c",
+    "caldat/caldatProgram/Eq/newV.c",
+    "caldat/flmoon/Eq/newV.c",
+    "caldat/julday/Eq/newV.c",
+    "dart/test/Eq/newV.c",
+    "ej_hash/ej_hash/Eq/newV.c",
+    "ej_hash/hashCode/Eq/newV.c",
+    "ej_hash/testCollision1/Eq/newV.c",
+    "ej_hash/testCollision2/Eq/newV.c",
+    "ej_hash/testCollision3/Eq/newV.c",
+    "ej_hash/testCollision4/Eq/newV.c",
+    "ell/brent/Eq/newV.c",
+    "ell/dbrent/Eq/newV.c",
+    "ell/ell/Eq/newV.c",
+    "ell/ellProgram/Eq/newV.c",
+    "ell/elle/Eq/newV.c",
+    "ell/ellpi/Eq/newV.c",
+    "ell/plgndr/Eq/newV.c",
+    "ell/rc/Eq/newV.c",
+    "ell/rd/Eq/newV.c",
+    "ell/rf/Eq/newV.c",
+    "ell/rj/Eq/newV.c",
+    "ell/sncndn/Eq/newV.c",
+    "ell/zbrent/Eq/newV.c",
+    "frenel/cisi/Eq/newV.c",
+    "frenel/frenel/Eq/newV.c",
+    "frenel/frenelProgram/Eq/newV.c",
+    "gam/betacf/Eq/newV.c",
+    "gam/betai/Eq/newV.c",
+    "gam/ei/Eq/newV.c",
+    "gam/erfcc/Eq/newV.c",
+    "gam/expint/Eq/newV.c",
+    "gam/factln/Eq/newV.c",
+    "gam/factrl/Eq/newV.c",
+    "gam/gam/Eq/newV.c",
+    "gam/gammp/Eq/newV.c",
+    "gam/gammq/Eq/newV.c",
+    "gam/gcf/Eq/newV.c",
+    "gam/gser/Eq/newV.c",
+    "optimization/optimization/Eq/newV.c",
+    "optimization/theta/Eq/newV.c",
+    "optimization/wood/Eq/newV.c",
+    "pow/test/Eq/newV.c",
+    "ran/bnldev/Eq/newV.c",
+    "ran/expdev/Eq/newV.c",
+    "ran/gamdev/Eq/newV.c",
+    "ran/gammln/Eq/newV.c",
+    "ran/gasdev/Eq/newV.c",
+    "ran/poidev/Eq/newV.c",
+    "ran/ran/Eq/newV.c",
+    "ran/ranone/Eq/newV.c",
+    "ran/ranthree/Eq/newV.c",
+    "ran/ranwo/Eq/newV.c",
+    "ran/ranzero/Eq/newV.c",
+    "raytrace/intersect/Eq/newV.c",
+    "raytrace/light/Eq/newV.c",
+    "raytrace/normalize/Eq/newV.c",
+    "raytrace/raytrace/Eq/newV.c",
+    "raytrace/sphere/Eq/newV.c",
+    "raytrace/surface/Eq/newV.c",
+    "sine/mysin/Eq/newV.c",
+    "statcalc/addValue/Eq/newV.c",
+    "tcas/NonCrossingBiasedClimb/Eq/newV.c",
+    "tcas/NonCrossingBiasedDescend/Eq/newV.c",
+    "tcas/altseptest/Eq/newV.c",
+    "tcas/tcas/Eq/newV.c",
+    "tsafe/conflict/Eq/newV.c",
+    "tsafe/normAngle/Eq/newV.c",
+    "tsafe/snippet/Eq/newV.c",
+    "tsafe/tsafe/Eq/newV.c"
+  ],
+  "expected_functions": {
+    "CLEVER/Add/Eq/newV.c": [
+      "foo"
+    ],
+    "CLEVER/Comp/Eq/newV.c": [
+      "foo"
+    ],
+    "CLEVER/Const/Eq/newV.c": [
+      "foo"
+    ],
+    "CLEVER/LoopMult10/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopMult15/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopMult2/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopMult20/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopMult5/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopSub/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopUnreach10/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopUnreach15/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopUnreach2/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopUnreach20/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/LoopUnreach5/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/Sub/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/UnchLoop/Eq/new.c": [
+      "foo"
+    ],
+    "CLEVER/divide/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/factorial/Eq/newV.c": [
+      "factorial",
+      "lib"
+    ],
+    "CLEVER/fib/Eq/newV.c": [
+      "fib",
+      "lib"
+    ],
+    "CLEVER/getSign2/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/is_prime1/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/is_prime2/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/is_prime3/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/ltfive/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/multiple/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/odd/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/oneBound/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/oneN2/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "CLEVER/pos/Eq/newV.c": [
+      "client",
+      "lib"
+    ],
+    "REVE/ackermann/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/addhorn/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/average/Eq/newV.c": [
+      "average"
+    ],
+    "REVE/barthe/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/barthe2/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/barthe2big/Eq/new.c": [
+      "f"
+    ],
+    "REVE/barthe2big2/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/bug15/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/digits10/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/inlining/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/limit1/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/limit2/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/limit3/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/loop/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/loop2/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/loop3/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/loop5/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/mccarthy91/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/nestedwhile/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/simpleloop/Eq/newV.c": [
+      "f"
+    ],
+    "REVE/triangular/Eq/newV.c": [
+      "g",
+      "triangle"
+    ],
+    "REVE/triangularMod/Eq/newV.c": [
+      "f",
+      "tr"
+    ],
+    "REVE/whileif/Eq/newV.c": [
+      "f"
+    ],
+    "airy/MAX/Eq/newV.c": [
+      "snippet"
+    ],
+    "airy/Sign/Eq/newV.c": [
+      "snippet"
+    ],
+    "airy/airy/Eq/newV.c": [
+      "MAX",
+      "SIGN",
+      "beschb",
+      "chebev_c1d",
+      "sphbes"
+    ],
+    "airy/beschb/Eq/newV.c": [
+      "MAX",
+      "SIGN",
+      "beschb",
+      "chebev_c1d",
+      "sphbes"
+    ],
+    "airy/chebev_c1d/Eq/newV.c": [
+      "MAX",
+      "SIGN",
+      "beschb",
+      "chebev_c1d",
+      "sphbes"
+    ],
+    "airy/sphbes/Eq/newV.c": [
+      "MAX",
+      "SIGN",
+      "beschb",
+      "chebev_c1d",
+      "sphbes"
+    ],
+    "bess/SIGN/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/SQR/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/bess/Eq/newV.c": [
+      "bessi",
+      "bessi0",
+      "bessi1",
+      "bessj",
+      "bessj0",
+      "bessj1",
+      "bessk",
+      "bessk0",
+      "bessk1"
+    ],
+    "bess/bessi/Eq/newV.c": [
+      "bessi0",
+      "snippet"
+    ],
+    "bess/bessi0/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/bessi1/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/bessj/Eq/newV.c": [
+      "bessj0",
+      "bessj1",
+      "snippet"
+    ],
+    "bess/bessj0/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/bessj1/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/bessk/Eq/newV.c": [
+      "bessi0",
+      "bessi1",
+      "bessk0",
+      "bessk1",
+      "snippet"
+    ],
+    "bess/bessk0/Eq/newV.c": [
+      "bessi0",
+      "snippet"
+    ],
+    "bess/bessk1/Eq/newV.c": [
+      "bessi1",
+      "snippet"
+    ],
+    "bess/bessy/Eq/newV.c": [
+      "bessj0",
+      "bessj1",
+      "bessy0",
+      "bessy1",
+      "snippet"
+    ],
+    "bess/bessy0/Eq/newV.c": [
+      "bessj0",
+      "snippet"
+    ],
+    "bess/bessy1/Eq/newV.c": [
+      "bessj1",
+      "snippet"
+    ],
+    "bess/dawson/Eq/newV.c": [
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "bess/probks/Eq/newV.c": [
+      "snippet"
+    ],
+    "bess/pythag/Eq/newV.c": [
+      "SQR",
+      "snippet"
+    ],
+    "caldat/badluk/Eq/newV.c": [
+      "julday",
+      "snippet"
+    ],
+    "caldat/caldat/Eq/newV.c": [
+      "caldat"
+    ],
+    "caldat/caldatProgram/Eq/newV.c": [
+      "badluk",
+      "caldat",
+      "flmoon",
+      "julday"
+    ],
+    "caldat/flmoon/Eq/newV.c": [
+      "flmoon"
+    ],
+    "caldat/julday/Eq/newV.c": [
+      "snippet"
+    ],
+    "dart/test/Eq/newV.c": [
+      "snippet"
+    ],
+    "ej_hash/ej_hash/Eq/newV.c": [
+      "checkCond",
+      "constructor",
+      "hashCode",
+      "testCollision1",
+      "testCollision2",
+      "testCollision3",
+      "testCollision4"
+    ],
+    "ej_hash/hashCode/Eq/newV.c": [
+      "constructor",
+      "hashCode"
+    ],
+    "ej_hash/testCollision1/Eq/newV.c": [
+      "constructor",
+      "hashCode",
+      "testCollision1"
+    ],
+    "ej_hash/testCollision2/Eq/newV.c": [
+      "checkCond",
+      "constructor",
+      "hashCode",
+      "testCollision2"
+    ],
+    "ej_hash/testCollision3/Eq/newV.c": [
+      "constructor",
+      "hashCode",
+      "testCollision3"
+    ],
+    "ej_hash/testCollision4/Eq/newV.c": [
+      "constructor",
+      "hashCode",
+      "testCollision4"
+    ],
+    "ell/brent/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "ell/dbrent/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "ell/ell/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "rd",
+      "rf",
+      "snippet"
+    ],
+    "ell/ellProgram/Eq/newV.c": [
+      "CheckCond",
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "ellpi",
+      "rc",
+      "rd",
+      "rf",
+      "rj",
+      "snippet"
+    ],
+    "ell/elle/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "elle",
+      "rd",
+      "rf"
+    ],
+    "ell/ellpi/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "rc",
+      "rf",
+      "rj",
+      "snippet"
+    ],
+    "ell/plgndr/Eq/newV.c": [
+      "snippet"
+    ],
+    "ell/rc/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "ell/rd/Eq/newV.c": [
+      "CheckCond",
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "ell/rf/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "ell/rj/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "rc",
+      "rd",
+      "rf",
+      "snippet"
+    ],
+    "ell/sncndn/Eq/newV.c": [
+      "snippet"
+    ],
+    "ell/zbrent/Eq/newV.c": [
+      "MAX",
+      "MIN",
+      "SIGN",
+      "SQR",
+      "snippet"
+    ],
+    "frenel/cisi/Eq/newV.c": [
+      "assign",
+      "assignObj",
+      "constructor",
+      "constructor2",
+      "divide",
+      "frenel",
+      "getimag",
+      "getreal",
+      "minus",
+      "multiply",
+      "plus",
+      "snippet"
+    ],
+    "frenel/frenel/Eq/newV.c": [
+      "assign",
+      "assignObj",
+      "cisi",
+      "constructor",
+      "constructor2",
+      "divide",
+      "getimag",
+      "getreal",
+      "minus",
+      "multiply",
+      "plus",
+      "snippet"
+    ],
+    "frenel/frenelProgram/Eq/newV.c": [
+      "assign",
+      "assignObj",
+      "cisi",
+      "constructor",
+      "constructor2",
+      "divide",
+      "getimag",
+      "getreal",
+      "minus",
+      "multiply",
+      "plus",
+      "snippet"
+    ],
+    "gam/betacf/Eq/newV.c": [
+      "snippet"
+    ],
+    "gam/betai/Eq/newV.c": [
+      "betacf",
+      "checkCond",
+      "gammln",
+      "snippet"
+    ],
+    "gam/ei/Eq/newV.c": [
+      "snippet"
+    ],
+    "gam/erfcc/Eq/newV.c": [
+      "snippet"
+    ],
+    "gam/expint/Eq/newV.c": [
+      "snippet"
+    ],
+    "gam/factln/Eq/newV.c": [
+      "factln",
+      "gammln"
+    ],
+    "gam/factrl/Eq/newV.c": [
+      "factrl",
+      "gammln"
+    ],
+    "gam/gam/Eq/newV.c": [
+      "betacf",
+      "betai",
+      "checkCond",
+      "gammln"
+    ],
+    "gam/gammp/Eq/newV.c": [
+      "gammln",
+      "gcf",
+      "gser",
+      "snippet"
+    ],
+    "gam/gammq/Eq/newV.c": [
+      "gammln",
+      "gcf",
+      "gser",
+      "snippet"
+    ],
+    "gam/gcf/Eq/newV.c": [
+      "gammln",
+      "gcf"
+    ],
+    "gam/gser/Eq/newV.c": [
+      "gammln",
+      "snippet"
+    ],
+    "optimization/optimization/Eq/newV.c": [
+      "theta",
+      "wood"
+    ],
+    "optimization/theta/Eq/newV.c": [
+      "theta"
+    ],
+    "optimization/wood/Eq/newV.c": [
+      "wood"
+    ],
+    "pow/test/Eq/newV.c": [
+      "snippet"
+    ],
+    "ran/bnldev/Eq/newV.c": [
+      "gammln",
+      "ran1",
+      "snippet"
+    ],
+    "ran/expdev/Eq/newV.c": [
+      "ran1",
+      "snippet"
+    ],
+    "ran/gamdev/Eq/newV.c": [
+      "ran1",
+      "snippet"
+    ],
+    "ran/gammln/Eq/newV.c": [
+      "snippet"
+    ],
+    "ran/gasdev/Eq/newV.c": [
+      "ran1",
+      "snippet"
+    ],
+    "ran/poidev/Eq/newV.c": [
+      "gammln",
+      "ran1",
+      "snippet"
+    ],
+    "ran/ran/Eq/newV.c": [
+      "gammln",
+      "poidev",
+      "ran1"
+    ],
+    "ran/ranone/Eq/newV.c": [
+      "snippet"
+    ],
+    "ran/ranthree/Eq/newV.c": [
+      "snippet"
+    ],
+    "ran/ranwo/Eq/newV.c": [
+      "snippet"
+    ],
+    "ran/ranzero/Eq/newV.c": [
+      "snippet"
+    ],
+    "raytrace/intersect/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "raytrace/light/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "raytrace/normalize/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "raytrace/raytrace/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "raytrace/sphere/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "raytrace/surface/Eq/newV.c": [
+      "LightConstructor",
+      "SphereConstructor",
+      "SurfaceConstructor",
+      "Vector3DConstructor",
+      "Vector3DConstructor2",
+      "intersect",
+      "normalize"
+    ],
+    "sine/mysin/Eq/newV.c": [
+      "doubleToRawLongBits",
+      "longBitsToDoubleC",
+      "snippet"
+    ],
+    "statcalc/addValue/Eq/newV.c": [
+      "addValue"
+    ],
+    "tcas/NonCrossingBiasedClimb/Eq/newV.c": [
+      "ALIM",
+      "Inhibit_Biased_Climb",
+      "Own_Above_Threat",
+      "Own_Below_Threat",
+      "checkCon",
+      "snippet"
+    ],
+    "tcas/NonCrossingBiasedDescend/Eq/newV.c": [
+      "ALIM",
+      "Inhibit_Biased_Climb",
+      "Own_Above_Threat",
+      "Own_Below_Threat",
+      "snippet"
+    ],
+    "tcas/altseptest/Eq/newV.c": [
+      "ALIM",
+      "Inhibit_Biased_Climb",
+      "Non_Crossing_Biased_Climb",
+      "Non_Crossing_Biased_Descend",
+      "Own_Above_Threat",
+      "Own_Below_Threat",
+      "checkCond1",
+      "checkCond2",
+      "snippet"
+    ],
+    "tcas/tcas/Eq/newV.c": [
+      "ALIM",
+      "Inhibit_Biased_Climb",
+      "Non_Crossing_Biased_Climb",
+      "Non_Crossing_Biased_Descend",
+      "Own_Above_Threat",
+      "Own_Below_Threat",
+      "altseptest",
+      "checkCon3",
+      "checkCond1",
+      "checkCond2"
+    ],
+    "tsafe/conflict/Eq/newV.c": [
+      "snippet"
+    ],
+    "tsafe/normAngle/Eq/newV.c": [
+      "snippet"
+    ],
+    "tsafe/snippet/Eq/newV.c": [
+      "normAngle",
+      "snippet"
+    ],
+    "tsafe/tsafe/Eq/newV.c": [
+      "conflict",
+      "normAngle",
+      "snippet"
+    ]
+  }
+}

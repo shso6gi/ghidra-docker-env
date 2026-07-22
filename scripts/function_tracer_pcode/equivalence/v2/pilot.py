@@ -41,6 +41,8 @@ PILOT_TYPED_CAUSE_KINDS = frozenset({
     "counterexample_analysis_safety_unproven",
     "counterexample_partition_replay_ambiguous",
     "counterexample_same_function_replay_unproven",
+    "comparison_equivalence_closure_unproven",
+    "pair_process_completion_unavailable",
 }) | frozenset(
     reason_id for reason_id in OUTCOME_STAGE_REASON_MATRIX.values()
     if reason_id is not None
@@ -86,6 +88,70 @@ class TerminalizationIntent:
 
 
 @dataclass(frozen=True)
+class TerminalCandidateView:
+    lifecycle_projection_digest: str
+    timeout_candidates: Tuple[Tuple[int, str, str], ...]
+    counterexample_event_digests: Tuple[str, ...]
+    error_event_digests: Tuple[str, ...]
+    competing_decisive_event_digests: Tuple[str, ...]
+    view_digest: str
+
+    @classmethod
+    def freeze(cls, session: Any, lifecycle_projection: Any) -> "TerminalCandidateView":
+        events = (
+            session.recorder.prefix_view().events
+            if session.recorder.event_count else ()
+        )
+        open_ids = {
+            row.proof_requirement_id for row in lifecycle_projection.q_open_base
+        }
+        timeout_candidates = tuple(sorted(
+            (
+                event.header.sequence_number,
+                event.authority_payload.proof_requirement_id,
+                event.authority_digest,
+            )
+            for event in events
+            if event.header.event_type in {
+                EventType.SOLVER_TIMEOUT, EventType.PROCESS_TIMEOUT,
+            }
+            and getattr(event.authority_payload, "proof_requirement_id", None)
+            in open_ids
+        ))
+        counterexamples = tuple(sorted(
+            event.authority_digest for event in events
+            if event.header.event_type is EventType.COUNTEREXAMPLE
+        ))
+        errors = tuple(sorted(
+            event.authority_digest for event in events
+            if event.header.event_type is EventType.ERROR
+        ))
+        competing = tuple(sorted(
+            event.authority_digest for event in events
+            if event.header.event_type is EventType.EQ_CLOSURE
+        ))
+        payload = {
+            "result_occurrence_id": session.identity.result_occurrence_id,
+            "lifecycle_projection_digest": (
+                getattr(lifecycle_projection, "lifecycle_projection_digest", None)
+                or lifecycle_projection.prefix_projection_digest
+            ),
+            "timeout_candidates": timeout_candidates,
+            "counterexample_event_digests": counterexamples,
+            "error_event_digests": errors,
+            "competing_decisive_event_digests": competing,
+        }
+        return cls(
+            payload["lifecycle_projection_digest"],
+            timeout_candidates,
+            counterexamples,
+            errors,
+            competing,
+            authority_digest(payload),
+        )
+
+
+@dataclass(frozen=True)
 class DualWritePilotResult:
     legacy_outcome_before: Outcome
     legacy_outcome_after: Outcome
@@ -99,6 +165,9 @@ class DualWritePilotResult:
     lifecycle_inference_count: int
     pilot_receipt_digest: str
     execution_authority_evidence_digests: Tuple[str, ...] = ()
+    decisive_proof_receipts: Tuple[DecisiveProofReceipt, ...] = ()
+    terminal_timeout_receipts: Tuple[TerminalTimeoutReceipt, ...] = ()
+    error_receipts: Tuple[ErrorReceipt, ...] = ()
 
     @property
     def attempted_requirement_identity_coverage(self) -> float | None:
@@ -113,6 +182,12 @@ class DualWritePilotResult:
     def validate(self) -> None:
         if self.legacy_outcome_before != self.legacy_outcome_after:
             raise ValueError("dual-write pilot changed the v1 final outcome")
+        for receipt in (
+            *self.decisive_proof_receipts,
+            *self.terminal_timeout_receipts,
+            *self.error_receipts,
+        ):
+            receipt.validate()
         self.sealed_event_stream.validate()
         self.reduction.snapshot.validate()
         self.reduction.projection.validate()
@@ -426,8 +501,10 @@ class ProductionDualWritePilotSession:
         reducer: ShadowLifecycleReducer,
         domain_signal_encoder: Optional[Callable[[Any, Any], Sequence[Any]]] = None,
         phase7_runtime: Any = None,
+        execution_payload: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.identity = identity
+        self.execution_payload = canonical_value(execution_payload or {})
         self.reducer = reducer
         self.recorder = EventRecorder(
             stream_id=f"stream-{identity.result_occurrence_id}",
@@ -456,6 +533,19 @@ class ProductionDualWritePilotSession:
         if self.phase7_runtime is not None and intent.event_type is not EventType.CAUSE_OBSERVED:
             self.phase7_runtime.buffer_execution_intent(intent)
         return recorded.header.sequence_number
+
+    def emit_many(
+        self, intents: Sequence[Any], commit_callback: Any = None,
+    ) -> tuple[int, ...]:
+        if self.closed:
+            raise ValueError("production dual-write pilot session is closed")
+        batch = tuple(intents)
+        recorded = self.recorder.append_many(batch, commit_callback)
+        if self.phase7_runtime is not None:
+            for intent in batch:
+                if intent.event_type is not EventType.CAUSE_OBSERVED:
+                    self.phase7_runtime.buffer_execution_intent(intent)
+        return tuple(item.header.sequence_number for item in recorded)
 
     def record_phase7_pre_emission_activation(
         self, producer_site_manifest_id: str, signal: Any,
@@ -489,10 +579,21 @@ class ProductionDualWritePilotSession:
                         "production signal lacks audited pre-emission site"
                     ) from exc
                 self.phase7_runtime.buffer_signal_intents(site_id, signal, intents)
-            for intent in intents:
-                self.emit(intent)
+            commit = getattr(
+                self.domain_signal_encoder, "commit_emitted_signal", None
+            )
+            commit_callback = (
+                (lambda: commit(self, signal, intents))
+                if callable(commit) else None
+            )
+            self.emit_many(intents, commit_callback)
             return len(intents)
         except Exception as exc:
+            rollback = getattr(
+                self.domain_signal_encoder, "rollback_emitted_signal", None
+            )
+            if callable(rollback):
+                rollback(self, signal)
             self.domain_signal_error_kinds.append(type(exc).__name__)
             self.domain_signal_error_details.append(
                 f"{type(signal).__name__}: {exc}"
@@ -518,6 +619,22 @@ class ProductionDualWritePilotSession:
 
         if self.closed:
             raise ValueError("production dual-write pilot session is closed")
+        if self.recorder.event_count == 0:
+            from .contracts import VerifiedLifecycleProjection
+
+            return VerifiedLifecycleProjection.seal(
+                result_occurrence_id=self.identity.result_occurrence_id,
+                snapshot_digest=authority_digest({
+                    "empty_verified_prefix": self.identity.result_occurrence_id,
+                    "execution_identity_digest": (
+                        self.identity.execution_identity_digest
+                    ),
+                }),
+                c_active_base=(),
+                q_open_base=(),
+                blocker_eligibility_base=(),
+                satisfaction_projection=(),
+            )
         return self.reducer.replay_prefix(self.recorder.prefix_view())
 
 
@@ -668,6 +785,7 @@ class ProductionDualWritePilotConnector:
         if occurrence_nonce is not None or startup_receipts:
             occurrence_nonce = occurrence_nonce or secrets.token_hex(24)
             identity_payload["result_entry_occurrence_nonce"] = occurrence_nonce
+        identity = ProductionPilotExecutionIdentity.create(identity_payload)
         occurrence_receipt = None
         if startup_receipts:
             assert occurrence_nonce is not None
@@ -678,12 +796,12 @@ class ProductionDualWritePilotConnector:
 
             occurrence_receipt = (
                 PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+                    result_occurrence_id=identity.result_occurrence_id,
                     execution_payload_digest=authority_digest(execution_payload),
                     startup_receipt_digests=startup_digests,
                     occurrence_nonce=occurrence_nonce,
                 )
             )
-        identity = ProductionPilotExecutionIdentity.create(identity_payload)
         session = ProductionDualWritePilotSession(
             identity,
             self._reducer,
@@ -692,6 +810,7 @@ class ProductionDualWritePilotConnector:
                 self._phase7_runtime_factory(identity)
                 if self._phase7_runtime_factory is not None else None
             ),
+            execution_payload=identity_payload,
         )
         session.startup_receipts = startup_receipts
         session.result_entry_occurrence_receipt = occurrence_receipt
@@ -742,7 +861,12 @@ class ProductionDualWritePilotConnector:
         )
         if callable(execution_history_finalizer):
             execution_history_finalizer(session)
-        if session.domain_signal_error_kinds and session.recorder.event_count == 0:
+        # A failed signal encoding leaves its Phase 7 discovery activation
+        # deliberately unmaterialized.  Report the original encoding failure
+        # before Phase 7 finalization; otherwise the pending-discovery guard
+        # masks the actionable authority error whenever an earlier event was
+        # recorded successfully.
+        if session.domain_signal_error_kinds:
             session.closed = True
             raise ValueError(
                 "production domain signal encoding is incomplete: "
@@ -751,6 +875,83 @@ class ProductionDualWritePilotConnector:
                     session.domain_signal_error_details,
                 )))
             )
+        provisional_projection = session.preview_lifecycle_projection()
+        provenance = getattr(result, "call_proof_terminal_provenance", None)
+        if (
+            before_outcome in {Outcome.UNKNOWN, Outcome.TIMEOUT}
+            and not provisional_projection.c_active_base
+            and not provisional_projection.q_open_base
+            and provenance is not None
+        ):
+            if not isinstance(provenance, Mapping):
+                raise ValueError(
+                    "inconclusive comparison lacks receipt-bound provenance"
+                )
+            terminal = provenance.get("monolithic_terminal_receipt")
+            queries = tuple(provenance.get("query_execution_receipts", ()) or ())
+            if (
+                not isinstance(terminal, Mapping)
+                or terminal.get("validated") is not True
+                or terminal.get("outcome_kind") != "inconclusive_diagnostic"
+                or not queries
+                or any(
+                    not isinstance(row, Mapping)
+                    or row.get("validated") is not True
+                    or row.get("disposition") not in {"unknown", "error"}
+                    for row in queries
+                )
+            ):
+                raise ValueError(
+                    "inconclusive comparison authority is not canonical"
+                )
+            from .production_context import production_pilot_session_scope
+            from .production_signals import (
+                ComparisonClosureProductionSignal,
+                emit_comparison_closure_signal,
+            )
+            signal = ComparisonClosureProductionSignal(
+                comparison_receipt_id=provenance["comparison_receipt_id"],
+                terminal_receipt_digest=terminal["receipt_digest"],
+                branch_id=provenance["terminal_branch_id"],
+                runtime_premise_digest=provenance[
+                    "terminal_runtime_premise_digest"
+                ],
+                runtime_view_id=provenance["terminal_runtime_view_id"],
+                query_receipt_digests=tuple(authority_digest(row) for row in queries),
+            )
+            with production_pilot_session_scope(session):
+                emitted = emit_comparison_closure_signal(
+                    signal,
+                    producer_site_manifest_id=(
+                        "comparison-inconclusive-terminal"
+                    ),
+                )
+            if emitted != 1:
+                raise ValueError(
+                    "inconclusive comparison C/Q was not materialized"
+                )
+        pre_closure_projection = session.preview_lifecycle_projection()
+        terminal_candidate_view = TerminalCandidateView.freeze(
+            session, pre_closure_projection
+        )
+        from .production_signals import finalize_pending_eq_authorities
+
+        for intent in finalize_pending_eq_authorities(
+            session, pre_closure_projection, terminal_candidate_view
+        ):
+            session.emit(intent)
+        session.domain_signal_state["terminal_candidate_view"] = (
+            terminal_candidate_view
+        )
+        live_pending = tuple(
+            nonce for nonce, entry in session.domain_signal_state.get(
+                "pending_eq_authorities", {}
+            ).items()
+            if entry.get("state") == "PENDING"
+        )
+        if live_pending:
+            session.closed = True
+            raise ValueError("production session cannot seal with live pending EQ")
         if session.phase7_runtime is not None:
             session.phase7_runtime_result = session.phase7_runtime.finalize(
                 stream_id=f"phase7-{session.identity.result_occurrence_id}",
@@ -779,9 +980,21 @@ class ProductionDualWritePilotConnector:
             None,
         )
         if callable(terminal_resolver):
-            for sequence_number, requirement_id in tuple(
-                terminal_resolver(session, stream)
+            terminal_bindings = tuple(terminal_resolver(session, stream))
+            frozen_timeout_bindings = {
+                (sequence_number, requirement_id)
+                for sequence_number, requirement_id, _event_digest
+                in terminal_candidate_view.timeout_candidates
+            }
+            if any(
+                binding not in frozen_timeout_bindings
+                for binding in terminal_bindings
             ):
+                session.closed = True
+                raise ValueError(
+                    "post-seal timeout resolver selected an unfrozen candidate"
+                )
+            for sequence_number, requirement_id in terminal_bindings:
                 session.terminalize(sequence_number, requirement_id)
         if session.domain_signal_error_kinds:
             session.closed = True
@@ -979,6 +1192,9 @@ def run_dual_write_pilot(
         lifecycle_inference_count,
         authority_digest(values),
         tuple(execution_authority_evidence_digests),
+        tuple(decisive_receipts),
+        tuple(timeout_receipts),
+        tuple(error_receipts),
     )
     result.validate()
     return result

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -52,7 +53,17 @@ def _write_log(root: Path, function_name: str, left: str, right: str, payload):
     return path
 
 
+def _isolated_git_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(
+        ["git", "init"], cwd=workspace, check=True, capture_output=True
+    )
+    return workspace
+
+
 def test_freeze_observed_baseline_writes_manifest_hashes_and_recovered_manifests(tmp_path):
+    workspace = _isolated_git_workspace(tmp_path)
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(
         source_root,
@@ -82,7 +93,7 @@ def test_freeze_observed_baseline_writes_manifest_hashes_and_recovered_manifests
         output_root=output_root,
         source_roots={"function_call": source_root},
         runner_commands=("VALIDATION_BEFORE_DIR=<fixed observed baseline>",),
-        workspace_root=Path.cwd(),
+        workspace_root=workspace,
     )
 
     manifest = json.loads(manifest_path.read_text())
@@ -139,6 +150,7 @@ def test_freeze_observed_baseline_records_untracked_hashes_and_git_policy(tmp_pa
 
 
 def test_freeze_observed_baseline_refuses_to_overwrite_existing_raw_dir(tmp_path):
+    workspace = _isolated_git_workspace(tmp_path)
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(source_root, "fc_equiv_direct", "B1", "B2", _payload("fc_equiv_direct", True))
     output_root = tmp_path / "artifacts" / "observed"
@@ -148,7 +160,7 @@ def test_freeze_observed_baseline_refuses_to_overwrite_existing_raw_dir(tmp_path
         git_head="0a53352",
         output_root=output_root,
         source_roots={"function_call": source_root},
-        workspace_root=Path.cwd(),
+        workspace_root=workspace,
     )
 
     with pytest.raises(FileExistsError):
@@ -157,15 +169,19 @@ def test_freeze_observed_baseline_refuses_to_overwrite_existing_raw_dir(tmp_path
             git_head="0a53352",
             output_root=output_root,
             source_roots={"function_call": source_root},
-            workspace_root=Path.cwd(),
+            workspace_root=workspace,
         )
 
 
 def test_freeze_observed_baseline_module_execution(tmp_path):
+    workspace = _isolated_git_workspace(tmp_path)
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(source_root, "fc_equiv_direct", "B1", "B2", _payload("fc_equiv_direct", True))
     output_root = tmp_path / "artifacts" / "observed"
 
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo_root)
     result = subprocess.run(
         [
             sys.executable,
@@ -183,6 +199,8 @@ def test_freeze_observed_baseline_module_execution(tmp_path):
         check=True,
         capture_output=True,
         text=True,
+        cwd=workspace,
+        env=environment,
     )
 
     assert "artifact_manifest.json" in result.stdout

@@ -25,7 +25,9 @@ EMITTERS = frozenset({
     "emit_call_effect_signal",
     "emit_loop_recurrence_signal",
     "emit_abi_width_readonly_signal",
+    "_emit_return_width_signal_once",
     "emit_operational_extraction_signal",
+    "emit_comparison_closure_signal",
 })
 
 _DOMAIN_BY_EMITTER = {
@@ -35,7 +37,9 @@ _DOMAIN_BY_EMITTER = {
     "emit_call_effect_signal": "expression_call_effect_memory",
     "emit_loop_recurrence_signal": "loop_recurrence_summary",
     "emit_abi_width_readonly_signal": "return_width",
+    "_emit_return_width_signal_once": "return_width",
     "emit_operational_extraction_signal": "operational_extraction",
+    "emit_comparison_closure_signal": "comparison_closure",
 }
 
 _DOMAIN_BY_SITE_OVERRIDE = {
@@ -48,6 +52,9 @@ _PRODUCER_IDS_BY_SITE = {
     "call-effect-producer-blocker": (
         "internal_typed_pure_direct_call_stage_producer",
     ),
+    "call-effect-producer-prerequisite": (
+        "internal_typed_pure_direct_call_stage_producer",
+    ),
     "checker-call-effect-proof-batch": ("call-effect-proof-batch-v2",),
     "checker-recurrence-proposal-blocker": (
         "typed-recurrence-proposal-signal-v2",
@@ -55,7 +62,6 @@ _PRODUCER_IDS_BY_SITE = {
     "checker-recurrence-validation-completed": (
         "equivalence_recurrence_validator",
     ),
-    "obligation-stage-final-eq-closure": ("verified_comparison_receipt",),
     "sat-safety-blocker-observed": ("sat_unsafety_reason_producer",),
     "sat-safety-ambiguity-observed": ("sat_counterexample_ambiguity_producer",),
     "sat-safety-ambiguity-completed": ("sat_counterexample_ambiguity_resolution_producer",),
@@ -84,6 +90,9 @@ _PRODUCER_IDS_BY_SITE = {
     "return-width-unary-provenance-blocker": (
         "typed-return-width-seed-signal-v2",
     ),
+    "return-width-pair-unary-provenance-blocker": (
+        "typed-return-width-seed-signal-v2",
+    ),
     "return-width-observation-contract-blocker": (
         "typed-return-observation-need-signal-v2",
     ),
@@ -95,9 +104,6 @@ _PRODUCER_IDS_BY_SITE = {
         "typed-return-observation-signal-v2",
         "typed-same-function-width-signal-v2",
     ),
-    "pairwise-return-width-relation-blocker": (
-        "typed-return-observation-signal-v2",
-    ),
     "pairwise-readonly-identity-blocker": ("typed-readonly-member-signal-v2",),
     "pairwise-readonly-correspondence-member": (
         "typed-readonly-member-signal-v2",
@@ -107,10 +113,12 @@ _PRODUCER_IDS_BY_SITE = {
         "function-decompilation-operational-error-producer-v2",
         "high-function-ir-validator-v2",
     ),
+    "comparison-inconclusive-terminal": ("comparison-closure-producer-v1",),
 }
 
 _DISPOSITIONS_BY_SITE = {
     "call-effect-producer-blocker": ("ELIGIBLE",),
+    "call-effect-producer-prerequisite": ("ELIGIBLE",),
     "checker-call-effect-proof-batch": ("DECISIVE",),
     "checker-recurrence-proposal-blocker": ("ELIGIBLE",),
     "checker-recurrence-validation-completed": ("DECISIVE",),
@@ -118,7 +126,6 @@ _DISPOSITIONS_BY_SITE = {
         "DECISIVE", "ELIGIBLE",
     ),
     "outcome-partition-stage-result": ("DECISIVE", "ELIGIBLE"),
-    "obligation-stage-final-eq-closure": ("DECISIVE",),
     "pair-disposition-safe-counterexample": ("DECISIVE",),
     "pairwise-loop-fallback-blocker": ("ELIGIBLE",),
     "pairwise-loop-guard-completed": ("DECISIVE",),
@@ -126,7 +133,6 @@ _DISPOSITIONS_BY_SITE = {
     "pairwise-pending-loop-blocker": ("ELIGIBLE",),
     "pairwise-readonly-correspondence-member": ("ELIGIBLE",),
     "pairwise-readonly-identity-blocker": ("ELIGIBLE",),
-    "pairwise-return-width-relation-blocker": ("ELIGIBLE",),
     "recurrence-summary-abi-width": ("ELIGIBLE",),
     "recurrence-summary-call-effect": ("ELIGIBLE",),
     "recurrence-summary-loop": ("ELIGIBLE",),
@@ -134,9 +140,11 @@ _DISPOSITIONS_BY_SITE = {
     "return-width-pair-assessment": ("ELIGIBLE",),
     "return-width-projection-relation-blocker": ("ELIGIBLE",),
     "return-width-unary-provenance-blocker": ("ELIGIBLE",),
+    "return-width-pair-unary-provenance-blocker": ("ELIGIBLE",),
     "sat-safety-ambiguity-completed": ("DECISIVE",),
     "sat-safety-ambiguity-observed": ("ELIGIBLE",),
     "sat-safety-blocker-observed": ("ELIGIBLE",),
+    "comparison-inconclusive-terminal": ("ELIGIBLE",),
 }
 
 
@@ -145,7 +153,13 @@ _DISPOSITIONS_BY_SITE = {
 # site must update this table explicitly; domain-wide registry expansion is
 # forbidden.
 _CAUSE_REASON_IDS_BY_SITE = {
+    "comparison-inconclusive-terminal": (
+        "comparison_equivalence_closure_unproven",
+    ),
     "call-effect-producer-blocker": ("pure_call_semantics_unproven",),
+    "call-effect-producer-prerequisite": (
+        "callsite_correspondence_unproven",
+    ),
     "checker-recurrence-proposal-blocker": (
         "recurrence_proposal_validation_unproven",
     ),
@@ -174,10 +188,6 @@ _CAUSE_REASON_IDS_BY_SITE = {
     ),
     "pairwise-readonly-identity-blocker": (
         "readonly_storage_identity_unproven",
-    ),
-    "pairwise-return-width-relation-blocker": (
-        "return_high_bit_relation_unproven",
-        "return_observation_contract_unproven",
     ),
     "recurrence-summary-abi-width": (
         "return_width_provenance_unavailable",
@@ -216,6 +226,9 @@ _CAUSE_REASON_IDS_BY_SITE = {
     "return-width-unary-provenance-blocker": (
         "return_width_provenance_unavailable",
     ),
+    "return-width-pair-unary-provenance-blocker": (
+        "return_width_provenance_unavailable",
+    ),
     "sat-safety-ambiguity-observed": (
         "counterexample_partition_replay_ambiguous",
     ),
@@ -238,6 +251,7 @@ _REASON_IDENTITY_SCOPES = {
     "counterexample_analysis_safety_unproven": "RELATIONAL",
     "counterexample_partition_replay_ambiguous": "RELATIONAL",
     "counterexample_same_function_replay_unproven": "RELATIONAL",
+    "comparison_equivalence_closure_unproven": "RELATIONAL",
 }
 
 

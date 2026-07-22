@@ -7,6 +7,7 @@ from enum import Enum
 import hashlib
 import hmac
 import inspect
+import marshal
 import secrets
 from threading import Lock
 from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple, Union
@@ -446,8 +447,17 @@ def register_producer_closure_validator(
 ) -> None:
     """Pin one import-time validator code object per artifact variant."""
 
-    if artifact_type.PRODUCER_KIND in _TRUSTED_PRODUCER_VALIDATOR_CODES:
-        raise RuntimeError("producer closure validator already registered")
+    existing = _TRUSTED_PRODUCER_VALIDATOR_CODES.get(
+        artifact_type.PRODUCER_KIND
+    )
+    if existing is not None:
+        # Some CLI import-fallback tests deliberately reload the producer
+        # module while this authority module remains live.  Accept only an
+        # exact bytecode-identical reload and rotate membership to the new code
+        # object; a changed validator remains a hard duplicate-registration
+        # error.
+        if marshal.dumps(existing) != marshal.dumps(validator.__code__):
+            raise RuntimeError("producer closure validator already registered")
     _TRUSTED_PRODUCER_VALIDATOR_CODES[
         artifact_type.PRODUCER_KIND
     ] = validator.__code__

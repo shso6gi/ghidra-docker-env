@@ -128,7 +128,7 @@ def test_emit_import_error_result_outputs_error_line_and_json(capsys):
             start_time=0.0,
         )
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 4
     output = capsys.readouterr().out
     assert "Result: ERROR" in output
     assert "ERROR: import failed" in output

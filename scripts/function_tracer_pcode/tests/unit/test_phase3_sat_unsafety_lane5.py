@@ -138,7 +138,7 @@ def _completed_sat_replay_evidence(action, **counterexample_overrides):
     return {
         "object_derived": True,
         "status": "complete",
-        "reason_id": "sat_unsafety",
+        "reason_id": action["reason_id"],
         "proof_kind": SAT_PROOF_KIND,
         "proof_stage": SAT_PROOF_STAGE,
         "evidence_kind": SAT_EVIDENCE_KIND,
@@ -228,14 +228,20 @@ def test_sat_unsafety_target_is_specific_and_action_uses_full_proof_id():
     reason = _sat_reason()
     action = build_unknown_recovery_actions([reason])[0]
 
-    assert reason.object_target_key[0] == "sat_unsafety"
+    assert reason.object_target_key[0] == "counterexample_safety_gate"
     assert _object_target_key_is_specific_sat_unsafety(reason.object_target_key)
     assert action.proof_kind == SAT_PROOF_KIND
     assert action.proof_stage == SAT_PROOF_STAGE
     assert action.evidence_kind == SAT_EVIDENCE_KIND
     assert action.required_evidence == SAT_REQUIRED_EVIDENCE
     assert action.proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
-    assert _global_reason_tuple_from_action(action) == SAT_ACTION_TUPLE
+    assert _global_reason_tuple_from_action(action) == (
+        SAT_ACTION_TUPLE[0],
+        "counterexample_analysis_safety_unproven",
+        SAT_ACTION_TUPLE[2],
+        "query",
+        *SAT_ACTION_TUPLE[4:],
+    )
     action_dict = action.to_dict()
     assert _proof_action_matches_lane_definition(action_dict)
     assert _proof_action_has_expected_id(action_dict)
@@ -388,7 +394,9 @@ def test_sat_unsafety_pending_proof_obligations_materialize_required_evidence():
 
     obligations = _pending_proof_obligations(entry)
     assert len(obligations) == 1
-    assert obligations[0]["reason_id"] == "sat_unsafety"
+    assert obligations[0]["reason_id"] == (
+        "counterexample_analysis_safety_unproven"
+    )
     assert obligations[0]["proof_kind"] == SAT_PROOF_KIND
     assert obligations[0]["proof_stage"] == SAT_PROOF_STAGE
     assert obligations[0]["evidence_kind"] == SAT_EVIDENCE_KIND
@@ -536,7 +544,9 @@ def test_sat_unsafety_observation_supplements_registered_unresolved_actions():
     observation = _observation({}, record)
     actions = observation["proof_actions"]
 
-    assert [action["reason_id"] for action in actions].count("sat_unsafety") == 1
+    assert [action["reason_id"] for action in actions].count(
+        "counterexample_analysis_safety_unproven"
+    ) == 1
     assert [action["reason_id"] for action in actions].count("unresolved_expression") == 2
     assert {
         action["proof_stage"]

@@ -18,11 +18,9 @@ from .contracts import (
     requirement_slot,
 )
 from .production_signals import (
-    EqClosureProductionSignal,
     SAT_SAFETY_TYPED_REASON_IDS,
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
-    consume_verified_eq_closure_signal,
 )
 from .registry import (
     SatisfactionBindingFactory,
@@ -129,15 +127,24 @@ class SatSafetyPilotEncoder:
         )
         return CauseOccurrenceAuthority(occurrence, bound), requirement_id
 
+    def authority_for_signal(
+        self, session: Any, signal: SatSafetyBlockerProductionSignal,
+    ) -> CauseOccurrenceAuthority:
+        if type(signal) is not SatSafetyBlockerProductionSignal:
+            raise TypeError("SAT safety authority requires an exact blocker signal")
+        return self._authority(session, signal)[0]
+
+    def register_transformed_observation(
+        self, session: Any, signal: SatSafetyBlockerProductionSignal,
+    ) -> None:
+        authority, _ = self._authority(session, signal)
+        observed, _completed = self._state(session)
+        occurrence_id = authority.occurrence.occurrence_id
+        if occurrence_id in observed:
+            raise ValueError("SAT safety transformed observation is duplicated")
+        observed.add(occurrence_id)
+
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
-        if type(signal) is EqClosureProductionSignal:
-            proof_artifact_digest = consume_verified_eq_closure_signal(
-                session, signal
-            )
-            return (EventIntent(
-                EventType.EQ_CLOSURE,
-                DecisiveProofEventAuthority(proof_artifact_digest),
-            ),)
         if type(signal) is SafeCounterexampleProductionSignal:
             return (EventIntent(
                 EventType.COUNTEREXAMPLE,

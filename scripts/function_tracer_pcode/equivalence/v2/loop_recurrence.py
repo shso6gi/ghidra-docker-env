@@ -261,6 +261,7 @@ _LOOP_FALLBACK_REASONS = MappingProxyType({
     "counted_loop_summary_expression_proof_missing": "loop_exact_summary_relation_unproven",
     "loop_summary_guard_mismatch": "loop_summary_guard_correspondence_unproven",
     "loop_summary_shape_mismatch": "loop_summary_structure_correspondence_unproven",
+    "loop_summary_incompatible": "loop_summary_structure_correspondence_unproven",
     "loop_summary_intrinsic_mismatch": "loop_summary_structure_correspondence_unproven",
     "loop_summary_operand_mismatch": "loop_summary_structure_correspondence_unproven",
     "exact_key_unavailable": "loop_summary_structure_correspondence_unproven",

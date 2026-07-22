@@ -271,7 +271,7 @@ def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.reason_id == "counterexample_same_function_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert not any(
         evidence.get("proof_source") == "monolithic_global_counterexample_validation"
@@ -501,12 +501,12 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.reason_id == "counterexample_analysis_safety_unproven"
     assert reason.decision_effect == "blocks_disequivalence"
     assert reason.recovery_proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.recovery_action == "sat_unsafety_resolution_required"
-    assert reason.object_target_key[0] == "sat_unsafety"
+    assert reason.object_target_key[0] == "counterexample_safety_gate"
     assert reason.object_evidence is not None
     assert reason.object_evidence["object_derived"] is True
     assert reason.object_evidence["evidence_kind"] == "active_unsafety_summary"
@@ -517,7 +517,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     assert active_unsafety[0]["call_effect"]["object_derived"] is True
     assert active_unsafety[0]["call_effect"]["object_target_kind"] == "unsupported_call_effect"
     assert reason.proof_obligation_id == build_proof_obligation_id(
-        UnknownReasonId.SAT_UNSAFETY,
+        reason.reason_id,
         "sat_counterexample_safety",
         UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
         "active_unsafety_summary",
@@ -736,7 +736,7 @@ def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexamp
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.reason_id == "counterexample_same_function_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert not any(
         evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
@@ -804,7 +804,7 @@ def test_pairwise_same_function_sat_without_model_still_requires_counterexample_
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.reason_id == "counterexample_same_function_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.proof_obligation_id is not None
@@ -870,7 +870,7 @@ def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexa
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.reason_id == "counterexample_same_function_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert not any(
         evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
@@ -964,8 +964,8 @@ def test_sat_unsafety_completed_proof_requires_current_counterexample_model_matc
         returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
         return_type="int",
     )
-    reason = make_unknown_reason(
-        UnknownReasonId.SAT_UNSAFETY,
+    reason = make_internal_v2_reason_diagnostic(
+        action.reason_id,
         stage=action.stage,
         pair_or_case=action.pair_or_case,
         evidence_refs=action.evidence_refs,
@@ -1076,7 +1076,7 @@ def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(mo
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert result.unknown_reasons[0].reason_id == "counterexample_analysis_safety_unproven"
 
 def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
@@ -1108,7 +1108,7 @@ def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     assert analysis1.completed_recovery_proof_evidence == ()

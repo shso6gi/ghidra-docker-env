@@ -61,6 +61,31 @@ def _strategy_and_surface():
     return strategy, analysis1, analysis2, case1, case2
 
 
+def test_sat_observation_without_safety_completion_remains_unknown():
+    connector = _connector()
+    session = connector.begin({"phase": "10", "case": "sat-safety-open"})
+    signal = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=("model-bound-near-miss",),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "model"),
+        evidence_refs=("sat-model-requires-safety-replay",),
+        producer_id="phase10-high-bit-sat-transform",
+    )
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(signal) == 1
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.UNKNOWN), case_id="sat-safety-open"
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert {
+        row.reason_id for row in evidence.pilot_result.reduction.projection.c_active_base
+    } == {"counterexample_analysis_safety_unproven"}
+    assert {
+        row.proof_kind for row in evidence.pilot_result.reduction.projection.q_open_base
+    } == {"counterexample_safety"}
+
+
 def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authority():
     connector = _connector()
     session = connector.begin({"phase": "6.1", "case": "sat-safety-complete"})

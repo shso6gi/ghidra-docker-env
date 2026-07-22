@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
     ReturnAbiRelationStatus,
     ReturnHighBitRelationProofArtifact,
     ReturnObservationProjectionSeed,
+    ReturnObservationNeedSeed,
     ProjectionNotFormable,
     ReturnObservationContractArtifact,
     FunctionReturnAbiSeed,
@@ -49,6 +50,7 @@ from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
 )
 from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     IdentityScope,
+    Outcome,
     authority_digest,
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import EventType
@@ -1080,6 +1082,66 @@ def test_projection_seed_is_factory_only_nonproof_authority():
         replace(seed, seed_digest="forged")
 
 
+def test_need_seed_without_common_positive_width_conserves_unknown_frontier():
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    left = _width_seed("left")
+    right = replace(
+        _width_seed("right"),
+        payload_width=16,
+        payload_value_identity=("payload", "right", 16),
+        calling_convention_fact=(
+            "return_type_provenance", ("declared_return_type_width", 16)
+        ),
+    )
+    target = PairReturnObservationTargetId(
+        "top_level_return", left.target_id, right.target_id,
+        (left.target_id.function_identity, right.target_id.function_identity),
+    )
+    pair = PairReturnObservationSeed(
+        target, left.digest, right.digest, "top_level_return",
+        target.semantic_anchors,
+    )
+    need = ReturnObservationNeedSeed.from_pair_seed(left, right, pair)
+    blocker = AbiWidthReadonlyBlockerSignal.from_observation_need_seed(need)
+    encoder = AbiWidthReadonlyPilotEncoder()
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            AbiWidthReadonlyBlockerSignal: encoder,
+        }),
+    )
+    session = connector.begin({"case": "need-seed-no-common-width"})
+    assert session.emit_domain_signal(blocker) == 1
+    result = SimpleNamespace(
+        is_equivalent=True, error_message=None, failure_status=None,
+        failure_message=None, unknown_reasons=[], unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        session, result, case_id="need-seed-no-common-width"
+    )
+    projection = evidence.pilot_result.reduction.projection
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "return_observation_contract_unproven"
+    }
+    assert {row.proof_kind for row in projection.q_open_base} == {
+        "return_observation_contract"
+    }
+
+
 def test_projection_seed_rejects_cross_target_and_reverse_is_ordered():
     left = _width_seed("left")
     right = _width_seed("right")
@@ -1409,7 +1471,10 @@ def test_return_width_production_source_dual_writes_exact_unary_c_and_q():
         (
             replace(_width_seed("left"), calling_convention_fact=("declared_return_type_width", 128)),
             replace(_width_seed("right"), calling_convention_fact=("declared_return_type_width", 128)),
-            ("return_high_bit_relation_unproven", "return_observation_contract_unproven"),
+            (
+                "return_high_bit_relation_unproven",
+                "return_observation_contract_unproven",
+            ),
         ),
     ),
 )
@@ -1539,7 +1604,9 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
         left_analysis, right_analysis, left, right, pair
     )
     assert proved.relation_assessment.status is ReturnAbiRelationStatus.PROVED
-    assert proved.signals == ()
+    assert [signal.reason_id for signal in proved.signals] == [
+        "return_abi_relation_unproven"
+    ]
 
     right_analysis.return_abi_facts["return_storage_descriptor"]["value"] = (
         "ghidra_return_storage_v1",
@@ -1552,7 +1619,9 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
         left_analysis, right_analysis, left, right, pair
     )
     assert cross_abi.relation_assessment.status is ReturnAbiRelationStatus.PROVED
-    assert cross_abi.signals == ()
+    assert [signal.reason_id for signal in cross_abi.signals] == [
+        "return_abi_relation_unproven"
+    ]
 
     narrow_right = replace(right, storage_width=16)
     narrow_pair = replace(pair, right_seed_digest=narrow_right.digest)
@@ -1586,8 +1655,8 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
     ("right_calling_status", "right_storage", "expected_reasons", "expected_errors"),
     (
         ("MISSING", "same", ("return_abi_provenance_unavailable",), ()),
-        ("PRESENT", "different", (), ()),
-        ("PRESENT", "same", (), ()),
+        ("PRESENT", "different", ("return_abi_relation_unproven",), ()),
+        ("PRESENT", "same", ("return_abi_relation_unproven",), ()),
         ("MALFORMED", "same", (), ("ValueError",)),
     ),
 )
@@ -1668,6 +1737,19 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
             right_prepared,
             return_coverage_ids=(),
         )
+        first_event_count = session.recorder.event_count
+        if expected_reasons:
+            repeated = prepare_pair_return_observation(
+                left_analysis,
+                right_analysis,
+                left_case,
+                right_case,
+                left_prepared,
+                right_prepared,
+                return_coverage_ids=(),
+            )
+            assert repeated.status == "blocked"
+            assert session.recorder.event_count == first_event_count
     assert result.status == "blocked"
     if expected_reasons:
         projection = session.preview_lifecycle_projection()
@@ -1756,7 +1838,29 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
             return None
 
     none_calling = _sealed_return_abi_facts(NoneCallingPrototype(), None, None)
-    assert none_calling["calling_convention"]["status"] == "MALFORMED"
+    assert none_calling["calling_convention"]["status"] == "MISSING"
+
+    class MissingStoragePrototype:
+        def getReturnStorage(self):
+            return None
+
+    none_storage = _sealed_return_abi_facts(
+        MissingStoragePrototype(), None, None
+    )
+    assert none_storage["return_storage_descriptor"]["status"] == "MISSING"
+
+    class EmptyStorage:
+        def getVarnodes(self):
+            return ()
+
+    class EmptyStoragePrototype:
+        def getReturnStorage(self):
+            return EmptyStorage()
+
+    empty_storage = _sealed_return_abi_facts(
+        EmptyStoragePrototype(), None, None
+    )
+    assert empty_storage["return_storage_descriptor"]["status"] == "MISSING"
 
     class BrokenPrototype:
         def getModelName(self):
@@ -1893,11 +1997,10 @@ def test_abi_projection_only_catches_typed_nonformability():
         incomplete_target, incomplete.digest, right.digest,
         "top_level_return", incomplete_target.semantic_anchors,
     )
-    with pytest.raises(ValueError, match="complete unary width facts") as exc:
-        assess_return_abi_pair(
-            left_analysis, right_analysis, incomplete, right, incomplete_pair
-        )
-    assert not isinstance(exc.value, ProjectionNotFormable)
+    incomplete_assessment = assess_return_abi_pair(
+        left_analysis, right_analysis, incomplete, right, incomplete_pair
+    )
+    assert incomplete_assessment.relation_assessment is None
 
 
 def test_all_eight_reasons_have_independent_c_and_q_with_n_readonly_members():
@@ -2560,6 +2663,9 @@ def test_parallel_duplicate_unsat_selects_exactly_one_completion_authority(
     assert len(session.domain_signal_state[
         "abi_width_readonly_completion_candidates"
     ]) == 1
+    assert session.domain_signal_state[
+        "abi_width_pending_emission_transactions"
+    ] == {}
     assert session.preview_lifecycle_projection().c_active_base == ()
     encoder.finalize_open_execution_history(session)
     assert len(session.domain_signal_state["abi_width_solver_census"].events) == 2
@@ -2657,9 +2763,15 @@ def test_dependency_ready_production_scheduler_executes_registered_readonly_quer
     assert len(session.domain_signal_state[
         "abi_width_readonly_completion_candidates"
     ]) == 1
+    assert session.domain_signal_state[
+        "abi_width_pending_emission_transactions"
+    ] == {}
 
 
-def _run_fixture_bound_high_bit_sat_authority(monkeypatch, high_bit, case_id):
+def _run_fixture_bound_high_bit_sat_authority(
+    monkeypatch, high_bit, case_id, *, inject_transaction_failure=False,
+    inject_commit_failure=False, inject_partial_commit_failure=False,
+):
     import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
     from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
@@ -2725,6 +2837,24 @@ def _run_fixture_bound_high_bit_sat_authority(monkeypatch, high_bit, case_id):
         AbiWidthReadonlySolverExecutionBatchSignal: encoder,
         SatSafetyBlockerProductionSignal: safety_encoder,
     })
+    if inject_commit_failure:
+        def fail_transaction_commit(_session, signal, _intents):
+            if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
+                raise RuntimeError("injected atomic commit failure")
+
+        monkeypatch.setattr(composite, "commit_emitted_signal", fail_transaction_commit)
+    if inject_partial_commit_failure:
+        original_sat_commit = composite.commit_sat_safety_transformed_observation
+
+        def fail_after_sat_observation(target_session, signal):
+            original_sat_commit(target_session, signal)
+            raise RuntimeError("injected failure after SAT-safety observation")
+
+        monkeypatch.setattr(
+            composite,
+            "commit_sat_safety_transformed_observation",
+            fail_after_sat_observation,
+        )
     reason_registry = SealedReasonRegistry.build((
         *ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot(),
         *SAT_SAFETY_REASON_REGISTRY.snapshot(),
@@ -2765,6 +2895,16 @@ def _run_fixture_bound_high_bit_sat_authority(monkeypatch, high_bit, case_id):
             projection,
             (abi_blocker, abi_relation, abi_receipt),
         )
+        if inject_transaction_failure:
+            original_append_many = session.recorder.append_many
+
+            def fail_replacement_transaction(intents):
+                batch = tuple(intents)
+                if len(batch) == 2:
+                    raise RuntimeError("injected atomic append failure")
+                return original_append_many(batch)
+
+            session.recorder.append_many = fail_replacement_transaction
         emitted_count = execute_abi_width_readonly_solver_query(
             high_blocker,
             query,
@@ -2772,12 +2912,46 @@ def _run_fixture_bound_high_bit_sat_authority(monkeypatch, high_bit, case_id):
             (abi_relation,),
             configured_timeout_ms=1000,
         )
-        assert emitted_count == 1, session.domain_signal_error_details
+        if (
+            inject_transaction_failure
+            or inject_commit_failure
+            or inject_partial_commit_failure
+        ):
+            assert emitted_count == 0
+        else:
+            assert emitted_count == 2, session.domain_signal_error_details
     lifecycle = session.preview_lifecycle_projection()
+    if (
+        inject_transaction_failure
+        or inject_commit_failure
+        or inject_partial_commit_failure
+    ):
+        assert {row.reason_id for row in lifecycle.c_active_base} == {
+            "return_high_bit_relation_unproven",
+        }
+        assert {row.proof_kind for row in lifecycle.q_open_base} == {
+            "return_high_bit_relation",
+        }
+        assert "abi_width_high_bit_sat_transformations" not in (
+            session.domain_signal_state
+        )
+        assert "abi_width_model_bound_refutation_artifacts" not in (
+            session.domain_signal_state
+        )
+        assert session.domain_signal_state.get(
+            "abi_width_solver_execution_receipts", set()
+        ) == set()
+        assert session.domain_signal_state.get("sat_safety_observed", set()) == set()
+        return {"atomic_failure_preserved_original_frontier": True}
     assert {row.reason_id for row in lifecycle.c_active_base} == {
-        "return_high_bit_relation_unproven",
         "counterexample_analysis_safety_unproven",
     }
+    assert {row.proof_kind for row in lifecycle.q_open_base} == {
+        "counterexample_safety",
+    }
+    assert len(session.domain_signal_state[
+        "abi_width_high_bit_sat_transformations"
+    ]) == 1
     assert len(session.domain_signal_state[
         "abi_width_model_bound_refutation_artifacts"
     ]) == 1
@@ -2831,7 +3005,7 @@ def _run_fixture_bound_high_bit_sat_authority(monkeypatch, high_bit, case_id):
     }
 
 
-def test_high_bit_solver_sat_keeps_q_live_and_hands_off_model_safety(monkeypatch):
+def test_high_bit_solver_sat_atomically_replaces_q_with_model_safety(monkeypatch):
     root = Path(__file__).resolve().parents[4]
     payload = json.loads((root / (
         "artifacts/unknown_taxonomy_v2/phase6/"
@@ -2846,6 +3020,58 @@ def test_high_bit_solver_sat_keeps_q_live_and_hands_off_model_safety(monkeypatch
     assert evidence["projection_seed_digest"] == high_bit[
         "shared_authority_chain"
     ]["projection_seed_digest"]
+    assert evidence["active_reason_ids"] == [
+        "counterexample_analysis_safety_unproven"
+    ]
+    assert evidence["open_proof_kinds"] == ["counterexample_safety"]
+
+
+def test_high_bit_sat_append_failure_preserves_original_cause_and_q(monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    payload = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase6/"
+        "slice5_representative_validation.json"
+    )).read_text(encoding="utf-8"))
+    high_bit = payload["compiled_fixture_evidence"][
+        "slice5_return_high_bit_near_miss"
+    ]
+    evidence = _run_fixture_bound_high_bit_sat_authority(
+        monkeypatch, high_bit, "slice5-highbit-atomic-append-failure",
+        inject_transaction_failure=True,
+    )
+    assert evidence["atomic_failure_preserved_original_frontier"] is True
+
+
+def test_high_bit_sat_commit_failure_preserves_original_cause_and_q(monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    payload = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase6/"
+        "slice5_representative_validation.json"
+    )).read_text(encoding="utf-8"))
+    high_bit = payload["compiled_fixture_evidence"][
+        "slice5_return_high_bit_near_miss"
+    ]
+    evidence = _run_fixture_bound_high_bit_sat_authority(
+        monkeypatch, high_bit, "slice5-highbit-atomic-commit-failure",
+        inject_commit_failure=True,
+    )
+    assert evidence["atomic_failure_preserved_original_frontier"] is True
+
+
+def test_high_bit_sat_partial_commit_failure_rolls_back_every_ledger(monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    payload = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase6/"
+        "slice5_representative_validation.json"
+    )).read_text(encoding="utf-8"))
+    high_bit = payload["compiled_fixture_evidence"][
+        "slice5_return_high_bit_near_miss"
+    ]
+    evidence = _run_fixture_bound_high_bit_sat_authority(
+        monkeypatch, high_bit, "slice5-highbit-partial-commit-failure",
+        inject_partial_commit_failure=True,
+    )
+    assert evidence["atomic_failure_preserved_original_frontier"] is True
 
 
 def test_high_bit_mask_relation_rejects_noncanonical_decimal_spellings():

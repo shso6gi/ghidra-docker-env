@@ -8,6 +8,18 @@ import sys
 import io
 
 
+def _attach_canonical_mock_decision(result):
+    from function_tracer_pcode.equivalence.v2.phase8_cutover import (
+        attach_canonical_decision, issue_infrastructure_error_decision,
+    )
+
+    attach_canonical_decision(result, issue_infrastructure_error_decision(
+        result_occurrence_id="cli-retry-test-result",
+        error_kind="strategy_exception",
+        error_artifact_digest="cli-retry-test-artifact",
+    ))
+
+
 def test_default_retry_phases_enabled():
     """デフォルトでは recovery phases が有効"""
     from function_tracer_pcode.cli.main import parse_arguments
@@ -171,6 +183,7 @@ def test_equiv_check_propagates_retry_flag():
             mock_equiv_result.is_equivalent = True
             mock_equiv_result.to_string.return_value = "EQUIVALENT"
             mock_equiv_result.smt_formula = None
+            _attach_canonical_mock_decision(mock_equiv_result)
             mock_check.return_value = mock_equiv_result
             
             # run_equivalence_check を実行
@@ -250,6 +263,7 @@ def test_equiv_check_propagates_no_retry_flag():
             mock_equiv_result.is_equivalent = False
             mock_equiv_result.to_string.return_value = "NOT EQUIVALENT"
             mock_equiv_result.smt_formula = None
+            _attach_canonical_mock_decision(mock_equiv_result)
             mock_check.return_value = mock_equiv_result
             
             try:
@@ -331,6 +345,7 @@ def test_cli_output_shows_retry_phases_status():
             mock_equiv_result.is_equivalent = True
             mock_equiv_result.to_string.return_value = "EQUIVALENT"
             mock_equiv_result.smt_formula = None
+            _attach_canonical_mock_decision(mock_equiv_result)
             mock_checker.check_from_binaries = Mock(return_value=mock_equiv_result)
             
             MockEquivChecker.return_value = mock_checker
@@ -415,6 +430,7 @@ def test_cli_output_shows_retry_phases_disabled():
             mock_equiv_result.is_equivalent = False
             mock_equiv_result.to_string.return_value = "NOT EQUIVALENT"
             mock_equiv_result.smt_formula = None
+            _attach_canonical_mock_decision(mock_equiv_result)
             mock_checker.check_from_binaries = Mock(return_value=mock_equiv_result)
             
             MockEquivChecker.return_value = mock_checker
@@ -495,6 +511,7 @@ def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
             mock_equiv_result.is_equivalent = True
             mock_equiv_result.to_string.return_value = "EQUIVALENT"
             mock_equiv_result.smt_formula = None
+            _attach_canonical_mock_decision(mock_equiv_result)
             mock_checker.check_from_binaries = Mock(return_value=mock_equiv_result)
 
             MockEquivChecker.return_value = mock_checker

@@ -89,7 +89,11 @@ def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):
         except Exception:
             calling_error = True
             continue
-        if value is not None and str(value).strip():
+        # Ghidra uses ``None`` for a prototype whose calling convention is not
+        # available.  That is missing provenance, not malformed authority.
+        if value is None:
+            continue
+        if str(value).strip():
             calling = ("ghidra_calling_convention_v1", str(value).strip())
             calling_source = getter_name
             break
@@ -137,14 +141,23 @@ def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):
 
     storage_value = None
     storage_error = False
+    storage_missing = False
     storage_source = "ghidra_function_prototype.getReturnStorage"
     getter = getattr(function_prototype, "getReturnStorage", None)
     if callable(getter):
         try:
             storage = getter()
-            if storage is None or not callable(getattr(storage, "getVarnodes", None)):
+            if storage is None:
+                storage_missing = True
+            elif not callable(getattr(storage, "getVarnodes", None)):
                 raise ValueError("return storage API returned no typed storage")
-            varnodes = tuple(storage.getVarnodes())
+            varnodes = (
+                tuple(storage.getVarnodes())
+                if not storage_missing
+                else ()
+            )
+            if not varnodes:
+                storage_missing = True
             members = []
             for varnode in varnodes:
                 address = varnode.getAddress()
@@ -166,12 +179,13 @@ def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):
                     offset,
                     size,
                 ))
-            if not members or len(members) != len(set(members)):
-                raise ValueError("return storage members are empty or duplicated")
-            storage_value = (
-                "ghidra_return_storage_v1",
-                tuple(sorted(members, key=lambda item: (item[1], item[2], item[3]))),
-            )
+            if not storage_missing:
+                if len(members) != len(set(members)):
+                    raise ValueError("return storage members are duplicated")
+                storage_value = (
+                    "ghidra_return_storage_v1",
+                    tuple(sorted(members, key=lambda item: (item[1], item[2], item[3]))),
+                )
         except Exception:
             storage_error = True
     storage_fact = (

@@ -9,7 +9,7 @@
         "9e6b3eb386c541698aaa42017887d21ca9296fd85553a0bcf58874ef075039f6"
       ],
       "exactly_one_decision_receipt_per_result": true,
-      "manifest_authority_digest": "9019bfb8e45ff37dacc6278b925f039482ebeb058fbd3409a111b1f81d2bc151",
+      "manifest_authority_digest": "0cd00415458d02ef5ff9c649a464f05e864bdd0290f8b2078551727c42123aca",
       "manifest_entry_count": 4,
       "result_occurrence_ids": [
         "production-pilot-7c4c70013d96f6671cfe7744",
@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "f4a7ffb331f85eb3da9b03c5e0b1c3206d3b3c7c9bebc43aa93080a1bfb2ab1a",
+  "artifact_digest": "19c22c336ae5e42efbf13c215445d59300878dbe6b03af8d216c142641136ea9",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -117,23 +117,21 @@
         "abi_completion_receipt_digest": "7a48b0130979ad1ab27f061eb8a63df27bdae60a88351b046e9ed1a86c400a8e",
         "abi_relation_artifact_digest": "1a29ee0b86c90efb73f5f91de0ea7116a3c9e5d3a6432fd4f15a0ed65d28b921",
         "active_reason_ids": [
-          "counterexample_analysis_safety_unproven",
-          "return_high_bit_relation_unproven"
+          "counterexample_analysis_safety_unproven"
         ],
         "extension_relations": [
           "zero_extend",
           "zero_extend_or_mask:1099511627776"
         ],
-        "high_bit_cause_rows_digest": "0cb4ccac6b05bcd109bde383b94d92d8b4b9dfe1827521c06fe9152d89dd8576",
-        "live_requirement_rows_digest": "ca244b350c1a3d609dfc43c3a8690d063912d031828214ac7c115db8addbbc63",
+        "high_bit_cause_rows_digest": "6ecb7eb9fa45a59d7afe141a12e313637599ea3e33900487acbdb3180e288e05",
+        "live_requirement_rows_digest": "51822d70d935aae786a0ceeef046edecf981696ef2c3985623d7e2715e249539",
         "model_safety_handoff_digest": "bce36a7c58dd09a68d5c60adbeeaed7094281741b08345e0d4df0789391ecec2",
         "normalized_storage_widths": [
           64,
           64
         ],
         "open_proof_kinds": [
-          "counterexample_safety",
-          "return_high_bit_relation"
+          "counterexample_safety"
         ],
         "projection_pair_target_digest": "baff6c87210ecee70848718fef465ca1fe11a08c82bbf04f3ec3727da750394c",
         "projection_seed_digest": "7bfdc133e9040b74c38f54850f815c71f84ac8f323bcf5f1f0fdac01502e8987",
@@ -210,19 +208,19 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "06ebfef4d80651e564a1559f55af7037dfcca83a324716a0d94fa5c391d8062a",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "8dc9d206762e58e5803a8a1bf8953cc2aa662caa3f257f69694162eb8234a087",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
-    "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "49382812f1ac3f40613cc375076d43b803c1fdf44c303d893d2b14a25f213542",
+    "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "8408ca465fa47f548c983fb729148a1f3df2d174dd63e31284cc0daa292967de",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789",
-    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "edccb49abca88a6a9ab749415e631aba5c5c807de70734868ee4bb66477670f7",
-    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "f03df3b06ed68cbcb1c835f934bc75a2ce2059955952c94813ca852aafe3ac99",
-    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "73875e1ab915a3b66bec11f4ce23aeae243b5fa4dedc21c4f70cbabe565411d6",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "078b0a6981bb18a5be3d363739008898a013d8acaee6e2864789e0185080583a",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b368c07824b7dd37bb8dd49df4b4b2a745b3ab36e6a1d77fef43ca875a3b033f",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "f4a92bcc52da778f7cd4afa65fd18c30e384b6deea31a349b9fd24f44940e896",
+    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "6d1f838d659d8e6213df1801ef87fbd90dc56fe9616da88c949af19f6498bce0",
+    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "ef39efbd32632b1dbb26fd4d19b2bca162a8d85627c4b7216f4a9e62c27a6532",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "5dcea1c6854868f1e121c1db1bc3f60139070029c41c6f796c380e30a01c5f87",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b4870075b5734b604a45f4aef5badb2d07497f8c7b748a67e0022c934c68c5d8",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "19710ee6652a2464acce3b1c3a0a0f02c3361b45fe6bbda8407dd9f4ba66b246",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "82802bc5f96ec1dca31c0f3f3a09b5dd172d27672a0cbef0c0d558b33aba9e11",
     "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
@@ -404,8 +402,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 596,
-      "candidate_set_digest": "a261edbab1e276ada0efd67e1858db143220e852faa4fce220a35b2a842386bc"
+      "candidate_count": 601,
+      "candidate_set_digest": "a20c7f444bde937ff7dfed66cd7b681f5df24682f86c20e3f1eaf3e65297b781"
     },
     "live_delta": {
       "added": 0,

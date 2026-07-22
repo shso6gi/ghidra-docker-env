@@ -118,7 +118,7 @@ def test_phase7_representative_ambiguous_sites_have_explicit_expected_classifica
     dynamic = next(row for row in rows if (
         row["path"].endswith("equivalence/v2/loop_recurrence.py")
         and row["reference_kind"] == "indirect_dynamic_site"
-        and row["line"] == 328
+        and row["symbol"] == "classify_loop_fallback"
     ))
     assert dynamic["proposed_finite_reason_set"] == ["unknown"]
     assert dynamic["suggested_relation"] == "P_emit"
@@ -185,8 +185,8 @@ def test_phase7_independent_review_can_exclude_false_dynamic_probe(template):
     reviewed = _review_suggestions(template)
     row = next(item for item in reviewed["entries"] if (
         item["path"].endswith("equivalence/v2/loop_recurrence.py")
-        and item["line"] == 328
         and item["reference_kind"] == "indirect_dynamic_site"
+        and item["symbol"] == "classify_loop_fallback"
     ))
     row["reviewed_in_scope"] = False
     row["reviewed_relation"] = None

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from copy import copy
+from copy import copy, deepcopy
 import json
 from pathlib import Path
 
@@ -30,6 +30,11 @@ from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
     attach_canonical_relations,
     outcome_from_payload,
     rematerialize_process_timeout_decision,
+)
+from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+    PAIR_STATUS_PUBLIC_KEY_FILE,
+    generate_pair_status_keypair,
+    seal_pair_status,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.validation.result_summary import (
@@ -315,6 +320,75 @@ def _json_result_log(payload):
     ))
 
 
+def _write_signed_unknown_pair_status(log: Path) -> None:
+    digest = "a" * 64
+    private_key = log.parent / ".pair-status-test.key"
+    public_key = log.parent / PAIR_STATUS_PUBLIC_KEY_FILE
+    generate_pair_status_keypair(private_key, public_key)
+    body = {
+        "authority_kind": "SupervisorCanonicalResultResolvedReceipt",
+        "supervisor_authority_kind": "SupervisorCanonicalResultResolvedReceipt",
+        "supervisor_final_authority_digest": digest,
+        "launch_receipt_digest": digest,
+        "canonical_outcome": "UNKNOWN",
+        "decision_receipt_digest": digest,
+        "result_occurrence_id": "result-occurrence",
+        "result_entry_occurrence_receipt_digest": digest,
+        "execution_identity_digest": digest,
+        "execution_nonce": "execution-nonce",
+        "stream_id": "stream-id",
+        "source_snapshot_fingerprint": digest,
+        "canonical_result_bundle_digest": digest,
+        "canonical_result_bundle_kind": "CanonicalResultFinalizationBundle",
+        "canonical_result_payload_preimage_digest": digest,
+        "semantic_projection_digest": digest,
+        "error_kind": None,
+        "child_returncode": 2,
+        "supervisor_status": "RESOLVED",
+        "supervisor_projection_digest": digest,
+        "classification_valid": True,
+        "pair_execution_target": {
+            "schema": "eqbench-pair-execution-target-v1",
+            "authority_kind": "PairExecutionTargetReceipt",
+            "sample_identity": "sample/Eq/newV",
+            "output_sample_relative_path": "sample/Eq/newV",
+            "function_name": "f", "left_binary_id": "B1",
+            "right_binary_id": "B2", "source_path": "source.c",
+            "source_sha256": digest, "left_binary_path": "left.bin",
+            "left_binary_sha256": digest, "right_binary_path": "right.bin",
+            "right_binary_sha256": digest, "analysis_source_digest": digest,
+            "analysis_config_digest": digest,
+        },
+    }
+    body["pair_execution_target"]["target_digest"] = authority_digest(
+        body["pair_execution_target"]
+    )
+    sealed = seal_pair_status(
+        body, private_key_path=private_key, public_key_path=public_key
+    )
+    log.with_suffix(".pair-status.json").write_text(
+        json.dumps(sealed), encoding="utf-8"
+    )
+
+
+def test_pair_status_resume_policy_keeps_unknown_and_timeout_resumable():
+    from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+        pair_status_resume_disposition,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
+        CLI_EXIT_MATRIX,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+        CLI_EXIT_CODE_BY_OUTCOME,
+    )
+
+    assert CLI_EXIT_MATRIX is CLI_EXIT_CODE_BY_OUTCOME
+    assert pair_status_resume_disposition.__name__ == "pair_status_resume_disposition"
+    assert BATCH_RESUME_MATRIX[Outcome.UNKNOWN].startswith("RESUMABLE_")
+    assert BATCH_RESUME_MATRIX[Outcome.TIMEOUT].startswith("RESUMABLE_")
+    assert BATCH_RESUME_MATRIX[Outcome.EQUIVALENT].startswith("COMPLETE_")
+
+
 def test_canonical_summary_drops_receiptless_unknown_payload_metrics(tmp_path):
     log = tmp_path / "f_B1_B2.log"
     log.write_text(_json_result_log({
@@ -348,6 +422,7 @@ def test_canonical_summary_keeps_only_final_receipt_bound_payload(tmp_path):
         _json_result_log(legacy) + "\n" + _json_result_log(canonical),
         encoding="utf-8",
     )
+    _write_signed_unknown_pair_status(log)
 
     summary = aggregate_validation_logs_by_function((log,), canonical_only=True)
     health = build_run_health_summary(summary)
@@ -385,10 +460,9 @@ def test_process_timeout_is_rematerialized_from_durable_terminal_bundle(tmp_path
     assert receipt.receipt_digest == payload["decision_receipt"]["receipt_digest"]
 
 
-def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal():
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
+def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
+    tmp_path, monkeypatch,
+):
     from scripts.function_tracer_pcode.equivalence.v2.pilot import (
         ProductionDualWritePilotConnector,
     )
@@ -398,9 +472,9 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal():
     )
     from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
         CompositeProductionSignalEncoder,
-        EqClosureProductionSignal,
-        emit_sat_safety_signal,
-        issue_eq_closure_signal,
+        PendingEqClosureAuthority,
+        SatSafetyBlockerProductionSignal,
+        issue_pending_eq_closure_authority,
         production_signal_scope,
     )
     from scripts.function_tracer_pcode.equivalence.v2.reducer import (
@@ -409,23 +483,22 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal():
     from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
         SatSafetyPilotEncoder,
     )
-    from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
-        build_phase7_producer_manifest,
+    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+        PINNED_SOLVER_EXECUTION_ISSUER,
     )
-
-    root = Path(__file__).resolve().parents[4]
-    manifest = build_phase7_producer_manifest(root)
+    occurrence_nonce = "phase8-eq-closure-occurrence"
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE",
+        occurrence_nonce,
+    )
     connector = ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(
             reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
             recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
         ),
         domain_signal_encoder=CompositeProductionSignalEncoder({
-            EqClosureProductionSignal: SatSafetyPilotEncoder(),
+            SatSafetyBlockerProductionSignal: SatSafetyPilotEncoder(),
         }),
-        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
-            manifest, identity
-        ),
     )
     session = connector.begin({"case": "phase8-eq-closure"})
     from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
@@ -442,35 +515,31 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal():
     receipt = frame.receipt
     assert receipt is not None and receipt.is_trusted_for(frame)
     with pytest.raises(ValueError, match="not the dispatch-frame receipt"):
-        issue_eq_closure_signal(session, copy(receipt), frame)
+        issue_pending_eq_closure_authority(session, copy(receipt), frame)
     forged_receipt = copy(receipt)
     frame.receipt = forged_receipt
-    with pytest.raises(TypeError, match="issuer-owned"):
-        issue_eq_closure_signal(session, forged_receipt, frame)
+    with pytest.raises(ValueError, match="not trusted"):
+        issue_pending_eq_closure_authority(session, forged_receipt, frame)
     frame.receipt = receipt
-    with pytest.raises(TypeError, match="issuer-owned"):
-        issue_eq_closure_signal(session, receipt, copy(frame))
+    with pytest.raises(ValueError, match="not trusted"):
+        issue_pending_eq_closure_authority(session, receipt, copy(frame))
     foreign_session = connector.begin({"case": "phase8-eq-closure-foreign"})
-    with pytest.raises(ValueError, match="different production session"):
-        issue_eq_closure_signal(foreign_session, receipt, frame)
+    with pytest.raises(ValueError, match="another production session"):
+        issue_pending_eq_closure_authority(foreign_session, receipt, frame)
     with pytest.raises(TypeError, match="verifier-owned issuer"):
-        EqClosureProductionSignal(
-            "comparison-digest", "comparison-receipt",
-            _token=object(),
+        PendingEqClosureAuthority(_token=object())
+    pending = issue_pending_eq_closure_authority(session, receipt, frame)
+    assert pending.comparison_receipt_id == receipt.receipt_id
+    occurrence_payload = dict(session.execution_payload)
+    assert occurrence_payload.pop("result_entry_occurrence_nonce") == occurrence_nonce
+    session.result_entry_occurrence_receipt = (
+        PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+            result_occurrence_id=session.identity.result_occurrence_id,
+            execution_payload_digest=authority_digest(occurrence_payload),
+            startup_receipt_digests=(receipt.receipt_id,),
+            occurrence_nonce=occurrence_nonce,
         )
-    signal = issue_eq_closure_signal(session, receipt, frame)
-    forged_copy = object.__new__(EqClosureProductionSignal)
-    for name in ("proof_artifact_digest", "comparison_receipt_id", "producer_id"):
-        object.__setattr__(forged_copy, name, getattr(signal, name))
-    with pytest.raises(ValueError, match="copied, forged"):
-        SatSafetyPilotEncoder()(session, forged_copy)
-    # The comparison receipt was issued while this exact production session was
-    # active.  Only the verifier-issued exact signal may cross the encoder.
-    with production_signal_scope(session):
-        emit_sat_safety_signal(
-            signal,
-            producer_site_manifest_id="obligation-stage-final-eq-closure",
-        )
+    )
     result = SimpleNamespace(
         is_equivalent=True,
         error_message=None,
@@ -484,5 +553,296 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal():
     evidence = connector.finish(session, result, case_id="phase8-eq-closure")
 
     assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.EQUIVALENT
-    assert session.phase7_runtime_result.expected_activation_count == 1
-    assert session.phase7_runtime_result.runtime_activation_count == 1
+    assert session.phase7_runtime_result is None
+
+    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+        RESULT_ENVELOPE_FILE,
+        _semantic_projection,
+        build_canonical_result_finalization_bundle,
+        persist_canonical_result_envelope,
+        validate_canonical_result_finalization_bundle,
+    )
+
+    preimage = {"final_outcome": "EQUIVALENT", "total_time": 0.0}
+    bundle_key = tmp_path / "canonical-bundle.key"
+    bundle_key.write_bytes(b"k" * 32)
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID", "phase10-test-key"
+    )
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE", str(bundle_key)
+    )
+    bundle = build_canonical_result_finalization_bundle(
+        result_payload_preimage=preimage,
+        evidence=evidence,
+        session=session,
+    )
+    assert validate_canonical_result_finalization_bundle(
+        bundle,
+        bundle_verification_key_id="phase10-test-key",
+        bundle_verification_key=b"k" * 32,
+    )["outcome"] == "EQUIVALENT"
+    forged_signature = deepcopy(bundle)
+    forged_signature["bundle_signature"] = "0" * 64
+    with pytest.raises(ValueError, match="signature is invalid"):
+        validate_canonical_result_finalization_bundle(
+            forged_signature,
+            bundle_verification_key_id="phase10-test-key",
+            bundle_verification_key=b"k" * 32,
+        )
+    semantic_a = _semantic_projection(
+        preimage, evidence.pilot_result,
+        (("binary1_id", "B1"), ("result_entry_occurrence_nonce", "a")),
+    )
+    semantic_b = _semantic_projection(
+        preimage, evidence.pilot_result,
+        (("binary1_id", "B1"), ("result_entry_occurrence_nonce", "b")),
+    )
+    assert semantic_a == semantic_b
+    payload = {**preimage, "canonical_result_finalization_bundle": bundle}
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT", str(tmp_path))
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE", "eq-bundle")
+    path = persist_canonical_result_envelope(payload)
+    assert path == tmp_path / "eq-bundle" / RESULT_ENVELOPE_FILE
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    persisted = envelope["canonical_result_payload"]
+    persisted_bundle = persisted["canonical_result_finalization_bundle"]
+    assert persisted == json.loads(json.dumps(payload, sort_keys=True))
+    assert validate_canonical_result_finalization_bundle(
+        persisted_bundle,
+        result_payload_preimage={
+            key: value for key, value in persisted.items()
+            if key != "canonical_result_finalization_bundle"
+        },
+    )["outcome"] == "EQUIVALENT"
+
+    forged = deepcopy(persisted_bundle)
+    forged["terminalizations"] = [{
+        "event_sequence_number": 1,
+        "proof_requirement_id": "foreign-timeout",
+    }]
+    forged_body = {
+        key: value for key, value in forged.items()
+        if key not in {"bundle_digest", "bundle_signature"}
+    }
+    forged["bundle_digest"] = authority_digest(forged_body)
+    with pytest.raises(ValueError, match="terminalization"):
+        validate_canonical_result_finalization_bundle(
+            forged, result_payload_preimage=preimage
+        )
+
+    forged = deepcopy(persisted_bundle)
+    forged["canonical_semantic_result_projection"]["payload"][
+        "binary1_content_identity"
+    ] = "foreign-binary"
+    forged["canonical_semantic_result_projection"][
+        "semantic_projection_digest"
+    ] = authority_digest(
+        forged["canonical_semantic_result_projection"]["payload"]
+    )
+    forged_body = {
+        key: value for key, value in forged.items()
+        if key not in {"bundle_digest", "bundle_signature"}
+    }
+    forged["bundle_digest"] = authority_digest(forged_body)
+    with pytest.raises(ValueError, match="semantic result projection"):
+        validate_canonical_result_finalization_bundle(
+            forged, result_payload_preimage=preimage
+        )
+
+
+def test_pending_eq_revalidates_from_immutable_post_cleanup_receipt_only():
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+        PROCESS_DURABLE_REASON_REGISTRY,
+        PROCESS_DURABLE_RECOVERY_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        issue_pending_eq_closure_authority,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+    from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import (
+        _analysis,
+    )
+
+    connector = ProductionDualWritePilotConnector(ShadowLifecycleReducer(
+        reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+        recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+    ))
+    session = connector.begin({"case": "phase10-stale-pending-eq"})
+    with production_signal_scope(session):
+        trusted_result = EquivalenceChecker(
+            strategy="monolithic", timeout=5, monolithic_timeout=5,
+            enable_rewrite=False, canonical_decision_cutover=False,
+        ).check(_analysis("left", 7), _analysis("right", 7))
+    frame = trusted_result._prepared_dispatch_frame
+    issue_pending_eq_closure_authority(session, frame.receipt, frame)
+    frame.cleanup_complete = False
+    result = SimpleNamespace(
+        is_equivalent=True, error_message=None, failure_status=None,
+        failure_message=None, unknown_reasons=[], unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        session, result, case_id="phase10-stale-pending-eq"
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.EQUIVALENT
+
+
+def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
+    tmp_path, monkeypatch,
+):
+    import hashlib
+    import hmac
+
+    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+        build_canonical_result_finalization_bundle,
+        validate_canonical_result_finalization_bundle,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+        PINNED_SOLVER_EXECUTION_ISSUER,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+        PROCESS_DURABLE_REASON_REGISTRY,
+        PROCESS_DURABLE_RECOVERY_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.stream import (
+        DecisiveProofEventAuthority, EventIntent, EventType,
+    )
+
+    nonce = "canonical-occurrence-nonce"
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE", nonce
+    )
+    connector = ProductionDualWritePilotConnector(ShadowLifecycleReducer(
+        reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+        recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+    ))
+    execution_payload = {"case": "canonical-occurrence-join"}
+    session = connector.begin(execution_payload)
+    receipt = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        execution_payload_digest=authority_digest(execution_payload),
+        startup_receipt_digests=("startup-receipt",),
+        occurrence_nonce=nonce,
+    )
+    session.result_entry_occurrence_receipt = receipt
+    session.emit(EventIntent(
+        EventType.EQ_CLOSURE, DecisiveProofEventAuthority("eq-proof")
+    ))
+    result = SimpleNamespace(
+        is_equivalent=True, error_message=None, failure_status=None,
+        failure_message=None, unknown_reasons=[], unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        session, result, case_id="canonical-occurrence-join"
+    )
+    key = b"o" * 32
+    key_file = tmp_path / "occurrence.key"
+    key_file.write_bytes(key)
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID", "occurrence-key")
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE", str(key_file)
+    )
+    bundle = build_canonical_result_finalization_bundle(
+        result_payload_preimage={"final_outcome": "EQUIVALENT"},
+        evidence=evidence,
+        session=session,
+    )
+    foreign = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+        result_occurrence_id="foreign-result-occurrence",
+        execution_payload_digest=authority_digest(execution_payload),
+        startup_receipt_digests=("startup-receipt",),
+        occurrence_nonce=nonce,
+    )
+    forged = deepcopy(bundle)
+    forged["result_entry_occurrence_receipt"] = foreign.to_authority_dict()
+    body = {
+        name: value for name, value in forged.items()
+        if name not in {"bundle_digest", "bundle_signature"}
+    }
+    forged["bundle_digest"] = authority_digest(body)
+    forged["bundle_signature"] = hmac.new(
+        key, forged["bundle_digest"].encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    with pytest.raises(ValueError, match="result-entry occurrence"):
+        validate_canonical_result_finalization_bundle(
+            forged,
+            result_payload_preimage={"final_outcome": "EQUIVALENT"},
+            bundle_verification_key_id="occurrence-key",
+            bundle_verification_key=key,
+        )
+
+
+def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
+    tmp_path, monkeypatch,
+):
+    import hashlib
+    import hmac
+
+    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+        attach_durable_error_finalization,
+        build_canonical_result_finalization_bundle,
+        validate_canonical_result_finalization_bundle,
+    )
+
+    key = b"e" * 32
+    key_file = tmp_path / "early-error.key"
+    key_file.write_bytes(key)
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID", "early-error-key"
+    )
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE", str(key_file)
+    )
+    result = SimpleNamespace(
+        is_equivalent=None, error_message="early failure",
+        failure_status="ERROR", failure_message="early failure",
+        unknown_reasons=[], unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    attach_durable_error_finalization(
+        result,
+        execution_payload={"case": "signed-early-error"},
+        error_kind="operational_authority_invalid",
+        error_artifact_digest="early-error-artifact",
+    )
+    evidence, session = result._canonical_finalization_context
+    bundle = build_canonical_result_finalization_bundle(
+        result_payload_preimage={"final_outcome": "ERROR"},
+        evidence=evidence, session=session,
+    )
+    occurrence = bundle["result_entry_occurrence_receipt"]
+    assert occurrence["authority_kind"] == (
+        "EarlyErrorResultEntryOccurrenceReceipt"
+    )
+    forged = deepcopy(bundle)
+    forged["result_entry_occurrence_receipt"] = None
+    body = {
+        name: value for name, value in forged.items()
+        if name not in {"bundle_digest", "bundle_signature"}
+    }
+    forged["bundle_digest"] = authority_digest(body)
+    forged["bundle_signature"] = hmac.new(
+        key, forged["bundle_digest"].encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    with pytest.raises(ValueError, match="lacks entry occurrence authority"):
+        validate_canonical_result_finalization_bundle(
+            forged,
+            result_payload_preimage={"final_outcome": "ERROR"},
+            bundle_verification_key_id="early-error-key",
+            bundle_verification_key=key,
+        )

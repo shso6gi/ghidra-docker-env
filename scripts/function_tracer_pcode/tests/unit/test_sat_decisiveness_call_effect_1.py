@@ -498,7 +498,7 @@ def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatc
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert result.unknown_reasons[0].reason_id == "unsupported_call_effect_semantics"
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert result.unknown_reasons[0].proof_obligation_id is not None
 
@@ -692,7 +692,7 @@ def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_p
     assert result.is_equivalent is None
     assert result.unknown_reasons
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.reason_id == "call_argument_extraction_incomplete"
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.detail == "function1:effect_call_argument_evidence"
     assert reason.object_target_key[0] == "call_argument_evidence"
@@ -754,11 +754,11 @@ def test_pairwise_preserves_call_effect_reason_alongside_return_coverage_gap(mon
     assert result.is_equivalent is None
     reason_ids = [reason.reason_id for reason in result.unknown_reasons]
     assert UnknownReasonId.RETURN_COVERAGE_GAP.value in reason_ids
-    assert UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value in reason_ids
+    assert "call_argument_extraction_incomplete" in reason_ids
     effect_reasons = [
         reason
         for reason in result.unknown_reasons
-        if reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+        if reason.reason_id == "call_argument_extraction_incomplete"
     ]
     assert effect_reasons
     assert effect_reasons[0].detail == "function1:effect_call_argument_evidence"
@@ -1212,8 +1212,8 @@ def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(mon
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
-        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        "call_argument_extraction_incomplete",
+        "call_argument_extraction_incomplete",
     ]
     assert {
         reason.detail for reason in result.unknown_reasons
@@ -1251,7 +1251,7 @@ def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypa
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     strategy._solve_query_after_guard.assert_not_called()
 
@@ -1387,7 +1387,7 @@ def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeyp
 
     assert result.is_equivalent is None
     assert [reason.reason_id for reason in result.unknown_reasons] == [
-        UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        "expression_translation_incomplete"
     ]
     strategy._solve_query_after_guard.assert_not_called()
 

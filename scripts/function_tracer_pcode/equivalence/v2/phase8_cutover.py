@@ -12,7 +12,9 @@ import argparse
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import Outcome
+from .contracts import (
+    BATCH_RESUME_DISPOSITION_BY_OUTCOME, CLI_EXIT_CODE_BY_OUTCOME, Outcome,
+)
 from .decision import DecisionReceipt
 
 
@@ -24,21 +26,10 @@ RETRY_FALLBACK_MATRIX: Mapping[Outcome, tuple[str, ...]] = {
     Outcome.ERROR: ("STOP",),
 }
 
-BATCH_RESUME_MATRIX: Mapping[Outcome, str] = {
-    Outcome.EQUIVALENT: "COMPLETE_EQ",
-    Outcome.NOT_EQ: "COMPLETE_NOT_EQ",
-    Outcome.UNKNOWN: "RESUMABLE_SEMANTIC_BACKLOG",
-    Outcome.TIMEOUT: "RESUMABLE_DEADLINE_BACKLOG",
-    Outcome.ERROR: "FAILED_INFRASTRUCTURE",
-}
+BATCH_RESUME_MATRIX = BATCH_RESUME_DISPOSITION_BY_OUTCOME
 
-CLI_EXIT_MATRIX: Mapping[Outcome, int] = {
-    Outcome.EQUIVALENT: 0,
-    Outcome.NOT_EQ: 1,
-    Outcome.UNKNOWN: 2,
-    Outcome.TIMEOUT: 3,
-    Outcome.ERROR: 4,
-}
+# Compatibility name retained for callers; the mapping has one authority.
+CLI_EXIT_MATRIX = CLI_EXIT_CODE_BY_OUTCOME
 
 
 def decision_receipt_payload(receipt: DecisionReceipt) -> dict[str, str]:
@@ -143,18 +134,13 @@ def rematerialize_process_timeout_decision(
 ) -> DecisionReceipt:
     """Derive TIMEOUT only from the durable terminal supervisor bundle."""
 
-    from .decision import (
-        FinalizationAuthority,
-        TerminalTimeoutReceipt,
-        finalize_decision,
-    )
+    from .codecs import StrictV2JsonCodec
     from .process_supervisor import (
         DurableCheckpointStore,
         PROCESS_DURABLE_REASON_REGISTRY,
         PROCESS_DURABLE_RECOVERY_REGISTRY,
         ProcessSupervisorAuthorityFactory,
     )
-    from .reducer import ShadowLifecycleReducer
 
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id=supervisor_signing_key_id,
@@ -165,22 +151,23 @@ def rematerialize_process_timeout_decision(
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
     prefix = store.rematerialize_active_prefix()
     bundle = store.rematerialize_timeout_bundle(prefix=prefix)
-    reduction = ShadowLifecycleReducer(
+    factory.validate_timeout_bundle_membership(bundle)
+    codec = StrictV2JsonCodec(
         reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
         recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
-    ).replay(bundle.terminal_segment.composite_stream)
-    terminal_event = bundle.terminal_segment.composite_stream.events[-1]
-    timeout = TerminalTimeoutReceipt.create(
-        result_occurrence_id=bundle.result_occurrence_id,
-        lifecycle_projection_digest=reduction.projection.lifecycle_projection_digest,
-        proof_requirement_id=bundle.proof_requirement_id,
-        execution_event_digest=terminal_event.authority_digest,
     )
-    return finalize_decision(FinalizationAuthority(
-        bundle.result_occurrence_id,
-        reduction.projection,
-        terminal_timeout_receipts=(timeout,),
+    receipt = codec.loads(json.dumps(
+        bundle.canonical_result_bundle["decision_receipt"]
     ))
+    if type(receipt) is not DecisionReceipt:
+        raise ValueError("supervisor canonical bundle lacks DecisionReceipt")
+    receipt.validate()
+    if (
+        receipt.result_occurrence_id != bundle.result_occurrence_id
+        or receipt.outcome is not Outcome.TIMEOUT
+    ):
+        raise ValueError("supervisor canonical DecisionReceipt join differs")
+    return receipt
 
 
 def outcome_from_result(result: Any) -> Outcome:
@@ -276,9 +263,10 @@ def build_default_cutover_connector() -> Any:
     )
     from .production_signals import (
         CallEffectBlockerProductionSignal,
+        CallEffectPrerequisiteProductionSignal,
         CallEffectProofBatchProductionSignal,
+        ComparisonClosureProductionSignal,
         CompositeProductionSignalEncoder,
-        EqClosureProductionSignal,
         OutcomePartitionProductionSignal,
         SafeCounterexampleProductionSignal,
         SatSafetyBlockerProductionSignal,
@@ -286,6 +274,7 @@ def build_default_cutover_connector() -> Any:
     from .reducer import ShadowLifecycleReducer
     from .return_outcome import ReturnOutcomePilotEncoder
     from .sat_safety import SatSafetyPilotEncoder
+    from .production_signals import ComparisonClosurePilotEncoder
 
     worker_key_id = os.environ.get("UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID")
     worker_key_file = os.environ.get("UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE")
@@ -321,12 +310,13 @@ def build_default_cutover_connector() -> Any:
     loop = LoopRecurrencePilotEncoder()
     abi = AbiWidthReadonlyPilotEncoder(enable_solver_execution=True)
     operational = OperationalExtractionPilotEncoder()
+    comparison = ComparisonClosurePilotEncoder()
     routes = {
         OutcomePartitionProductionSignal: outcome,
         SatSafetyBlockerProductionSignal: sat,
         SafeCounterexampleProductionSignal: sat,
-        EqClosureProductionSignal: sat,
         CallEffectBlockerProductionSignal: call,
+        CallEffectPrerequisiteProductionSignal: call,
         CallEffectProofBatchProductionSignal: call,
         SummaryEffectPrerequisiteProductionSignal: call,
         LoopBlockerProductionSignal: loop,
@@ -338,6 +328,7 @@ def build_default_cutover_connector() -> Any:
         AbiWidthReadonlySolverExecutionBatchSignal: abi,
         OperationalBlockerSignal: operational,
         OperationalCompletionSignal: operational,
+        ComparisonClosureProductionSignal: comparison,
     }
     return ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(

@@ -45,6 +45,7 @@ from .contracts import (
 )
 from .production_signals import (
     CallEffectBlockerProductionSignal,
+    CallEffectPrerequisiteProductionSignal,
     CallEffectProofBatchProductionSignal,
 )
 from .registry import (
@@ -1069,6 +1070,87 @@ class CallEffectPilotEncoder:
             "producer_id": signal.producer_id,
         })
 
+    @staticmethod
+    def _prerequisite_signal_key(
+        signal: CallEffectPrerequisiteProductionSignal,
+    ) -> str:
+        return authority_digest(signal._phase7_signal_authority())
+
+    def _prerequisite_authority(
+        self, session: Any, signal: CallEffectPrerequisiteProductionSignal,
+    ) -> CauseOccurrenceAuthority:
+        reason_id = "callsite_correspondence_unproven"
+        spec = CALL_EFFECT_REASON_SPECS[reason_id]
+        target = (
+            "callsite_correspondence_obligation",
+            signal.obligation_id,
+            signal.observation_contract_id,
+            signal.left_fact_id,
+            signal.right_fact_id,
+            signal.structural_certificate_id,
+        )
+        cause = self._cause_factory.create(
+            reason_id=reason_id,
+            identity_scope=IdentityScope.RELATIONAL,
+            target_kind=spec.target_kind,
+            canonical_target_key=target,
+            missing_semantic_fact=("paired_callsite_correspondence",),
+            semantic_proposition=("callsite_correspondence_is_complete", target),
+            observation_surface=(
+                signal.observation_contract_id,
+                signal.structural_certificate_id,
+            ),
+            active_semantic_precondition=(
+                "phase2_eligibility_blockers", signal.eligibility_blockers
+            ),
+            correspondence_contract=(
+                "relational_call_effect_obligation",
+                signal.left_fact_id,
+                signal.right_fact_id,
+            ),
+        )
+        semantic_target = (
+            "typed_callsite_correspondence_requirement_v1", target
+        )
+        requirement_id = "call-effect-prereq-" + authority_digest({
+            "cause_id": cause.value,
+            "proof_kind": "callsite_correspondence",
+            "semantic_target": semantic_target,
+        })[:32]
+        requirement = ProofRequirement(
+            requirement_id, "callsite_correspondence", semantic_target
+        )
+        bound = self._binding_factory.bind(
+            contract_definition_id=spec.contract_definition_id,
+            contract_version=1,
+            bindings={"proof": requirement},
+        )
+        occurrence = CauseOccurrence(
+            "call-effect-prereq-occ-" + authority_digest({
+                "cause_id": cause.value,
+                "result_occurrence_id": session.identity.result_occurrence_id,
+            })[:32],
+            cause,
+            reason_id,
+            authority_digest({"canonical_target": target}),
+            spec.target_kind,
+            IdentityScope.RELATIONAL,
+            bound.contract_definition_id,
+            bound.contract_version,
+            bound.normalized_expression_digest,
+            bound.bound_expression_digest,
+            (requirement_id,),
+            (
+                signal.structural_certificate_id,
+                *signal.eligibility_blockers,
+            ),
+            "typed_call_effect_prerequisite",
+            session.identity.source_snapshot_fingerprint,
+            signal.producer_id,
+            session.identity.execution_identity_digest,
+        )
+        return CauseOccurrenceAuthority(occurrence, bound)
+
     def _summary_effect_authority(
         self,
         session: Any,
@@ -1236,6 +1318,18 @@ class CallEffectPilotEncoder:
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is CallEffectProofBatchProductionSignal:
             return self._proof_batch_intents(session, signal)
+        if type(signal) is CallEffectPrerequisiteProductionSignal:
+            state = self._state(session)
+            key = self._prerequisite_signal_key(signal)
+            if key in state["authorities"]:
+                return ()
+            authority = self._prerequisite_authority(session, signal)
+            state["authorities"][key] = authority
+            state["signals"][key] = signal
+            return (EventIntent(
+                EventType.CAUSE_OBSERVED,
+                CauseObservedEventAuthority(authority),
+            ),)
         if type(signal) is SummaryEffectPrerequisiteProductionSignal:
             state = self._state(session)
             key = self._summary_effect_signal_key(signal)
@@ -1404,13 +1498,35 @@ class CallEffectPilotEncoder:
                 requirement_to_key[requirement.requirement_id] = (
                     signal.obligation_id, stage
                 )
+        completed_stage_requirements = (
+            set(requirement_to_key) & state["completed_requirements"]
+        )
+        if completed_stage_requirements == set(requirement_to_key):
+            # The checker may revisit the same shadow manifest in one result
+            # occurrence after the exact stage batch has already been
+            # materialized.  Its semantic-arm requirement intentionally stays
+            # open, but the solver stages must not be executed a second time.
+            return None
         assignments = tuple(
             (requirement_to_key[row.proof_requirement_id], row)
             for row in projection.q_open_base
             if row.proof_requirement_id in requirement_to_key
         )
         if len(assignments) != len(requirement_to_key):
-            raise ValueError("call/effect execution context lacks exact live stage frontier")
+            live_requirement_ids = {
+                row.proof_requirement_id for row in projection.q_open_base
+            }
+            missing_requirement_ids = tuple(sorted(
+                set(requirement_to_key) - live_requirement_ids
+            ))
+            raise ValueError(
+                "call/effect execution context lacks exact live stage frontier: "
+                f"expected={len(requirement_to_key)} assigned={len(assignments)} "
+                f"missing={missing_requirement_ids!r} "
+                f"live_count={len(live_requirement_ids)} "
+                f"completed_stage_count={len(completed_stage_requirements)} "
+                f"recorder_event_count={session.recorder.event_count}"
+            )
         for authority in authorities:
             state["execution_projections"][authority.occurrence.occurrence_id] = projection
         from ..call_effect_producer import V2CallEffectExecutionContext

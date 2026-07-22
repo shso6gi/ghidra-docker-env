@@ -74,6 +74,25 @@ class Outcome(str, Enum):
     ERROR = "ERROR"
 
 
+# Single public authority for the process exit associated with each canonical
+# outcome.  Compatibility surfaces may alias this mapping, but must not copy it.
+CLI_EXIT_CODE_BY_OUTCOME: Mapping[Outcome, int] = {
+    Outcome.EQUIVALENT: 0,
+    Outcome.NOT_EQ: 1,
+    Outcome.UNKNOWN: 2,
+    Outcome.TIMEOUT: 3,
+    Outcome.ERROR: 4,
+}
+
+BATCH_RESUME_DISPOSITION_BY_OUTCOME: Mapping[Outcome, str] = {
+    Outcome.EQUIVALENT: "COMPLETE_EQ",
+    Outcome.NOT_EQ: "COMPLETE_NOT_EQ",
+    Outcome.UNKNOWN: "RESUMABLE_SEMANTIC_BACKLOG",
+    Outcome.TIMEOUT: "RESUMABLE_DEADLINE_BACKLOG",
+    Outcome.ERROR: "FAILED_INFRASTRUCTURE",
+}
+
+
 class CensusMode(str, Enum):
     V2_CANONICAL = "V2_CANONICAL"
     LEGACY_DIAGNOSTIC = "LEGACY_DIAGNOSTIC"

@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
+
+
+def _isolated_git_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    return workspace
 
 from scripts.function_tracer_pcode.validation.freeze_observed_baseline import (
     freeze_observed_baseline,
@@ -182,7 +190,7 @@ def _ready_phase1_fixture(tmp_path: Path):
         git_head="0a53352cf3c9528abfb654906ed7b963474bedc5",
         output_root=baseline_root,
         source_roots={"function_call": source_root},
-        workspace_root=Path.cwd(),
+        workspace_root=_isolated_git_workspace(tmp_path),
     )
     phase1_dir = baseline_root / "phase1"
     _write_positive_object_evidence(phase1_dir)

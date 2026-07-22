@@ -73,7 +73,6 @@ SEALED_OPERATIONAL_ERROR_KINDS = frozenset({
     "analysis_exception",
     "strategy_exception",
     "unexpected_pairwise_state",
-    "process_deadline_without_checkpoint",
     "operational_authority_invalid",
 })
 

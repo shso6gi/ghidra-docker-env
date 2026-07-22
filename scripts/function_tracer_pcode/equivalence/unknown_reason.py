@@ -284,9 +284,25 @@ class UnknownRecoveryAction:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
-        reason_id = normalize_unknown_reason_id(payload.get("reason_id"))
+        raw_reason_id = _enum_value(payload.get("reason_id"))
+        reason_id = normalize_unknown_reason_id(raw_reason_id)
+        if reason_id == UnknownReasonId.UNKNOWN.value and raw_reason_id:
+            try:
+                from .v2.process_supervisor import PROCESS_DURABLE_REASON_REGISTRY
+
+                PROCESS_DURABLE_REASON_REGISTRY.get(raw_reason_id)
+            except KeyError:
+                pass
+            else:
+                # Exact v2 compatibility diagnostics are reader-supported
+                # without registering them as legacy decision reasons.  Keep
+                # their identity and the already serialized typed fields.
+                reason_id = raw_reason_id
         definition = get_unknown_reason_definition(reason_id)
-        use_definition_defaults = reason_id != UnknownReasonId.UNKNOWN.value
+        use_definition_defaults = (
+            reason_id != UnknownReasonId.UNKNOWN.value
+            and reason_id in _UNKNOWN_REASON_REGISTRY
+        )
         return cls(
             count_kind=_enum_value(payload.get("count_kind")) or UnknownCountKind.PROOF_ACTION.value,
             reason_id=reason_id,

@@ -2085,6 +2085,7 @@ class EquivalenceChecker:
                 "shadow_status": "inconclusive",
                 "failure_cause": "shadow_manifest_construction_failed",
                 "error_type": type(exc).__name__,
+                "error_detail": str(exc),
             }
 
     @staticmethod

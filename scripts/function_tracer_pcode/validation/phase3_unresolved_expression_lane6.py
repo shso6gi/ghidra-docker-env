@@ -2804,7 +2804,13 @@ def _current_targets(entry: Any) -> Sequence[Any]:
         return ()
     targets = []
     for record in current.get("reason_records") or ():
-        if not isinstance(record, Mapping) or record.get("reason_id") != "unresolved_expression":
+        if (
+            not isinstance(record, Mapping)
+            or record.get("reason_id") not in {
+                "unresolved_expression",
+                "expression_translation_incomplete",
+            }
+        ):
             continue
         if record.get("evidence_kind") != UNRESOLVED_EVIDENCE_KIND:
             continue
@@ -2822,7 +2828,14 @@ def _expected_movements_match_definition(entry: Mapping[str, Any]) -> bool:
 
 def _object_target_key_is_specific_unresolved_expression(value: Any) -> bool:
     target = _normalize_nested_tuple(value)
-    if not isinstance(target, tuple) or len(target) not in {4, 5} or target[0] != "unresolved_expression":
+    if (
+        not isinstance(target, tuple)
+        or len(target) not in {4, 5}
+        or target[0] not in {
+            "unresolved_expression",
+            "expression_translation_incomplete",
+        }
+    ):
         return False
     if _nested_contains_diagnostic_reason(target):
         return False

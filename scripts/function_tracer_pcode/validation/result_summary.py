@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from ..equivalence.v2.pair_status_authority import (
+    find_pair_status_public_key,
+    validate_signed_pair_status,
+)
 from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     coerce_unknown_reason_records,
@@ -58,6 +62,7 @@ class ValidationLogRecord:
     pair_label: str
     status: str
     payloads: Tuple[Mapping[str, Any], ...] = ()
+    pair_status_metadata: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -256,15 +261,36 @@ def read_validation_log_record(
     log_path = Path(path)
     text = log_path.read_text(errors="replace") if log_path.is_file() else ""
     payloads = extract_result_payloads_from_text(text)
+    pair_status = None
     if canonical_only:
+        pair_status_path = log_path.with_suffix(".pair-status.json")
+        if pair_status_path.is_file():
+            pair_status_payload = json.loads(
+                pair_status_path.read_text(encoding="utf-8")
+            )
+            pair_status = validate_signed_pair_status(
+                pair_status_payload,
+                public_key_path=find_pair_status_public_key(pair_status_path),
+            )
         events = _extract_final_result_events(text, matrix_context=True)
         final_payload = events[-1][2] if events else None
         payloads = (
             (final_payload,)
             if final_payload is not None
             and final_payload.get("decision_receipt") is not None
+            and (
+                pair_status is None
+                or classify_result_payload(final_payload, matrix_context=True)
+                == (
+                    STATUS_EQ
+                    if pair_status["canonical_outcome"] == "EQUIVALENT"
+                    else pair_status["canonical_outcome"]
+                )
+            )
             else ()
         )
+        if pair_status is None:
+            payloads = ()
     function_name, pair_label = parse_log_identity(log_path)
     if payloads:
         payload = payloads[-1]
@@ -278,11 +304,25 @@ def read_validation_log_record(
         function_name=function_name,
         pair_label=pair_label,
         status=(
-            classify_canonical_log_text(text, matrix_context=True)
+            (
+                STATUS_EQ
+                if pair_status["canonical_outcome"] == "EQUIVALENT"
+                else pair_status["canonical_outcome"]
+            )
+            if pair_status is not None
+            else STATUS_INCOMPLETE
             if canonical_only
             else classify_log_text(text, matrix_context=True)
         ),
         payloads=payloads,
+        pair_status_metadata=(
+            {
+                "error_kind": pair_status["error_kind"],
+                "child_returncode": pair_status["child_returncode"],
+                "supervisor_status": pair_status["supervisor_status"],
+            }
+            if pair_status is not None else None
+        ),
     )
 
 
@@ -788,10 +828,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.classify_log:
         if len(logs) != 1:
             parser.error("--classify-log requires exactly one log")
-        print(classify_canonical_log_text(
-            Path(logs[0]).read_text(encoding="utf-8", errors="replace"),
-            matrix_context=True,
-        ))
+        print(read_validation_log_record(logs[0], canonical_only=True).status)
         return 0
 
     if args.function_summary:
@@ -866,6 +903,29 @@ def build_run_health_summary(
 ) -> Dict[str, Any]:
     payloads = _payloads_from_records(summary.overall.records)
     unknown_summary = summarize_validation_unknowns(payloads)
+    metadata_counts = {
+        "error_kind_counts": {},
+        "child_returncode_counts": {},
+        "supervisor_status_counts": {},
+    }
+    for record in summary.overall.records:
+        metadata = record.pair_status_metadata
+        if metadata is None:
+            continue
+        values = {
+            "error_kind_counts": (
+                "<none>" if metadata["error_kind"] is None
+                else str(metadata["error_kind"])
+            ),
+            "child_returncode_counts": (
+                "null" if metadata["child_returncode"] is None
+                else str(metadata["child_returncode"])
+            ),
+            "supervisor_status_counts": str(metadata["supervisor_status"]),
+        }
+        for field, value in values.items():
+            counts = metadata_counts[field]
+            counts[value] = counts.get(value, 0) + 1
     health: Dict[str, Any] = {
         "total_results": summary.overall.total_pairs,
         "final_result_counts": {status: summary.overall.count(status) for status in STATUS_ORDER},
@@ -875,6 +935,7 @@ def build_run_health_summary(
         "proof_backlog_by_reason": dict(unknown_summary.proof_backlog_by_reason),
         "proof_backlog_by_proof_kind": dict(unknown_summary.proof_backlog_by_proof_kind),
         "operational_unknown_by_reason": dict(unknown_summary.operational_unknown_by_reason),
+        **metadata_counts,
         "functions": {
             function_name: {
                 "total": aggregate.total_pairs,

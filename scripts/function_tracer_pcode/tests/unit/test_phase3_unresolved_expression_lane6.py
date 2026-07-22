@@ -557,7 +557,7 @@ def _nested_contains(value, needle) -> bool:
 def test_unresolved_expression_target_is_object_specific():
     target = _unresolved_target()
 
-    assert target[0] == "unresolved_expression"
+    assert target[0] == "expression_translation_incomplete"
     assert _object_target_key_is_specific_unresolved_expression(target)
     assert _nested_contains(target, "unresolved_classification")
     assert _nested_contains(target, "opaque_unknown")

@@ -14,6 +14,10 @@ __pycache__
 output
 logs/
 tmp/
+**/.process-authority-keys/
+**/.phase8-execution-authority/
+artifacts/**/*.key
+**/.process-authority/
 # targets配下のバイナリファイルを除外
 targets/**/*-x86_64-gcc-O*
 targets/**/*-x86_64-clang-O*

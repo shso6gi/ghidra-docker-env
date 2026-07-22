@@ -593,6 +593,52 @@ def test_pairwise_return_coverage_inconclusive_unresolved_expression_does_not_au
     assert reasons == ["function1:return_coverage_inconclusive", "function2:return_coverage_inconclusive"]
     assert analysis1.completed_recovery_proof_evidence == ()
 
+
+def test_pairwise_return_coverage_accepts_typed_v2_string_reason(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_outcome_partition_covered_labels",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_outcome_partition_inconclusive_labels",
+        lambda *_args, **_kwargs: {"function1"},
+    )
+    strategy._last_unary_outcome_blockers = {
+        "function1": "outcome_partition_completion_unproven",
+    }
+
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [case1],
+        [case2],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons[0] == "function1:outcome_partition_completion_unproven"
+
 def test_pairwise_return_coverage_non_dischargeable_inconclusive_causes_do_not_auto_complete(monkeypatch):
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
@@ -738,9 +784,9 @@ def test_pairwise_keeps_global_coverage_gap_with_sat_unsafety(monkeypatch):
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason_ids = {reason.reason_id for reason in result.unknown_reasons}
-    assert UnknownReasonId.SAT_UNSAFETY.value in reason_ids
+    assert "counterexample_analysis_safety_unproven" in reason_ids
     assert UnknownReasonId.RETURN_COVERAGE_GAP.value in reason_ids
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert result.unknown_reasons[0].reason_id == "counterexample_analysis_safety_unproven"
     assert any(
         reason.reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
         and reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
@@ -980,13 +1026,13 @@ def test_analysis_requires_completed_return_coverage_proof_uses_reason_kind_for_
             analysis,
             ignored_reason_ids=(UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,),
         )
-        == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+        == "effect_observation_coverage_incomplete"
     )
     assert (
         strategy._unknown_reason_id_for_blocking_unsafety(
             "function1:effect_summary_path_coverage_incomplete"
         )
-        == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+        == "effect_observation_coverage_incomplete"
     )
 
 def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():

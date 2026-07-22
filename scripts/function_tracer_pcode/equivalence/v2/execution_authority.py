@@ -242,12 +242,8 @@ class SolverResultEntryOccurrenceReceipt:
             or not self.occurrence_nonce
             or self.startup_receipt_digests
             != tuple(sorted(self.startup_receipt_digests))
-            or self.result_entry_occurrence_id
-            != "solver-result-entry-" + authority_digest({
-                "execution_payload_digest": self.execution_payload_digest,
-                "startup_receipt_digests": self.startup_receipt_digests,
-                "occurrence_nonce": self.occurrence_nonce,
-            })[:32]
+            or type(self.result_entry_occurrence_id) is not str
+            or not self.result_entry_occurrence_id
             or self.receipt_digest != authority_digest(payload)
         ):
             raise ValueError("solver result-entry occurrence receipt is invalid")
@@ -996,6 +992,7 @@ class PinnedSolverExecutionIssuer:
     def issue_result_entry_occurrence(
         self,
         *,
+        result_occurrence_id: str,
         execution_payload_digest: str,
         startup_receipt_digests: Sequence[str],
         occurrence_nonce: Optional[str] = None,
@@ -1003,16 +1000,12 @@ class PinnedSolverExecutionIssuer:
         startup = tuple(sorted(startup_receipt_digests))
         nonce = secrets.token_hex(24) if occurrence_nonce is None else occurrence_nonce
         _exact_string(nonce, "result-entry occurrence nonce")
-        occurrence_id = "solver-result-entry-" + authority_digest({
-            "execution_payload_digest": execution_payload_digest,
-            "startup_receipt_digests": startup,
-            "occurrence_nonce": nonce,
-        })[:32]
+        _exact_string(result_occurrence_id, "canonical result occurrence ID")
         payload = {
             "execution_payload_digest": execution_payload_digest,
             "startup_receipt_digests": startup,
             "occurrence_nonce": nonce,
-            "result_entry_occurrence_id": occurrence_id,
+            "result_entry_occurrence_id": result_occurrence_id,
         }
         receipt = SolverResultEntryOccurrenceReceipt(
             **payload,

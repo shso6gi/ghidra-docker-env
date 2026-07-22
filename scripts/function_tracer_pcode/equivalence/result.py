@@ -121,6 +121,9 @@ class EquivalenceResult:
     canonical_decision_required: bool = False
     canonical_c_active_base: Tuple[Mapping[str, Any], ...] = ()
     canonical_q_open_base: Tuple[Mapping[str, Any], ...] = ()
+    canonical_result_finalization_bundle: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -243,6 +246,10 @@ class EquivalenceResult:
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
+        if self.canonical_result_finalization_bundle is not None:
+            result["canonical_result_finalization_bundle"] = dict(
+                self.canonical_result_finalization_bundle
+            )
         if self.completed_recovery_proof_evidence:
             result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
         if self.reason_completion_applicability_contexts:

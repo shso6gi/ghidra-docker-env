@@ -1,0 +1,460 @@
+"""Publicly verifiable authority for canonical EqBench pair status."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Any, Mapping
+
+from .contracts import (
+    BATCH_RESUME_DISPOSITION_BY_OUTCOME, CLI_EXIT_CODE_BY_OUTCOME, Outcome,
+    authority_digest,
+)
+
+
+PAIR_STATUS_SCHEMA = "signed-canonical-pair-status-v1"
+PAIR_STATUS_AUTHORITY_KIND = "SignedCanonicalPairStatusProjection"
+PAIR_STATUS_ALGORITHM = "Ed25519"
+PAIR_STATUS_PUBLIC_KEY_SCHEMA = "pair-status-ed25519-public-key-v1"
+PAIR_STATUS_PUBLIC_KEY_FILE = "pair-status-verification-key.json"
+
+PAIR_STATUS_COMMON_FIELDS = frozenset({
+    "authority_kind",
+    "supervisor_authority_kind",
+    "supervisor_final_authority_digest",
+    "launch_receipt_digest",
+    "canonical_outcome",
+    "decision_receipt_digest",
+    "result_occurrence_id",
+    "result_entry_occurrence_receipt_digest",
+    "execution_identity_digest",
+    "execution_nonce",
+    "stream_id",
+    "source_snapshot_fingerprint",
+    "canonical_result_bundle_digest",
+    "canonical_result_bundle_kind",
+    "canonical_result_payload_preimage_digest",
+    "semantic_projection_digest",
+    "error_kind",
+    "child_returncode",
+    "supervisor_status",
+    "supervisor_projection_digest",
+    "classification_valid",
+    "pair_execution_target",
+})
+PAIR_STATUS_DURABLE_FIELDS = frozenset({
+    "finalization_bundle_digest",
+    "event_stream_authority_digest",
+    "child_exit_disposition",
+    "child_returncode_observation_kind",
+})
+PAIR_STATUS_SEAL_FIELDS = frozenset({
+    "pair_status_schema",
+    "pair_status_authority_kind",
+    "pair_status_signing_algorithm",
+    "pair_status_signing_key_id",
+    "pair_status_body_digest",
+    "pair_status_signature",
+})
+
+
+def _atomic_write(path: Path, data: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent)
+    )
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _public_key_payload(public_key_bytes: bytes) -> Mapping[str, Any]:
+    public_key_sha256 = hashlib.sha256(public_key_bytes).hexdigest()
+    body = {
+        "schema": PAIR_STATUS_PUBLIC_KEY_SCHEMA,
+        "authority_kind": "PairStatusEd25519PublicVerificationKey",
+        "algorithm": PAIR_STATUS_ALGORITHM,
+        "key_id": f"pair-status-ed25519:{public_key_sha256}",
+        "public_key_base64": base64.b64encode(public_key_bytes).decode("ascii"),
+        "public_key_sha256": public_key_sha256,
+    }
+    return {**body, "artifact_digest": authority_digest(body)}
+
+
+def generate_pair_status_keypair(
+    private_key_path: Path, public_key_path: Path,
+) -> Mapping[str, Any]:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key = Ed25519PrivateKey.generate()
+    private_key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_key_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    public_payload = _public_key_payload(public_key_bytes)
+    _atomic_write(Path(private_key_path), private_key_bytes, 0o600)
+    _atomic_write(
+        Path(public_key_path),
+        (json.dumps(public_payload, sort_keys=True) + "\n").encode("utf-8"),
+        0o644,
+    )
+    return public_payload
+
+
+def write_pair_status_public_key(
+    private_key_path: Path, public_key_path: Path,
+) -> Mapping[str, Any]:
+    """Materialize the public verifier without replacing retained secret state."""
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    try:
+        private_key = Ed25519PrivateKey.from_private_bytes(
+            Path(private_key_path).read_bytes()
+        )
+    except Exception as exc:
+        raise ValueError("pair-status private signing key is invalid") from exc
+    public_key_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    payload = _public_key_payload(public_key_bytes)
+    _atomic_write(
+        Path(public_key_path),
+        (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        0o644,
+    )
+    return payload
+
+
+def load_pair_status_public_key(
+    public_key_path: Path,
+) -> tuple[Mapping[str, Any], Any]:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    payload = json.loads(Path(public_key_path).read_text(encoding="utf-8"))
+    required = {
+        "schema", "authority_kind", "algorithm", "key_id",
+        "public_key_base64", "public_key_sha256", "artifact_digest",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != required:
+        raise ValueError("pair-status public-key schema differs")
+    body = {key: payload[key] for key in required - {"artifact_digest"}}
+    try:
+        public_key_bytes = base64.b64decode(
+            payload["public_key_base64"], validate=True
+        )
+    except Exception as exc:
+        raise ValueError("pair-status public key encoding is invalid") from exc
+    expected = _public_key_payload(public_key_bytes)
+    if dict(payload) != expected or authority_digest(body) != payload["artifact_digest"]:
+        raise ValueError("pair-status public-key authority drifted")
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+    except Exception as exc:
+        raise ValueError("pair-status public key is invalid") from exc
+    return payload, public_key
+
+
+def validate_pair_status_keypair(
+    private_key_path: Path, public_key_path: Path,
+) -> Mapping[str, Any]:
+    """Fail closed unless a retained private key matches the public artifact."""
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    public_payload, _ = load_pair_status_public_key(public_key_path)
+    try:
+        private_key = Ed25519PrivateKey.from_private_bytes(
+            Path(private_key_path).read_bytes()
+        )
+    except Exception as exc:
+        raise ValueError("pair-status private signing key is invalid") from exc
+    derived_public = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if _public_key_payload(derived_public)["key_id"] != public_payload["key_id"]:
+        raise ValueError("pair-status signing and verification keys differ")
+    return public_payload
+
+
+def _validate_durable_child_exit(body: Mapping[str, Any]) -> None:
+    disposition = body["child_exit_disposition"]
+    observation = body["child_returncode_observation_kind"]
+    returncode = body["child_returncode"]
+    if type(disposition) is not str or not disposition:
+        raise ValueError("pair-status durable child disposition is missing")
+    if observation == "DURABLE_RESTART_NO_CHILD_STATUS":
+        if returncode is not None:
+            raise ValueError("pair-status durable restart invented a child return code")
+        return
+    if observation != "LIVE_PROCESS_WAIT" or type(returncode) is not int:
+        raise ValueError("pair-status durable child observation is invalid")
+    if disposition == "SIGTERM_AFTER_DEADLINE":
+        expected = -15
+    elif disposition == "SIGKILL_AFTER_DEADLINE":
+        expected = -9
+    elif disposition.startswith("EXIT_CODE_"):
+        code = disposition[len("EXIT_CODE_"):]
+        try:
+            expected = int(code)
+        except ValueError as exc:
+            raise ValueError("pair-status child exit disposition is malformed") from exc
+    elif disposition.startswith("EXITED_"):
+        code = disposition[len("EXITED_"):].split("_", 1)[0]
+        try:
+            expected = int(code)
+        except ValueError as exc:
+            raise ValueError("pair-status child exit disposition is malformed") from exc
+    else:
+        raise ValueError("pair-status child exit disposition is not canonical")
+    if returncode != expected:
+        raise ValueError("pair-status child return code differs from disposition")
+
+
+def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
+    status = body.get("supervisor_status")
+    expected = set(PAIR_STATUS_COMMON_FIELDS)
+    if status in {"TIMEOUT", "ERROR"}:
+        expected.update(PAIR_STATUS_DURABLE_FIELDS)
+    elif status != "RESOLVED":
+        raise ValueError("pair-status supervisor disposition is invalid")
+    if set(body) != expected:
+        raise ValueError("pair-status authority fields differ")
+    if body.get("classification_valid") is not True:
+        raise ValueError("pair-status classification is not valid")
+    outcome = body.get("canonical_outcome")
+    if outcome not in {"EQUIVALENT", "NOT_EQ", "UNKNOWN", "TIMEOUT", "ERROR"}:
+        raise ValueError("pair-status canonical outcome is invalid")
+    if (outcome == "ERROR") != (
+        type(body.get("error_kind")) is str and bool(body.get("error_kind"))
+    ):
+        raise ValueError("pair-status ERROR/error_kind join is invalid")
+    required_strings = PAIR_STATUS_COMMON_FIELDS - {
+        "error_kind", "child_returncode", "classification_valid",
+        "pair_execution_target",
+    }
+    if any(type(body.get(field)) is not str or not body[field] for field in required_strings):
+        raise ValueError("pair-status required authority field is empty")
+    if body["child_returncode"] is not None and type(body["child_returncode"]) is not int:
+        raise ValueError("pair-status child return code is invalid")
+    target = body["pair_execution_target"]
+    target_fields = {
+        "schema", "authority_kind", "sample_identity",
+        "output_sample_relative_path", "function_name", "left_binary_id",
+        "right_binary_id", "source_path", "source_sha256",
+        "left_binary_path", "left_binary_sha256", "right_binary_path",
+        "right_binary_sha256", "analysis_source_digest",
+        "analysis_config_digest", "target_digest",
+    }
+    if not isinstance(target, Mapping) or set(target) != target_fields:
+        raise ValueError("pair execution target schema differs")
+    target_body = {key: target[key] for key in target if key != "target_digest"}
+    if (
+        target["schema"] != "eqbench-pair-execution-target-v1"
+        or target["authority_kind"] != "PairExecutionTargetReceipt"
+        or any(type(target[field]) is not str or not target[field] for field in target_fields)
+        or target["target_digest"] != authority_digest(target_body)
+    ):
+        raise ValueError("pair execution target authority is invalid")
+    if status in {"TIMEOUT", "ERROR"} and any(
+        type(body.get(field)) is not str or not body[field]
+        for field in PAIR_STATUS_DURABLE_FIELDS
+    ):
+        raise ValueError("pair-status durable authority field is empty")
+    if body.get("canonical_result_bundle_kind") != "CanonicalResultFinalizationBundle":
+        raise ValueError("pair-status canonical bundle kind is invalid")
+    authority_kind = body.get("authority_kind")
+    supervisor_kind = body.get("supervisor_authority_kind")
+    if status == "RESOLVED":
+        if outcome == "TIMEOUT":
+            raise ValueError("pair-status RESOLVED/TIMEOUT join is invalid")
+        if (
+            authority_kind != "SupervisorCanonicalResultResolvedReceipt"
+            or supervisor_kind != "SupervisorCanonicalResultResolvedReceipt"
+        ):
+            raise ValueError("pair-status RESOLVED authority kind is invalid")
+        if body["child_returncode"] != CLI_EXIT_CODE_BY_OUTCOME[Outcome(outcome)]:
+            raise ValueError("pair-status resolved outcome/child exit join is invalid")
+    else:
+        expected_outcome = status
+        expected_kind = f"Durable{status.title()}FinalizationBundle"
+        if outcome != expected_outcome:
+            raise ValueError("pair-status durable status/outcome join is invalid")
+        if authority_kind != expected_kind or supervisor_kind != expected_kind:
+            raise ValueError("pair-status durable authority kind is invalid")
+        _validate_durable_child_exit(body)
+
+
+def seal_pair_status(
+    projection: Mapping[str, Any], *, private_key_path: Path,
+    public_key_path: Path,
+) -> Mapping[str, Any]:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    body = dict(projection)
+    _validate_pair_status_body(body)
+    public_payload, _ = load_pair_status_public_key(public_key_path)
+    private_key_bytes = Path(private_key_path).read_bytes()
+    try:
+        private_key = Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+    except Exception as exc:
+        raise ValueError("pair-status private signing key is invalid") from exc
+    derived_public = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if _public_key_payload(derived_public)["key_id"] != public_payload["key_id"]:
+        raise ValueError("pair-status signing and verification keys differ")
+    body_digest = authority_digest(body)
+    signature = private_key.sign(bytes.fromhex(body_digest))
+    return {
+        **body,
+        "pair_status_schema": PAIR_STATUS_SCHEMA,
+        "pair_status_authority_kind": PAIR_STATUS_AUTHORITY_KIND,
+        "pair_status_signing_algorithm": PAIR_STATUS_ALGORITHM,
+        "pair_status_signing_key_id": public_payload["key_id"],
+        "pair_status_body_digest": body_digest,
+        "pair_status_signature": base64.b64encode(signature).decode("ascii"),
+    }
+
+
+def validate_signed_pair_status(
+    payload: Mapping[str, Any], *, public_key_path: Path,
+) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("pair-status payload is not an object")
+    if set(payload) != set(PAIR_STATUS_SEAL_FIELDS) | (
+        set(PAIR_STATUS_COMMON_FIELDS)
+        | (set(PAIR_STATUS_DURABLE_FIELDS)
+           if payload.get("supervisor_status") in {"TIMEOUT", "ERROR"} else set())
+    ):
+        raise ValueError("signed pair-status schema differs")
+    body = {key: payload[key] for key in payload if key not in PAIR_STATUS_SEAL_FIELDS}
+    public_payload, public_key = load_pair_status_public_key(public_key_path)
+    body_digest = authority_digest(body)
+    if (
+        payload["pair_status_schema"] != PAIR_STATUS_SCHEMA
+        or payload["pair_status_authority_kind"] != PAIR_STATUS_AUTHORITY_KIND
+        or payload["pair_status_signing_algorithm"] != PAIR_STATUS_ALGORITHM
+        or payload["pair_status_signing_key_id"] != public_payload["key_id"]
+        or payload["pair_status_body_digest"] != body_digest
+    ):
+        raise ValueError("pair-status seal metadata is invalid")
+    try:
+        signature = base64.b64decode(payload["pair_status_signature"], validate=True)
+        public_key.verify(signature, bytes.fromhex(body_digest))
+    except Exception as exc:
+        raise ValueError("pair-status signature is invalid") from exc
+    _validate_pair_status_body(body)
+    return body
+
+
+def pair_status_resume_disposition(body: Mapping[str, Any]) -> str:
+    """Apply the production batch-resume contract to a verified status body."""
+
+    _validate_pair_status_body(body)
+    return BATCH_RESUME_DISPOSITION_BY_OUTCOME[Outcome(body["canonical_outcome"])]
+
+
+def find_pair_status_public_key(pair_status_path: Path) -> Path:
+    for directory in (pair_status_path.parent, *pair_status_path.parents):
+        candidate = directory / PAIR_STATUS_PUBLIC_KEY_FILE
+        if candidate.is_file():
+            return candidate
+    raise ValueError(f"pair-status public verification key is missing: {pair_status_path}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--generate-private-key")
+    parser.add_argument("--write-public-key")
+    parser.add_argument("--validate-private-key")
+    parser.add_argument("--export-public-from-private")
+    parser.add_argument("--public-key")
+    parser.add_argument("--validate-pair-status")
+    parser.add_argument("--resume-disposition", action="store_true")
+    parser.add_argument("--expected-pair-target")
+    args = parser.parse_args(argv)
+    if args.generate_private_key:
+        if not args.generate_private_key or not args.write_public_key:
+            parser.error("key generation requires private and public output paths")
+        payload = generate_pair_status_keypair(
+            Path(args.generate_private_key), Path(args.write_public_key)
+        )
+        print(payload["key_id"])
+        return 0
+    if args.validate_private_key:
+        if not args.public_key:
+            parser.error("private-key validation requires --public-key")
+        payload = validate_pair_status_keypair(
+            Path(args.validate_private_key), Path(args.public_key)
+        )
+        print(payload["key_id"])
+        return 0
+    if args.export_public_from_private:
+        if not args.write_public_key:
+            parser.error("public-key export requires --write-public-key")
+        payload = write_pair_status_public_key(
+            Path(args.export_public_from_private), Path(args.write_public_key)
+        )
+        print(payload["key_id"])
+        return 0
+    if args.write_public_key:
+        parser.error("--write-public-key requires key generation or export")
+    if args.validate_pair_status:
+        pair_status_path = Path(args.validate_pair_status)
+        public_key_path = (
+            Path(args.public_key) if args.public_key
+            else find_pair_status_public_key(pair_status_path)
+        )
+        body = validate_signed_pair_status(
+            json.loads(pair_status_path.read_text(encoding="utf-8")),
+            public_key_path=public_key_path,
+        )
+        if args.expected_pair_target:
+            expected_target = json.loads(
+                Path(args.expected_pair_target).read_text(encoding="utf-8")
+            )
+            if body["pair_execution_target"] != expected_target:
+                raise ValueError("signed pair-status target differs from current execution target")
+        print(
+            pair_status_resume_disposition(body)
+            if args.resume_disposition else body["canonical_outcome"]
+        )
+        return 0
+    parser.error("one pair-status authority operation is required")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

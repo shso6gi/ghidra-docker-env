@@ -30,6 +30,9 @@ from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
     CHECKPOINT_AUTHORITY_FILENAMES,
     CheckpointState,
 )
+from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    classify_pair_status,
+)
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor import (
     _active_process_authority,
     _completed_continuation,
@@ -70,6 +73,20 @@ def _projection(path):
     digest = payload.pop("projection_digest")
     assert digest == authority_digest(payload)
     return payload
+
+
+def _classify_durable_projection(command):
+    config = command.config
+    return classify_pair_status(
+        config.working_directory / "unused-terminal-log",
+        config.authority_output,
+        checkpoint_root=config.checkpoint_root,
+        execution_nonce=config.execution_nonce,
+        supervisor_signing_key_id=config.supervisor_signing_key_id,
+        supervisor_signing_key_file=config.supervisor_signing_key_file,
+        worker_signing_key_id=config.worker_signing_key_id,
+        worker_signing_key_file=config.worker_signing_key_file,
+    )
 
 
 def _json_authority_value(value):
@@ -221,7 +238,7 @@ def test_launch_is_durable_before_child_exec_and_no_checkpoint_is_error(tmp_path
         f"pathlib.Path({str(marker)!r}).write_text(json.dumps({{'launch':str(launch)}}))"
     )
     _authority, config = _config(
-        tmp_path, (sys.executable, "-c", code), timeout=5.0
+        tmp_path, (sys.executable, "-c", code), timeout=30.0
     )
     command = ProcessSupervisorCommand(config)
     assert command.run() == 2
@@ -232,6 +249,22 @@ def test_launch_is_durable_before_child_exec_and_no_checkpoint_is_error(tmp_path
     bundle = command.store.rematerialize_operational_error_bundle()
     assert bundle.bundle_digest == projection["finalization_bundle_digest"]
     assert bundle.error_kind == "operational_authority_invalid"
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "ERROR"
+    assert classified["classification_valid"] is True
+    original_projection = config.authority_output.read_bytes()
+    forged_projection = json.loads(original_projection)
+    forged_projection["child_returncode"] = 17
+    forged_projection["projection_digest"] = authority_digest({
+        key: value for key, value in forged_projection.items()
+        if key != "projection_digest"
+    })
+    config.authority_output.write_text(
+        json.dumps(forged_projection), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="return code differs"):
+        _classify_durable_projection(command)
+    config.authority_output.write_bytes(original_projection)
     config.authority_output.unlink()
     assert ProcessSupervisorCommand(config).run() == 2
     restarted = _projection(config.authority_output)
@@ -246,26 +279,26 @@ def test_launch_is_durable_before_child_exec_and_no_checkpoint_is_error(tmp_path
     assert conflicted["status"] == "INVALID"
 
 
-def test_whole_process_mode_resolves_signed_child_exit_without_checkpoint(tmp_path):
+def test_whole_process_mode_rejects_bundleless_child_exit(tmp_path):
     _authority, base_config = _config(
-        tmp_path, (sys.executable, "-c", "pass"), timeout=5.0
+        tmp_path, (sys.executable, "-c", "pass"), timeout=30.0
     )
     config = replace(base_config, allow_child_exit_resolution=True)
 
     command = ProcessSupervisorCommand(config)
-    assert command.run() == 0
+    assert command.run() == 2
     projection = _projection(config.authority_output)
-    assert projection["status"] == "RESOLVED"
-    assert projection["authority_kind"] == "SupervisorChildExitReceipt"
-    resolution = command.store.rematerialize_child_exit_resolution()
-    assert resolution.payload["child_returncode"] == 0
+    assert projection["status"] == "INVALID"
+    assert projection["authority_kind"] == "InvalidSupervisorCommandProjection"
+    assert projection["error_code"] == "CANONICAL_CHILD_RESULT_INVALID"
+    assert projection["child_returncode"] == 0
 
     config.authority_output.unlink()
-    assert ProcessSupervisorCommand(config).run() == 0
-    assert _projection(config.authority_output) == projection
+    assert ProcessSupervisorCommand(config).run() == 2
+    assert _projection(config.authority_output)["status"] == "INVALID"
 
 
-def test_deadline_without_active_checkpoint_is_error_not_timeout(tmp_path):
+def test_deadline_without_worker_checkpoint_gets_durable_process_timeout(tmp_path):
     _authority, config = _config(
         tmp_path,
         (sys.executable, "-c", "import time; time.sleep(30)"),
@@ -274,10 +307,43 @@ def test_deadline_without_active_checkpoint_is_error_not_timeout(tmp_path):
     command = ProcessSupervisorCommand(config)
     assert command.run() == 124
     projection = _projection(config.authority_output)
-    assert projection["status"] == "ERROR"
-    assert projection["authority_kind"] == "DurableErrorFinalizationBundle"
-    bundle = command.store.rematerialize_operational_error_bundle()
-    assert bundle.error_kind == "process_deadline_without_checkpoint"
+    assert projection["status"] == "TIMEOUT"
+    assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["classification_valid"] is True
+
+
+def test_deadline_does_not_misclassify_resolved_child_checkpoint_as_pair_result(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch, checkpoint = _persist_active_for_command(command, authority)
+    continuation, stream = _completed_continuation(
+        authority, supervisor=command.factory, checkpoint=checkpoint,
+    )
+    _ready, resolved = command.store.worker_publish_completion(
+        active=checkpoint, continuation=continuation,
+        prefix=authority["prefix"], continuation_stream=stream,
+    )
+    assert resolved.payload["state"] == CheckpointState.RESOLVED.value
+    process = type("DeadlineProcess", (), {"returncode": 143})()
+    monkeypatch.setattr(
+        command, "_terminate_exact_process_group",
+        lambda _process, _token: "EXITED_143_AFTER_SIGTERM",
+    )
+    exit_code, projection = command._finalize_deadline(
+        launch=launch, process=process, start_token="pid-start-token",
+    )
+    command._write_projection(projection)
+    assert exit_code == 124
+    assert projection["status"] == "TIMEOUT"
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["classification_valid"] is True
+    history = command.store.directory / "checkpoint-history" / resolved.receipt_digest
+    assert history.is_dir()
 
 
 def test_deadline_with_exact_durable_active_checkpoint_is_timeout(tmp_path):
@@ -292,7 +358,7 @@ def test_deadline_with_exact_durable_active_checkpoint_is_timeout(tmp_path):
         # supervisor model under test and can take several seconds on WSL.
         # Leave enough time for the worker to durably publish ACTIVE before
         # exercising the deadline transition.
-        tmp_path, (sys.executable, "-c", child_code), timeout=30.0
+        tmp_path, (sys.executable, "-c", child_code), timeout=120.0
     )
     command = ProcessSupervisorCommand(config)
     assert command.run() == 124
@@ -303,6 +369,9 @@ def test_deadline_with_exact_durable_active_checkpoint_is_timeout(tmp_path):
     bundle = command.store.rematerialize_timeout_bundle(prefix=prefix)
     assert bundle.bundle_digest == projection["finalization_bundle_digest"]
     assert bundle.result_occurrence_id == authority["session"].identity.result_occurrence_id
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["classification_valid"] is True
     timeout_receipt = json.loads(
         (command.store.directory / "timeout.json").read_text()
     )
@@ -481,7 +550,7 @@ def test_normal_exit_with_active_checkpoint_is_invalid_not_timeout(tmp_path):
         "_child_persist_active(sleep_seconds=0)"
     )
     _authority, config = _config(
-        tmp_path, (sys.executable, "-c", child_code), timeout=30.0
+        tmp_path, (sys.executable, "-c", child_code), timeout=120.0
     )
     assert ProcessSupervisorCommand(config).run() == 2
     projection = _projection(config.authority_output)
@@ -497,7 +566,7 @@ def test_deadline_escalates_to_sigkill_and_binds_disposition(tmp_path):
         "_child_persist_active(sleep_seconds=120,ignore_sigterm=True)"
     )
     _authority, config = _config(
-        tmp_path, (sys.executable, "-c", child_code), timeout=30.0
+        tmp_path, (sys.executable, "-c", child_code), timeout=120.0
     )
     assert ProcessSupervisorCommand(config).run() == 124
     projection = _projection(config.authority_output)

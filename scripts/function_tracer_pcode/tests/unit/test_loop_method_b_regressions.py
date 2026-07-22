@@ -1631,7 +1631,9 @@ def test_exact_prefix_return_does_not_close_path_sensitive_loop_summary_without_
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
+    assert result.unknown_reasons[0].reason_id == (
+        "loop_summary_structure_correspondence_unproven"
+    )
     strategy.solver_runner.run_sequential.assert_called()
 
 
@@ -4941,7 +4943,9 @@ def test_counted_loop_summary_vs_mips64_long_limit_without_semantic_width_stays_
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].reason_id == (
+        "loop_exact_summary_relation_unproven"
+    )
     assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
     strategy.solver_runner.run_sequential.assert_called()
 
@@ -5052,7 +5056,9 @@ def test_counted_loop_summary_vs_closed_form_near_miss_stays_proof_missing():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].reason_id == (
+        "loop_exact_summary_relation_unproven"
+    )
     assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
     strategy.solver_runner.run_sequential.assert_called()
 
@@ -5085,7 +5091,9 @@ def test_counted_loop_summary_vs_closed_form_near_miss_with_total_partition_stay
     assert result.total_pairs == 4
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING.value
+    assert result.unknown_reasons[0].reason_id == (
+        "loop_exact_summary_relation_unproven"
+    )
     assert result.unknown_reasons[0].evidence_refs == ("counted_loop_summary_expression_proof_missing",)
 
 

@@ -343,7 +343,7 @@ def test_subordinate_broker_binds_live_parent_without_completing_it(row):
     assert session.domain_signal_error_kinds == []
 
 
-def test_subordinate_broker_without_exact_parent_is_legacy_transparent_and_invalid_shadow():
+def test_subordinate_broker_without_live_parent_uses_standalone_operational_owner():
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
         BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
     )
@@ -383,10 +383,13 @@ def test_subordinate_broker_without_exact_parent_is_legacy_transparent_and_inval
             source_contract_id=LIFECYCLE_HELPER_SOURCE_CONTRACT,
             semantic_owner="subordinate",
         )
-    assert observed is raw
+    assert observed.decompileCompleted()
     assert decompiler.calls == 1
     assert "subordinate_decompilation_executions" not in session.domain_signal_state
-    assert session.domain_signal_error_kinds
+    assert session.domain_signal_error_kinds == []
+    projection = session.reducer.replay_prefix(session.recorder.prefix_view())
+    assert projection.c_active_base == ()
+    assert projection.q_open_base == ()
 
 
 def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_event():
@@ -462,7 +465,7 @@ def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_
             EventType.REQUIREMENT_COMPLETED,
             RequirementCompletedEventAuthority(completion),
         ))
-        expected_events = 2
+        expected_events = 4
     manager = type("Manager", (), {"getFunctions": lambda self, forward: iter(())})()
     program = Program(manager)
     function = Function(program=program)
@@ -482,13 +485,17 @@ def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_
     assert caught.value is error
     assert decompiler.calls == 1
     assert len(session.recorder.prefix_view().events) == expected_events
+    allowed_types = {EventType.CAUSE_OBSERVED, EventType.REQUIREMENT_COMPLETED}
+    if not parent_live:
+        allowed_types.add(EventType.ERROR)
     assert all(
-        event.header.event_type in {
-            EventType.CAUSE_OBSERVED, EventType.REQUIREMENT_COMPLETED,
-        }
+        event.header.event_type in allowed_types
         for event in session.recorder.prefix_view().events
     )
-    assert session.domain_signal_error_kinds
+    if parent_live:
+        assert session.domain_signal_error_kinds
+    else:
+        assert session.domain_signal_error_kinds == []
 
 
 def _subordinate_runtime_case(tmp_path, row, result, *, extra_signal=None):

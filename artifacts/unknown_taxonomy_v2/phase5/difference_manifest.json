@@ -3,13 +3,13 @@
   "case_13_canonical_census_status": "INVALID",
   "evidence_class": "deterministic_production_boundary_pilot",
   "files": {
-    "scripts/function_tracer_pcode/equivalence/checker.py": "755976a5ec11b9f6b4e8a3c7d081a98ef6240d91d73e1026defe27449c233e8a",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "0deb2ac4630e6d9e79bde1f5fd39f1615b29b82fb3f8e73f18e2f93cc007df8d",
     "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b",
-    "scripts/function_tracer_pcode/equivalence/result.py": "fe8bb0920bee49004793d44cb28ace08bb8a8a32f8a5267a46fafd91d5eb6fea",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "078b0a6981bb18a5be3d363739008898a013d8acaee6e2864789e0185080583a",
-    "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "0c7e5c296238e41cdaf6ac9220f3f1e68e2013d01e07058fc6db5f5a1c310ebf",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b368c07824b7dd37bb8dd49df4b4b2a745b3ab36e6a1d77fef43ca875a3b033f",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "339f577c020d989cc55ddd037b85c683876b2a220046601998c1b7b2387b9948"
+    "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "5dcea1c6854868f1e121c1db1bc3f60139070029c41c6f796c380e30a01c5f87",
+    "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b4870075b5734b604a45f4aef5badb2d07497f8c7b748a67e0022c934c68c5d8",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
   },
   "gate_test": {
     "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py",
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "efb3f448dcbe7bb034129358e5c725616c64d0931f85183da8bc5861fbdfcb6d",
+  "manifest_digest": "c44d2b675fa0f14acb1744630ab420aac288cd92b3ae103de808e220a9e6e565",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

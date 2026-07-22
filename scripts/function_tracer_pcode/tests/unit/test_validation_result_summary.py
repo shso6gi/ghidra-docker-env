@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
 
 import json
+import base64
 import os
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
+
+import pytest
+
+from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+    PAIR_STATUS_PUBLIC_KEY_FILE,
+    generate_pair_status_keypair,
+    seal_pair_status,
+)
+from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
@@ -23,6 +33,7 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     aggregate_validation_logs,
     aggregate_validation_logs_by_function,
     assert_aggregation_invariant,
+    build_run_health_summary,
     canonical_validation_surface,
     canonical_validation_surface_hash,
     classify_log_text,
@@ -63,6 +74,62 @@ def _write_log(tmp_path, name, human_result, payload=None):
             ]
         )
     path.write_text("\n".join(lines))
+    return path
+
+
+def _write_pair_status(log_path, outcome):
+    path = log_path.with_suffix(".pair-status.json")
+    private_key = log_path.parent / ".pair-status-test.key"
+    public_key = log_path.parent / PAIR_STATUS_PUBLIC_KEY_FILE
+    if not private_key.exists():
+        generate_pair_status_keypair(private_key, public_key)
+    digest = "a" * 64
+    status = {
+        "authority_kind": "DurableTimeoutFinalizationBundle",
+        "supervisor_authority_kind": "DurableTimeoutFinalizationBundle",
+        "supervisor_final_authority_digest": digest,
+        "launch_receipt_digest": digest,
+        "canonical_outcome": outcome,
+        "decision_receipt_digest": digest,
+        "result_occurrence_id": "result-occurrence",
+        "result_entry_occurrence_receipt_digest": digest,
+        "execution_identity_digest": digest,
+        "execution_nonce": "execution-nonce",
+        "stream_id": "stream-id",
+        "source_snapshot_fingerprint": digest,
+        "canonical_result_bundle_digest": digest,
+        "canonical_result_bundle_kind": "CanonicalResultFinalizationBundle",
+        "canonical_result_payload_preimage_digest": digest,
+        "semantic_projection_digest": digest,
+        "error_kind": None,
+        "child_returncode": 143,
+        "supervisor_status": "TIMEOUT",
+        "supervisor_projection_digest": digest,
+        "classification_valid": True,
+        "pair_execution_target": {
+            "schema": "eqbench-pair-execution-target-v1",
+            "authority_kind": "PairExecutionTargetReceipt",
+            "sample_identity": "sample/Eq/newV",
+            "output_sample_relative_path": "sample/Eq/newV",
+            "function_name": "client", "left_binary_id": "B7",
+            "right_binary_id": "B13", "source_path": "source.c",
+            "source_sha256": digest, "left_binary_path": "left.bin",
+            "left_binary_sha256": digest, "right_binary_path": "right.bin",
+            "right_binary_sha256": digest, "analysis_source_digest": digest,
+            "analysis_config_digest": digest,
+        },
+        "finalization_bundle_digest": digest,
+        "event_stream_authority_digest": digest,
+        "child_exit_disposition": "EXITED_143_AFTER_SIGTERM",
+        "child_returncode_observation_kind": "LIVE_PROCESS_WAIT",
+    }
+    status["pair_execution_target"]["target_digest"] = authority_digest(
+        status["pair_execution_target"]
+    )
+    sealed = seal_pair_status(
+        status, private_key_path=private_key, public_key_path=public_key
+    )
+    path.write_text(json.dumps(sealed))
     return path
 
 
@@ -112,6 +179,115 @@ def test_validation_classifier_prefers_typed_payload_over_human_text():
     )
 
     assert classify_log_text(text) == STATUS_UNKNOWN
+
+
+def test_canonical_pair_status_overrides_obsolete_log_only_error(tmp_path):
+    path = _write_log(
+        tmp_path,
+        "client_B7_B13.log",
+        "\n".join((
+            "Result: TIMEOUT (pair process exceeded wall-clock time limit)",
+            "Result: ERROR (pair process exited before emitting a final result)",
+        )),
+    )
+    _write_pair_status(path, "TIMEOUT")
+
+    record = read_validation_log_record(path, canonical_only=True)
+    assert record.status == STATUS_TIMEOUT
+    assert record.payloads == ()
+    assert _bash_validation_classify(path) == STATUS_TIMEOUT
+
+
+def test_canonical_pair_status_rejects_outcome_tampering(tmp_path):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    status_path = _write_pair_status(path, "TIMEOUT")
+    payload = json.loads(status_path.read_text())
+    payload["canonical_outcome"] = "EQUIVALENT"
+    status_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="pair-status seal metadata is invalid"):
+        read_validation_log_record(path, canonical_only=True)
+
+
+def test_canonical_only_missing_pair_status_is_incomplete(tmp_path):
+    path = _write_log(tmp_path, "client_B1_B2.log", "Result: EQUIVALENT")
+
+    record = read_validation_log_record(path, canonical_only=True)
+
+    assert record.status == STATUS_INCOMPLETE
+    assert record.payloads == ()
+    assert record.pair_status_metadata is None
+
+
+def test_signed_pair_status_rejects_semantically_inconsistent_status(tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    status_path = _write_pair_status(path, "TIMEOUT")
+    payload = json.loads(status_path.read_text())
+    payload["canonical_outcome"] = "EQUIVALENT"
+    seal_fields = {
+        key for key in payload if key.startswith("pair_status_")
+    }
+    body = {key: value for key, value in payload.items() if key not in seal_fields}
+    digest = authority_digest(body)
+    private_key = Ed25519PrivateKey.from_private_bytes(
+        (tmp_path / ".pair-status-test.key").read_bytes()
+    )
+    payload["pair_status_body_digest"] = digest
+    payload["pair_status_signature"] = base64.b64encode(
+        private_key.sign(bytes.fromhex(digest))
+    ).decode("ascii")
+    status_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="durable status/outcome join"):
+        read_validation_log_record(path, canonical_only=True)
+
+
+def test_run_health_counts_verified_pair_status_metadata(tmp_path):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    _write_pair_status(path, "TIMEOUT")
+    summary = aggregate_validation_logs_by_function((path,), canonical_only=True)
+
+    health = build_run_health_summary(summary)
+
+    assert health["error_kind_counts"] == {"<none>": 1}
+    assert health["child_returncode_counts"] == {"143": 1}
+    assert health["supervisor_status_counts"] == {"TIMEOUT": 1}
+
+
+def test_canonical_pair_status_rejects_schema_extension(tmp_path):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    status_path = _write_pair_status(path, "TIMEOUT")
+    payload = json.loads(status_path.read_text())
+    payload["unsealed_claim"] = True
+    status_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="signed pair-status schema differs"):
+        read_validation_log_record(path, canonical_only=True)
+
+
+def test_canonical_pair_status_remains_verifiable_after_private_key_removal(
+    tmp_path,
+):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    _write_pair_status(path, "TIMEOUT")
+    (tmp_path / ".pair-status-test.key").unlink()
+
+    record = read_validation_log_record(path, canonical_only=True)
+    assert record.status == STATUS_TIMEOUT
+
+
+def test_canonical_pair_status_rejects_replacement_public_key(tmp_path):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    _write_pair_status(path, "TIMEOUT")
+    replacement_private = tmp_path / "replacement.key"
+    generate_pair_status_keypair(
+        replacement_private, tmp_path / PAIR_STATUS_PUBLIC_KEY_FILE
+    )
+
+    with pytest.raises(ValueError, match="pair-status seal metadata is invalid"):
+        read_validation_log_record(path, canonical_only=True)
 
 
 def test_validation_classifier_uses_trailing_timeout_result_after_error_json():
@@ -1085,6 +1261,21 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert '--log-list0 "$function_log_list"' in script
     assert '--log-list0 "$overall_log_list"' in script
     assert '! -name "run_stdout.log"' in script
+    assert "--emit-process-timeout-json" not in script
+    assert "UNKNOWN_TAXONOMY_V2_DISABLE_PROCESS_WORKER_RUNTIME" not in script
+    assert 'PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-600s}"' in script
+    assert "--classify-pair-log" in script
+    assert "validation_result_log_is_complete" not in script
+    assert "signed_pair_status_is_complete" in script
+    assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
+    assert "--validate-private-key" in script
+    assert "expected_pair_status_paths.txt" in script
+    failure_decision = script.index("FINAL_RUN_EXIT_STATUS=0")
+    receipt_issue = script.rindex("validation.execution_receipt")
+    assert failure_decision < receipt_issue
+    assert 'FINAL_RUN_EXIT_STATUS=1' in script[failure_decision:receipt_issue]
+    assert '--exit-status "$FINAL_RUN_EXIT_STATUS"' in script
+    assert 'exit "$FINAL_RUN_EXIT_STATUS"' in script[receipt_issue:]
     overall_summary_call = script.split(
         'write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt"', 1
     )[1].split("\nfi", 1)[0]

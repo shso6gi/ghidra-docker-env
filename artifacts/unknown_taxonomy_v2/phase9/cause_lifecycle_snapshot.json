@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "e99a16b76e18c3db8d67e86e580fdc6b5293407db3bba4d5221b38286abc7436",
+  "artifact_digest": "38880c0b8b6cce06ad4cc980b732e2c127af8653aa9b5b6ff812e9da9509ff56",
   "artifact_kind": "phase9-cause-lifecycle-snapshot-v1",
   "base_relations_exclude_final_outcome": true,
   "lifecycle_replay_authority": {
@@ -21,7 +21,7 @@
         "cause_id": "7c793b3dcab19e27e366a7bace7ce8f5fdc3a559b3beb956c63d576121a3fb4d",
         "decision_effect": "blocks_decision",
         "domain": "operational_extraction",
-        "occurrence_id": "operational-occ-070ce95ae79562c4be8618978a09060a",
+        "occurrence_id": "operational-occ-2c9bbe1d4aca2e6c2d661841de495125",
         "reason_id": "function_decompilation_artifact_unavailable",
         "result_occurrence_id": "production-pilot-477da540f1a59023e887fd48",
         "target_kind": "function_decompilation_target"
@@ -31,9 +31,9 @@
     "q_open": [
       {
         "cause_id": "7c793b3dcab19e27e366a7bace7ce8f5fdc3a559b3beb956c63d576121a3fb4d",
-        "occurrence_id": "operational-occ-070ce95ae79562c4be8618978a09060a",
+        "occurrence_id": "operational-occ-2c9bbe1d4aca2e6c2d661841de495125",
         "proof_kind": "function_decompilation_artifact",
-        "proof_requirement_id": "operational-q-f6edaa070fb7495ddb29a3eca15f474e",
+        "proof_requirement_id": "operational-q-7e4f05925290cb948b02c84190db7931",
         "result_occurrence_id": "production-pilot-477da540f1a59023e887fd48",
         "semantic_target_digest": "2141428834b2f72466e4d8d272439a1eb02f1a6705454350663c89da5dfa4a11"
       }

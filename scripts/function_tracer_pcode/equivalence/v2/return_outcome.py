@@ -613,6 +613,7 @@ from .stream import (  # noqa: E402
     OutcomeProducerAttemptEventAuthority,
     RequirementCompletedEventAuthority,
     ReceiptBoundSolverExecutionEventAuthority,
+    outcome_stage_requirement_id,
 )
 
 
@@ -776,13 +777,20 @@ class ReturnOutcomePilotEncoder:
             active_semantic_precondition=("outcome_seed_available", True),
             correspondence_contract=("unary_function_identity",),
         )
-        requirement_id = "outcome-stage-" + authority_digest({
-            "typed_requirement": canonical_value(signal.proof_requirement_identity),
-        })[:32]
+        requirement_id = self._requirement_id(signal)
         requirement = ProofRequirement(
             requirement_id,
             proof_kind,
-            ("typed_requirement", canonical_value(signal.proof_requirement_identity)),
+            (
+                "typed_outcome_requirement_v2",
+                canonical_value(signal.proof_requirement_identity),
+                canonical_value(signal.function_identity),
+                signal.function_snapshot_fingerprint,
+                signal.outcome_seed_digest,
+                signal.outcome_seed_revision,
+                signal.premise_digest,
+                signal.stage,
+            ),
         )
         bound = self._binding_factory.bind(
             contract_definition_id=RETURN_OUTCOME_STAGE_CONTRACT.contract_definition_id,
@@ -864,9 +872,7 @@ class ReturnOutcomePilotEncoder:
         state = self._state(session)
         if reason_id is None:
             artifact = signal.validated_artifact_authority
-            requirement_id = "outcome-stage-" + authority_digest({
-                "typed_requirement": canonical_value(signal.proof_requirement_identity),
-            })[:32]
+            requirement_id = self._requirement_id(signal)
             authority = state["authorities"].get(requirement_id)
             if authority is None or requirement_id in state["completed"]:
                 return ()
@@ -939,9 +945,7 @@ class ReturnOutcomePilotEncoder:
         return tuple(intents)
 
     def has_observed(self, session: Any, signal: Any) -> bool:
-        requirement_id = "outcome-stage-" + authority_digest({
-            "typed_requirement": canonical_value(signal.proof_requirement_identity),
-        })[:32]
+        requirement_id = self._requirement_id(signal)
         return requirement_id in self._state(session)["authorities"]
 
     def finalize_terminal_timeout_bindings(
@@ -1016,3 +1020,14 @@ class ReturnOutcomePilotEncoder:
             latest.header.sequence_number,
             latest.authority_payload.proof_requirement_id,
         ),)
+    @staticmethod
+    def _requirement_id(signal: Any) -> str:
+        return outcome_stage_requirement_id({
+            "proof_requirement_identity": signal.proof_requirement_identity,
+            "function_identity": canonical_value(signal.function_identity),
+            "function_snapshot_fingerprint": signal.function_snapshot_fingerprint,
+            "outcome_seed_digest": signal.outcome_seed_digest,
+            "outcome_seed_revision": signal.outcome_seed_revision,
+            "premise_digest": signal.premise_digest,
+            "stage": signal.stage,
+        })

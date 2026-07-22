@@ -51,6 +51,37 @@ class PreparedPairReturnObservation:
         return self.status == "proven" and self.view is not None and self.binding_receipt is not None
 
 
+def _emit_return_width_signal_once(signal: Any, producer_site_manifest_id: str) -> int:
+    """Make the retrying return-width producer idempotent per result occurrence."""
+    from .v2.phase7_runtime import Phase7ProductionRuntime
+    from .v2.production_signals import (
+        active_production_pilot_session,
+        emit_abi_width_readonly_signal,
+    )
+
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    signal_digest = Phase7ProductionRuntime.signal_digest(
+        producer_site_manifest_id, signal
+    )
+    emitted = session.domain_signal_state.setdefault(
+        "return_width_producer_signal_digests", set()
+    )
+    if signal_digest in emitted:
+        return 0
+    # Phase 7 audits the literal site IDs at this helper's call sites.  Keep the
+    # generic dispatch itself out of that AST inventory: it has no independent
+    # producer-site identity.
+    emit_signal = emit_abi_width_readonly_signal
+    count = emit_signal(
+        signal, producer_site_manifest_id=producer_site_manifest_id
+    )
+    if count:
+        emitted.add(signal_digest)
+    return count
+
+
 def prepare_function_return_widths(
     analysis: Any,
     cases: Sequence[Any],
@@ -144,8 +175,12 @@ def prepare_pair_return_observation(
     right_proof = right_prepared.proofs_by_case_id[id(right_case)]
     pair_seed = build_pair_return_observation_seed(left_seed, right_seed)
     try:
-        from .v2.abi_width_readonly import assess_return_abi_pair
-        from .v2.production_signals import emit_abi_width_readonly_signal
+        from .v2.abi_width_readonly import (
+            ProjectionNotFormable,
+            ReturnObservationProjectionSeed,
+            assess_return_abi_pair,
+        )
+        from .v2.production_signals import register_return_observation_proof_plan
 
         abi_assessment = assess_return_abi_pair(
             left_analysis,
@@ -155,8 +190,22 @@ def prepare_pair_return_observation(
             pair_seed,
         )
         for signal in abi_assessment.signals:
-            emit_abi_width_readonly_signal(
-                signal, producer_site_manifest_id="return-width-pair-assessment"
+            _emit_return_width_signal_once(
+                signal,
+                producer_site_manifest_id="return-width-pair-assessment",
+            )
+        if not left_seed.complete or not right_seed.complete:
+            projection_seed = None
+        else:
+            try:
+                projection_seed = ReturnObservationProjectionSeed.from_pair_seed(
+                    left_seed, right_seed, pair_seed
+                )
+            except ProjectionNotFormable:
+                projection_seed = None
+        if projection_seed is not None and abi_assessment.relation_assessment is not None:
+            register_return_observation_proof_plan(
+                projection_seed, abi_assessment
             )
     except Exception as exc:
         from .v2.production_signals import record_production_pilot_shadow_error
@@ -172,6 +221,32 @@ def prepare_pair_return_observation(
             **kwargs,
         )
     if not left_proof.complete or not right_proof.complete:
+        try:
+            from .v2.abi_width_readonly import AbiWidthReadonlyBlockerSignal
+
+            for seed, proof in (
+                (left_seed, left_proof),
+                (right_seed, right_proof),
+            ):
+                if proof.complete:
+                    continue
+                for slot in seed.unresolved_fact_slots:
+                    if slot in {
+                        "return_storage_fact", "payload_width_fact",
+                        "extension_evidence_fact",
+                    }:
+                        _emit_return_width_signal_once(
+                            AbiWidthReadonlyBlockerSignal.from_width_seed(
+                                seed, slot
+                            ),
+                            producer_site_manifest_id=(
+                                "return-width-pair-unary-provenance-blocker"
+                            ),
+                        )
+        except Exception as exc:
+            from .v2.production_signals import record_production_pilot_shadow_error
+
+            record_production_pilot_shadow_error(exc)
         blockers = tuple(
             WidthBlocker(
                 "unary_width",

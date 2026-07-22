@@ -55,6 +55,10 @@ from ..equivalence.unknown_reason import (
 
 MANIFEST_VERSION = 1
 TARGET_REASON_IDS = ("sat_unsafety",)
+CURRENT_TARGET_REASON_IDS = frozenset({
+    "sat_unsafety",
+    "counterexample_analysis_safety_unproven",
+})
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
 SAT_PROOF_KIND = "sat_unsafety_resolution"
 SAT_PROOF_STAGE = "sat_counterexample_safety"
@@ -740,7 +744,10 @@ def _current_targets(entry: Any) -> Sequence[Any]:
         return ()
     targets = []
     for record in current.get("reason_records") or ():
-        if not isinstance(record, Mapping) or record.get("reason_id") != "sat_unsafety":
+        if (
+            not isinstance(record, Mapping)
+            or record.get("reason_id") not in CURRENT_TARGET_REASON_IDS
+        ):
             continue
         target = record.get("object_target_key")
         if _object_target_key_is_specific_sat_unsafety(target):
@@ -756,7 +763,7 @@ def _current_sat_actions(entry: Any) -> Sequence[Mapping[str, Any]]:
     for action in current.get("proof_actions") or ():
         if not isinstance(action, Mapping):
             continue
-        if action.get("reason_id") != "sat_unsafety":
+        if action.get("reason_id") not in CURRENT_TARGET_REASON_IDS:
             continue
         if not _object_target_key_is_specific_sat_unsafety(action.get("object_target_key")):
             continue
@@ -1040,7 +1047,7 @@ def _expected_proof_obligation_id(
     object_target_key: Any,
 ) -> Tuple[Any, ...]:
     return build_proof_obligation_id(
-        "sat_unsafety",
+        action.get("reason_id"),
         action.get("proof_stage"),
         action.get("proof_kind"),
         action.get("evidence_kind"),
@@ -1051,9 +1058,9 @@ def _expected_proof_obligation_id(
 def _proof_action_matches_lane_definition(action: Mapping[str, Any]) -> bool:
     return (
         action.get("count_kind") == UnknownCountKind.PROOF_ACTION.value
-        and action.get("reason_id") == "sat_unsafety"
+        and action.get("reason_id") in CURRENT_TARGET_REASON_IDS
         and action.get("decision_effect") == "blocks_disequivalence"
-        and action.get("reason_scope") == "pair"
+        and action.get("reason_scope") in {"pair", "query"}
         and action.get("aggregation_unit") == "pair"
         and action.get("stage") == "S_PAIRWISE"
         and action.get("proof_kind") == SAT_PROOF_KIND
@@ -1066,7 +1073,11 @@ def _proof_action_matches_lane_definition(action: Mapping[str, Any]) -> bool:
 
 def _object_target_key_is_specific_sat_unsafety(value: Any) -> bool:
     target = _normalize_nested_tuple(value)
-    if not isinstance(target, tuple) or len(target) != 5 or target[0] != "sat_unsafety":
+    if (
+        not isinstance(target, tuple)
+        or len(target) != 5
+        or target[0] not in {"sat_unsafety", "counterexample_safety_gate"}
+    ):
         return False
     if _nested_contains_diagnostic_reason(target):
         return False

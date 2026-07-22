@@ -81,6 +81,7 @@ from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
 )
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     CallEffectBlockerProductionSignal,
+    CallEffectPrerequisiteProductionSignal,
     CallEffectProofBatchProductionSignal,
     CompositeProductionSignalEncoder,
     production_signal_scope,
@@ -2908,6 +2909,11 @@ def test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences(monke
             session.emit_domain_signal(CallEffectProofBatchProductionSignal(
                 legacy.v2_blocker_signals[0], v2.artifacts
             ))
+            repeated_context = composite.build_call_effect_execution_context(
+                session, legacy.v2_blocker_signals,
+                CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+            )
+            assert repeated_context is None
         evidences.append(connector.finish(
             session,
             SimpleNamespace(
@@ -3000,6 +3006,47 @@ def test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger(monk
         session.identity.result_occurrence_id,
     )
     assert len(session.domain_signal_state["call_effect_v2"]["solver_census"].events) == 3
+
+
+def test_ineligible_call_obligation_emits_typed_prerequisite_frontier():
+    install_execution_authority_signing_key(
+        "call-prerequisite-key", b"p" * 32
+    )
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "call-prerequisite-policy", 1, "test-owner", "test-source",
+        "call-prerequisite-key", (), 3600, "test-revocation",
+    ))
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectPrerequisiteProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    left, right, manifest = _call_to_region_proof_inputs()
+    manifest = deepcopy(manifest)
+    manifest["phase2_direct_call_eligibility"][0]["status"] = "ineligible"
+    manifest["phase2_direct_call_eligibility"][0]["blockers"] = [
+        "phase2_requires_paired_call_sites"
+    ]
+    session = connector.begin({"case": "ineligible-call-prerequisite"})
+    with production_signal_scope(session):
+        production = produce_pure_direct_call_proofs(
+            manifest, left, right,
+            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            timeout_seconds=5,
+        )
+    projection = session.preview_lifecycle_projection()
+    assert len(production.v2_prerequisite_signals) == 1
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "callsite_correspondence_unproven"
+    }
+    assert len(projection.q_open_base) == 1
 
 
 def test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists():

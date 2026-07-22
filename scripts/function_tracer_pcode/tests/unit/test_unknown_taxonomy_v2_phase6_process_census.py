@@ -344,7 +344,7 @@ def test_operational_error_projection_requires_exact_durable_bundle(tmp_path):
     store.persist_launch(authority["launch"])
     bundle = store.supervisor_finalize_operational_error(
         launch=authority["launch"],
-        error_kind="process_deadline_without_checkpoint",
+        error_kind="operational_authority_invalid",
         deadline_stage="BEFORE_CHECKPOINT",
         child_exit_disposition="SIGTERM_AFTER_DEADLINE",
     )

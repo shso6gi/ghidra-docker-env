@@ -17,7 +17,9 @@ def test_phase7_producer_manifest_is_current_complete_and_unique():
     validate_phase7_producer_manifest(root, stored)
     assert stored["site_count"] > 0
     ids = [row["producer_site_manifest_id"] for row in stored["sites"]]
-    assert len(ids) == len(set(ids)) == stored["site_count"] == 25
+    assert len(ids) == len(set(ids)) == stored["site_count"] == 26
+    assert "pairwise-return-width-relation-blocker" not in ids
+    assert "obligation-stage-final-eq-closure" not in ids
     assert "sat-safety-blocker-observed" in ids
     assert all("NOT_REACHED" not in row["allowed_dispositions"] for row in stored["sites"])
     assert all(row["branch_or_attempt_contract_id"] for row in stored["sites"])

@@ -177,6 +177,7 @@ def _subordinate_decompile(
     prepared_checkpoint = active_checkpoint = None
     try:
         from ..equivalence.v2.subordinate_decompilation import (
+            SubordinateParentNotLive,
             SubordinateProcessAssignmentFactory,
         )
 
@@ -225,6 +226,15 @@ def _subordinate_decompile(
         )
         if prepared_checkpoint is not None:
             active_checkpoint = prepared_checkpoint.persist(invocation)
+    except SubordinateParentNotLive:
+        return decompile_function(
+            analyzer,
+            function,
+            timeout,
+            monitor,
+            source_contract_id=source_contract_id,
+            semantic_owner="slice6",
+        )
     except Exception as exc:
         _record_shadow_error(exc)
         assignment_factory = assignment = invocation_binding = None
@@ -386,6 +396,7 @@ def decompile_function(
             prepared_checkpoint = runtime.prepare(
                 session=session, operational_factory=factory,
                 reason_id="function_decompilation_artifact_unavailable",
+                proof_requirement_id=decomp_q,
             )
             if prepared_checkpoint.assignment.payload[
                 "proof_requirement_id"

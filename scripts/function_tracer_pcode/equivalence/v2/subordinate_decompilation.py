@@ -154,6 +154,10 @@ SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST = authority_digest({
     "registry_version": SUBORDINATE_ADAPTER_REGISTRY_VERSION,
     "rows": tuple(row.authority_tuple() for row in SUBORDINATE_DECOMPILATION_ADAPTER_ROWS),
 })
+
+
+class SubordinateParentNotLive(ValueError):
+    """The source has no live recovery parent and needs standalone ownership."""
 EXPECTED_SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST = (
     "e1d8bb3c21a4985e84020afd7974a9f0342cd93b112c0e9f5fdaa76f5fae576c"
 )
@@ -393,6 +397,10 @@ class SubordinateProcessAssignmentFactory:
             row for row in SUBORDINATE_DECOMPILATION_ADAPTER_ROWS
             if row.source_contract_id == source_contract_id
         )
+        if not rows:
+            raise ValueError(
+                "subordinate source requires exactly one live parent C/Q"
+            )
         candidates = []
         for row in rows:
             for q_row in projection.q_open_base:
@@ -410,6 +418,15 @@ class SubordinateProcessAssignmentFactory:
                         and producer in row.parent_producer_contract_ids
                     ):
                         candidates.append((row, c_row, q_row, producer))
+        has_parent_shaped_requirement = any(
+            q_row.proof_kind == row.parent_proof_kind
+            for row in rows
+            for q_row in projection.q_open_base
+        )
+        if not candidates and not has_parent_shaped_requirement:
+            raise SubordinateParentNotLive(
+                "subordinate source has no live parent C/Q"
+            )
         if len(candidates) != 1:
             raise ValueError("subordinate source requires exactly one live parent C/Q")
         row, c_row, q_row, producer = candidates[0]

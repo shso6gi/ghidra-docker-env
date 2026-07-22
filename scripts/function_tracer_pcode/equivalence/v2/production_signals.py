@@ -3,15 +3,119 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import secrets
 from typing import Any, Callable, Iterator, Mapping, Optional
 
-from .contracts import CauseOccurrenceAuthority, authority_digest, canonical_value
+from .contracts import (
+    CauseOccurrence, CauseOccurrenceAuthority, IdentityScope, ProofRequirement,
+    ReasonDefinition, RecoveryAddressability, RequirementSlotDefinition,
+    SatisfactionContractDefinition, authority_digest, canonical_value,
+    requirement_slot,
+)
 from .production_context import (
     active_production_pilot_session,
     comparison_receipt_authority,
     production_pilot_session_scope,
 )
-from .stream import CauseObservedEventAuthority, EventIntent, EventType
+from .comparison_closure import ComparisonClosureProductionSignal
+from .registry import (
+    SatisfactionBindingFactory, SealedReasonRegistry, SealedRecoveryRegistry,
+    SemanticCauseIdentityFactory,
+)
+from .stream import (
+    CauseObservedEventAuthority,
+    DecisiveProofEventAuthority,
+    EventIntent,
+    EventType,
+)
+
+
+COMPARISON_CLOSURE_REASON_ID = "comparison_equivalence_closure_unproven"
+COMPARISON_CLOSURE_PROOF_KIND = "comparison_equivalence_closure"
+COMPARISON_CLOSURE_CONTRACT_ID = "comparison-equivalence-closure-recovery"
+COMPARISON_CLOSURE_REASON_REGISTRY = SealedReasonRegistry.build((
+    ReasonDefinition(
+        COMPARISON_CLOSURE_REASON_ID, "comparison_closure", "proof_obligation",
+        "blocks_decision", frozenset(("comparison_execution_receipt",)),
+        ("comparison_receipt", "terminal_receipt", "query_receipts"),
+        frozenset((COMPARISON_CLOSURE_PROOF_KIND,)), True,
+        "comparison_closure_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+))
+COMPARISON_CLOSURE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
+    SatisfactionContractDefinition(
+        COMPARISON_CLOSURE_CONTRACT_ID, 1,
+        (RequirementSlotDefinition(
+            "closure", frozenset((COMPARISON_CLOSURE_PROOF_KIND,))
+        ),),
+        requirement_slot("closure"),
+    ),
+))
+
+
+class ComparisonClosurePilotEncoder:
+    def __init__(self) -> None:
+        self._cause_factory = SemanticCauseIdentityFactory(
+            COMPARISON_CLOSURE_REASON_REGISTRY
+        )
+        self._binding_factory = SatisfactionBindingFactory(
+            COMPARISON_CLOSURE_RECOVERY_REGISTRY
+        )
+
+    def __call__(
+        self, session: Any, signal: ComparisonClosureProductionSignal,
+    ) -> tuple[EventIntent, ...]:
+        if type(signal) is not ComparisonClosureProductionSignal:
+            raise TypeError("comparison closure encoder requires an exact signal")
+        target = (
+            "comparison_execution_receipt_v1", signal.comparison_receipt_id,
+            signal.terminal_receipt_digest, signal.branch_id,
+            signal.runtime_premise_digest, signal.runtime_view_id,
+            signal.query_receipt_digests,
+        )
+        cause = self._cause_factory.create(
+            reason_id=COMPARISON_CLOSURE_REASON_ID,
+            identity_scope=IdentityScope.RELATIONAL,
+            target_kind="comparison_execution_receipt",
+            canonical_target_key=target,
+            missing_semantic_fact=("decisive_comparison_closure", signal.branch_id),
+            semantic_proposition=("comparison_is_decisive", signal.comparison_receipt_id),
+            observation_surface=(
+                signal.runtime_view_id, signal.runtime_premise_digest,
+                signal.query_receipt_digests,
+            ),
+            active_semantic_precondition=(
+                "inconclusive_terminal_receipt", signal.terminal_receipt_digest,
+            ),
+            correspondence_contract=None,
+        )
+        requirement = ProofRequirement(
+            "comparison-closure-q-" + authority_digest(target)[:32],
+            COMPARISON_CLOSURE_PROOF_KIND, target,
+        )
+        bound = self._binding_factory.bind(
+            contract_definition_id=COMPARISON_CLOSURE_CONTRACT_ID,
+            contract_version=1, bindings={"closure": requirement},
+        )
+        occurrence = CauseOccurrence(
+            "comparison-closure-occ-" + authority_digest({
+                "result_occurrence_id": session.identity.result_occurrence_id,
+                "target": target,
+            })[:32],
+            cause, COMPARISON_CLOSURE_REASON_ID, authority_digest(target),
+            "comparison_execution_receipt", IdentityScope.RELATIONAL,
+            bound.contract_definition_id, bound.contract_version,
+            bound.normalized_expression_digest, bound.bound_expression_digest,
+            (requirement.requirement_id,),
+            (signal.terminal_receipt_digest, *signal.query_receipt_digests),
+            "comparison_closure_producer_signal",
+            session.identity.source_snapshot_fingerprint, signal.producer_id,
+            session.identity.execution_identity_digest,
+        )
+        return (EventIntent(
+            EventType.CAUSE_OBSERVED,
+            CauseObservedEventAuthority(CauseOccurrenceAuthority(occurrence, bound)),
+        ),)
 
 
 @dataclass(frozen=True)
@@ -126,112 +230,308 @@ class SafeCounterexampleProductionSignal:
             raise TypeError("safe counterexample signal pair key is invalid")
 
 
-_EQ_CLOSURE_SIGNAL_TOKEN = object()
+_PENDING_EQ_CLOSURE_TOKEN = object()
+_POST_CLEANUP_EQ_RECEIPT_TOKEN = object()
 
 
 @dataclass(frozen=True, init=False)
-class EqClosureProductionSignal:
-    proof_artifact_digest: str
+class PostCleanupEqClosureReceipt:
+    """Immutable factory receipt replacing a live dispatch-frame reference."""
+
+    result_occurrence_id: str
+    execution_identity_digest: str
     comparison_receipt_id: str
-    producer_id: str = "verified_comparison_receipt"
+    comparison_receipt_authority_digest: str
+    comparison_session_id: str
+    branch_id: str
+    generation: int
+    runtime_view_id: str
+    runtime_premise_digest: str
+    post_cleanup_binding_digest: str
+    receipt_digest: str
 
-    def __init__(
-        self,
-        proof_artifact_digest: str,
-        comparison_receipt_id: str,
-        *,
-        _token: object,
-    ) -> None:
-        if _token is not _EQ_CLOSURE_SIGNAL_TOKEN:
-            raise TypeError("EQ closure signal requires its verifier-owned issuer")
-        for value in (
-            proof_artifact_digest,
-            comparison_receipt_id,
+    def __init__(self, *, _token: object, **values: Any) -> None:
+        if _token is not _POST_CLEANUP_EQ_RECEIPT_TOKEN:
+            raise TypeError("post-cleanup EQ receipt requires its factory")
+        supplied = values.pop("receipt_digest", None)
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        digest = authority_digest(values)
+        if supplied is not None and supplied != digest:
+            raise ValueError("post-cleanup EQ receipt digest mismatch")
+        object.__setattr__(self, "receipt_digest", digest)
+        self.validate()
+
+    def validate(self) -> None:
+        values = {
+            name: getattr(self, name) for name in self.__dataclass_fields__
+            if name != "receipt_digest"
+        }
+        if (
+            authority_digest(values) != self.receipt_digest
+            or self.generation < 0
+            or any(
+                type(value) is not str or not value
+                for name, value in values.items() if name != "generation"
+            )
         ):
-            if type(value) is not str or not value:
-                raise TypeError("EQ closure signal authority is incomplete")
-        object.__setattr__(self, "proof_artifact_digest", proof_artifact_digest)
-        object.__setattr__(self, "comparison_receipt_id", comparison_receipt_id)
-        object.__setattr__(self, "producer_id", "verified_comparison_receipt")
+            raise ValueError("post-cleanup EQ receipt is invalid")
 
 
-def issue_eq_closure_signal(
-    session: Any, comparison_receipt: Any, dispatch_frame: Any,
-) -> EqClosureProductionSignal:
-    """Issue one-shot EQ authority from an exact trusted comparison receipt."""
+@dataclass(frozen=True, init=False)
+class PendingEqClosureAuthority:
+    result_occurrence_id: str
+    execution_identity_digest: str
+    comparison_receipt_id: str
+    comparison_receipt_authority_digest: str
+    comparison_session_id: str
+    branch_id: str
+    generation: int
+    dispatch_frame_authority_digest: str
+    runtime_view_id: str
+    runtime_premise_digest: str
+    post_cleanup_binding_digest: str
+    post_cleanup_receipt_digest: str
+    proof_artifact_digest: str
+    authority_nonce: str
+    receipt_digest: str
 
-    if getattr(dispatch_frame, "receipt", None) is not comparison_receipt:
-        raise ValueError("EQ closure receipt is not the dispatch-frame receipt")
-    authority = comparison_receipt_authority(comparison_receipt, dispatch_frame)
-    if authority is None:
-        raise TypeError("EQ closure requires an exact issuer-owned comparison receipt")
-    if not comparison_receipt.is_trusted_for(dispatch_frame):
-        raise ValueError("EQ closure comparison receipt is not trusted")
-    bound_session = authority[2]
-    if bound_session is not session:
-        raise ValueError("EQ closure receipt belongs to a different production session")
-    if (
-        getattr(getattr(bound_session, "identity", None), "result_occurrence_id", None)
-        != getattr(getattr(session, "identity", None), "result_occurrence_id", None)
-        or getattr(
-            getattr(bound_session, "identity", None),
-            "execution_identity_digest",
-            None,
-        )
-        != getattr(
-            getattr(session, "identity", None),
-            "execution_identity_digest",
-            None,
-        )
-    ):
-        raise ValueError("EQ closure production execution identity changed")
-    proof_digest = authority_digest({
-        "comparison_receipt": comparison_receipt,
-        "result_occurrence_id": session.identity.result_occurrence_id,
-        "execution_identity_digest": session.identity.execution_identity_digest,
+    def __init__(self, *, _token: object, **values: Any) -> None:
+        if _token is not _PENDING_EQ_CLOSURE_TOKEN:
+            raise TypeError("pending EQ authority requires its verifier-owned issuer")
+        supplied = values.pop("receipt_digest", None)
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        digest = authority_digest(values)
+        if supplied is not None and supplied != digest:
+            raise ValueError("pending EQ authority digest mismatch")
+        object.__setattr__(self, "receipt_digest", digest)
+
+    def validate(self) -> None:
+        values = {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+            if name != "receipt_digest"
+        }
+        if (
+            authority_digest(values) != self.receipt_digest
+            or self.generation < 0
+            or any(
+                type(value) is not str or not value
+                for name, value in values.items()
+                if name != "generation"
+            )
+        ):
+            raise ValueError("pending EQ authority is invalid")
+
+
+@dataclass(frozen=True)
+class PendingEqTransitionReceipt:
+    pending_receipt_digest: str
+    action: str
+    lifecycle_projection_digest: str
+    terminal_candidate_view_digest: str
+    receipt_digest: str
+
+    @classmethod
+    def create(
+        cls, pending: PendingEqClosureAuthority, *, action: str,
+        lifecycle_projection_digest: str, terminal_candidate_view_digest: str,
+    ) -> "PendingEqTransitionReceipt":
+        if action not in {"CONSUMED", "DISCARDED"}:
+            raise ValueError("pending EQ transition action is invalid")
+        payload = {
+            "pending_receipt_digest": pending.receipt_digest,
+            "action": action,
+            "lifecycle_projection_digest": lifecycle_projection_digest,
+            "terminal_candidate_view_digest": terminal_candidate_view_digest,
+        }
+        return cls(*payload.values(), authority_digest(payload))
+
+
+def _pending_eq_post_cleanup_binding(dispatch_frame: Any) -> dict[str, Any]:
+    """Freeze the exact mutable authority surface consumed by EQ closure."""
+
+    runtime = getattr(dispatch_frame, "obligation_runtime", None)
+    view_id = str(getattr(getattr(runtime, "current_view", None), "view_id", ""))
+    premise_digest = str(getattr(runtime, "premise_digest", ""))
+    successor_plan = getattr(dispatch_frame, "replan_successor_plan", None)
+    successor_ledger = getattr(dispatch_frame, "replan_successor_ledger", None)
+    pair_ledger = getattr(dispatch_frame, "pair_disposition_ledger", None)
+    return {
         "comparison_session_id": dispatch_frame.comparison_session_id,
         "branch_id": dispatch_frame.branch_id,
         "generation": dispatch_frame.generation,
-    })
-    signal = EqClosureProductionSignal(
-        proof_digest,
-        comparison_receipt.receipt_id,
-        _token=_EQ_CLOSURE_SIGNAL_TOKEN,
+        "dispatch_nonce": dispatch_frame.dispatch_nonce,
+        "prepared_surface_digest": dispatch_frame.prepared.surface_digest,
+        "projection_id": dispatch_frame.projection.projection_id,
+        "cleanup_complete": bool(dispatch_frame.cleanup_complete),
+        "lifecycle_state": str(dispatch_frame.lifecycle_state),
+        "runtime_view_id": view_id,
+        "runtime_premise_digest": premise_digest,
+        "successor_ledger_reused": bool(dispatch_frame.successor_ledger_reused),
+        "successor_plan_key": (
+            successor_plan.stable_key() if successor_plan is not None else None
+        ),
+        "successor_ledger_is_pair_ledger": (
+            successor_ledger is pair_ledger if successor_plan is not None else True
+        ),
+        "pair_ledger_binding_key": (
+            pair_ledger.binding.stable_key() if pair_ledger is not None else None
+        ),
+        "pair_ledger_expected_pairs": (
+            int(pair_ledger.expected_pairs) if pair_ledger is not None else None
+        ),
+    }
+
+
+def issue_pending_eq_closure_authority(
+    session: Any, comparison_receipt: Any, dispatch_frame: Any,
+) -> PendingEqClosureAuthority:
+    """Seal immutable comparison authority for post-proof-DAG EQ promotion."""
+
+    if getattr(dispatch_frame, "receipt", None) is not comparison_receipt:
+        raise ValueError("pending EQ receipt is not the dispatch-frame receipt")
+    authority = comparison_receipt_authority(comparison_receipt, dispatch_frame)
+    if authority is None or not comparison_receipt.is_trusted_for(dispatch_frame):
+        raise ValueError("pending EQ comparison receipt is not trusted")
+    if authority[2] is not session:
+        raise ValueError("pending EQ receipt belongs to another production session")
+    if not bool(getattr(dispatch_frame, "cleanup_complete", False)):
+        raise ValueError("pending EQ requires a post-cleanup dispatch frame")
+    runtime = getattr(dispatch_frame, "obligation_runtime", None)
+    runtime_view_id = str(getattr(getattr(runtime, "current_view", None), "view_id", ""))
+    runtime_premise_digest = str(getattr(runtime, "premise_digest", ""))
+    if not runtime_view_id or not runtime_premise_digest:
+        raise ValueError("pending EQ lacks terminal runtime authority")
+    receipt_authority_digest = authority_digest(comparison_receipt)
+    post_cleanup_binding = _pending_eq_post_cleanup_binding(dispatch_frame)
+    frame_digest = authority_digest(post_cleanup_binding)
+    post_cleanup_receipt = PostCleanupEqClosureReceipt(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        execution_identity_digest=session.identity.execution_identity_digest,
+        comparison_receipt_id=comparison_receipt.receipt_id,
+        comparison_receipt_authority_digest=receipt_authority_digest,
+        comparison_session_id=dispatch_frame.comparison_session_id,
+        branch_id=dispatch_frame.branch_id,
+        generation=dispatch_frame.generation,
+        runtime_view_id=runtime_view_id,
+        runtime_premise_digest=runtime_premise_digest,
+        post_cleanup_binding_digest=frame_digest,
+        _token=_POST_CLEANUP_EQ_RECEIPT_TOKEN,
     )
-    owned = session.domain_signal_state.setdefault("eq_closure_signal_authority", {})
-    owned[id(signal)] = (signal, comparison_receipt, dispatch_frame, session)
-    return signal
-
-
-def consume_verified_eq_closure_signal(session: Any, signal: Any) -> str:
-    """Revalidate and consume exact-object EQ authority at the encoder boundary."""
-
-    if type(signal) is not EqClosureProductionSignal:
-        raise TypeError("EQ closure encoder requires its exact signal type")
-    owned = session.domain_signal_state.setdefault("eq_closure_signal_authority", {})
-    authority = owned.pop(id(signal), None)
-    if authority is None or authority[0] is not signal:
-        raise ValueError("EQ closure signal is copied, forged, or already consumed")
-    _owned_signal, receipt, frame, bound_session = authority
-    if bound_session is not session:
-        raise ValueError("EQ closure signal belongs to a different production session")
-    if getattr(frame, "receipt", None) is not receipt:
-        raise ValueError("EQ closure dispatch-frame receipt changed")
-    if receipt.receipt_id != signal.comparison_receipt_id:
-        raise ValueError("EQ closure receipt identity changed")
-    if not receipt.is_trusted_for(frame):
-        raise ValueError("EQ closure receipt no longer validates")
-    expected = authority_digest({
-        "comparison_receipt": receipt,
+    proof_digest = authority_digest({
+        "comparison_receipt_authority_digest": receipt_authority_digest,
+        "post_cleanup_receipt_digest": post_cleanup_receipt.receipt_digest,
         "result_occurrence_id": session.identity.result_occurrence_id,
         "execution_identity_digest": session.identity.execution_identity_digest,
-        "comparison_session_id": frame.comparison_session_id,
-        "branch_id": frame.branch_id,
-        "generation": frame.generation,
     })
-    if signal.proof_artifact_digest != expected:
-        raise ValueError("EQ closure proof digest changed")
-    return expected
+    pending = PendingEqClosureAuthority(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        execution_identity_digest=session.identity.execution_identity_digest,
+        comparison_receipt_id=comparison_receipt.receipt_id,
+        comparison_receipt_authority_digest=receipt_authority_digest,
+        comparison_session_id=dispatch_frame.comparison_session_id,
+        branch_id=dispatch_frame.branch_id,
+        generation=dispatch_frame.generation,
+        dispatch_frame_authority_digest=frame_digest,
+        runtime_view_id=runtime_view_id,
+        runtime_premise_digest=runtime_premise_digest,
+        post_cleanup_binding_digest=frame_digest,
+        post_cleanup_receipt_digest=post_cleanup_receipt.receipt_digest,
+        proof_artifact_digest=proof_digest,
+        authority_nonce=secrets.token_hex(24),
+        _token=_PENDING_EQ_CLOSURE_TOKEN,
+    )
+    pending.validate()
+    ledger = session.domain_signal_state.setdefault("pending_eq_authorities", {})
+    if ledger:
+        raise ValueError("production result already owns a pending EQ authority")
+    ledger[pending.authority_nonce] = {
+        "authority": pending,
+        "post_cleanup_receipt": post_cleanup_receipt,
+        "state": "PENDING",
+    }
+    return pending
+
+
+def finalize_pending_eq_authorities(
+    session: Any, lifecycle_projection: Any, terminal_candidate_view: Any,
+) -> tuple[EventIntent, ...]:
+    """Consume or neutrally discard every one-shot pending EQ capability."""
+
+    ledger = session.domain_signal_state.setdefault("pending_eq_authorities", {})
+    intents = []
+    transitions = session.domain_signal_state.setdefault(
+        "pending_eq_transition_receipts", []
+    )
+    for nonce, entry in tuple(sorted(ledger.items())):
+        pending = entry.get("authority")
+        if (
+            entry.get("state") != "PENDING"
+            or type(pending) is not PendingEqClosureAuthority
+            or pending.authority_nonce != nonce
+        ):
+            raise ValueError("pending EQ ledger contains invalid authority state")
+        pending.validate()
+        if (
+            pending.result_occurrence_id != session.identity.result_occurrence_id
+            or pending.execution_identity_digest
+            != session.identity.execution_identity_digest
+        ):
+            raise ValueError("pending EQ execution identity changed")
+        post_cleanup_receipt = entry.get("post_cleanup_receipt")
+        if (
+            type(post_cleanup_receipt) is not PostCleanupEqClosureReceipt
+            or post_cleanup_receipt.receipt_digest
+            != pending.post_cleanup_receipt_digest
+            or post_cleanup_receipt.result_occurrence_id
+            != pending.result_occurrence_id
+            or post_cleanup_receipt.execution_identity_digest
+            != pending.execution_identity_digest
+            or post_cleanup_receipt.comparison_receipt_id
+            != pending.comparison_receipt_id
+            or post_cleanup_receipt.comparison_receipt_authority_digest
+            != pending.comparison_receipt_authority_digest
+            or post_cleanup_receipt.comparison_session_id
+            != pending.comparison_session_id
+            or post_cleanup_receipt.branch_id != pending.branch_id
+            or post_cleanup_receipt.generation != pending.generation
+            or post_cleanup_receipt.runtime_view_id != pending.runtime_view_id
+            or post_cleanup_receipt.runtime_premise_digest
+            != pending.runtime_premise_digest
+            or post_cleanup_receipt.post_cleanup_binding_digest
+            != pending.post_cleanup_binding_digest
+        ):
+            raise ValueError("pending EQ post-cleanup authority no longer validates")
+        post_cleanup_receipt.validate()
+        blocks_eq = any(
+            row.decision_effect in {"blocks_equivalence", "blocks_decision"}
+            for row in lifecycle_projection.c_active_base
+        )
+        competing = bool(
+            terminal_candidate_view.timeout_candidates
+            or terminal_candidate_view.counterexample_event_digests
+            or terminal_candidate_view.error_event_digests
+            or terminal_candidate_view.competing_decisive_event_digests
+        )
+        action = "DISCARDED" if blocks_eq or competing else "CONSUMED"
+        transitions.append(PendingEqTransitionReceipt.create(
+            pending,
+            action=action,
+            lifecycle_projection_digest=(
+                getattr(lifecycle_projection, "lifecycle_projection_digest", None)
+                or lifecycle_projection.prefix_projection_digest
+            ),
+            terminal_candidate_view_digest=terminal_candidate_view.view_digest,
+        ))
+        entry["state"] = action
+        if action == "CONSUMED":
+            intents.append(EventIntent(
+                EventType.EQ_CLOSURE,
+                DecisiveProofEventAuthority(pending.proof_artifact_digest),
+            ))
+    return tuple(intents)
 
 
 _CALL_EFFECT_BLOCKER_SIGNAL_TOKEN = object()
@@ -245,8 +545,8 @@ class CallEffectBlockerProductionSignal:
     failure_code: str
     obligation_id: str
     observation_contract_id: str
-    left_fact_id: str
-    right_fact_id: str
+    left_fact_id: Optional[str]
+    right_fact_id: Optional[str]
     semantic_arm: str
     structural_certificate_id: str
     producer_id: str
@@ -296,12 +596,18 @@ class CallEffectBlockerProductionSignal:
         if type(self.effect_stage_required) is not bool:
             raise TypeError("call/effect effect-stage predicate must be exact bool")
 
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        return {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+        }
+
     @classmethod
     def from_proof_input(cls, proof_input: Any) -> "CallEffectBlockerProductionSignal":
-        from ..call_effect_producer import (
+        from ..call_effect_proof_input import (
+            CALL_EFFECT_PRODUCER_KIND,
             PureCallRegionProofInput,
             PureDirectCallProofInput,
-            _PRODUCER_KIND,
         )
 
         if type(proof_input) is PureCallRegionProofInput:
@@ -340,7 +646,7 @@ class CallEffectBlockerProductionSignal:
             proof_input.right_fact_id,
             semantic_arm,
             proof_input.structural_certificate_id,
-            _PRODUCER_KIND,
+            CALL_EFFECT_PRODUCER_KIND,
             memory_stage_required or caller_memory_stage_required,
             _factory_token=_CALL_EFFECT_BLOCKER_SIGNAL_TOKEN,
         )
@@ -357,6 +663,56 @@ class CallEffectProofBatchProductionSignal:
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
         if not self.artifacts:
             raise ValueError("call/effect proof batch cannot be empty")
+
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        return {
+            "blocker": self.blocker._phase7_signal_authority(),
+            "proof_records": tuple(
+                artifact.record.to_dict() for artifact in self.artifacts
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class CallEffectPrerequisiteProductionSignal:
+    """Object-derived blocker for an ineligible relational call obligation."""
+
+    obligation_id: str
+    observation_contract_id: str
+    left_fact_id: str
+    right_fact_id: str
+    structural_certificate_id: str
+    eligibility_blockers: tuple[str, ...]
+    producer_id: str = "internal_typed_pure_direct_call_stage_producer"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "eligibility_blockers", tuple(self.eligibility_blockers)
+        )
+        for value in (
+            self.obligation_id,
+            self.observation_contract_id,
+            self.structural_certificate_id,
+            self.producer_id,
+        ):
+            if type(value) is not str or not value:
+                raise TypeError("call/effect prerequisite identity is incomplete")
+        if (
+            self.left_fact_id is not None
+            and (type(self.left_fact_id) is not str or not self.left_fact_id)
+        ) or (
+            self.right_fact_id is not None
+            and (type(self.right_fact_id) is not str or not self.right_fact_id)
+        ) or (self.left_fact_id is None and self.right_fact_id is None):
+            raise TypeError("call/effect prerequisite endpoints are incomplete")
+        if self.eligibility_blockers != ("phase2_requires_paired_call_sites",):
+            raise ValueError("call/effect prerequisite blocker set is not sealed")
+
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        return {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+        }
 
 
 class OutcomePartitionPilotEncoder:
@@ -405,6 +761,20 @@ class CompositeProductionSignalEncoder:
         if encoder is None:
             raise TypeError("production signal type has no registered encoder")
         return encoder(session, signal)
+
+    def commit_emitted_signal(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
+    ) -> None:
+        encoder = self._routes.get(type(signal))
+        committer = getattr(encoder, "commit_emitted_signal", None)
+        if callable(committer):
+            committer(session, signal, intents)
+
+    def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        encoder = self._routes.get(type(signal))
+        rollback = getattr(encoder, "rollback_emitted_signal", None)
+        if callable(rollback):
+            rollback(session, signal)
 
     def accepts_signal_type(self, signal_type: type) -> bool:
         return type(signal_type) is type and signal_type in self._routes
@@ -463,14 +833,19 @@ class CompositeProductionSignalEncoder:
 
     def validate_startup(self) -> tuple[Any, ...]:
         encoders = tuple({id(value): value for value in self._routes.values()}.values())
-        receipts = []
+        receipts = {}
         for encoder in encoders:
             validator = getattr(encoder, "validate_startup", None)
             if callable(validator):
                 receipt = validator()
                 if receipt is not None:
-                    receipts.append(receipt)
-        return tuple(receipts)
+                    digest = getattr(receipt, "receipt_digest", None)
+                    if type(digest) is not str or not digest:
+                        raise TypeError("production startup receipt lacks exact digest")
+                    prior = receipts.setdefault(digest, receipt)
+                    if prior != receipt:
+                        raise ValueError("production startup receipt digest collided")
+        return tuple(receipts[digest] for digest in sorted(receipts))
 
     def build_call_effect_execution_context(
         self, session: Any, signals: tuple[Any, ...], registry: Any
@@ -525,6 +900,17 @@ class CompositeProductionSignalEncoder:
             raise TypeError("ABI/width route lacks solver scheduler authority")
         registrar(session, blocker, seed)
 
+    def register_return_observation_proof_plan(
+        self, session: Any, projection_seed: Any, assessment: Any
+    ) -> None:
+        from .abi_width_readonly import AbiWidthReadonlyBlockerSignal
+
+        encoder = self._routes.get(AbiWidthReadonlyBlockerSignal)
+        registrar = getattr(encoder, "register_return_observation_proof_plan", None)
+        if not callable(registrar):
+            raise TypeError("ABI/width route lacks return-observation proof planning")
+        registrar(session, projection_seed, assessment)
+
     def build_abi_width_execution_context(
         self, session: Any, blocker: Any, query: Any
     ) -> Any:
@@ -535,6 +921,24 @@ class CompositeProductionSignalEncoder:
         if not callable(builder):
             raise TypeError("ABI/width route lacks execution-context authority")
         return builder(session, blocker, query)
+
+    def prepare_sat_safety_transformation(
+        self, session: Any, signal: Any,
+    ) -> Any:
+        encoder = self._routes.get(SatSafetyBlockerProductionSignal)
+        resolver = getattr(encoder, "authority_for_signal", None)
+        if not callable(resolver):
+            raise TypeError("SAT safety route lacks occurrence authority")
+        return resolver(session, signal)
+
+    def commit_sat_safety_transformed_observation(
+        self, session: Any, signal: Any,
+    ) -> None:
+        encoder = self._routes.get(SatSafetyBlockerProductionSignal)
+        registrar = getattr(encoder, "register_transformed_observation", None)
+        if not callable(registrar):
+            raise TypeError("SAT safety route lacks transformation registration")
+        registrar(session, signal)
 
 
 def active_operational_authority_factory() -> Optional[Any]:
@@ -597,17 +1001,46 @@ def emit_outcome_partition_signal(
     return int(emit(signal))
 
 
+def emit_comparison_closure_signal(
+    signal: ComparisonClosureProductionSignal,
+    *, producer_site_manifest_id: Optional[str] = None,
+) -> int:
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
+        )
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
 def emit_sat_safety_signal(
     signal: (
         SatSafetyBlockerProductionSignal
         | SafeCounterexampleProductionSignal
-        | EqClosureProductionSignal
     ),
     *, producer_site_manifest_id: Optional[str] = None,
 ) -> int:
     session = active_production_pilot_session()
     if session is None:
         return 0
+    if (
+        type(signal) is SatSafetyBlockerProductionSignal
+        and signal.action == "OBSERVED"
+    ):
+        already_observed = getattr(
+            session.domain_signal_encoder, "has_observed", None
+        )
+        if callable(already_observed) and already_observed(session, signal):
+            # Repeated legacy diagnostics are not new producer activations.  In
+            # particular, do not open a Phase-7 discovery record which would
+            # otherwise materialize the encoder's empty deduplication result as
+            # a DECISIVE activation at this ELIGIBLE-only site.
+            return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
             producer_site_manifest_id, signal
@@ -642,6 +1075,16 @@ def emit_call_effect_signal(
     accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
     if callable(accepts) and not accepts(type(signal)):
         return 0
+    from .phase7_runtime import Phase7ProductionRuntime
+
+    signal_digest = Phase7ProductionRuntime.signal_digest(
+        producer_site_manifest_id, signal
+    )
+    emitted = session.domain_signal_state.setdefault(
+        "call_effect_production_signal_digests", set()
+    )
+    if signal_digest in emitted:
+        return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
             producer_site_manifest_id, signal
@@ -649,7 +1092,9 @@ def emit_call_effect_signal(
     emit = getattr(session, "emit_domain_signal", None)
     if not callable(emit):
         raise TypeError("active production pilot session lacks signal authority")
-    return int(emit(signal))
+    count = int(emit(signal))
+    emitted.add(signal_digest)
+    return count
 
 
 def emit_loop_recurrence_signal(
@@ -769,6 +1214,24 @@ def register_abi_width_solver_candidate(blocker: Any, seed: Any) -> None:
     if not callable(registrar):
         return
     registrar(session, blocker, seed)
+
+
+def register_return_observation_proof_plan(
+    projection_seed: Any, assessment: Any
+) -> None:
+    """Register one exact object-derived ABI relation for terminal proof closure."""
+
+    session = active_production_pilot_session()
+    if session is None:
+        return
+    registrar = getattr(
+        session.domain_signal_encoder,
+        "register_return_observation_proof_plan",
+        None,
+    )
+    if not callable(registrar):
+        return
+    registrar(session, projection_seed, assessment)
 
 
 def execute_abi_width_readonly_solver_query(

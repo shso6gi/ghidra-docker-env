@@ -102,6 +102,11 @@ def _unary_blocker_reason_id(blocker: str):
     return "outcome_partition_completion_unproven"
 
 
+def _reason_id_value(reason_id: Any) -> str:
+    """Return the stable identifier for legacy enums and typed-v2 strings."""
+    return str(getattr(reason_id, "value", reason_id))
+
+
 def _prove_unary_outcome_for_analysis(
     self,
     base_ctx: Mapping[str, Any],
@@ -871,7 +876,7 @@ def _impl__collect_return_coverage_unsafety_reasons(
             if coverage_result.detail:
                 self._debug_print(coverage_result.detail)
             blocker_reason = coverage_result.reason_id or UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
-            reasons.append(f"{label}:{blocker_reason.value}")
+            reasons.append(f"{label}:{_reason_id_value(blocker_reason)}")
             if (
                 coverage_result.reason_id == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
                 and self.enable_completed_recovery_proofs

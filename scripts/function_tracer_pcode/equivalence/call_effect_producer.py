@@ -46,9 +46,14 @@ from .formula.params import (
     build_symbol_name_mapping,
     collect_param_info,
 )
+from .call_effect_proof_input import (
+    CALL_EFFECT_PRODUCER_KIND,
+    PureCallRegionProofInput,
+    PureDirectCallProofInput,
+)
 
 
-_PRODUCER_KIND = "internal_typed_pure_direct_call_stage_producer"
+_PRODUCER_KIND = CALL_EFFECT_PRODUCER_KIND
 _STAGES = (
     "guard_relation",
     "argument_relation",
@@ -92,62 +97,11 @@ _TOTAL_UNARY_OPERATORS = frozenset(
 
 
 @dataclass(frozen=True)
-class PureDirectCallProofInput:
-    obligation_id: str
-    observation_contract_id: str
-    left_fact_id: str
-    right_fact_id: str
-    structural_certificate_id: str
-    left_fact_payload: Mapping[str, Any]
-    right_fact_payload: Mapping[str, Any]
-    left_arguments: CallArgumentEvidence
-    right_arguments: CallArgumentEvidence
-    left_effect: CallSiteEffectSummaryEvidence
-    right_effect: CallSiteEffectSummaryEvidence
-    left_parameters: Tuple[Mapping[str, Any], ...]
-    right_parameters: Tuple[Mapping[str, Any], ...]
-    left_caller_observation_bit_width: Optional[int]
-    right_caller_observation_bit_width: Optional[int]
-    left_caller_effects: Tuple[StoreEffect, ...]
-    right_caller_effects: Tuple[StoreEffect, ...]
-    left_caller_profile: Any
-    right_caller_profile: Any
-    left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
-    right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
-
-
-@dataclass(frozen=True)
-class PureCallRegionProofInput:
-    obligation_id: str
-    observation_contract_id: str
-    left_fact_id: str
-    right_fact_id: str
-    structural_certificate_id: str
-    left_fact_payload: Mapping[str, Any]
-    right_fact_payload: Mapping[str, Any]
-    call_on_left: bool
-    call_arguments: CallArgumentEvidence
-    call_effect: CallSiteEffectSummaryEvidence
-    region_returns: Tuple[ReturnInfo, ...]
-    region_effects: Tuple[StoreEffect, ...]
-    left_parameters: Tuple[Mapping[str, Any], ...]
-    right_parameters: Tuple[Mapping[str, Any], ...]
-    left_caller_observation_bit_width: Optional[int]
-    right_caller_observation_bit_width: Optional[int]
-    region_return_signed: Optional[bool]
-    left_caller_effects: Tuple[StoreEffect, ...]
-    right_caller_effects: Tuple[StoreEffect, ...]
-    left_caller_profile: Any
-    right_caller_profile: Any
-    left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
-    right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
-
-
-@dataclass(frozen=True)
 class PureDirectCallProofProduction:
     artifacts: Tuple[InternalSolverProofArtifact, ...]
     failure_causes: Tuple[str, ...] = ()
     v2_blocker_signals: Tuple[Any, ...] = ()
+    v2_prerequisite_signals: Tuple[Any, ...] = ()
 
 
 @dataclass
@@ -2569,12 +2523,48 @@ def produce_pure_direct_call_proofs(
     proof_inputs, failures = _build_inputs(manifest, analysis1, analysis2)
     from .v2.production_signals import (
         CallEffectBlockerProductionSignal,
+        CallEffectPrerequisiteProductionSignal,
         emit_call_effect_signal,
     )
     blocker_signals = tuple(
         CallEffectBlockerProductionSignal.from_proof_input(proof_input)
         for proof_input in proof_inputs
     )
+    prerequisite_signals = tuple(
+        CallEffectPrerequisiteProductionSignal(
+            obligation_id=str(obligation.get("obligation_id") or ""),
+            observation_contract_id=str(
+                obligation.get("observation_contract_id") or ""
+            ),
+            left_fact_id=obligation.get("left_fact_id"),
+            right_fact_id=obligation.get("right_fact_id"),
+            structural_certificate_id=str(
+                (manifest.get("structural_coverage_certificate") or {}).get(
+                    "certificate_id"
+                )
+                or ""
+            ),
+            eligibility_blockers=tuple(eligibility.get("blockers", ()) or ()),
+        )
+        for obligation in manifest.get("relational_obligations", ()) or ()
+        if isinstance(obligation, Mapping)
+        for eligibility in (
+            next((
+                item
+                for item in manifest.get("phase2_direct_call_eligibility", ()) or ()
+                if isinstance(item, Mapping)
+                and item.get("obligation_id") == obligation.get("obligation_id")
+            ), {}),
+        )
+        if eligibility.get("status") == "ineligible"
+        and tuple(eligibility.get("blockers", ()) or ())
+        == ("phase2_requires_paired_call_sites",)
+    )
+    for signal in prerequisite_signals:
+        emit_call_effect_signal(
+            signal,
+            producer_site_manifest_id="call-effect-producer-prerequisite",
+        )
     for signal in blocker_signals:
         emit_call_effect_signal(
             signal,
@@ -2715,6 +2705,7 @@ def produce_pure_direct_call_proofs(
         artifacts=tuple(artifacts),
         failure_causes=tuple(failure_list),
         v2_blocker_signals=blocker_signals,
+        v2_prerequisite_signals=prerequisite_signals,
     )
 
 

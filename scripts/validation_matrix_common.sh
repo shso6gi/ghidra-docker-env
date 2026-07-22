@@ -5,7 +5,7 @@ validation_prepare_before_after_logs() {
     VALIDATION_MOVED_OUTPUT_DIR=""
 
     local execution_authority_root
-    execution_authority_root="$OUTPUT_BASE_DIR/.phase8-execution-authority"
+    execution_authority_root="${VALIDATION_EXECUTION_AUTHORITY_ROOT:-${EQBENCH_RUN_TMPDIR:-${TMPDIR:-/tmp}/phase8-execution-authority-$$}}"
     mkdir -p "$execution_authority_root"
     chmod 700 "$execution_authority_root"
     export UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID="phase8-matrix-worker-v1"
@@ -92,28 +92,6 @@ validation_result_log_has_final_authority() {
     [[ "$(validation_classify_log_result "$log_file")" != "INCOMPLETE" ]]
 }
 
-validation_ensure_final_result_line() {
-    local log_file="$1"
-    local exit_code="$2"
-
-    if (( exit_code == 0 )) || validation_result_log_has_final_authority "$log_file"; then
-        return 0
-    fi
-
-    {
-        echo ""
-        echo "Pair process failed before emitting a final result line."
-        echo "Exit code: $exit_code"
-        echo "Result: ERROR (pair process exited before emitting a final result)"
-    } >> "$log_file"
-    PYTHONWARNINGS="ignore::RuntimeWarning" "${PYTHON_BIN:-python3}" -m \
-        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
-        --emit-infrastructure-error-json \
-        --result-occurrence-id "process-exit-${exit_code}-$(basename "$log_file")" \
-        --error-kind "PAIR_PROCESS_EXIT_ERROR" \
-        --error-detail "exit_code=${exit_code}" >> "$log_file"
-}
-
 validation_classify_log_result() {
     local log_file="$1"
     "${PYTHON_BIN:-python3}" -m \
@@ -146,6 +124,5 @@ validation_classify_log_display() {
 
 export -f validation_result_log_is_complete
 export -f validation_result_log_has_final_authority
-export -f validation_ensure_final_result_line
 export -f validation_classify_log_result
 export -f validation_classify_log_display

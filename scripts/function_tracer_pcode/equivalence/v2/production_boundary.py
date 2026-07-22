@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from ..workflow import run_check_from_binaries as _run_legacy_check_from_binaries
@@ -12,6 +14,108 @@ from .phase8_cutover import (
     attach_canonical_relations,
     issue_infrastructure_error_decision,
 )
+
+
+class LegacyBoundaryErrorKind(str, Enum):
+    FUNCTION_LOOKUP_MISS = "function_lookup_miss"
+    STRATEGY_EXCEPTION = "strategy_exception"
+    UNEXPECTED_PAIRWISE_STATE = "unexpected_pairwise_state"
+    COMPATIBILITY_ERROR = "legacy_compatibility_error"
+
+
+@dataclass(frozen=True)
+class LegacyBoundaryErrorArtifact:
+    """Typed authority issued where a legacy ERROR crosses the v2 boundary."""
+
+    error_kind: LegacyBoundaryErrorKind
+    result_occurrence_id: str
+    source_snapshot_fingerprint: str
+    legacy_failure_status: str | None
+    diagnostic_digest: str
+    artifact_digest: str
+
+    def validate(self) -> None:
+        payload = {
+            "authority_kind": "LegacyBoundaryErrorArtifact",
+            "error_kind": self.error_kind.value,
+            "result_occurrence_id": self.result_occurrence_id,
+            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
+            "diagnostic_digest": self.diagnostic_digest,
+            "issuer_contract_id": "production-boundary-legacy-error-v1",
+        }
+        if (
+            type(self.error_kind) is not LegacyBoundaryErrorKind
+            or not self.result_occurrence_id
+            or not self.source_snapshot_fingerprint
+            or authority_digest(payload) != self.artifact_digest
+        ):
+            raise ValueError("legacy boundary error artifact is invalid")
+
+
+def _issue_legacy_boundary_error(
+    session: Any, result: Any,
+) -> LegacyBoundaryErrorArtifact:
+    raw_status = getattr(result, "failure_status", None)
+    sealed = {
+        "function_lookup_miss": LegacyBoundaryErrorKind.FUNCTION_LOOKUP_MISS,
+        "strategy_exception": LegacyBoundaryErrorKind.STRATEGY_EXCEPTION,
+        "unexpected_pairwise_state": (
+            LegacyBoundaryErrorKind.UNEXPECTED_PAIRWISE_STATE
+        ),
+    }.get(raw_status, LegacyBoundaryErrorKind.COMPATIBILITY_ERROR)
+    diagnostic_digest = authority_digest({
+        "legacy_failure_status": raw_status,
+        "error_message": getattr(result, "error_message", None),
+        "failure_message": getattr(result, "failure_message", None),
+    })
+    payload = {
+        "authority_kind": "LegacyBoundaryErrorArtifact",
+        "error_kind": sealed.value,
+        "result_occurrence_id": session.identity.result_occurrence_id,
+        "source_snapshot_fingerprint": (
+            session.identity.source_snapshot_fingerprint
+        ),
+        "diagnostic_digest": diagnostic_digest,
+        "issuer_contract_id": "production-boundary-legacy-error-v1",
+    }
+    artifact = LegacyBoundaryErrorArtifact(
+        sealed,
+        session.identity.result_occurrence_id,
+        session.identity.source_snapshot_fingerprint,
+        raw_status if type(raw_status) is str else None,
+        diagnostic_digest,
+        authority_digest(payload),
+    )
+    artifact.validate()
+    return artifact
+
+
+def _reconcile_legacy_and_canonical_candidate(
+    *, session: Any, legacy_outcome: Any, candidate_receipt: Any
+) -> tuple[Any, str | None]:
+    """Apply the exhaustive Phase-10 non-legacy-ERROR reconciliation table."""
+
+    from .contracts import Outcome
+    from .decision import DecisionReceipt
+
+    if type(candidate_receipt) is not DecisionReceipt:
+        raise TypeError("canonical candidate is not an exact DecisionReceipt")
+    candidate_receipt.validate()
+    legacy = Outcome(legacy_outcome)
+    candidate = candidate_receipt.outcome
+    decisive = {Outcome.EQUIVALENT, Outcome.NOT_EQ}
+    if legacy in decisive and candidate in decisive and legacy is not candidate:
+        error_kind = "DECISIVE_OUTCOME_DISAGREEMENT"
+        return issue_infrastructure_error_decision(
+            result_occurrence_id=session.identity.result_occurrence_id,
+            error_kind=error_kind,
+            error_artifact_digest=authority_digest({
+                "legacy_outcome": legacy.value,
+                "candidate_outcome": candidate.value,
+                "candidate_receipt_digest": candidate_receipt.receipt_digest,
+            }),
+        ), error_kind
+    return candidate_receipt, None
 
 
 def _operational_binary_content_identity(value: Any) -> str:
@@ -100,6 +204,17 @@ def run_check_from_binaries_with_v2_pilot(
                 }),
             ),
         )
+        from .canonical_result import attach_durable_error_finalization
+        attach_durable_error_finalization(
+            result,
+            execution_payload=execution_payload,
+            error_kind="V2_EXECUTION_AUTHORITY_STARTUP_INVALID",
+            error_artifact_digest=authority_digest({
+                "result_occurrence_id": result_occurrence_id,
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            }),
+        )
         return result
     operational_factory_resolver = getattr(
         session.domain_signal_encoder,
@@ -142,21 +257,24 @@ def run_check_from_binaries_with_v2_pilot(
             )
         if getattr(result, "error_message", None):
             session.closed = True
+            error_artifact = _issue_legacy_boundary_error(session, result)
+            error_kind = error_artifact.error_kind.value
+            error_artifact_digest = error_artifact.artifact_digest
+            result.v2_legacy_error_authority = error_artifact
             attach_canonical_decision(
                 result,
                 issue_infrastructure_error_decision(
                     result_occurrence_id=session.identity.result_occurrence_id,
-                    error_kind=str(
-                        getattr(result, "failure_status", None)
-                        or "strategy_exception"
-                    ),
-                    error_artifact_digest=authority_digest({
-                        "result_occurrence_id": session.identity.result_occurrence_id,
-                        "error_message": result.error_message,
-                        "failure_status": getattr(result, "failure_status", None),
-                        "failure_message": getattr(result, "failure_message", None),
-                    }),
+                    error_kind=error_kind,
+                    error_artifact_digest=error_artifact_digest,
                 ),
+            )
+            from .canonical_result import attach_durable_error_finalization
+            attach_durable_error_finalization(
+                result,
+                execution_payload=execution_payload,
+                error_kind=error_kind,
+                error_artifact_digest=error_artifact_digest,
             )
             result.v2_dual_write_pilot = {
                 "status": "CANONICAL_ERROR",
@@ -193,6 +311,13 @@ def run_check_from_binaries_with_v2_pilot(
                     error_artifact_digest=error_artifact_digest,
                 ),
             )
+            from .canonical_result import attach_durable_error_finalization
+            attach_durable_error_finalization(
+                result,
+                execution_payload=execution_payload,
+                error_kind="V2_PROJECTION_AUTHORITY_INVALID",
+                error_artifact_digest=error_artifact_digest,
+            )
             result.v2_dual_write_pilot = {
                 "non_authoritative_shadow": True,
                 "status": "SHADOW_EVIDENCE_INCOMPLETE",
@@ -201,23 +326,44 @@ def run_check_from_binaries_with_v2_pilot(
         else:
             result._v2_dual_write_evidence = evidence
             result.v2_dual_write_pilot = dict(evidence.to_dict())
-            candidate_receipt = evidence.pilot_result.candidate.decision_receipt
-            if evidence.pilot_result.decision_delta:
-                result.error_message = "V2_LEGACY_DECISION_CONTRADICTION"
-                candidate_receipt = issue_infrastructure_error_decision(
-                    result_occurrence_id=session.identity.result_occurrence_id,
-                    error_kind="V2_LEGACY_DECISION_CONTRADICTION",
+            candidate_receipt, reconciliation_error = (
+                _reconcile_legacy_and_canonical_candidate(
+                    session=session,
+                    legacy_outcome=(
+                        evidence.pilot_result.legacy_outcome_after
+                    ),
+                    candidate_receipt=(
+                        evidence.pilot_result.candidate.decision_receipt
+                    ),
+                )
+            )
+            if reconciliation_error is not None:
+                result.error_message = reconciliation_error
+                result.failure_status = "canonical_decisive_disagreement"
+            attach_canonical_decision(result, candidate_receipt)
+            result.v2_dual_write_pilot["non_authoritative_shadow"] = False
+            result.v2_dual_write_pilot["status"] = "CANONICAL_AUTHORITY"
+            if reconciliation_error is not None:
+                from .canonical_result import attach_durable_error_finalization
+                attach_durable_error_finalization(
+                    result,
+                    execution_payload=execution_payload,
+                    error_kind="canonical_decisive_disagreement",
                     error_artifact_digest=authority_digest({
-                        "legacy_outcome": evidence.pilot_result.legacy_outcome_after.value,
-                        "candidate_outcome": candidate_receipt.outcome.value,
-                        "candidate_receipt_digest": candidate_receipt.receipt_digest,
+                        "result_occurrence_id": session.identity.result_occurrence_id,
+                        "reconciliation_error": reconciliation_error,
                     }),
                 )
-            attach_canonical_decision(result, candidate_receipt)
-            if candidate_receipt is evidence.pilot_result.candidate.decision_receipt:
+            else:
                 attach_canonical_relations(
                     result, evidence.pilot_result.reduction.projection
                 )
+                # The CLI owns the final serialized payload (including binary
+                # content identities and timing).  Preserve exact issuer-owned
+                # objects here and seal the bundle only after that payload is
+                # complete; sealing this earlier produced durable null
+                # identities that no later digest rebound could repair.
+                result._canonical_finalization_context = (evidence, session)
         return result
     finally:
         if previous_session is None:

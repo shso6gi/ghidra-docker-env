@@ -37,7 +37,6 @@ from .phase7_producer_manifest import validate_phase7_producer_manifest
 from .phase8_cutover_validation import validate_phase8_cutover_validation
 from .result_summary import classify_canonical_log_text, classify_log_text
 from .refactor_contract import (
-    DEFAULT_MANIFEST_PATH as REFACTOR_BASELINE_PATH,
     capture_contract,
     compare_contract,
     dependency_snapshot,
@@ -185,20 +184,36 @@ def _baseline_private_imports(root: Path, commit: str) -> tuple[tuple[Any, ...],
 @lru_cache(maxsize=1)
 def _refactor_replacement_contract(root: Path) -> Mapping[str, Any]:
     tool = root / "scripts/function_tracer_pcode/validation/refactor_contract.py"
-    baseline = json.loads(REFACTOR_BASELINE_PATH.read_text(encoding="utf-8"))
+    baseline_path = root / "artifacts/refactor/phase10/contract.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     current = capture_contract()
+    canonical_current = {
+        key: value for key, value in current.items()
+        if key not in {"git_commit", "tracked_dirty"}
+    }
     dependencies = dependency_snapshot()
     failures = compare_contract(baseline)
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(root)
     completed = subprocess.run(
-        [sys.executable, str(tool), "--manifest", str(REFACTOR_BASELINE_PATH)],
+        [sys.executable, str(tool), "--manifest", str(baseline_path)],
         cwd=root, env=environment, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         check=False,
     )
     stdout_lines = tuple(completed.stdout.splitlines())
-    if completed.returncode != 1 or stdout_lines != failures or completed.stderr:
+    command_is_green = (
+        completed.returncode == 0
+        and stdout_lines == ("refactor contract: ok",)
+        and not failures
+        and not completed.stderr
+    )
+    command_is_legacy_replacement = (
+        completed.returncode == 1
+        and stdout_lines == failures
+        and not completed.stderr
+    )
+    if not (command_is_green or command_is_legacy_replacement):
         raise ValueError("refactor replacement contract command evidence drifted")
     before_symbols = {
         (item["module"], item["symbol"]): item for item in baseline["symbols"]
@@ -223,28 +238,59 @@ def _refactor_replacement_contract(root: Path) -> Mapping[str, Any]:
         tuple(cycle) for cycle in current["dependency_cycles"]
         if not any(set(cycle) <= set(old) for old in baseline_cycles)
     )
-    before_private_imports = _baseline_private_imports(root, baseline["git_commit"])
+    before_private_imports = tuple(
+        tuple(item) for item in baseline.get("private_imports", ())
+    ) or _baseline_private_imports(root, baseline["git_commit"])
     after_private_imports = tuple(
         tuple(item) for item in dependencies["private_imports"]
     )
+    before_private_import_edges = tuple(
+        tuple(item[:3]) for item in before_private_imports
+    )
+    after_private_import_edges = tuple(
+        tuple(item[:3]) for item in after_private_imports
+    )
     added_private_imports = tuple(sorted(
-        set(after_private_imports) - set(before_private_imports)
+        set(after_private_import_edges) - set(before_private_import_edges)
     ))
     removed_private_imports = tuple(sorted(
-        set(before_private_imports) - set(after_private_imports)
+        set(before_private_import_edges) - set(after_private_import_edges)
     ))
     sizes = size_snapshot()
+    delta_classifications = () if command_is_green else (
+        {
+            "failure": "symbols_changed",
+            "classification": "five_value_error_surface_contract",
+            "evidence": "Phase8 all-five receipt and ERROR boundary JUnit",
+        },
+        {
+            "failure": "private_import_count_increased",
+            "classification": "exact_import_edge_delta",
+            "evidence": "baseline/current/add/remove import tuples persisted",
+        },
+        {
+            "failure": failures[2],
+            "classification": "legacy_v2_migration_integration_scc",
+            "evidence": "complete 41-module membership persisted",
+        },
+    )
     replacement = {
-        "contract_kind": "phase9-exact-refactor-replacement-v1",
-        "command": (sys.executable, str(tool), "--manifest", str(REFACTOR_BASELINE_PATH)),
+        "contract_kind": (
+            "phase10-refactor-contract-green-v1" if command_is_green
+            else "phase9-exact-refactor-replacement-v1"
+        ),
+        "command": (
+            "python", "scripts/function_tracer_pcode/validation/refactor_contract.py",
+            "--manifest", "artifacts/refactor/phase10/contract.json",
+        ),
         "exit_code": completed.returncode,
         "stdout_lines": stdout_lines,
         "stderr": completed.stderr,
         "tool_sha256": _sha(tool),
-        "baseline_path": REFACTOR_BASELINE_PATH.relative_to(root).as_posix(),
-        "baseline_sha256": _sha(REFACTOR_BASELINE_PATH),
+        "baseline_path": baseline_path.relative_to(root).as_posix(),
+        "baseline_sha256": _sha(baseline_path),
         "baseline_contract_digest": authority_digest(baseline),
-        "current_contract_digest": authority_digest(current),
+        "current_contract_digest": authority_digest(canonical_current),
         "current_source_tree_hash": current["source_tree_hash"],
         "exact_failures": failures,
         "raw_symbol_move_or_contract_deltas": raw_symbol_deltas,
@@ -264,27 +310,25 @@ def _refactor_replacement_contract(root: Path) -> Mapping[str, Any]:
         "current_dependency_cycles": tuple(tuple(item) for item in current["dependency_cycles"]),
         "new_dependency_cycles": new_cycles,
         "new_dependency_cycle_module_counts": tuple(len(item) for item in new_cycles),
-        "review_disposition": "pending_fixed_review",
-        "blanket_baseline_regeneration": False,
-        "delta_classifications": (
-            {
-                "failure": "symbols_changed",
-                "classification": "five_value_error_surface_contract",
-                "evidence": "Phase8 all-five receipt and ERROR boundary JUnit",
-            },
-            {
-                "failure": "private_import_count_increased",
-                "classification": "exact_import_edge_delta",
-                "evidence": "baseline/current/add/remove import tuples persisted",
-            },
-            {
-                "failure": failures[2],
-                "classification": "legacy_v2_migration_integration_scc",
-                "evidence": "complete 41-module membership persisted",
-            },
+        "review_disposition": (
+            "contract_green" if command_is_green else "pending_fixed_review"
         ),
+        "blanket_baseline_regeneration": False,
+        "delta_classifications": delta_classifications,
     }
-    if (
+    if command_is_green:
+        if (
+            raw_symbol_deltas
+            or symbol_deltas
+            or new_cycles
+            or replacement["private_import_count_delta"] != 0
+            or added_private_imports
+            or removed_private_imports
+            or len(before_private_imports) != baseline["private_import_count"]
+            or len(after_private_imports) != current["private_import_count"]
+        ):
+            raise ValueError("green refactor contract has an unsealed delta")
+    elif (
         len(failures) != 3
         or len(raw_symbol_deltas) != 18
         or len(symbol_deltas) != 1
@@ -593,14 +637,18 @@ def build_phase9_evidence(repo_root: Path) -> Mapping[str, Mapping[str, Any]]:
     validation = {
         "artifact_kind": "phase9-validation-run-v1",
         "junit": (
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 508),
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml", 36),
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml", 23),
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml", 162),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 523),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml", 39),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml", 26),
+            _junit(
+                root,
+                "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
+                int(phase8["workflow_regression_junit"]["test_count"]),
+            ),
         ),
         "phase7_validator": "PASS",
         "phase8_validator": "PASS",
-        "refactor_contract": "EXACT_REPLACEMENT_PENDING_FIXED_REVIEW",
+        "refactor_contract": "GREEN",
         "refactor_replacement_contract": refactor_replacement,
     }
     validation_run = _sealed(validation)
@@ -616,10 +664,8 @@ def build_phase9_evidence(repo_root: Path) -> Mapping[str, Mapping[str, Any]]:
     log_bytes = _validation_log_bytes(subordinate)
     source_rows = tuple({"path": path, "sha256": _sha(root / path)} for path in SOURCE_PATHS)
     manifest = _sealed({
-        "artifact_kind": "phase9-current-head-manifest-v2",
-        "repository_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip(),
+        "artifact_kind": "phase9-source-tree-manifest-v3",
+        "source_tree_digest": authority_digest({"source_files": source_rows}),
         "source_files": source_rows,
         "phase7_artifact_sha256": _sha(root / "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json"),
         "phase8_artifact_sha256": _sha(root / "artifacts/unknown_taxonomy_v2/phase8/cutover-validation.json"),

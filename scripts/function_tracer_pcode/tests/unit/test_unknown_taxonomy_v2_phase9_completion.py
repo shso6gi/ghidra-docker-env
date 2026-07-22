@@ -107,25 +107,21 @@ def test_phase9_binds_all_five_receipt_cases_to_phase8_authority():
     assert len(binding["focused_test_source_sha256"]) == 64
 
 
-def test_phase9_refactor_replacement_preserves_the_exact_delta():
+def test_phase9_refactor_replacement_is_current_contract_green():
     root = Path(__file__).resolve().parents[4]
     replacement = build_phase9_evidence(root)["validation_run.json"][
         "refactor_replacement_contract"
     ]
 
-    assert replacement["exit_code"] == 1
-    assert tuple(replacement["stdout_lines"]) == tuple(replacement["exact_failures"])
+    assert replacement["contract_kind"] == "phase10-refactor-contract-green-v1"
+    assert replacement["exit_code"] == 0
+    assert tuple(replacement["stdout_lines"]) == ("refactor contract: ok",)
     assert replacement["stderr"] == ""
-    assert len(replacement["public_symbol_deltas"]) == 1
-    assert replacement["private_import_count_delta"] == 59
-    assert (
-        len(replacement["added_private_imports"])
-        - len(replacement["removed_private_imports"])
-    ) == 59
-    assert len(replacement["exact_failures"]) == 3
-    assert not any(
-        failure.startswith("new_file_hard_limit_exceeded:")
-        for failure in replacement["exact_failures"]
-    )
-    assert replacement["new_dependency_cycle_module_counts"] == (41,)
+    assert replacement["public_symbol_deltas"] == ()
+    assert replacement["private_import_count_delta"] == 0
+    assert replacement["added_private_imports"] == ()
+    assert replacement["removed_private_imports"] == ()
+    assert replacement["exact_failures"] == ()
+    assert replacement["new_dependency_cycle_module_counts"] == ()
+    assert replacement["review_disposition"] == "contract_green"
     assert replacement["blanket_baseline_regeneration"] is False

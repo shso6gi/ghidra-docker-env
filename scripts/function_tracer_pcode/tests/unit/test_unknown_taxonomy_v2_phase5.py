@@ -46,9 +46,17 @@ from scripts.function_tracer_pcode.equivalence.v2.pilot import (
     run_dual_write_pilot,
 )
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    ComparisonClosureProductionSignal,
+    ComparisonClosurePilotEncoder,
+    CompositeProductionSignalEncoder,
     OutcomePartitionPilotEncoder,
     OutcomePartitionProductionSignal,
+    emit_comparison_closure_signal,
     production_signal_scope,
+)
+from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    PROCESS_DURABLE_REASON_REGISTRY,
+    PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
 from scripts.function_tracer_pcode.equivalence.obligations.outcome_partition import (
     UnaryProducerResult,
@@ -884,6 +892,41 @@ def test_real_outcome_partition_producer_emits_typed_signal_without_monkeypatch(
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.UNKNOWN
 
 
+def test_inconclusive_comparison_materializes_receipt_bound_typed_backlog():
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            ComparisonClosureProductionSignal: ComparisonClosurePilotEncoder(),
+        }),
+    )
+    session = connector.begin({"production_fixture": "comparison-inconclusive"})
+    signal = ComparisonClosureProductionSignal(
+        comparison_receipt_id="comparison-receipt",
+        terminal_receipt_digest="terminal-receipt",
+        branch_id="S_MONOLITHIC_FALLBACK",
+        runtime_premise_digest="runtime-premise",
+        runtime_view_id=("derived-view", "pair"),
+        query_receipt_digests=("query-receipt",),
+    )
+    with production_signal_scope(session):
+        assert emit_comparison_closure_signal(signal) == 1
+    evidence = connector.finish(
+        session,
+        _ObservedLegacyResult(Outcome.UNKNOWN),
+        case_id="comparison-inconclusive",
+    )
+    projection = evidence.pilot_result.reduction.projection
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert len(projection.c_active_base) == 1
+    assert len(projection.q_open_base) == 1
+    assert projection.c_active_base[0].reason_id == (
+        "comparison_equivalence_closure_unproven"
+    )
+
+
 def test_production_signal_encoder_failure_is_shadow_only_and_fail_closed():
     def broken_encoder(_session, _signal):
         raise RuntimeError("shadow encoder failure")
@@ -982,14 +1025,14 @@ def test_production_binary_boundary_legacy_opt_out_and_cutover_fail_closed(monke
     )
     evidence = enabled_result._v2_dual_write_evidence
     evidence.validate()
-    assert enabled_result.final_outcome == "ERROR"
+    assert enabled_result.final_outcome == "TIMEOUT"
     assert evidence.legacy_observation_receipt.before_outcome == Outcome.UNKNOWN
     assert evidence.legacy_observation_receipt.after_outcome == Outcome.UNKNOWN
     assert evidence.legacy_observation_receipt.before_surface_digest == (
         evidence.legacy_observation_receipt.after_surface_digest
     )
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.TIMEOUT
-    assert enabled_result.v2_dual_write_pilot["non_authoritative_shadow"] is True
+    assert enabled_result.v2_dual_write_pilot["non_authoritative_shadow"] is False
 
     def no_emission(_checker, *_args, **_kwargs):
         return EquivalenceResult(
