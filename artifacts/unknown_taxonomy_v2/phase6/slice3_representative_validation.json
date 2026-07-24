@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "1d92ed783dba9123bfc5fa4b54f4e88a1eefdaac4729b1979463c154b7e03798",
+  "artifact_digest": "7dc3521145aadc853f9acc6bd3681ad1dcbfb8559fe73c93fbfbbc329e62fcdd",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -16,7 +16,7 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "1852ef84e69b284b68f7730577443c41a49a7791c1703e01c9aec367cfbb7111",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "25e3ec66e43bf82cbc763d693e0811ce9dae295599fc74fd17790d2664eec6a9",
     "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "aa6d2cdeb2b10dbd03d89b88cae024a7b08d4aca59409b7a6ec554204e7e30fc",
     "scripts/function_tracer_pcode/equivalence/checker.py": "0deb2ac4630e6d9e79bde1f5fd39f1615b29b82fb3f8e73f18e2f93cc007df8d",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "d4dbd63b239014df96bf0361def25cfa2bd55a00a1e6a7ff625d0ee94877ee28",
@@ -87,7 +87,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 601,
-      "candidate_set_digest": "d51407c583abff57cc42e151086a547065eacb145a428dcdb2de22f7e904bf0e"
+      "candidate_set_digest": "a4840070de18c325e7636db7d0ca78173a078a5f5260aa7b58a977131f5853bb"
     },
     "live_delta": {
       "added": 0,

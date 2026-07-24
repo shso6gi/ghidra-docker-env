@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "58e20880b6de3546048e80ae2278f33e662e437fb01c7823bd4cd84617f6c8ba",
+  "artifact_digest": "d721069be0a49055d4da654802f02dd2a9004aa8443d9a84977cce33fa75a720",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -208,11 +208,11 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "1852ef84e69b284b68f7730577443c41a49a7791c1703e01c9aec367cfbb7111",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "25e3ec66e43bf82cbc763d693e0811ce9dae295599fc74fd17790d2664eec6a9",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "8408ca465fa47f548c983fb729148a1f3df2d174dd63e31284cc0daa292967de",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789",
-    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "573e0cf593b5938c206adc4498f080d8b445e9c6d11b0dbc22a558e99f39d727",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "a5fe7dac5b1d63b1ebe637c6a2cd54c6e99d43399dbc42679e6ecfe27eef01ca",
     "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "0c1f5474c7568a7fc0dfdc7dce185837e8b7d5e9dee9746fc183c38373f4d87b",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "ef39efbd32632b1dbb26fd4d19b2bca162a8d85627c4b7216f4a9e62c27a6532",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
@@ -403,7 +403,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 601,
-      "candidate_set_digest": "d51407c583abff57cc42e151086a547065eacb145a428dcdb2de22f7e904bf0e"
+      "candidate_set_digest": "a4840070de18c325e7636db7d0ca78173a078a5f5260aa7b58a977131f5853bb"
     },
     "live_delta": {
       "added": 0,

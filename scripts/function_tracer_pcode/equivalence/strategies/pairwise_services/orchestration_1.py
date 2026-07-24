@@ -885,7 +885,9 @@ def _impl_check(
                     ):
                         try:
                             from ..pairwise_query_executor import (
-                                render_loop_v2_solver_query,
+                                LoopV2QueryNotFormable,
+                                RenderedLoopV2SolverQuery,
+                                preflight_loop_v2_solver_query,
                             )
                             from ...v2.production_signals import (
                                 active_loop_requirement_for_signal,
@@ -904,7 +906,7 @@ def _impl_check(
                                 v2_requirement is not None
                                 and v2_execution_identity is not None
                             ):
-                                rendered_loop_query = render_loop_v2_solver_query(
+                                loop_query_preflight = preflight_loop_v2_solver_query(
                                     blocker=v2_loop_blocker_signal,
                                     requirement=v2_requirement,
                                     analysis1=base_ctx.get("analysis1"),
@@ -914,14 +916,26 @@ def _impl_check(
                                     pair_id=pair_id,
                                     execution_identity_digest=v2_execution_identity,
                                 )
-                                execute_loop_solver_rendered_query(
-                                    v2_loop_blocker_signal,
-                                    rendered_loop_query,
-                                    configured_timeout_ms=max(
-                                        1,
-                                        int(self.per_query_timeout_hard * 1000),
-                                    ),
-                                )
+                                if type(loop_query_preflight) is (
+                                    RenderedLoopV2SolverQuery
+                                ):
+                                    execute_loop_solver_rendered_query(
+                                        v2_loop_blocker_signal,
+                                        loop_query_preflight,
+                                        configured_timeout_ms=max(
+                                            1,
+                                            int(self.per_query_timeout_hard * 1000),
+                                        ),
+                                    )
+                                elif type(loop_query_preflight) is (
+                                    LoopV2QueryNotFormable
+                                ):
+                                    pass
+                                else:
+                                    raise TypeError(
+                                        "loop v2 query preflight returned an "
+                                        "unknown variant"
+                                    )
                         except Exception as exc:
                             from ...v2.production_signals import (
                                 record_production_pilot_shadow_error,

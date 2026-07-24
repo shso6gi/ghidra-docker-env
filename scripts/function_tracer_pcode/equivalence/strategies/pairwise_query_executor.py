@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from ...smt import SolverStatus
 from ..unknown_reason import UnknownRecoveryActionStatus
 from ..formula.returns import (
+    RETURN_WIDTH_BRIDGE_MISSING_REASON,
     ReturnWidthMismatchError,
     expression_has_unresolved_value,
     require_equal_return_bit_widths,
@@ -84,6 +85,29 @@ class RenderedLoopV2SolverQuery(metaclass=_SealedLoopV2RendererReceiptMeta):
         if not callable(validator):
             raise ValueError("loop v2 renderer receipt validator is unavailable")
         validator(self)
+
+
+@dataclass(frozen=True)
+class LoopV2QueryNotFormable:
+    """Typed proof-blocker result for a loop-v2 query that cannot be rendered."""
+
+    reason_id: str
+    return_size1: Optional[int]
+    return_size2: Optional[int]
+    detail: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.reason_id != RETURN_WIDTH_BRIDGE_MISSING_REASON
+            or type(self.return_size1) is not int
+            or type(self.return_size2) is not int
+            or self.return_size1 <= 0
+            or self.return_size2 <= 0
+            or self.return_size1 == self.return_size2
+            or type(self.detail) is not str
+            or not self.detail
+        ):
+            raise ValueError("loop v2 query-not-formable result is invalid")
 
 
 def _derive_loop_v2_solver_query_payload(
@@ -277,6 +301,41 @@ type.__setattr__(
 del _build_loop_v2_renderer_authority
 del _derive_loop_v2_solver_query_payload
 del _loop_v2_renderer_validator
+
+
+def preflight_loop_v2_solver_query(
+    *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
+    case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+) -> RenderedLoopV2SolverQuery | LoopV2QueryNotFormable:
+    """Render a loop-v2 query or preserve an expected return-width proof gap."""
+
+    try:
+        return render_loop_v2_solver_query(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=analysis1,
+            analysis2=analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id=pair_id,
+            execution_identity_digest=execution_identity_digest,
+        )
+    except ReturnWidthMismatchError as exc:
+        if (
+            exc.reason_id == RETURN_WIDTH_BRIDGE_MISSING_REASON
+            and type(exc.return_size1) is int
+            and type(exc.return_size2) is int
+            and exc.return_size1 > 0
+            and exc.return_size2 > 0
+            and exc.return_size1 != exc.return_size2
+        ):
+            return LoopV2QueryNotFormable(
+                reason_id=exc.reason_id,
+                return_size1=exc.return_size1,
+                return_size2=exc.return_size2,
+                detail=str(exc),
+            )
+        raise
 
 
 def _build_region_executor_scope():

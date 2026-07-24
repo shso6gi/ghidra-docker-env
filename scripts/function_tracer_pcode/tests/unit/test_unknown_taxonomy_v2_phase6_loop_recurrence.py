@@ -371,6 +371,196 @@ def _typed_loop_query(
     return _issue_loop_solver_query_authority(rendered)
 
 
+def _loop_query_preflight_fixture(return_size1, return_size2):
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        preflight_loop_v2_solver_query,
+    )
+    from scripts.function_tracer_pcode.model import ComparisonSurface
+
+    _, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
+    left = replace(
+        left,
+        return_type="int" if return_size1 == 32 else "long",
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=return_size1,
+            type_name="int" if return_size1 == 32 else "long",
+        ),
+    )
+    right = replace(
+        right,
+        return_type="int" if return_size2 == 32 else "long",
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=return_size2,
+            type_name="int" if return_size2 == 32 else "long",
+        ),
+    )
+    blocker = LoopBlockerProductionSignal.from_loop_fallback(
+        left,
+        right,
+        exact_case,
+        summary_case,
+        "counted_loop_summary_expression_proof_missing",
+        observation_contract_id="return-and-memory-v1",
+    )
+    encoder = LoopRecurrencePilotEncoder()
+    session = _session("loop-query-preflight")
+    session.domain_signal_error_kinds = []
+    _plan_and_commit_loop_signal(encoder, session, blocker)
+    authority = encoder.authority_for_signal(session, blocker)
+    requirement = dict(authority.bound_contract.slot_bindings)[
+        "loop_exact_term_relation"
+    ]
+    preflight = preflight_loop_v2_solver_query(
+        blocker=blocker,
+        requirement=requirement,
+        analysis1=left,
+        analysis2=right,
+        case1=exact_case,
+        case2=summary_case,
+        pair_id="(0,1)",
+        execution_identity_digest=session.identity.execution_identity_digest,
+    )
+    return preflight, session, blocker, requirement, exact_case, summary_case
+
+
+@pytest.mark.parametrize(
+    ("return_size1", "return_size2"),
+    ((32, 64), (64, 32)),
+)
+def test_loop_v2_return_width_gap_is_typed_query_not_formable(
+    return_size1, return_size2,
+):
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        LoopV2QueryNotFormable,
+    )
+
+    preflight, session, _, requirement, _, _ = _loop_query_preflight_fixture(
+        return_size1, return_size2
+    )
+
+    assert type(preflight) is LoopV2QueryNotFormable
+    assert preflight.reason_id == "return_width_bridge_missing"
+    assert (preflight.return_size1, preflight.return_size2) == (
+        return_size1, return_size2
+    )
+    assert session.domain_signal_error_kinds == []
+    assert len(session.domain_signal_state["loop_recurrence_observed"]) == 1
+    assert requirement.requirement_id not in session.domain_signal_state.get(
+        "loop_recurrence_completed_requirements", set()
+    )
+    assert "loop_solver_execution_receipts" not in session.domain_signal_state
+    assert "loop_solver_unsat_completion_receipts" not in (
+        session.domain_signal_state
+    )
+
+
+@pytest.mark.parametrize(
+    ("return_size1", "return_size2", "reason_id"),
+    (
+        (None, 64, "return_width_bridge_missing"),
+        (0, 64, "return_width_bridge_missing"),
+        (-1, 64, "return_width_bridge_missing"),
+        ("not-an-integer", 64, "return_width_bridge_missing"),
+        (32, 64, "unexpected_return_width_failure"),
+    ),
+)
+def test_loop_v2_invalid_return_width_failure_is_not_suppressed(
+    monkeypatch, return_size1, return_size2, reason_id,
+):
+    from scripts.function_tracer_pcode.equivalence.formula.returns import (
+        ReturnWidthMismatchError,
+    )
+    import scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor as query_executor
+
+    failure = ReturnWidthMismatchError(
+        "invalid loop-v2 return width",
+        return_size1=return_size1,
+        return_size2=return_size2,
+        reason_id=reason_id,
+    )
+
+    def fail_render(**_kwargs):
+        raise failure
+
+    monkeypatch.setattr(query_executor, "render_loop_v2_solver_query", fail_render)
+    with pytest.raises(ReturnWidthMismatchError) as raised:
+        query_executor.preflight_loop_v2_solver_query(
+            blocker=None,
+            requirement=None,
+            analysis1=None,
+            analysis2=None,
+            case1=None,
+            case2=None,
+            pair_id="(0,1)",
+            execution_identity_digest="invalid-width-execution",
+        )
+    assert raised.value is failure
+
+
+@pytest.mark.parametrize(
+    ("return_size1", "return_size2"),
+    ((None, 64), (0, 64), (-1, 64), (32, 32)),
+)
+def test_loop_v2_query_not_formable_rejects_invalid_variant_state(
+    return_size1, return_size2,
+):
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        LoopV2QueryNotFormable,
+    )
+
+    with pytest.raises(
+        ValueError, match="loop v2 query-not-formable result is invalid"
+    ):
+        LoopV2QueryNotFormable(
+            reason_id="return_width_bridge_missing",
+            return_size1=return_size1,
+            return_size2=return_size2,
+            detail="invalid variant state",
+        )
+
+
+def test_loop_v2_same_width_preflight_still_renders_query():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        RenderedLoopV2SolverQuery,
+    )
+
+    preflight, session, _, _, _, _ = _loop_query_preflight_fixture(32, 32)
+
+    assert type(preflight) is RenderedLoopV2SolverQuery
+    assert session.domain_signal_error_kinds == []
+
+
+def test_loop_v2_preflight_does_not_hide_renderer_invariant_failure():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        preflight_loop_v2_solver_query,
+    )
+
+    preflight, session, blocker, requirement, exact_case, summary_case = (
+        _loop_query_preflight_fixture(32, 32)
+    )
+    assert preflight is not None
+    stale_analysis = replace(
+        _analysis("stale-loop-analysis"),
+        comparison_surface=None,
+    )
+
+    with pytest.raises(
+        ValueError, match="loop typed renderer analyses differ from blocker snapshots"
+    ):
+        preflight_loop_v2_solver_query(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=stale_analysis,
+            analysis2=stale_analysis,
+            case1=exact_case,
+            case2=summary_case,
+            pair_id="(0,1)",
+            execution_identity_digest=session.identity.execution_identity_digest,
+        )
+
+
 def _plan_and_commit_loop_signal(encoder, session, signal):
     intents = tuple(encoder(session, signal))
     encoder.commit_emitted_signal(session, signal, intents)

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "b3e8f262caff91bf35094d5f57d387725bb9fc606b2e5fa414962d8d28fe6ca6",
+  "artifact_digest": "112ca9fb5164024bb89986e5c99c733cc4816a9efe2459089d83ae983cbd7a5a",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "3f87eb368aab120f2534bb730139e3552d9f922a21b7c4be6fd0a661b65b3fd6",
+    "current_contract_digest": "d797203ce9e6cb901eb929a1e6446e689f9d1995958df7611838280ea6cd8c24",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -2978,7 +2978,7 @@
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_loop_case_object_identity",
-        102
+        126
       ],
       [
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_services._shared",
@@ -3740,7 +3740,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        1742
+        1932
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
@@ -3758,85 +3758,85 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_recurrence_proof_contract",
         "_content_bound_artifact",
-        2416
+        2606
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_analysis_with_exact_returns",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_analysis_with_exact_returns",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_cond",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_cond",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_const",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_const",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_empty_effect_summary",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_n",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_n",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_summary_const",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_summary_const",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_with_summary_proof",
-        2589
+        2779
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_with_summary_proof",
-        2637
+        2827
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_census",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "227a26dcb3fed239b04a56402b6a1883e382fb3c8fa1b6af8dba106094a399c9",
+    "current_source_tree_hash": "eb498fda06aadeb58a0bd1146cdc723445f98f525ae681db5d0b17e3d9d35c62",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,
