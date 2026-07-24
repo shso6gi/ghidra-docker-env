@@ -2014,18 +2014,43 @@ class LoopRecurrencePilotEncoder:
         return validate_execution_authority_deployment()
 
     @staticmethod
-    def _observed(session: Any) -> set[str]:
-        return session.domain_signal_state.setdefault("loop_recurrence_observed", set())
+    def _committed_ledger(session: Any, key: str) -> set[str]:
+        ledger = session.domain_signal_state.get(key)
+        if ledger is None:
+            return set()
+        if type(ledger) is not set:
+            raise TypeError(f"loop committed ledger is not an exact set: {key}")
+        return ledger
 
-    @staticmethod
-    def _completed(session: Any) -> set[str]:
-        return session.domain_signal_state.setdefault("loop_recurrence_completed", set())
+    @classmethod
+    def _observed(cls, session: Any) -> set[str]:
+        return cls._committed_ledger(session, "loop_recurrence_observed")
 
-    @staticmethod
-    def _completed_requirements(session: Any) -> set[str]:
-        return session.domain_signal_state.setdefault(
-            "loop_recurrence_completed_requirements", set()
+    @classmethod
+    def _completed(cls, session: Any) -> set[str]:
+        return cls._committed_ledger(session, "loop_recurrence_completed")
+
+    @classmethod
+    def _completed_requirements(cls, session: Any) -> set[str]:
+        return cls._committed_ledger(
+            session, "loop_recurrence_completed_requirements"
         )
+
+    @staticmethod
+    def _register_emission_plan(
+        session: Any,
+        signal: Any,
+        intents: tuple[EventIntent, ...],
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        pending_key = "loop_recurrence_pending_emission_transactions"
+        pending = session.domain_signal_state.setdefault(pending_key, {})
+        if type(pending) is not dict:
+            raise TypeError("loop pending emission ledger is not exact")
+        if id(signal) in pending:
+            raise ValueError("loop signal already owns an emission transaction")
+        pending[id(signal)] = (intents, action, dict(payload))
 
     def authority_for_signal(
         self, session: Any, signal: LoopBlockerProductionSignal
@@ -2356,10 +2381,6 @@ class LoopRecurrencePilotEncoder:
         if authority_type is LoopExactGuardPartitionCompletionAuthority:
             authority_values["term_completion_artifact_digest"] = dependency_ids[-1]
         authority = authority_type(**authority_values)
-        completed_requirements.add(requirement.requirement_id)
-        session.domain_signal_state.setdefault(
-            "loop_exact_completion_authorities", []
-        ).append(authority)
         return authority
 
     def _solver_batch_intents(
@@ -2593,6 +2614,7 @@ class LoopRecurrencePilotEncoder:
         self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
     ) -> None:
         if type(signal) is not LoopSolverExecutionBatchSignal:
+            self._commit_recurrence_emission_plan(session, signal, intents)
             return
         state = session.domain_signal_state
         pending_key = "loop_solver_pending_emission_transactions"
@@ -2638,6 +2660,87 @@ class LoopRecurrencePilotEncoder:
         if not pending:
             state.pop(pending_key, None)
 
+    def _commit_recurrence_emission_plan(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
+    ) -> None:
+        state = session.domain_signal_state
+        pending_key = "loop_recurrence_pending_emission_transactions"
+        pending = state.get(pending_key)
+        if pending is None:
+            if intents:
+                raise ValueError("loop emission transaction is missing")
+            return
+        if type(pending) is not dict:
+            raise TypeError("loop pending emission ledger is not exact")
+        try:
+            expected_intents, action, payload = pending[id(signal)]
+        except KeyError as exc:
+            if intents:
+                raise ValueError(
+                    "loop emission transaction is missing"
+                ) from exc
+            return
+        if tuple(intents) != expected_intents:
+            raise ValueError("loop emission transaction intents changed")
+        mutated_keys = (
+            "loop_recurrence_observed",
+            "loop_recurrence_completed",
+            "loop_recurrence_completed_requirements",
+            "recurrence_completion_authorities",
+            "loop_exact_completion_authorities",
+        )
+        snapshots = {}
+        for key in mutated_keys:
+            if key not in state:
+                snapshots[key] = (False, None)
+            elif type(state[key]) is set:
+                snapshots[key] = (True, set(state[key]))
+            elif type(state[key]) is list:
+                snapshots[key] = (True, list(state[key]))
+            else:
+                raise TypeError(
+                    f"loop emission transaction ledger has invalid type: {key}"
+                )
+        try:
+            if action == "OBSERVED":
+                ledger = state.setdefault("loop_recurrence_observed", set())
+                occurrence_id = payload["occurrence_id"]
+                if occurrence_id in ledger:
+                    raise ValueError("loop observation duplicates committed state")
+                ledger.add(occurrence_id)
+            elif action == "RECURRENCE_COMPLETED":
+                ledger = state.setdefault("loop_recurrence_completed", set())
+                occurrence_id = payload["occurrence_id"]
+                if occurrence_id in ledger:
+                    raise ValueError("recurrence completion duplicates committed state")
+                ledger.add(occurrence_id)
+                state.setdefault(
+                    "recurrence_completion_authorities", []
+                ).append(payload["authority"])
+            elif action == "EXACT_COMPLETED":
+                ledger = state.setdefault(
+                    "loop_recurrence_completed_requirements", set()
+                )
+                requirement_id = payload["requirement_id"]
+                if requirement_id in ledger:
+                    raise ValueError("loop exact completion duplicates committed state")
+                ledger.add(requirement_id)
+                state.setdefault(
+                    "loop_exact_completion_authorities", []
+                ).append(payload["authority"])
+            else:
+                raise ValueError("loop emission transaction action is invalid")
+        except Exception:
+            for key, (existed, snapshot) in snapshots.items():
+                if existed:
+                    state[key] = snapshot
+                else:
+                    state.pop(key, None)
+            raise
+        pending.pop(id(signal))
+        if not pending:
+            state.pop(pending_key, None)
+
     @staticmethod
     def _apply_solver_batch_commit_payload(
         state: dict[str, Any], payload: Mapping[str, Any]
@@ -2670,6 +2773,15 @@ class LoopRecurrencePilotEncoder:
 
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
         if type(signal) is not LoopSolverExecutionBatchSignal:
+            pending_key = "loop_recurrence_pending_emission_transactions"
+            pending = session.domain_signal_state.get(pending_key)
+            if pending is None:
+                return
+            if type(pending) is not dict:
+                raise TypeError("loop pending emission ledger is not exact")
+            pending.pop(id(signal), None)
+            if not pending:
+                session.domain_signal_state.pop(pending_key, None)
             return
         state = session.domain_signal_state
         pending_key = "loop_solver_pending_emission_transactions"
@@ -2788,7 +2900,7 @@ class LoopRecurrencePilotEncoder:
             authority = self._issue_loop_exact_completion(session, signal)
             if authority is None:
                 return ()
-            return (
+            intents = (
                 EventIntent(
                     EventType.REQUIREMENT_COMPLETED,
                     RequirementCompletedEventAuthority(
@@ -2796,6 +2908,19 @@ class LoopRecurrencePilotEncoder:
                     ),
                 ),
             )
+            self._register_emission_plan(
+                session,
+                signal,
+                intents,
+                "EXACT_COMPLETED",
+                {
+                    "requirement_id": (
+                        authority.completion_receipt.proof_requirement_id
+                    ),
+                    "authority": authority,
+                },
+            )
+            return intents
         if type(signal) is RecurrenceValidationCompletionSignal:
             completion_authority = self._issue_recurrence_completion(session, signal)
             occurrence_id = (
@@ -2806,12 +2931,7 @@ class LoopRecurrencePilotEncoder:
             completed = self._completed(session)
             if occurrence_id in completed:
                 return ()
-            completed.add(occurrence_id)
-            evidence = session.domain_signal_state.setdefault(
-                "recurrence_completion_authorities", []
-            )
-            evidence.append(completion_authority)
-            return (
+            intents = (
                 EventIntent(
                     EventType.REQUIREMENT_COMPLETED,
                     RequirementCompletedEventAuthority(
@@ -2819,6 +2939,17 @@ class LoopRecurrencePilotEncoder:
                     ),
                 ),
             )
+            self._register_emission_plan(
+                session,
+                signal,
+                intents,
+                "RECURRENCE_COMPLETED",
+                {
+                    "occurrence_id": occurrence_id,
+                    "authority": completion_authority,
+                },
+            )
+            return intents
         if type(signal) is not LoopBlockerProductionSignal:
             raise TypeError("loop encoder signal type is not registered")
         authority = self.authority_for_signal(session, signal)
@@ -2826,10 +2957,23 @@ class LoopRecurrencePilotEncoder:
         observed = self._observed(session)
         if occurrence_id in observed:
             return ()
-        observed.add(occurrence_id)
-        return (
+        intents = (
             EventIntent(
                 EventType.CAUSE_OBSERVED,
                 CauseObservedEventAuthority(authority),
             ),
         )
+        self._register_emission_plan(
+            session,
+            signal,
+            intents,
+            "OBSERVED",
+            {"occurrence_id": occurrence_id},
+        )
+        return intents
+
+    def has_observed(self, session: Any, signal: Any) -> bool:
+        if type(signal) is not LoopBlockerProductionSignal:
+            return False
+        authority = self.authority_for_signal(session, signal)
+        return authority.occurrence.occurrence_id in self._observed(session)

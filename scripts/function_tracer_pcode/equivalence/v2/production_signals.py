@@ -1124,6 +1124,15 @@ def emit_loop_recurrence_signal(
     accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
     if callable(accepts) and not accepts(type(signal)):
         return 0
+    if type(signal) is LoopBlockerProductionSignal:
+        already_observed = getattr(
+            session.domain_signal_encoder, "has_observed", None
+        )
+        if callable(already_observed) and already_observed(session, signal):
+            # A repeated semantic occurrence is not a new producer activation.
+            # Do not let its empty encoder plan materialize as DECISIVE at an
+            # ELIGIBLE-only Phase 7 site.
+            return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
             producer_site_manifest_id, signal

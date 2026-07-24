@@ -371,6 +371,12 @@ def _typed_loop_query(
     return _issue_loop_solver_query_authority(rendered)
 
 
+def _plan_and_commit_loop_signal(encoder, session, signal):
+    intents = tuple(encoder(session, signal))
+    encoder.commit_emitted_signal(session, signal, intents)
+    return intents
+
+
 def test_loop_exact_blocker_binds_distinct_term_and_guard_requirements():
     blocker, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
     authority = LoopRecurrencePilotEncoder().authority_for_signal(
@@ -392,7 +398,9 @@ def test_loop_exact_completion_requires_observation_and_term_before_guard():
     session = _session("loop-exact-result")
     with pytest.raises(ValueError, match="no observed live occurrence"):
         encoder(session, term)
-    assert encoder(session, blocker)[0].event_type is EventType.CAUSE_OBSERVED
+    assert _plan_and_commit_loop_signal(
+        encoder, session, blocker
+    )[0].event_type is EventType.CAUSE_OBSERVED
     with pytest.raises(ValueError, match="prior exact term authority"):
         encoder(session, guard)
 
@@ -401,9 +409,9 @@ def test_loop_exact_term_and_guard_issue_separate_ordered_authorities():
     blocker, term, guard, _, _, _, _, _ = _loop_exact_fixture()
     encoder = LoopRecurrencePilotEncoder()
     session = _session("loop-exact-result")
-    encoder(session, blocker)
-    term_event = encoder(session, term)
-    guard_event = encoder(session, guard)
+    _plan_and_commit_loop_signal(encoder, session, blocker)
+    term_event = _plan_and_commit_loop_signal(encoder, session, term)
+    guard_event = _plan_and_commit_loop_signal(encoder, session, guard)
     assert term_event[0].event_type is EventType.REQUIREMENT_COMPLETED
     assert guard_event[0].event_type is EventType.REQUIREMENT_COMPLETED
     authorities = session.domain_signal_state["loop_exact_completion_authorities"]
@@ -489,8 +497,8 @@ def test_loop_exact_guard_joins_the_exact_prior_term_artifact():
     )
     encoder = LoopRecurrencePilotEncoder()
     session = _session("loop-exact-term-join")
-    encoder(session, blocker)
-    encoder(session, first_term)
+    _plan_and_commit_loop_signal(encoder, session, blocker)
+    _plan_and_commit_loop_signal(encoder, session, first_term)
     with pytest.raises(ValueError, match="does not join prior term authority"):
         encoder(session, other_guard)
 
@@ -533,6 +541,9 @@ def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
         def emit_domain_signal(self, signal):
             intents = tuple(self.domain_signal_encoder(self, signal))
             self.intents.extend(intents)
+            self.domain_signal_encoder.commit_emitted_signal(
+                self, signal, intents
+            )
             return len(intents)
 
     session = _Session()
@@ -600,7 +611,8 @@ def test_loop_solver_query_and_assignment_bind_exact_live_q():
         result_occurrence_id=session.identity.result_occurrence_id,
         source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
     )
-    for intent in encoder(session, blocker):
+    blocker_intents = _plan_and_commit_loop_signal(encoder, session, blocker)
+    for intent in blocker_intents:
         recorder.append(intent)
     reducer = ShadowLifecycleReducer(
         reason_registry=LOOP_REASON_REGISTRY,
@@ -745,7 +757,8 @@ def _loop_solver_runtime_fixture(result_id):
         result_occurrence_id=result_id,
         source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
     )
-    for intent in encoder(session, blocker):
+    blocker_intents = _plan_and_commit_loop_signal(encoder, session, blocker)
+    for intent in blocker_intents:
         recorder.append(intent)
     projection = ShadowLifecycleReducer(
         reason_registry=LOOP_REASON_REGISTRY,
@@ -765,12 +778,6 @@ def _loop_solver_runtime_fixture(result_id):
         context.membership_for(query),
         (requirement, left, right, exact_case, summary_case),
     )
-
-
-def _plan_and_commit_loop_solver_batch(encoder, session, batch):
-    intents = tuple(encoder(session, batch))
-    encoder.commit_emitted_signal(session, batch, intents)
-    return intents
 
 
 def test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q(monkeypatch):
@@ -830,7 +837,7 @@ def test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q(monkeyp
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, tuple(reversed(receipts)), projection
     )
-    intents = _plan_and_commit_loop_solver_batch(encoder, session, batch)
+    intents = _plan_and_commit_loop_signal(encoder, session, batch)
     assert [item.event_type for item in intents] == [
         EventType.SOLVER_TIMEOUT,
         EventType.REQUIREMENT_COMPLETED,
@@ -929,7 +936,7 @@ def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(mon
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, receipts, projection
     )
-    assert _plan_and_commit_loop_solver_batch(
+    assert _plan_and_commit_loop_signal(
         encoder,
         session,
         batch,
@@ -1495,7 +1502,7 @@ def test_loop_solver_nonproof_statuses_never_complete_q(
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, receipts, projection
     )
-    intents = _plan_and_commit_loop_solver_batch(
+    intents = _plan_and_commit_loop_signal(
         encoder,
         session,
         batch,
@@ -1585,7 +1592,7 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, supplied, projection
     )
-    intents = _plan_and_commit_loop_solver_batch(
+    intents = _plan_and_commit_loop_signal(
         encoder,
         session,
         batch,
@@ -1965,6 +1972,326 @@ def _session(result_occurrence_id="result-loop-a"):
     )
 
 
+def _duplicate_loop_signal_for_site(site_id):
+    if site_id == "checker-recurrence-proposal-blocker":
+        return LoopBlockerProductionSignal.from_recurrence_proposal(
+            _analysis("duplicate-recurrence"), _proposal("duplicate-seed")
+        )
+    if site_id in {
+        "pairwise-loop-fallback-blocker",
+        "pairwise-pending-loop-blocker",
+    }:
+        return _loop_exact_fixture()[0]
+    if site_id == "recurrence-summary-loop":
+        from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+        from scripts.function_tracer_pcode.model.analysis import (
+            SummaryReturnCandidate,
+        )
+
+        analysis = _analysis("duplicate-summary")
+        candidate = SummaryReturnCandidate(
+            ("candidate", "duplicate-summary"),
+            ReturnInfo(
+                "0x1010", Expression.constant(0, size=4), [],
+                pcode_identity="duplicate-summary-return",
+            ),
+            ("guard", "duplicate-summary"),
+            ("value", "duplicate-summary"),
+            active_precondition_key=("active", "duplicate-summary"),
+            memory_read_set_key=("reads", ()),
+            memory_write_set_key=("writes", ()),
+        )
+        return LoopBlockerProductionSignal.from_summary_candidate(
+            analysis,
+            candidate,
+            "summary_precondition_incomplete:"
+            "summary_applicability_guard_missing",
+        )
+    raise AssertionError(f"unhandled loop producer site: {site_id}")
+
+
+def _loop_production_session(*signal_types, phase7_manifest=None, case_id="loop"):
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotSession,
+        ProductionPilotExecutionIdentity,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    encoder = LoopRecurrencePilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        signal_type: encoder for signal_type in signal_types
+    })
+    identity = ProductionPilotExecutionIdentity.create({"case": case_id})
+    runtime = (
+        runtime_from_audited_manifest(phase7_manifest, identity)
+        if phase7_manifest is not None
+        else None
+    )
+    session = ProductionDualWritePilotSession(
+        identity,
+        ShadowLifecycleReducer(
+            reason_registry=LOOP_REASON_REGISTRY,
+            recovery_registry=LOOP_RECOVERY_REGISTRY,
+        ),
+        composite,
+        runtime,
+    )
+    return encoder, session
+
+
+@pytest.mark.parametrize(
+    "site_id",
+    (
+        "checker-recurrence-proposal-blocker",
+        "pairwise-loop-fallback-blocker",
+        "pairwise-pending-loop-blocker",
+        "recurrence-summary-loop",
+    ),
+)
+def test_loop_blocker_duplicate_is_filtered_before_phase7_activation(site_id):
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        emit_loop_recurrence_signal,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    encoder, session = _loop_production_session(
+        LoopBlockerProductionSignal,
+        phase7_manifest=manifest,
+        case_id="loop-duplicate-" + site_id,
+    )
+    first = _duplicate_loop_signal_for_site(site_id)
+    equivalent_instance = _duplicate_loop_signal_for_site(site_id)
+    assert equivalent_instance is not first
+    with production_signal_scope(session):
+        assert emit_loop_recurrence_signal(
+            first, producer_site_manifest_id=site_id
+        ) == 1
+        assert emit_loop_recurrence_signal(
+            first, producer_site_manifest_id=site_id
+        ) == 0
+        assert emit_loop_recurrence_signal(
+            equivalent_instance, producer_site_manifest_id=site_id
+        ) == 0
+    assert session.recorder.event_count == 1
+    assert encoder.has_observed(session, first)
+    assert encoder.has_observed(session, equivalent_instance)
+    assert len(session.domain_signal_state["loop_recurrence_observed"]) == 1
+    assert "loop_recurrence_pending_emission_transactions" not in (
+        session.domain_signal_state
+    )
+    assert len(session.phase7_runtime._materialized) == 1
+    assert session.phase7_runtime._discovery_factory._ordinals == {site_id: 1}
+    assert session._phase7_signal_transactions == {}
+    assert session.domain_signal_error_kinds == []
+
+
+@pytest.mark.parametrize("failure_stage", ("phase7_buffer", "stream_append"))
+def test_loop_blocker_failed_first_emit_rolls_back_and_can_be_reemitted(
+    monkeypatch, failure_stage,
+):
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        emit_loop_recurrence_signal,
+    )
+
+    site_id = "checker-recurrence-proposal-blocker"
+    root = Path(__file__).resolve().parents[4]
+    manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    encoder, session = _loop_production_session(
+        LoopBlockerProductionSignal,
+        phase7_manifest=manifest,
+        case_id="loop-first-emit-failure-" + failure_stage,
+    )
+    signal = _duplicate_loop_signal_for_site(site_id)
+    runtime = session.phase7_runtime
+    if failure_stage == "phase7_buffer":
+        real_buffer = runtime.buffer_signal_intents
+
+        def fail_after_phase7_buffer(*args):
+            real_buffer(*args)
+            raise RuntimeError("forced loop Phase 7 signal buffer failure")
+
+        monkeypatch.setattr(runtime, "buffer_signal_intents", fail_after_phase7_buffer)
+        restore = lambda: monkeypatch.setattr(
+            runtime, "buffer_signal_intents", real_buffer
+        )
+    else:
+        real_emit_many = session.emit_many
+
+        def fail_stream_append(*_args, **_kwargs):
+            raise RuntimeError("forced loop stream append failure")
+
+        monkeypatch.setattr(session, "emit_many", fail_stream_append)
+        restore = lambda: monkeypatch.setattr(session, "emit_many", real_emit_many)
+    with production_signal_scope(session):
+        assert emit_loop_recurrence_signal(
+            signal, producer_site_manifest_id=site_id
+        ) == 0
+        assert session.recorder.event_count == 0
+        assert not encoder.has_observed(session, signal)
+        assert "loop_recurrence_observed" not in session.domain_signal_state
+        assert "loop_recurrence_pending_emission_transactions" not in (
+            session.domain_signal_state
+        )
+        assert runtime._pending == {}
+        assert runtime._materialized == []
+        assert runtime._signal_transactions == {}
+        assert runtime._discovery_factory._ordinals == {}
+        assert session._phase7_signal_transactions == {}
+        restore()
+        assert emit_loop_recurrence_signal(
+            signal, producer_site_manifest_id=site_id
+        ) == 1
+    assert session.recorder.event_count == 1
+    assert encoder.has_observed(session, signal)
+    assert len(runtime._materialized) == 1
+    assert session.domain_signal_error_kinds == ["RuntimeError"]
+
+
+def test_recurrence_completion_state_commits_only_after_stream_append(
+    monkeypatch,
+):
+    side = _validated_side_promotion()
+    blocker = LoopBlockerProductionSignal.from_recurrence_proposal(
+        side.source_analysis, side.proposal
+    )
+    completion = RecurrenceValidationCompletionSignal.from_side_promotion(side)
+    encoder, session = _loop_production_session(
+        LoopBlockerProductionSignal,
+        RecurrenceValidationCompletionSignal,
+        case_id="recurrence-completion-transaction",
+    )
+    assert session.emit_domain_signal(blocker) == 1
+    real_emit_many = session.emit_many
+
+    def fail_stream_append(*_args, **_kwargs):
+        raise RuntimeError("forced recurrence completion append failure")
+
+    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    assert session.emit_domain_signal(completion) == 0
+    assert session.recorder.event_count == 1
+    assert "loop_recurrence_completed" not in session.domain_signal_state
+    assert "recurrence_completion_authorities" not in session.domain_signal_state
+    assert "loop_recurrence_pending_emission_transactions" not in (
+        session.domain_signal_state
+    )
+    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    assert session.emit_domain_signal(completion) == 1
+    assert session.recorder.event_count == 2
+    assert len(session.domain_signal_state["loop_recurrence_completed"]) == 1
+    assert len(session.domain_signal_state["recurrence_completion_authorities"]) == 1
+    assert session.domain_signal_error_kinds == ["RuntimeError"]
+
+
+def test_nonempty_loop_intent_without_pending_plan_is_rejected_before_append():
+    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+
+    signal = LoopBlockerProductionSignal.from_recurrence_proposal(
+        _analysis("missing-plan"), _proposal("missing-plan-seed")
+    )
+    session = _session("missing-plan-result")
+    encoder = LoopRecurrencePilotEncoder()
+    intents = tuple(encoder(session, signal))
+    assert len(intents) == 1
+    session.domain_signal_state.pop(
+        "loop_recurrence_pending_emission_transactions"
+    )
+    recorder = EventRecorder(
+        stream_id="missing-plan-stream",
+        result_occurrence_id=session.identity.result_occurrence_id,
+        source_snapshot_fingerprint=(
+            session.identity.source_snapshot_fingerprint
+        ),
+    )
+    with pytest.raises(ValueError, match="loop emission transaction is missing"):
+        recorder.append_many(
+            intents,
+            lambda: encoder.commit_emitted_signal(session, signal, intents),
+        )
+    assert recorder.event_count == 0
+    assert "loop_recurrence_observed" not in session.domain_signal_state
+
+
+def test_loop_exact_term_and_guard_state_commit_only_after_stream_append(
+    monkeypatch,
+):
+    blocker, term, guard, _, _, _, _, _ = _loop_exact_fixture()
+    _, session = _loop_production_session(
+        LoopBlockerProductionSignal,
+        LoopExactTermRelationCompletionSignal,
+        LoopExactGuardPartitionCompletionSignal,
+        case_id="loop-exact-completion-transaction",
+    )
+    assert session.emit_domain_signal(blocker) == 1
+    real_emit_many = session.emit_many
+
+    def fail_stream_append(*_args, **_kwargs):
+        raise RuntimeError("forced loop exact completion append failure")
+
+    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    assert session.emit_domain_signal(term) == 0
+    assert session.recorder.event_count == 1
+    assert "loop_recurrence_completed_requirements" not in (
+        session.domain_signal_state
+    )
+    assert "loop_exact_completion_authorities" not in (
+        session.domain_signal_state
+    )
+    assert "loop_recurrence_pending_emission_transactions" not in (
+        session.domain_signal_state
+    )
+
+    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    assert session.emit_domain_signal(term) == 1
+    assert session.recorder.event_count == 2
+    committed_requirements = set(
+        session.domain_signal_state["loop_recurrence_completed_requirements"]
+    )
+    term_authorities = list(
+        session.domain_signal_state["loop_exact_completion_authorities"]
+    )
+    assert len(committed_requirements) == 1
+    assert len(term_authorities) == 1
+    assert type(term_authorities[0]) is LoopExactTermRelationCompletionAuthority
+
+    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    assert session.emit_domain_signal(guard) == 0
+    assert session.recorder.event_count == 2
+    assert session.domain_signal_state[
+        "loop_recurrence_completed_requirements"
+    ] == committed_requirements
+    assert session.domain_signal_state[
+        "loop_exact_completion_authorities"
+    ] == term_authorities
+    assert "loop_recurrence_pending_emission_transactions" not in (
+        session.domain_signal_state
+    )
+
+    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    assert session.emit_domain_signal(guard) == 1
+    assert session.recorder.event_count == 3
+    assert len(session.domain_signal_state[
+        "loop_recurrence_completed_requirements"
+    ]) == 2
+    authorities = session.domain_signal_state[
+        "loop_exact_completion_authorities"
+    ]
+    assert [type(authority) for authority in authorities] == [
+        LoopExactTermRelationCompletionAuthority,
+        LoopExactGuardPartitionCompletionAuthority,
+    ]
+    assert session.domain_signal_error_kinds == ["RuntimeError", "RuntimeError"]
+
+
 def test_loop_blocker_signal_direct_construction_is_rejected():
     with pytest.raises(TypeError, match="object-factory issued"):
         LoopBlockerProductionSignal(
@@ -2008,7 +2335,7 @@ def test_loop_encoder_materializes_one_active_cause_and_one_open_requirement():
     )
     session = _session()
     encoder = LoopRecurrencePilotEncoder()
-    intents = encoder(session, signal)
+    intents = _plan_and_commit_loop_signal(encoder, session, signal)
     assert len(intents) == 1
     assert intents[0].event_type is EventType.CAUSE_OBSERVED
     authority = intents[0].authority_payload.occurrence_authority
@@ -2049,9 +2376,12 @@ def test_real_checker_recurrence_blocker_uses_exact_v2_reason():
             self.intents = []
 
         def emit_domain_signal(self, signal):
-            emitted = tuple(self.domain_signal_encoder(self, signal))
-            self.intents.extend(emitted)
-            return len(emitted)
+            intents = tuple(self.domain_signal_encoder(self, signal))
+            self.intents.extend(intents)
+            self.domain_signal_encoder.commit_emitted_signal(
+                self, signal, intents
+            )
+            return len(intents)
 
     session = _Session()
     strategy_result = SimpleNamespace(
@@ -2074,6 +2404,10 @@ def test_real_checker_recurrence_blocker_uses_exact_v2_reason():
     authority = session.intents[0].authority_payload.occurrence_authority
     assert authority.occurrence.reason_id == (
         "recurrence_proposal_validation_unproven"
+    )
+    assert len(session.domain_signal_state["loop_recurrence_observed"]) == 1
+    assert "loop_recurrence_pending_emission_transactions" not in (
+        session.domain_signal_state
     )
     assert strategy_result.is_equivalent is None
 
@@ -2200,8 +2534,12 @@ def test_recurrence_completion_issues_binding_and_completes_exact_observed_q():
     completion_signal = RecurrenceValidationCompletionSignal.from_side_promotion(side)
     session = _session()
     encoder = LoopRecurrencePilotEncoder()
-    assert encoder(session, blocker)[0].event_type is EventType.CAUSE_OBSERVED
-    completed = encoder(session, completion_signal)
+    assert _plan_and_commit_loop_signal(
+        encoder, session, blocker
+    )[0].event_type is EventType.CAUSE_OBSERVED
+    completed = _plan_and_commit_loop_signal(
+        encoder, session, completion_signal
+    )
     assert len(completed) == 1
     assert completed[0].event_type is EventType.REQUIREMENT_COMPLETED
     authorities = session.domain_signal_state["recurrence_completion_authorities"]

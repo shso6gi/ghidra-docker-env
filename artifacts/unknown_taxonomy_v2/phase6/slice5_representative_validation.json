@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "db919a6501cef31a40245b3cfacf076683832f23412e31d51c19eefb87baa0c1",
+  "artifact_digest": "58e20880b6de3546048e80ae2278f33e662e437fb01c7823bd4cd84617f6c8ba",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -216,7 +216,7 @@
     "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "0c1f5474c7568a7fc0dfdc7dce185837e8b7d5e9dee9746fc183c38373f4d87b",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "ef39efbd32632b1dbb26fd4d19b2bca162a8d85627c4b7216f4a9e62c27a6532",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "bcfe20bfd53e6177423a53c30148a66a0144016cd6ef9d0daf2f042949985903",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "27a701b358fca507c8ed3e43513a9f2abfa25ba8a88e095a5623d9b58a631a17",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "2c68072f88b8f2007db305c3818971e1de0fa025a64c94c89f8a55e6c56df33e",
+  "artifact_digest": "151724ac4d618a5ab3efbca15621861ae7a8d44806fe5e8becf1276d726ea5e7",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -254,12 +254,12 @@
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
     "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "faafa908413cbf23d24ba784f4f0c6f035866357538fd333f42511088affa62a",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "ef39efbd32632b1dbb26fd4d19b2bca162a8d85627c4b7216f4a9e62c27a6532",
-    "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py": "899ee812a18fbc365dfe167468ef489233fa032d6183e10e991af8019938c982",
+    "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py": "f072894b1cbc7f113fd1c1d8b52b60404f75c32849762cf6f9ab74840fcadb5c",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "bcfe20bfd53e6177423a53c30148a66a0144016cd6ef9d0daf2f042949985903",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "27a701b358fca507c8ed3e43513a9f2abfa25ba8a88e095a5623d9b58a631a17",
     "scripts/function_tracer_pcode/equivalence/v2/shadow_compare.py": "83f837ccdffdd70ad525c434527b6a6fa4587a85437e5c1abf17b62a644ed634",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "c197552463bfeac4d1ea759df5efb253266bd0b2adf0e68b352356ccf9aa70b3"
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "3db710d2f204dbe9b9ba3581d5752e613da93c5a89c8ac79f00c281b6c90e62a"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
   "relation_evidence": {

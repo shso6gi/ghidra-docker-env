@@ -8,7 +8,7 @@
     "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "bcfe20bfd53e6177423a53c30148a66a0144016cd6ef9d0daf2f042949985903",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "27a701b358fca507c8ed3e43513a9f2abfa25ba8a88e095a5623d9b58a631a17",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
   },
   "gate_test": {
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "903799c057e8bf17e5067ae9067b1a20838e8b22811f432dd8e1e8c8624bbfb3",
+  "manifest_digest": "6095b476ccf2f6513ba12e6fbb689b2ebf579d832e019693ad5995d67978882e",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

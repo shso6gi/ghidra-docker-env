@@ -10,11 +10,11 @@
     "focused_junit_sha256": "0fd550424066657f2140d06cd5e60de7e8ef315712d584aad7dd9201c85971d2",
     "focused_test_source_sha256": "126637313554fdacb575060c88bc842f747fdab5ff6b4c97c4580c01921d7896",
     "outcome_case_count": 5,
-    "phase8_artifact_digest": "ac4985288c011fbabc84e8990d3c9aa3b96b02d47a44b914880796c6525e5e4f",
-    "phase8_artifact_sha256": "a50042352a2e8d2a7198dfb5d1524d1f92242573ce9392e79343bc209182d76e",
+    "phase8_artifact_digest": "b99cb8729ad957fc4c80974785b2594447deb522a5446497255e7e673d45d0e4",
+    "phase8_artifact_sha256": "4e37cb5ea35e037e2e9c7cc5650b7747183f431fb8b21deabcc66b82fe1d0140",
     "test_family": "test_decision_receipt_is_only_serialized_status_authority"
   },
-  "artifact_digest": "cafcff0ef035b985e36a111913c16a2923eee84de7eea733ed2fb3c50426663d",
+  "artifact_digest": "c274e107ededc790a960b65e84d9fc7da470ce15174c7aee67892b2d98c354f0",
   "artifact_kind": "phase9-decision-receipt-census-v1",
   "observed_outcomes": [
     "UNKNOWN",

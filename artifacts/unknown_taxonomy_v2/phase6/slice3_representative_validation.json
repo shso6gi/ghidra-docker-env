@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "eb72fda3331db895c42fb9acf598ab3ed2b295e5d661a9e559ea4a37fd06fcb2",
+  "artifact_digest": "1d92ed783dba9123bfc5fa4b54f4e88a1eefdaac4729b1979463c154b7e03798",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -23,7 +23,7 @@
     "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "9066c901bcc18ff9a52aa2085b202d3df6643d4625f0c45586c41c1eddceb33c",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "ef39efbd32632b1dbb26fd4d19b2bca162a8d85627c4b7216f4a9e62c27a6532",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "bcfe20bfd53e6177423a53c30148a66a0144016cd6ef9d0daf2f042949985903",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "27a701b358fca507c8ed3e43513a9f2abfa25ba8a88e095a5623d9b58a631a17",
     "scripts/function_tracer_pcode/equivalence/v2/reducer.py": "0d73924839fe034b152a2a23711df79087be49e801f0d16908b7e27ee179732c",
     "scripts/function_tracer_pcode/equivalence/v2/stream.py": "f46350dedf70e84fcb8d078393a83e39607a1cd0036af654d6b274f62fee8b0c",
     "scripts/function_tracer_pcode/tests/unit/test_call_effect_obligations.py": "d91f81b601345834c22e48c939bb806e58bcb9ecbaa7d85bab0c94d0dc43e9a6",
