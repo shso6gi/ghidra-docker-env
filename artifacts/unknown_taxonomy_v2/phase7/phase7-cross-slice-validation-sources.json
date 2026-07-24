@@ -1,7 +1,7 @@
 {
-  "artifact_digest": "c3233fee640b79737964dc4c65d104ed6c74fff2468f0df0650c13d0ea5a8612",
-  "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-  "junit_sha256": "95fc19768a06b9272d0d6ee314a5ece4fb246d3d1db95feef24ceea7c5542957",
+  "artifact_digest": "cbdbb4ef3470dd1072c4cbb450063d66db5614ad5d21c584e007cba5aaeaa4ef",
+  "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
+  "junit_sha256": "77012035157c816e48f1063422ece8e146cec81d7082febc63ec6d63827abc3f",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v1",
   "pytest_selection": [
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -56,7 +56,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
-      "sha256": "124e31ed68b2dd0a2055fd950210e04a826be31efd2e0becbc38495a0adfb4b6"
+      "sha256": "c197552463bfeac4d1ea759df5efb253266bd0b2adf0e68b352356ccf9aa70b3"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_operational_extraction.py",
@@ -84,7 +84,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py",
-      "sha256": "e8bd2363120607e08970adc9fe3948bd1ae97f3c5fd005fc036e32f05a80f7ee"
+      "sha256": "903baaafcb3b0dc89c3667da6bc71b93802bc514935d34548119f1490cf52f85"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_subordinate_decompilation.py",
@@ -104,8 +104,8 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_producer_manifest.py",
-      "sha256": "f285f4924e3c0b3db1fba842710a7af427a74111188843b2b2cde999648515c6"
+      "sha256": "63d437d9e5d3ec7fdd29a97307716bc4e101c246538479c472d53aea8fa89a36"
     }
   ],
-  "test_count": 523
+  "test_count": 532
 }

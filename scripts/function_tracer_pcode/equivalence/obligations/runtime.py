@@ -28,7 +28,7 @@ from ...model.recurrence_contracts import (
 )
 from .recurrence import (
     validate_recurrence_artifact_content,
-    validate_recurrence_requirement_target,
+    validate_recurrence_requirement_binding,
 )
 
 
@@ -244,18 +244,14 @@ class ObligationRuntimeSession:
         binding_digest = function_recurrence_binding_digest(
             semantic_seed.digest, proposal_digest, premise
         )
-        target = artifact.requirement_id.proof_target_key
         try:
-            fields = dict(target[1:])
-            validate_recurrence_requirement_target(
+            validate_recurrence_requirement_binding(
                 artifact.requirement_id,
                 seed_core_digest=semantic_seed.digest,
                 proposal_digest=proposal_digest,
                 function_recurrence_binding_digest=binding_digest,
-                proof_stage=str(fields["proof_stage"]),
-                proof_target_semantic_key=tuple(fields["proof_target"]),
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError(
                 "recurrence artifact requirement is not bound to the selected proposal"
             ) from exc
@@ -362,18 +358,14 @@ class ObligationRuntimeSession:
             binding_digest = function_recurrence_binding_digest(
                 seed.digest, proposal_digest, expected_function_premise_digest
             )
-            target = entry.artifact.requirement_id.proof_target_key
             try:
-                fields = dict(target[1:])
-                validate_recurrence_requirement_target(
+                validate_recurrence_requirement_binding(
                     entry.artifact.requirement_id,
                     seed_core_digest=seed.digest,
                     proposal_digest=proposal_digest,
                     function_recurrence_binding_digest=binding_digest,
-                    proof_stage=str(fields["proof_stage"]),
-                    proof_target_semantic_key=tuple(fields["proof_target"]),
                 )
-            except (KeyError, TypeError, ValueError) as exc:
+            except (TypeError, ValueError) as exc:
                 raise ValueError("recurrence import requirement mismatch") from exc
             validate_recurrence_artifact_content(
                 entry.artifact,

@@ -935,10 +935,10 @@ class CompositeProductionSignalEncoder:
         self, session: Any, signal: Any,
     ) -> None:
         encoder = self._routes.get(SatSafetyBlockerProductionSignal)
-        registrar = getattr(encoder, "register_transformed_observation", None)
-        if not callable(registrar):
+        committer = getattr(encoder, "commit_transformed_observation", None)
+        if not callable(committer):
             raise TypeError("SAT safety route lacks transformation registration")
-        registrar(session, signal)
+        committer(session, signal)
 
 
 def active_operational_authority_factory() -> Optional[Any]:
@@ -1367,24 +1367,63 @@ def execute_loop_solver_rendered_query(
         query_authority=query,
         lifecycle_projection=context.lifecycle_projection,
     )
-    emitted = int(session.emit_domain_signal(
-        LoopSolverExecutionBatchSignal.from_issuer_results(
-            blocker, query, membership, receipts, context.lifecycle_projection
-        )
-    ))
-    pending_handoffs = tuple(
-        session.domain_signal_state.pop("loop_sat_safety_handoffs", ())
+    batch = LoopSolverExecutionBatchSignal.from_issuer_results(
+        blocker, query, membership, receipts, context.lifecycle_projection
     )
-    if pending_handoffs:
-        accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
-        if not callable(accepts) or not accepts(SatSafetyBlockerProductionSignal):
+    commit = getattr(session.domain_signal_encoder, "commit_emitted_signal", None)
+    rollback = getattr(session.domain_signal_encoder, "rollback_emitted_signal", None)
+    try:
+        intents = tuple(session.domain_signal_encoder(session, batch))
+        session.emit_many(
+            intents,
+            (lambda: commit(session, batch, intents)) if callable(commit) else None,
+        )
+    except Exception:
+        if callable(rollback):
+            rollback(session, batch)
+        raise
+    emitted = len(intents)
+    emitted += _consume_loop_sat_safety_handoffs(session)
+    return emitted
+
+
+def _consume_loop_sat_safety_handoffs(session: Any) -> int:
+    """Consume each handoff only after an event or typed duplicate is proven."""
+
+    state = session.domain_signal_state
+    key = "loop_sat_safety_handoffs"
+    pending = state.get(key)
+    if pending is None:
+        return 0
+    if type(pending) is not list:
+        raise TypeError("loop SAT safety handoff ledger is not an exact list")
+    accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
+    if not callable(accepts) or not accepts(SatSafetyBlockerProductionSignal):
+        raise ValueError(
+            "loop SAT refutation lacks Phase 6.1 counterexample-safety route"
+        )
+    has_observed = getattr(session.domain_signal_encoder, "has_observed", None)
+    if not callable(has_observed):
+        raise ValueError("loop SAT safety route lacks typed duplicate authority")
+    emitted = 0
+    while pending:
+        handoff = pending[0]
+        if type(handoff) is not SatSafetyBlockerProductionSignal:
+            raise TypeError("loop SAT handoff signal is not exact")
+        if has_observed(session, handoff):
+            del pending[0]
+            continue
+        count = emit_sat_safety_signal(
+            handoff,
+            producer_site_manifest_id="pairwise-loop-sat-safety-observed",
+        )
+        if count <= 0 and not has_observed(session, handoff):
             raise ValueError(
-                "loop SAT refutation lacks Phase 6.1 counterexample-safety route"
+                "loop SAT safety handoff was neither emitted nor deduplicated"
             )
-        for handoff in pending_handoffs:
-            if type(handoff) is not SatSafetyBlockerProductionSignal:
-                raise TypeError("loop SAT handoff signal is not exact")
-            emitted += int(session.emit_domain_signal(handoff))
+        del pending[0]
+        emitted += count
+    state.pop(key, None)
     return emitted
 
 

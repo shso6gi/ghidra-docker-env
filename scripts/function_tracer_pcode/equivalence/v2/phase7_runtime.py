@@ -48,6 +48,12 @@ class Phase7RuntimeResult:
     discovered_activation_count: int = 0
 
 
+@dataclass(frozen=True)
+class Phase7SignalTransaction:
+    runtime_identity: int
+    snapshot: Mapping[str, Any]
+
+
 class Phase7ProductionRuntime:
     """Consume independently expected activations from real producer signals."""
 
@@ -87,7 +93,56 @@ class Phase7ProductionRuntime:
         self._pending_by_signal: dict[str, list[str]] = {}
         self._buffered: list[tuple[str | None, EventIntent]] = []
         self._recorded: set[str] = set()
+        self._signal_transactions: dict[int, Phase7SignalTransaction] = {}
         self._finalized = False
+
+    def begin_signal_transaction(self) -> Phase7SignalTransaction:
+        if self._finalized:
+            raise ValueError("Phase 7 runtime is finalized")
+        if self._signal_transactions:
+            raise ValueError("Phase 7 runtime already owns a signal transaction")
+        transaction = Phase7SignalTransaction(
+            id(self),
+            {
+                "signal_authorities": {
+                    key: list(values)
+                    for key, values in self._signal_authorities.items()
+                },
+                "activation_pending": dict(self._activation_factory._pending),
+                "pending_by_signal": {
+                    key: list(values)
+                    for key, values in self._pending_by_signal.items()
+                },
+                "buffered": list(self._buffered),
+                "recorded": set(self._recorded),
+            },
+        )
+        self._signal_transactions[id(transaction)] = transaction
+        return transaction
+
+    def commit_signal_transaction(
+        self, transaction: Phase7SignalTransaction,
+    ) -> None:
+        if self._signal_transactions.pop(id(transaction), None) is not transaction:
+            raise ValueError("Phase 7 signal transaction is not runtime-owned")
+
+    def rollback_signal_transaction(
+        self, transaction: Phase7SignalTransaction,
+    ) -> None:
+        if self._signal_transactions.pop(id(transaction), None) is not transaction:
+            raise ValueError("Phase 7 signal transaction is not runtime-owned")
+        snapshot = transaction.snapshot
+        self._signal_authorities = {
+            key: list(values)
+            for key, values in snapshot["signal_authorities"].items()
+        }
+        self._activation_factory._pending = dict(snapshot["activation_pending"])
+        self._pending_by_signal = {
+            key: list(values)
+            for key, values in snapshot["pending_by_signal"].items()
+        }
+        self._buffered = list(snapshot["buffered"])
+        self._recorded = set(snapshot["recorded"])
 
     @staticmethod
     def signal_digest(producer_site_manifest_id: str, signal: Any) -> str:
@@ -146,6 +201,8 @@ class Phase7ProductionRuntime:
         if not pending:
             raise ValueError("cause emission lacks pre-emission activation")
         activation_id = pending.pop(0)
+        if not pending:
+            self._pending_by_signal.pop(digest, None)
         for intent in intents:
             if type(intent) is not EventIntent:
                 raise TypeError("Phase 7 runtime requires exact event intents")
@@ -360,7 +417,54 @@ class AuditedManifestPhase7Runtime:
             ExpectedActivationContract,
         ]] = []
         self._execution_intents: list[EventIntent] = []
+        self._signal_transactions: dict[int, Phase7SignalTransaction] = {}
         self._finalized = False
+
+    def begin_signal_transaction(self) -> Phase7SignalTransaction:
+        if self._finalized:
+            raise ValueError("Phase 7 discovered runtime is finalized")
+        if self._signal_transactions:
+            raise ValueError(
+                "Phase 7 discovered runtime already owns a signal transaction"
+            )
+        transaction = Phase7SignalTransaction(
+            id(self),
+            {
+                "pending": {
+                    key: list(values) for key, values in self._pending.items()
+                },
+                "materialized": list(self._materialized),
+                "execution_intents": list(self._execution_intents),
+                "discovery_issued": dict(self._discovery_factory._issued),
+                "discovery_ordinals": dict(self._discovery_factory._ordinals),
+            },
+        )
+        self._signal_transactions[id(transaction)] = transaction
+        return transaction
+
+    def commit_signal_transaction(
+        self, transaction: Phase7SignalTransaction,
+    ) -> None:
+        if self._signal_transactions.pop(id(transaction), None) is not transaction:
+            raise ValueError(
+                "Phase 7 discovered signal transaction is not runtime-owned"
+            )
+
+    def rollback_signal_transaction(
+        self, transaction: Phase7SignalTransaction,
+    ) -> None:
+        if self._signal_transactions.pop(id(transaction), None) is not transaction:
+            raise ValueError(
+                "Phase 7 discovered signal transaction is not runtime-owned"
+            )
+        snapshot = transaction.snapshot
+        self._pending = {
+            key: list(values) for key, values in snapshot["pending"].items()
+        }
+        self._materialized = list(snapshot["materialized"])
+        self._execution_intents = list(snapshot["execution_intents"])
+        self._discovery_factory._issued = dict(snapshot["discovery_issued"])
+        self._discovery_factory._ordinals = dict(snapshot["discovery_ordinals"])
 
     def record_pre_emission_activation(
         self, producer_site_manifest_id: str, signal: Any,
@@ -403,6 +507,8 @@ class AuditedManifestPhase7Runtime:
         if not pending:
             raise ValueError("signal intents lack wrapper-entry discovery authority")
         discovery, discovered_signal = pending.pop(0)
+        if not pending:
+            self._pending.pop(digest, None)
         if discovered_signal is not signal or not self._discovery_factory.owns(discovery):
             raise ValueError("signal intents differ from discovered branch entry")
         exact_intents = tuple(intents)

@@ -971,7 +971,8 @@ class FormulaBuilder:
         lines.append("; " + "-" * 40)
         for p in params:
             signed_comment = "signed" if p.is_signed else "unsigned"
-            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))  ; {signed_comment}")
+            lines.append(f"; {p.smt_name}: {signed_comment}")
+            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))")
         lines.append("")
         return lines
 
@@ -1013,12 +1014,12 @@ class FormulaBuilder:
         lines.append("; (Non-parameter variables found in expressions)")
         lines.append("; " + "-" * 40)
         for v in extra_vars:
-            comment = ""
             if v.analysis:
-                comment = f"  ; {v.analysis.classification.name}"
+                comment = v.analysis.classification.name
                 if v.analysis.reason:
                     comment += f": {v.analysis.reason}"
-            lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width})){comment}")
+                lines.append(f"; {v.smt_name}: {comment}")
+            lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width}))")
         lines.append("")
         return lines
 

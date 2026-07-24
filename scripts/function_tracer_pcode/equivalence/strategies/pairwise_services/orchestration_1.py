@@ -70,6 +70,7 @@ def validate_counterexample_across_cases(*args, **kwargs):
     """Preserve the documented module-level monkeypatch seam."""
     return _pairwise_facade.validate_counterexample_across_cases(*args, **kwargs)
 
+
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
     if implementation_function is None:
@@ -753,8 +754,8 @@ def _impl_check(
                             case1,
                             case2,
                             loop_fallback_reason,
-                            observation_contract_id=(
-                                self.observation_contract.contract_id
+                            observation_contract_id=dispatch_bound_observation_contract_digest(
+                                base_ctx, dispatch_frame
                             ),
                         )
                     )
@@ -1461,7 +1462,7 @@ def _impl_check(
                         cases1[pending.i],
                         cases2[pending.j],
                         pending.reason,
-                        observation_contract_id=self.observation_contract.contract_id,
+                        observation_contract_id=dispatch_bound_observation_contract_digest(base_ctx, dispatch_frame),
                     ),
                     producer_site_manifest_id="pairwise-pending-loop-blocker",
                 )
@@ -3397,6 +3398,22 @@ def _impl__accumulator_proof_count_surface_expressions(self, accumulator_proof):
         expr = getattr(condition, "expression", condition)
         if expr is not None:
             yield expr
+
+
+def dispatch_bound_observation_contract_digest(base_ctx, dispatch_frame) -> str:
+    """Return the observation contract owned by the consumed dispatch frame."""
+
+    if dispatch_frame is None:
+        raise ValueError("loop production signal requires a prepared dispatch frame")
+    prepared = getattr(dispatch_frame, "prepared", None)
+    certificate = getattr(prepared, "certificate", None)
+    expected = getattr(certificate, "observation_contract_digest", None)
+    actual = base_ctx.get("observation_contract_digest")
+    if type(expected) is not str or not expected:
+        raise ValueError("dispatch observation contract is incomplete")
+    if type(actual) is not str or not actual or actual != expected:
+        raise ValueError("base context observation contract differs from dispatch")
+    return actual
 
 
 from ...call_effect_preflight import register_builtin_receipt_executor

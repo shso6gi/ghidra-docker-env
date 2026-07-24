@@ -72,10 +72,13 @@ class SatSafetyPilotEncoder:
         self._binding_factory = SatisfactionBindingFactory(SAT_SAFETY_RECOVERY_REGISTRY)
 
     @staticmethod
-    def _state(session: Any) -> tuple[set[str], set[str]]:
-        observed = session.domain_signal_state.setdefault("sat_safety_observed", set())
-        completed = session.domain_signal_state.setdefault("sat_safety_completed", set())
-        return observed, completed
+    def _committed_ledger(session: Any, key: str) -> set[str]:
+        ledger = session.domain_signal_state.get(key)
+        if ledger is None:
+            return set()
+        if type(ledger) is not set:
+            raise TypeError(f"SAT safety committed ledger is not an exact set: {key}")
+        return ledger
 
     def _authority(self, session: Any, signal: SatSafetyBlockerProductionSignal):
         cause = self._cause_factory.create(
@@ -134,15 +137,18 @@ class SatSafetyPilotEncoder:
             raise TypeError("SAT safety authority requires an exact blocker signal")
         return self._authority(session, signal)[0]
 
-    def register_transformed_observation(
+    def commit_transformed_observation(
         self, session: Any, signal: SatSafetyBlockerProductionSignal,
     ) -> None:
-        authority, _ = self._authority(session, signal)
-        observed, _completed = self._state(session)
-        occurrence_id = authority.occurrence.occurrence_id
-        if occurrence_id in observed:
+        """Commit a transformed cause through the same canonical ledger callback."""
+
+        intents = tuple(self(session, signal))
+        if (
+            len(intents) != 1
+            or intents[0].event_type is not EventType.CAUSE_OBSERVED
+        ):
             raise ValueError("SAT safety transformed observation is duplicated")
-        observed.add(occurrence_id)
+        self.commit_emitted_signal(session, signal, intents)
 
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is SafeCounterexampleProductionSignal:
@@ -154,41 +160,102 @@ class SatSafetyPilotEncoder:
             return ()
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
-        observed_occurrences, completed_occurrences = self._state(session)
+        observed_occurrences = self._committed_ledger(
+            session, "sat_safety_observed"
+        )
+        completed_occurrences = self._committed_ledger(
+            session, "sat_safety_completed"
+        )
         if signal.action == "OBSERVED":
             if occurrence_key in observed_occurrences:
                 return ()
-            observed_occurrences.add(occurrence_key)
-            return (EventIntent(
+            intents = (EventIntent(
                 EventType.CAUSE_OBSERVED,
                 CauseObservedEventAuthority(authority),
             ),)
-        if occurrence_key not in observed_occurrences:
+            action = "OBSERVED"
+        elif occurrence_key not in observed_occurrences:
             raise ValueError("SAT safety completion has no observed active occurrence")
-        if occurrence_key in completed_occurrences:
+        elif occurrence_key in completed_occurrences:
             return ()
-        completed_occurrences.add(occurrence_key)
-        receipt = RequirementCompletionReceipt(
-            authority.occurrence.cause_id.value,
-            authority.occurrence.occurrence_id,
-            requirement_id,
-            authority.bound_contract.contract_definition_id,
-            authority.bound_contract.contract_version,
-            authority.bound_contract.bound_expression_digest,
-            str(signal.proof_artifact_digest),
-            authority_digest({
-                "proof_artifact_digest": signal.proof_artifact_digest,
-                "cause_id": authority.occurrence.cause_id.value,
-            }),
+        else:
+            receipt = RequirementCompletionReceipt(
+                authority.occurrence.cause_id.value,
+                authority.occurrence.occurrence_id,
+                requirement_id,
+                authority.bound_contract.contract_definition_id,
+                authority.bound_contract.contract_version,
+                authority.bound_contract.bound_expression_digest,
+                str(signal.proof_artifact_digest),
+                authority_digest({
+                    "proof_artifact_digest": signal.proof_artifact_digest,
+                    "cause_id": authority.occurrence.cause_id.value,
+                }),
+            )
+            intents = (EventIntent(
+                EventType.REQUIREMENT_COMPLETED,
+                RequirementCompletedEventAuthority(receipt),
+            ),)
+            action = "COMPLETED"
+        pending_key = "sat_safety_pending_emission_transactions"
+        pending = session.domain_signal_state.setdefault(pending_key, {})
+        if type(pending) is not dict:
+            raise TypeError("SAT safety pending transaction ledger is not exact")
+        if id(signal) in pending:
+            raise ValueError("SAT safety signal already owns an emission transaction")
+        pending[id(signal)] = (intents, action, occurrence_key)
+        return intents
+
+    def commit_emitted_signal(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...],
+    ) -> None:
+        if type(signal) is not SatSafetyBlockerProductionSignal:
+            return
+        pending_key = "sat_safety_pending_emission_transactions"
+        pending = session.domain_signal_state.get(pending_key)
+        if pending is None:
+            return
+        if type(pending) is not dict:
+            raise TypeError("SAT safety pending transaction ledger is not exact")
+        try:
+            expected_intents, action, occurrence_key = pending[id(signal)]
+        except KeyError as exc:
+            raise ValueError("SAT safety emission transaction is missing") from exc
+        if tuple(intents) != expected_intents:
+            raise ValueError("SAT safety emission transaction intents changed")
+        ledger_key = (
+            "sat_safety_observed"
+            if action == "OBSERVED"
+            else "sat_safety_completed"
         )
-        return (EventIntent(
-            EventType.REQUIREMENT_COMPLETED,
-            RequirementCompletedEventAuthority(receipt),
-        ),)
+        ledger = session.domain_signal_state.setdefault(ledger_key, set())
+        if type(ledger) is not set:
+            raise TypeError("SAT safety committed ledger is not an exact set")
+        if occurrence_key in ledger:
+            raise ValueError("SAT safety transaction duplicates committed state")
+        ledger.add(occurrence_key)
+        pending.pop(id(signal))
+        if not pending:
+            session.domain_signal_state.pop(pending_key, None)
+
+    def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        if type(signal) is not SatSafetyBlockerProductionSignal:
+            return
+        pending_key = "sat_safety_pending_emission_transactions"
+        pending = session.domain_signal_state.get(pending_key)
+        if pending is None:
+            return
+        if type(pending) is not dict:
+            raise TypeError("SAT safety pending transaction ledger is not exact")
+        pending.pop(id(signal), None)
+        if not pending:
+            session.domain_signal_state.pop(pending_key, None)
 
     def has_observed(self, session: Any, signal: Any) -> bool:
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return False
         authority, _ = self._authority(session, signal)
-        observed_occurrences, _ = self._state(session)
+        observed_occurrences = self._committed_ledger(
+            session, "sat_safety_observed"
+        )
         return authority.occurrence.occurrence_id in observed_occurrences

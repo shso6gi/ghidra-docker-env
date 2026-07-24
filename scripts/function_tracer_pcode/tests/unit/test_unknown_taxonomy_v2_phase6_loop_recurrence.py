@@ -767,6 +767,12 @@ def _loop_solver_runtime_fixture(result_id):
     )
 
 
+def _plan_and_commit_loop_solver_batch(encoder, session, batch):
+    intents = tuple(encoder(session, batch))
+    encoder.commit_emitted_signal(session, batch, intents)
+    return intents
+
+
 def test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q(monkeypatch):
     import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
     from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
@@ -824,7 +830,7 @@ def test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q(monkeyp
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, tuple(reversed(receipts)), projection
     )
-    intents = encoder(session, batch)
+    intents = _plan_and_commit_loop_solver_batch(encoder, session, batch)
     assert [item.event_type for item in intents] == [
         EventType.SOLVER_TIMEOUT,
         EventType.REQUIREMENT_COMPLETED,
@@ -920,11 +926,13 @@ def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(mon
         query_authority=query,
         lifecycle_projection=projection,
     )
-    assert encoder(
+    batch = LoopSolverExecutionBatchSignal.from_issuer_results(
+        blocker, query, membership, receipts, projection
+    )
+    assert _plan_and_commit_loop_solver_batch(
+        encoder,
         session,
-        LoopSolverExecutionBatchSignal.from_issuer_results(
-            blocker, query, membership, receipts, projection
-        ),
+        batch,
     ) == ()
     assert "loop_solver_unsat_completion_receipts" not in session.domain_signal_state
     assert len(session.domain_signal_state["loop_sat_safety_handoffs"]) == 1
@@ -1015,6 +1023,427 @@ def test_loop_sat_refutation_fails_closed_when_fixed_model_replay_is_not_sat(
     ]
 
 
+def test_loop_solver_batch_commit_failure_rolls_back_stream_and_all_ledgers(
+    monkeypatch,
+):
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
+    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+        ExecutionAuthorityDeploymentPolicy,
+        PINNED_SOLVER_EXECUTION_ISSUER,
+        activate_execution_authority_deployment,
+        install_execution_authority_signing_key,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        active_loop_requirement_for_signal,
+        execute_loop_solver_rendered_query,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        render_loop_v2_solver_query,
+    )
+    from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
+    from scripts.function_tracer_pcode.smt.parallel import ParallelResult
+
+    key_id = "loop-stream-rollback-key"
+    install_execution_authority_signing_key(key_id, b"r" * 32)
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "loop-stream-rollback-policy", 1, "test-owner", "test-source",
+        key_id, (), 3600, "test-revocation",
+    ))
+    monkeypatch.setattr(
+        execution_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.SAT, elapsed_time=0.001, model={}),
+        ]),
+    )
+    loop_encoder = LoopRecurrencePilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        LoopBlockerProductionSignal: loop_encoder,
+        LoopSolverExecutionBatchSignal: loop_encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=LOOP_REASON_REGISTRY,
+            recovery_registry=LOOP_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "loop-stream-rollback"})
+    blocker, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
+    with production_signal_scope(session):
+        assert session.emit_domain_signal(blocker) == 1
+        requirement = active_loop_requirement_for_signal(
+            blocker, "loop_exact_term_relation"
+        )
+        rendered = render_loop_v2_solver_query(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=left,
+            analysis2=right,
+            case1=exact_case,
+            case2=summary_case,
+            pair_id="(0,1)",
+            execution_identity_digest=session.identity.execution_identity_digest,
+        )
+
+        def fail_during_commit(state, payload):
+            state.setdefault("loop_solver_execution_receipts", set()).update(
+                payload["fresh_receipt_digests"]
+            )
+            state.setdefault(
+                "loop_model_bound_refutation_artifacts", []
+            ).extend(payload["model_artifacts"])
+            raise RuntimeError("forced loop ledger commit failure")
+
+        monkeypatch.setattr(
+            loop_encoder,
+            "_apply_solver_batch_commit_payload",
+            fail_during_commit,
+        )
+        with pytest.raises(RuntimeError, match="forced loop ledger commit failure"):
+            execute_loop_solver_rendered_query(
+                blocker, rendered, configured_timeout_ms=1000
+            )
+    assert session.recorder.event_count == 1
+    for key in (
+        "loop_solver_execution_receipts",
+        "loop_recurrence_completed_requirements",
+        "loop_model_bound_refutation_artifacts",
+        "loop_sat_safety_handoffs",
+        "loop_exact_completion_authorities",
+        "loop_solver_unsat_completion_receipts",
+        "loop_solver_pending_emission_transactions",
+    ):
+        assert key not in session.domain_signal_state
+    PINNED_SOLVER_EXECUTION_ISSUER.seal_result_census(
+        LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
+        session.identity.result_occurrence_id,
+    )
+
+
+def test_loop_solver_phase7_execution_buffer_failure_precedes_stream_and_ledgers(
+    monkeypatch,
+):
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
+    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+        ExecutionAuthorityDeploymentPolicy,
+        PINNED_SOLVER_EXECUTION_ISSUER,
+        activate_execution_authority_deployment,
+        install_execution_authority_signing_key,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        active_loop_requirement_for_signal,
+        execute_loop_solver_rendered_query,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        render_loop_v2_solver_query,
+    )
+    from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
+    from scripts.function_tracer_pcode.smt.parallel import ParallelResult
+
+    key_id = "loop-phase7-buffer-rollback-key"
+    install_execution_authority_signing_key(key_id, b"b" * 32)
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "loop-phase7-buffer-rollback-policy", 1, "test-owner", "test-source",
+        key_id, (), 3600, "test-revocation",
+    ))
+    monkeypatch.setattr(
+        execution_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
+        ]),
+    )
+    loop_encoder = LoopRecurrencePilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        LoopBlockerProductionSignal: loop_encoder,
+        LoopSolverExecutionBatchSignal: loop_encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=LOOP_REASON_REGISTRY,
+            recovery_registry=LOOP_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "loop-phase7-buffer-rollback"})
+    blocker, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
+    with production_signal_scope(session):
+        assert session.emit_domain_signal(blocker) == 1
+        requirement = active_loop_requirement_for_signal(
+            blocker, "loop_exact_term_relation"
+        )
+        rendered = render_loop_v2_solver_query(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=left,
+            analysis2=right,
+            case1=exact_case,
+            case2=summary_case,
+            pair_id="(0,1)",
+            execution_identity_digest=session.identity.execution_identity_digest,
+        )
+        root = Path(__file__).resolve().parents[4]
+        manifest = json.loads((root / (
+            "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+        )).read_text(encoding="utf-8"))
+        runtime = runtime_from_audited_manifest(manifest, session.identity)
+        session.phase7_runtime = runtime
+        real_buffer = runtime.buffer_execution_intent
+
+        def fail_after_buffer(intent):
+            real_buffer(intent)
+            raise RuntimeError("forced loop Phase 7 execution buffer failure")
+
+        monkeypatch.setattr(runtime, "buffer_execution_intent", fail_after_buffer)
+        with pytest.raises(
+            RuntimeError, match="forced loop Phase 7 execution buffer failure"
+        ):
+            execute_loop_solver_rendered_query(
+                blocker, rendered, configured_timeout_ms=1000
+            )
+    assert session.recorder.event_count == 1
+    for key in (
+        "loop_solver_execution_receipts",
+        "loop_recurrence_completed_requirements",
+        "loop_model_bound_refutation_artifacts",
+        "loop_sat_safety_handoffs",
+        "loop_exact_completion_authorities",
+        "loop_solver_unsat_completion_receipts",
+        "loop_solver_pending_emission_transactions",
+    ):
+        assert key not in session.domain_signal_state
+    assert runtime._execution_intents == []
+    assert runtime._signal_transactions == {}
+    assert session._phase7_signal_transactions == {}
+    PINNED_SOLVER_EXECUTION_ISSUER.seal_result_census(
+        LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
+        session.identity.result_occurrence_id,
+    )
+
+
+def _loop_sat_safety_handoff(label):
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        SatSafetyBlockerProductionSignal,
+    )
+
+    return SatSafetyBlockerProductionSignal(
+        "OBSERVED",
+        "counterexample_analysis_safety_unproven",
+        ("loop_model_bound_refutation", label),
+        ("model_bound_refutation_requires_counterexample_safety", label),
+        ("artifact", label),
+        "loop-model-bound-refutation-handoff-v1",
+    )
+
+
+class _LoopSatHandoffRoute:
+    def __init__(self, observed=()):
+        self.observed = set(observed)
+
+    @staticmethod
+    def accepts_signal_type(signal_type):
+        from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+            SatSafetyBlockerProductionSignal,
+        )
+
+        return signal_type is SatSafetyBlockerProductionSignal
+
+    def has_observed(self, _session, signal):
+        return id(signal) in self.observed
+
+
+def test_loop_sat_handoff_is_retained_when_encoder_returns_zero(monkeypatch):
+    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+
+    handoff = _loop_sat_safety_handoff("encoder-zero")
+    session = SimpleNamespace(
+        domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
+        domain_signal_encoder=_LoopSatHandoffRoute(),
+    )
+    monkeypatch.setattr(module, "emit_sat_safety_signal", lambda *_a, **_k: 0)
+    with pytest.raises(ValueError, match="neither emitted nor deduplicated"):
+        module._consume_loop_sat_safety_handoffs(session)
+    assert session.domain_signal_state["loop_sat_safety_handoffs"] == [handoff]
+
+
+def test_loop_sat_handoff_is_retained_when_phase7_activation_fails(monkeypatch):
+    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+
+    handoff = _loop_sat_safety_handoff("phase7-failure")
+    session = SimpleNamespace(
+        domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
+        domain_signal_encoder=_LoopSatHandoffRoute(),
+    )
+
+    def fail_activation(*_args, **_kwargs):
+        raise RuntimeError("forced Phase 7 activation failure")
+
+    monkeypatch.setattr(module, "emit_sat_safety_signal", fail_activation)
+    with pytest.raises(RuntimeError, match="forced Phase 7 activation failure"):
+        module._consume_loop_sat_safety_handoffs(session)
+    assert session.domain_signal_state["loop_sat_safety_handoffs"] == [handoff]
+
+
+def test_loop_sat_handoff_consumes_only_successful_prefix(monkeypatch):
+    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+
+    first = _loop_sat_safety_handoff("first")
+    second = _loop_sat_safety_handoff("second")
+    session = SimpleNamespace(
+        domain_signal_state={"loop_sat_safety_handoffs": [first, second]},
+        domain_signal_encoder=_LoopSatHandoffRoute(),
+    )
+    results = iter((1, 0))
+    monkeypatch.setattr(
+        module, "emit_sat_safety_signal", lambda *_a, **_k: next(results)
+    )
+    with pytest.raises(ValueError, match="neither emitted nor deduplicated"):
+        module._consume_loop_sat_safety_handoffs(session)
+    assert session.domain_signal_state["loop_sat_safety_handoffs"] == [second]
+
+
+def test_loop_sat_handoff_consumes_typed_duplicate_without_emit(monkeypatch):
+    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+
+    handoff = _loop_sat_safety_handoff("typed-duplicate")
+    session = SimpleNamespace(
+        domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
+        domain_signal_encoder=_LoopSatHandoffRoute((id(handoff),)),
+    )
+
+    def unexpected_emit(*_args, **_kwargs):
+        raise AssertionError("typed duplicate must not be emitted again")
+
+    monkeypatch.setattr(module, "emit_sat_safety_signal", unexpected_emit)
+    assert module._consume_loop_sat_safety_handoffs(session) == 0
+    assert "loop_sat_safety_handoffs" not in session.domain_signal_state
+
+
+def test_loop_sat_handoff_append_failure_allows_reemit_but_keeps_failure_authority(
+    monkeypatch,
+):
+    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+        SAT_SAFETY_REASON_REGISTRY,
+        SAT_SAFETY_RECOVERY_REGISTRY,
+        SatSafetyPilotEncoder,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    safety_encoder = SatSafetyPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        module.SatSafetyBlockerProductionSignal: safety_encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=SAT_SAFETY_REASON_REGISTRY,
+            recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            manifest, identity
+        ),
+    )
+    session = connector.begin({"case": "loop-sat-append-failure-retry"})
+    handoff = _loop_sat_safety_handoff("real-encoder-append-failure")
+    session.domain_signal_state["loop_sat_safety_handoffs"] = [handoff]
+    real_emit_many = session.emit_many
+    calls = {"count": 0}
+
+    def fail_first_append(
+        intents, commit_callback=None, *,
+        phase7_execution_intents_prebuffered=False,
+    ):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("forced SAT safety stream append failure")
+        return real_emit_many(
+            intents,
+            commit_callback,
+            phase7_execution_intents_prebuffered=(
+                phase7_execution_intents_prebuffered
+            ),
+        )
+
+    monkeypatch.setattr(session, "emit_many", fail_first_append)
+    with production_signal_scope(session):
+        with pytest.raises(
+            ValueError, match="neither emitted nor deduplicated"
+        ):
+            module._consume_loop_sat_safety_handoffs(session)
+        assert session.recorder.event_count == 0
+        assert not safety_encoder.has_observed(session, handoff)
+        assert session.domain_signal_state["loop_sat_safety_handoffs"] == [
+            handoff
+        ]
+        for key in (
+            "sat_safety_observed",
+            "sat_safety_completed",
+            "sat_safety_pending_emission_transactions",
+        ):
+            assert key not in session.domain_signal_state
+        runtime = session.phase7_runtime
+        assert runtime._pending == {}
+        assert runtime._materialized == []
+        assert runtime._signal_transactions == {}
+        assert runtime._discovery_factory._issued == {}
+        assert runtime._discovery_factory._ordinals == {}
+        assert session._phase7_signal_sites == {}
+        assert session._phase7_signal_transactions == {}
+
+        assert module._consume_loop_sat_safety_handoffs(session) == 1
+    assert session.recorder.event_count == 1
+    assert safety_encoder.has_observed(session, handoff)
+    assert "loop_sat_safety_handoffs" not in session.domain_signal_state
+    assert session.phase7_runtime._pending == {}
+    assert len(session.phase7_runtime._materialized) == 1
+    assert session.phase7_runtime._discovery_factory._ordinals == {
+        "pairwise-loop-sat-safety-observed": 1
+    }
+    with pytest.raises(
+        ValueError, match="production domain signal encoding is incomplete"
+    ):
+        connector.finish(
+            session,
+            SimpleNamespace(
+                error_message=None,
+                is_equivalent=None,
+                failure_status=None,
+                failure_message=None,
+                is_timeout=lambda: False,
+            ),
+            case_id="loop-sat-append-failure-reemit",
+        )
+
+
 @pytest.mark.parametrize(
     ("status", "event_type"),
     (
@@ -1063,11 +1492,13 @@ def test_loop_solver_nonproof_statuses_never_complete_q(
         query_authority=query,
         lifecycle_projection=projection,
     )
-    intents = encoder(
+    batch = LoopSolverExecutionBatchSignal.from_issuer_results(
+        blocker, query, membership, receipts, projection
+    )
+    intents = _plan_and_commit_loop_solver_batch(
+        encoder,
         session,
-        LoopSolverExecutionBatchSignal.from_issuer_results(
-            blocker, query, membership, receipts, projection
-        ),
+        batch,
     )
     assert [item.event_type for item in intents] == [event_type]
     assert "loop_solver_unsat_completion_receipts" not in session.domain_signal_state
@@ -1151,11 +1582,13 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
         lifecycle_projection=projection,
     )
     supplied = tuple(reversed(receipts)) if reverse_batch_receipts else receipts
-    intents = encoder(
+    batch = LoopSolverExecutionBatchSignal.from_issuer_results(
+        blocker, query, membership, supplied, projection
+    )
+    intents = _plan_and_commit_loop_solver_batch(
+        encoder,
         session,
-        LoopSolverExecutionBatchSignal.from_issuer_results(
-            blocker, query, membership, supplied, projection
-        ),
+        batch,
     )
     recorder = EventRecorder(
         stream_id="loop-retry-stream-" + suffix,
@@ -1670,7 +2103,7 @@ def _validated_side_promotion():
         payload={
             **artifact.payload,
             "proof_stage": "recurrence_validation_complete",
-            "object_target_key": target,
+            "object_target_key": artifact.requirement_id.proof_target_key,
         },
     )
     binding = function_recurrence_binding_digest(
@@ -1713,6 +2146,50 @@ def test_recurrence_completion_signal_requires_exact_validated_promotion():
         )
     with pytest.raises(TypeError, match="exact side promotion"):
         RecurrenceValidationCompletionSignal.from_side_promotion(object())
+
+
+def test_recurrence_completion_rejects_inner_target_in_production_payload():
+    side = _validated_side_promotion()
+    requirement_target = side.entry.artifact.requirement_id.proof_target_key
+    inner_target = dict(requirement_target[1:])["proof_target"]
+    artifact = replace(
+        side.entry.artifact,
+        payload={
+            **side.entry.artifact.payload,
+            "object_target_key": inner_target,
+        },
+    )
+    entry = replace(side.entry, artifact=artifact)
+    with pytest.raises(
+        ValueError, match="artifact payload target differs from its requirement"
+    ):
+        RecurrenceValidationCompletionSignal.from_side_promotion(
+            replace(side, entry=entry)
+        )
+
+
+def test_pairwise_loop_signal_contract_is_dispatch_certificate_bound():
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services.orchestration_1 import (
+        dispatch_bound_observation_contract_digest,
+    )
+
+    dispatch = SimpleNamespace(
+        prepared=SimpleNamespace(
+            certificate=SimpleNamespace(
+                observation_contract_digest="observation-contract-digest"
+            )
+        )
+    )
+    assert dispatch_bound_observation_contract_digest(
+        {"observation_contract_digest": "observation-contract-digest"},
+        dispatch,
+    ) == "observation-contract-digest"
+    with pytest.raises(ValueError, match="differs from dispatch"):
+        dispatch_bound_observation_contract_digest(
+            {"observation_contract_digest": "other-contract"}, dispatch
+        )
+    with pytest.raises(ValueError, match="requires a prepared dispatch"):
+        dispatch_bound_observation_contract_digest({}, None)
 
 
 def test_recurrence_completion_issues_binding_and_completes_exact_observed_q():

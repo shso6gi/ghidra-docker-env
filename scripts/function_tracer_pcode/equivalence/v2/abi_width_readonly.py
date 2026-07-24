@@ -3230,6 +3230,7 @@ class AbiWidthReadonlyPilotEncoder:
             "abi_width_solver_decisive_conflicts",
             "abi_width_model_bound_refutation_artifacts",
             "sat_safety_observed",
+            "sat_safety_pending_emission_transactions",
             "abi_width_high_bit_sat_transformations",
         )
         snapshots = {}
@@ -3240,6 +3241,8 @@ class AbiWidthReadonlyPilotEncoder:
                 snapshots[key] = (True, set(state[key]))
             elif type(state[key]) is list:
                 snapshots[key] = (True, list(state[key]))
+            elif type(state[key]) is dict:
+                snapshots[key] = (True, dict(state[key]))
             else:
                 raise TypeError(
                     f"ABI/width transaction ledger has invalid type: {key}"

@@ -242,6 +242,147 @@ def test_sat_safety_dedup_state_is_isolated_between_identical_sessions():
     assert event_counts == [1, 1]
 
 
+def test_sat_safety_completion_commits_only_after_stream_append(monkeypatch):
+    connector = _connector()
+    session = connector.begin({"phase": "6.1", "case": "completion-append-failure"})
+    observed = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=("completion-transaction",),
+        missing_semantic_fact=("analysis_safety", False),
+        evidence_refs=("completion-transaction",),
+        producer_id="completion-transaction-fixture",
+    )
+    completed = SatSafetyBlockerProductionSignal(
+        action="COMPLETED",
+        reason_id=observed.reason_id,
+        canonical_target_key=observed.canonical_target_key,
+        missing_semantic_fact=observed.missing_semantic_fact,
+        evidence_refs=observed.evidence_refs,
+        producer_id=observed.producer_id,
+        proof_artifact_digest="completion-transaction-proof",
+    )
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(observed) == 1
+        real_emit_many = session.emit_many
+
+        def fail_append(_intents, _commit_callback=None):
+            raise RuntimeError("forced SAT safety completion append failure")
+
+        monkeypatch.setattr(session, "emit_many", fail_append)
+        assert emit_sat_safety_signal(completed) == 0
+        assert session.recorder.event_count == 1
+        assert "sat_safety_completed" not in session.domain_signal_state
+        assert "sat_safety_pending_emission_transactions" not in (
+            session.domain_signal_state
+        )
+
+        monkeypatch.setattr(session, "emit_many", real_emit_many)
+        assert emit_sat_safety_signal(completed) == 1
+    assert session.recorder.event_count == 2
+    assert len(session.domain_signal_state["sat_safety_completed"]) == 1
+
+
+def test_sat_safety_phase7_execution_buffer_failure_rolls_back_before_stream(
+    monkeypatch,
+):
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        emit_sat_safety_completion_if_observed,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    safety_encoder = SatSafetyPilotEncoder()
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=SAT_SAFETY_REASON_REGISTRY,
+            recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            SatSafetyBlockerProductionSignal: safety_encoder,
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            manifest, identity
+        ),
+    )
+    session = connector.begin({
+        "phase": "7",
+        "case": "sat-completion-execution-buffer-failure",
+    })
+    observed = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_partition_replay_ambiguous",
+        canonical_target_key=("phase7-completion-transaction",),
+        missing_semantic_fact=("unique_counterexample_partition_witness", False),
+        evidence_refs=("phase7-completion-transaction",),
+        producer_id="sat_counterexample_ambiguity_producer",
+    )
+    completed = SatSafetyBlockerProductionSignal(
+        action="COMPLETED",
+        reason_id=observed.reason_id,
+        canonical_target_key=observed.canonical_target_key,
+        missing_semantic_fact=observed.missing_semantic_fact,
+        evidence_refs=observed.evidence_refs,
+        producer_id="sat_counterexample_ambiguity_resolution_producer",
+        proof_artifact_digest="phase7-completion-transaction-proof",
+    )
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(
+            observed,
+            producer_site_manifest_id="sat-safety-ambiguity-observed",
+        ) == 1
+        runtime = session.phase7_runtime
+        real_buffer = runtime.buffer_execution_intent
+
+        def fail_after_buffer(intent):
+            real_buffer(intent)
+            raise RuntimeError("forced Phase 7 execution buffer failure")
+
+        monkeypatch.setattr(runtime, "buffer_execution_intent", fail_after_buffer)
+        assert emit_sat_safety_completion_if_observed(
+            completed,
+            producer_site_manifest_id="sat-safety-ambiguity-completed",
+        ) == 0
+        assert session.recorder.event_count == 1
+        assert "sat_safety_completed" not in session.domain_signal_state
+        assert "sat_safety_pending_emission_transactions" not in (
+            session.domain_signal_state
+        )
+        assert runtime._pending == {}
+        assert len(runtime._materialized) == 1
+        assert runtime._execution_intents == []
+        assert runtime._signal_transactions == {}
+        assert runtime._discovery_factory._ordinals == {
+            "sat-safety-ambiguity-observed": 1
+        }
+        assert session._phase7_signal_sites == {}
+        assert session._phase7_signal_transactions == {}
+
+        monkeypatch.setattr(runtime, "buffer_execution_intent", real_buffer)
+        assert emit_sat_safety_completion_if_observed(
+            completed,
+            producer_site_manifest_id="sat-safety-ambiguity-completed",
+        ) == 1
+    assert session.recorder.event_count == 2
+    assert len(session.domain_signal_state["sat_safety_completed"]) == 1
+    assert len(session.phase7_runtime._materialized) == 2
+    assert len(session.phase7_runtime._execution_intents) == 1
+    with pytest.raises(
+        ValueError, match="production domain signal encoding is incomplete"
+    ):
+        connector.finish(
+            session,
+            _LegacyResult(Outcome.NOT_EQ),
+            case_id="sat-completion-execution-buffer-failure",
+        )
+
+
 def test_sat_safety_completion_near_miss_cannot_close_an_unobserved_cause():
     connector = _connector()
     session = connector.begin({"phase": "6.1", "case": "near-miss"})

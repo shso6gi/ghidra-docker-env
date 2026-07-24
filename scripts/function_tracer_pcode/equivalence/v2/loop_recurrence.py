@@ -606,6 +606,14 @@ class LoopBlockerProductionSignal:
         ):
             authority_digest(value)
 
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        """Project only the sealed semantic blocker fields into Phase 7 identity."""
+
+        return {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+        }
+
     @classmethod
     def from_recurrence_proposal(
         cls, analysis: Any, proposal: Any
@@ -1326,7 +1334,6 @@ class LoopSolverExecutionBatchSignal:
             _factory_token=_LOOP_SOLVER_BATCH_TOKEN,
         )
 
-
 class _SealedPairwiseStructuralValidatorMeta(type):
     def __setattr__(cls, name: str, value: Any) -> None:
         raise TypeError("sealed pairwise structural validator class is immutable")
@@ -1742,6 +1749,65 @@ class RecurrenceValidationCompletionSignal:
             _factory_token=_RECURRENCE_COMPLETION_SIGNAL_TOKEN,
         )
 
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        """Bind completion identity without serializing live Ghidra objects."""
+
+        from ..obligations.snapshot import AnalysisSnapshot
+
+        artifact = self.validated_entry.artifact
+        artifact_authority = {
+            "artifact_id": artifact.artifact_id,
+            "requirement_key": artifact.requirement_id.to_key(),
+            "produced_from_view_id": artifact.produced_from_view_id,
+            "premise_digest": artifact.premise_digest,
+            "dependency_artifact_ids": artifact.dependency_artifact_ids,
+            "producer_id": artifact.producer_id,
+            "producer_version": artifact.producer_version,
+            "encoding_version": artifact.encoding_version,
+            "artifact_validation_status": artifact.artifact_validation_status,
+            "payload": artifact.payload,
+        }
+        return {
+            "blocker": self.blocker._phase7_signal_authority(),
+            "source_snapshot_fingerprint": AnalysisSnapshot.from_function_analysis(
+                self.source_analysis
+            ).semantic_fingerprint,
+            "successor_snapshot_fingerprint": AnalysisSnapshot.from_function_analysis(
+                self.successor_analysis
+            ).semantic_fingerprint,
+            "successor_analysis_view_identity": (
+                self.successor_analysis.analysis_view_identity
+            ),
+            "successor_partition_revision": int(
+                self.successor_analysis.partition_revision
+            ),
+            "proposal_digest": self.proposal.digest,
+            "seed_core_digest": self.seed_core.digest,
+            "validated_entry": {
+                "domain": self.validated_entry.domain,
+                "function_premise_digest": (
+                    self.validated_entry.function_premise_digest
+                ),
+                "function_snapshot_fingerprint": (
+                    self.validated_entry.function_snapshot_fingerprint
+                ),
+                "semantic_seed_digest": self.validated_entry.semantic_seed_digest,
+                "normalization_policy_digest": (
+                    self.validated_entry.normalization_policy_digest
+                ),
+                "attempt_candidate_independent": (
+                    self.validated_entry.attempt_candidate_independent
+                ),
+                "pair_independent": self.validated_entry.pair_independent,
+                "premise_schema_id": self.validated_entry.premise_schema_id,
+                "premise_codec_id": self.validated_entry.premise_codec_id,
+                "proposal_digest": self.validated_entry.proposal_digest,
+                "function_recurrence_binding_digest": (
+                    self.validated_entry.function_recurrence_binding_digest
+                ),
+                "artifact_digest": authority_digest(artifact_authority),
+            },
+        }
 
 def _validate_recurrence_completion_inputs(
     signal: RecurrenceValidationCompletionSignal,
@@ -1754,7 +1820,7 @@ def _validate_recurrence_completion_inputs(
     from ..obligations.cache import ValidatedUnaryArtifactEntry
     from ..obligations.recurrence import (
         validate_recurrence_artifact_content,
-        validate_recurrence_requirement_target,
+        validate_recurrence_requirement_binding,
     )
     from ..obligations.snapshot import AnalysisSnapshot
 
@@ -1789,15 +1855,11 @@ def _validate_recurrence_completion_inputs(
     binding = entry.function_recurrence_binding_digest
     if type(binding) is not str or not binding:
         raise ValueError("recurrence completion binding digest is missing")
-    validate_recurrence_requirement_target(
+    validate_recurrence_requirement_binding(
         artifact.requirement_id,
         seed_core_digest=signal.seed_core.digest,
         proposal_digest=signal.proposal.digest,
         function_recurrence_binding_digest=binding,
-        proof_stage=str(artifact.payload.get("proof_stage") or ""),
-        proof_target_semantic_key=tuple(
-            artifact.payload.get("object_target_key") or ()
-        ),
     )
     validate_recurrence_artifact_content(
         artifact,
@@ -2321,14 +2383,27 @@ class LoopRecurrencePilotEncoder:
             raise ValueError("loop solver assignment differs from blocker authority")
         observation_intents: list[EventIntent] = []
         completion_intents: list[EventIntent] = []
-        completed = self._completed_requirements(session)
-        seen = session.domain_signal_state.setdefault(
-            "loop_solver_execution_receipts", set()
+        state = session.domain_signal_state
+        completed = state.get("loop_recurrence_completed_requirements", set())
+        seen = state.get("loop_solver_execution_receipts", set())
+        if type(completed) is not set or type(seen) is not set:
+            raise TypeError("loop solver transaction ledgers are not exact sets")
+        fresh_receipts = tuple(
+            receipt for receipt in batch.execution_receipts
+            if receipt.receipt_digest not in seen
         )
-        for receipt in batch.execution_receipts:
-            if receipt.receipt_digest in seen:
-                continue
-            seen.add(receipt.receipt_digest)
+        projected_completed = set(completed)
+        commit_payload = {
+            "fresh_receipt_digests": tuple(
+                receipt.receipt_digest for receipt in fresh_receipts
+            ),
+            "completed_requirement_ids": [],
+            "model_artifacts": [],
+            "sat_safety_handoffs": [],
+            "exact_completion_authorities": [],
+            "unsat_completion_receipts": [],
+        }
+        for receipt in fresh_receipts:
             if receipt.observed_status in {"unknown", "timeout", "error"}:
                 event_type = {
                     "unknown": EventType.SOLVER_UNKNOWN,
@@ -2407,12 +2482,9 @@ class LoopRecurrencePilotEncoder:
                     LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
                     batch.membership,
                 )
-                session.domain_signal_state.setdefault(
-                    "loop_model_bound_refutation_artifacts", []
-                ).append(artifact)
-                session.domain_signal_state.setdefault(
-                    "loop_sat_safety_handoffs", []
-                ).append(SatSafetyBlockerProductionSignal(
+                commit_payload["model_artifacts"].append(artifact)
+                commit_payload["sat_safety_handoffs"].append(
+                    SatSafetyBlockerProductionSignal(
                     "OBSERVED",
                     "counterexample_analysis_safety_unproven",
                     (
@@ -2431,17 +2503,18 @@ class LoopRecurrencePilotEncoder:
                         replay.replay_receipt_digest,
                     ),
                     "loop-model-bound-refutation-handoff-v1",
-                ))
+                    )
+                )
                 continue
             if receipt.observed_status != "unsat":
                 raise ValueError("loop solver receipt status is not sealed")
-            if requirement.requirement_id in completed:
+            if requirement.requirement_id in projected_completed:
                 continue
             if batch.query_authority.proof_kind == "loop_exact_guard_partition":
                 term = self._requirement_for_kind(
                     occurrence_authority, "loop_exact_term_relation"
                 )
-                if term.requirement_id not in completed:
+                if term.requirement_id not in projected_completed:
                     raise ValueError(
                         "loop solver guard UNSAT requires prior exact term completion"
                     )
@@ -2470,7 +2543,10 @@ class LoopRecurrencePilotEncoder:
                 occurrence_authority.bound_contract,
                 (requirement.requirement_id,),
             )
-            completed.add(requirement.requirement_id)
+            projected_completed.add(requirement.requirement_id)
+            commit_payload["completed_requirement_ids"].append(
+                requirement.requirement_id
+            )
             if requirement.proof_kind == "loop_exact_term_relation":
                 proof_body = (
                     "loop_exact_term_solver_unsat_proof_v2",
@@ -2491,21 +2567,120 @@ class LoopRecurrencePilotEncoder:
                     "producer_contract_version": 2,
                     "encoding_version": "loop-exact-term-relation-encoding-v2",
                 }
-                session.domain_signal_state.setdefault(
-                    "loop_exact_completion_authorities", []
-                ).append(LoopExactTermRelationCompletionAuthority(
-                    **authority_payload,
-                    artifact_digest=authority_digest(authority_payload),
-                    _factory_token=_LOOP_EXACT_TERM_AUTHORITY_TOKEN,
-                ))
-            session.domain_signal_state.setdefault(
-                "loop_solver_unsat_completion_receipts", []
-            ).append(completion)
+                commit_payload["exact_completion_authorities"].append(
+                    LoopExactTermRelationCompletionAuthority(
+                        **authority_payload,
+                        artifact_digest=authority_digest(authority_payload),
+                        _factory_token=_LOOP_EXACT_TERM_AUTHORITY_TOKEN,
+                    )
+                )
+            commit_payload["unsat_completion_receipts"].append(completion)
             completion_intents.append(EventIntent(
                 EventType.REQUIREMENT_COMPLETED,
                 RequirementCompletedEventAuthority(completion),
             ))
-        return tuple((*observation_intents, *completion_intents))
+        intents = tuple((*observation_intents, *completion_intents))
+        pending_key = "loop_solver_pending_emission_transactions"
+        pending = state.setdefault(pending_key, {})
+        if type(pending) is not dict:
+            raise TypeError("loop solver pending transaction ledger is not exact")
+        if id(batch) in pending:
+            raise ValueError("loop solver signal already owns an emission transaction")
+        pending[id(batch)] = (intents, commit_payload)
+        return intents
+
+    def commit_emitted_signal(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
+    ) -> None:
+        if type(signal) is not LoopSolverExecutionBatchSignal:
+            return
+        state = session.domain_signal_state
+        pending_key = "loop_solver_pending_emission_transactions"
+        pending = state.get(pending_key)
+        if type(pending) is not dict:
+            raise ValueError("loop solver emission transaction is missing")
+        try:
+            expected_intents, payload = pending[id(signal)]
+        except KeyError as exc:
+            raise ValueError("loop solver emission transaction is missing") from exc
+        if tuple(intents) != expected_intents:
+            raise ValueError("loop solver emission transaction intents changed")
+        mutated_keys = (
+            "loop_solver_execution_receipts",
+            "loop_recurrence_completed_requirements",
+            "loop_model_bound_refutation_artifacts",
+            "loop_sat_safety_handoffs",
+            "loop_exact_completion_authorities",
+            "loop_solver_unsat_completion_receipts",
+        )
+        snapshots = {}
+        for key in mutated_keys:
+            if key not in state:
+                snapshots[key] = (False, None)
+            elif type(state[key]) is set:
+                snapshots[key] = (True, set(state[key]))
+            elif type(state[key]) is list:
+                snapshots[key] = (True, list(state[key]))
+            else:
+                raise TypeError(
+                    f"loop solver transaction ledger has invalid type: {key}"
+                )
+        try:
+            self._apply_solver_batch_commit_payload(state, payload)
+        except Exception:
+            for key, (existed, snapshot) in snapshots.items():
+                if existed:
+                    state[key] = snapshot
+                else:
+                    state.pop(key, None)
+            raise
+        pending.pop(id(signal))
+        if not pending:
+            state.pop(pending_key, None)
+
+    @staticmethod
+    def _apply_solver_batch_commit_payload(
+        state: dict[str, Any], payload: Mapping[str, Any]
+    ) -> None:
+        """Apply one prevalidated loop batch plan inside recorder transaction."""
+
+        state.setdefault("loop_solver_execution_receipts", set()).update(
+            payload["fresh_receipt_digests"]
+        )
+        state.setdefault(
+            "loop_recurrence_completed_requirements", set()
+        ).update(payload["completed_requirement_ids"])
+        for key, payload_key in (
+            (
+                "loop_model_bound_refutation_artifacts",
+                "model_artifacts",
+            ),
+            ("loop_sat_safety_handoffs", "sat_safety_handoffs"),
+            (
+                "loop_exact_completion_authorities",
+                "exact_completion_authorities",
+            ),
+            (
+                "loop_solver_unsat_completion_receipts",
+                "unsat_completion_receipts",
+            ),
+        ):
+            if payload[payload_key]:
+                state.setdefault(key, []).extend(payload[payload_key])
+
+    def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        if type(signal) is not LoopSolverExecutionBatchSignal:
+            return
+        state = session.domain_signal_state
+        pending_key = "loop_solver_pending_emission_transactions"
+        pending = state.get(pending_key)
+        if pending is None:
+            return
+        if type(pending) is not dict:
+            raise TypeError("loop solver pending transaction ledger is not exact")
+        pending.pop(id(signal), None)
+        if not pending:
+            state.pop(pending_key, None)
 
     def finalize_open_execution_history(self, session: Any) -> None:
         from .execution_authority import PINNED_SOLVER_EXECUTION_ISSUER

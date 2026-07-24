@@ -65,6 +65,68 @@ def validate_recurrence_requirement_target(
         raise ValueError("recurrence proof requirement does not match runtime proposal binding")
 
 
+def recurrence_requirement_semantic_fields(
+    requirement: ProofRequirementId,
+) -> Tuple[str, Tuple[Any, ...]]:
+    """Decode the inner semantic target from one exact recurrence requirement."""
+
+    if not isinstance(requirement, ProofRequirementId):
+        raise TypeError("recurrence proof requirement is not typed")
+    target = requirement.proof_target_key
+    if (
+        not isinstance(target, tuple)
+        or not target
+        or target[0] != "recurrence_proof_target_v1"
+    ):
+        raise ValueError("recurrence proof target envelope is invalid")
+    rows = target[1:]
+    if any(
+        not isinstance(row, tuple) or len(row) != 2 or type(row[0]) is not str
+        for row in rows
+    ):
+        raise ValueError("recurrence proof target fields are malformed")
+    keys = tuple(row[0] for row in rows)
+    expected_keys = (
+        "domain",
+        "seed_core_digest",
+        "proposal_digest",
+        "function_recurrence_binding_digest",
+        "proof_stage",
+        "proof_target",
+    )
+    if keys != expected_keys:
+        raise ValueError("recurrence proof target field schema differs")
+    fields = dict(rows)
+    proof_stage = fields["proof_stage"]
+    proof_target = fields["proof_target"]
+    if type(proof_stage) is not str or not proof_stage:
+        raise ValueError("recurrence proof stage is incomplete")
+    if not isinstance(proof_target, tuple) or not proof_target:
+        raise ValueError("recurrence semantic proof target is incomplete")
+    return proof_stage, proof_target
+
+
+def validate_recurrence_requirement_binding(
+    requirement: ProofRequirementId,
+    *,
+    seed_core_digest: str,
+    proposal_digest: str,
+    function_recurrence_binding_digest: str,
+) -> Tuple[str, Tuple[Any, ...]]:
+    """Validate runtime binding without wrapping the requirement target twice."""
+
+    proof_stage, proof_target = recurrence_requirement_semantic_fields(requirement)
+    validate_recurrence_requirement_target(
+        requirement,
+        seed_core_digest=seed_core_digest,
+        proposal_digest=proposal_digest,
+        function_recurrence_binding_digest=function_recurrence_binding_digest,
+        proof_stage=proof_stage,
+        proof_target_semantic_key=proof_target,
+    )
+    return proof_stage, proof_target
+
+
 def validate_recurrence_artifact_content(
     artifact: ProofArtifact,
     *,
@@ -77,6 +139,12 @@ def validate_recurrence_artifact_content(
     payload = artifact.payload
     if not isinstance(payload, Mapping):
         raise ValueError("recurrence artifact payload is required")
+    if tuple(payload.get("object_target_key") or ()) != tuple(
+        artifact.requirement_id.proof_target_key
+    ):
+        raise ValueError(
+            "recurrence artifact payload target differs from its requirement"
+        )
     raw_evidence = payload.get("recurrence_validation_evidence")
     if not isinstance(raw_evidence, Mapping):
         raise ValueError("recurrence validation evidence payload is required")

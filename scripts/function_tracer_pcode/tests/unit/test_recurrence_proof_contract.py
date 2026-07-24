@@ -166,6 +166,7 @@ def _content_bound_artifact(seed, proposal, premise_digest, target, view_id):
         encoding_version="recurrence_digest_codec_v1",
         artifact_validation_status="validated",
         payload={
+            "object_target_key": requirement.proof_target_key,
             "semantic_closure_digest": closure,
             "recurrence_validation_evidence": evidence.to_dict(),
         },

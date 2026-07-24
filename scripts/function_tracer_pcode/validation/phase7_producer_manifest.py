@@ -62,6 +62,9 @@ _PRODUCER_IDS_BY_SITE = {
     "checker-recurrence-validation-completed": (
         "equivalence_recurrence_validator",
     ),
+    "pairwise-loop-sat-safety-observed": (
+        "loop-model-bound-refutation-handoff-v1",
+    ),
     "sat-safety-blocker-observed": ("sat_unsafety_reason_producer",),
     "sat-safety-ambiguity-observed": ("sat_counterexample_ambiguity_producer",),
     "sat-safety-ambiguity-completed": ("sat_counterexample_ambiguity_resolution_producer",),
@@ -122,6 +125,7 @@ _DISPOSITIONS_BY_SITE = {
     "checker-call-effect-proof-batch": ("DECISIVE",),
     "checker-recurrence-proposal-blocker": ("ELIGIBLE",),
     "checker-recurrence-validation-completed": ("DECISIVE",),
+    "pairwise-loop-sat-safety-observed": ("ELIGIBLE",),
     "decompilation-broker-operational-signal": (
         "DECISIVE", "ELIGIBLE",
     ),
@@ -236,6 +240,10 @@ _CAUSE_REASON_IDS_BY_SITE = {
         "counterexample_analysis_safety_unproven",
         "counterexample_same_function_replay_unproven",
     ),
+    "pairwise-loop-sat-safety-observed": (
+        "counterexample_analysis_safety_unproven",
+        "counterexample_same_function_replay_unproven",
+    ),
 }
 
 _REASON_IDENTITY_SCOPES = {
@@ -311,9 +319,7 @@ def build_phase7_producer_manifest(repo_root: Path) -> Mapping[str, Any]:
     missing = []
     for path in sorted(source_root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
-        if "/tests/" in f"/{rel}/" or rel.endswith(
-            "equivalence/v2/production_signals.py"
-        ):
+        if "/tests/" in f"/{rel}/":
             continue
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=rel)

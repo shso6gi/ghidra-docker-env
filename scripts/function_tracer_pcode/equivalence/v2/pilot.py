@@ -525,36 +525,109 @@ class ProductionDualWritePilotSession:
         self.phase7_runtime = phase7_runtime
         self.phase7_runtime_result: Any = None
         self._phase7_signal_sites: dict[int, str] = {}
+        self._phase7_signal_transactions: dict[int, Any] = {}
 
     def emit(self, intent: Any) -> int:
-        if self.closed:
-            raise ValueError("production dual-write pilot session is closed")
-        recorded = self.recorder.append(intent)
-        if self.phase7_runtime is not None and intent.event_type is not EventType.CAUSE_OBSERVED:
-            self.phase7_runtime.buffer_execution_intent(intent)
-        return recorded.header.sequence_number
+        return self.emit_many((intent,))[0]
 
     def emit_many(
-        self, intents: Sequence[Any], commit_callback: Any = None,
+        self, intents: Sequence[Any], commit_callback: Any = None, *,
+        phase7_execution_intents_prebuffered: bool = False,
     ) -> tuple[int, ...]:
         if self.closed:
             raise ValueError("production dual-write pilot session is closed")
+        if type(phase7_execution_intents_prebuffered) is not bool:
+            raise TypeError("Phase 7 execution prebuffer flag is not exact")
         batch = tuple(intents)
-        recorded = self.recorder.append_many(batch, commit_callback)
-        if self.phase7_runtime is not None:
-            for intent in batch:
-                if intent.event_type is not EventType.CAUSE_OBSERVED:
-                    self.phase7_runtime.buffer_execution_intent(intent)
-        return tuple(item.header.sequence_number for item in recorded)
+        transaction = None
+        if (
+            self.phase7_runtime is not None
+            and not phase7_execution_intents_prebuffered
+        ):
+            transaction = self._begin_phase7_transaction()
+        try:
+            if transaction is not None:
+                for intent in batch:
+                    if intent.event_type is not EventType.CAUSE_OBSERVED:
+                        self.phase7_runtime.buffer_execution_intent(intent)
+            recorded = self.recorder.append_many(batch, commit_callback)
+            if transaction is not None:
+                self._commit_phase7_transaction(transaction)
+                transaction = None
+            return tuple(item.header.sequence_number for item in recorded)
+        except Exception:
+            if transaction is not None:
+                self._rollback_phase7_transaction(transaction)
+            raise
+
+    def _begin_phase7_transaction(self) -> Any:
+        if self.phase7_runtime is None:
+            return None
+        begin = getattr(self.phase7_runtime, "begin_signal_transaction", None)
+        if not callable(begin):
+            raise TypeError("Phase 7 runtime lacks signal transaction authority")
+        return begin()
+
+    def _commit_phase7_transaction(self, transaction: Any) -> None:
+        if self.phase7_runtime is None:
+            raise ValueError("Phase 7 transaction lacks a runtime")
+        commit = getattr(self.phase7_runtime, "commit_signal_transaction", None)
+        if not callable(commit):
+            raise TypeError("Phase 7 runtime lacks signal commit authority")
+        commit(transaction)
+
+    def _rollback_phase7_transaction(self, transaction: Any) -> None:
+        if self.phase7_runtime is None:
+            raise ValueError("Phase 7 transaction lacks a runtime")
+        rollback = getattr(
+            self.phase7_runtime, "rollback_signal_transaction", None
+        )
+        if not callable(rollback):
+            raise TypeError("Phase 7 runtime lacks signal rollback authority")
+        rollback(transaction)
 
     def record_phase7_pre_emission_activation(
         self, producer_site_manifest_id: str, signal: Any,
     ) -> None:
         if self.phase7_runtime is not None:
-            self.phase7_runtime.record_pre_emission_activation(
-                producer_site_manifest_id, signal
-            )
-            self._phase7_signal_sites[id(signal)] = producer_site_manifest_id
+            signal_id = id(signal)
+            if (
+                signal_id in self._phase7_signal_sites
+                or signal_id in self._phase7_signal_transactions
+            ):
+                raise ValueError("production signal already owns a Phase 7 transaction")
+            transaction = self._begin_phase7_transaction()
+            try:
+                self.phase7_runtime.record_pre_emission_activation(
+                    producer_site_manifest_id, signal
+                )
+            except Exception:
+                self._rollback_phase7_transaction(transaction)
+                raise
+            self._phase7_signal_sites[signal_id] = producer_site_manifest_id
+            self._phase7_signal_transactions[signal_id] = transaction
+
+    def _commit_phase7_signal_transaction(self, signal: Any) -> None:
+        if self.phase7_runtime is None:
+            return
+        signal_id = id(signal)
+        try:
+            transaction = self._phase7_signal_transactions[signal_id]
+        except KeyError as exc:
+            raise ValueError("production signal lacks a Phase 7 transaction") from exc
+        self._commit_phase7_transaction(transaction)
+        self._phase7_signal_transactions.pop(signal_id)
+        self._phase7_signal_sites.pop(signal_id)
+
+    def _rollback_phase7_signal_transaction(self, signal: Any) -> None:
+        if self.phase7_runtime is None:
+            return
+        signal_id = id(signal)
+        transaction = self._phase7_signal_transactions.pop(signal_id, None)
+        self._phase7_signal_sites.pop(signal_id, None)
+        if transaction is None:
+            return
+        self._rollback_phase7_transaction(transaction)
 
     def terminalize(self, event_sequence_number: int, proof_requirement_id: str) -> None:
         if self.closed:
@@ -573,12 +646,15 @@ class ProductionDualWritePilotSession:
             intents = tuple(self.domain_signal_encoder(self, signal))
             if self.phase7_runtime is not None:
                 try:
-                    site_id = self._phase7_signal_sites.pop(id(signal))
+                    site_id = self._phase7_signal_sites[id(signal)]
                 except KeyError as exc:
                     raise ValueError(
                         "production signal lacks audited pre-emission site"
                     ) from exc
                 self.phase7_runtime.buffer_signal_intents(site_id, signal, intents)
+                for intent in intents:
+                    if intent.event_type is not EventType.CAUSE_OBSERVED:
+                        self.phase7_runtime.buffer_execution_intent(intent)
             commit = getattr(
                 self.domain_signal_encoder, "commit_emitted_signal", None
             )
@@ -586,7 +662,14 @@ class ProductionDualWritePilotSession:
                 (lambda: commit(self, signal, intents))
                 if callable(commit) else None
             )
-            self.emit_many(intents, commit_callback)
+            self.emit_many(
+                intents,
+                commit_callback,
+                phase7_execution_intents_prebuffered=(
+                    self.phase7_runtime is not None
+                ),
+            )
+            self._commit_phase7_signal_transaction(signal)
             return len(intents)
         except Exception as exc:
             rollback = getattr(
@@ -594,6 +677,7 @@ class ProductionDualWritePilotSession:
             )
             if callable(rollback):
                 rollback(self, signal)
+            self._rollback_phase7_signal_transaction(signal)
             self.domain_signal_error_kinds.append(type(exc).__name__)
             self.domain_signal_error_details.append(
                 f"{type(signal).__name__}: {exc}"
