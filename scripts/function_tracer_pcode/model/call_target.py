@@ -7,12 +7,39 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
 
 
+_JVM_NOT_RUNNING_MESSAGES = frozenset({
+    "JVM is not running",
+    "Java Virtual Machine is not running",
+})
+
+
+def _is_jvm_not_running_error(error: Exception) -> bool:
+    try:
+        from jpype import JVMNotRunning
+    except ImportError:
+        JVMNotRunning = ()  # type: ignore[assignment]
+    return (
+        isinstance(error, JVMNotRunning)
+        or str(error) in _JVM_NOT_RUNNING_MESSAGES
+    )
+
+
+def _safe_getattr(owner: Any, name: str) -> Any:
+    """Read a proxy attribute without leaking JVM-shutdown races."""
+    try:
+        return getattr(owner, name, None)
+    except Exception as error:
+        if _is_jvm_not_running_error(error):
+            return None
+        raise
+
+
 def _safe_offset(address_or_value: Any) -> Optional[int]:
     if address_or_value is None:
         return None
     if isinstance(address_or_value, int):
         return address_or_value if address_or_value >= 0 else None
-    get_offset = getattr(address_or_value, "getOffset", None)
+    get_offset = _safe_getattr(address_or_value, "getOffset")
     if callable(get_offset):
         try:
             offset = int(get_offset())
@@ -31,14 +58,14 @@ def _safe_program_id(owner: Any) -> Optional[int]:
         return None
 
     program = owner
-    get_program = getattr(owner, "getProgram", None)
+    get_program = _safe_getattr(owner, "getProgram")
     if callable(get_program):
         try:
             program = get_program()
         except Exception:
             program = owner
 
-    get_unique_program_id = getattr(program, "getUniqueProgramID", None)
+    get_unique_program_id = _safe_getattr(program, "getUniqueProgramID")
     if callable(get_unique_program_id):
         try:
             return int(get_unique_program_id())
@@ -48,7 +75,7 @@ def _safe_program_id(owner: Any) -> Optional[int]:
 
 
 def _safe_bool_method(owner: Any, method_name: str) -> Optional[bool]:
-    method = getattr(owner, method_name, None)
+    method = _safe_getattr(owner, method_name)
     if not callable(method):
         return None
     try:
@@ -60,7 +87,7 @@ def _safe_bool_method(owner: Any, method_name: str) -> Optional[bool]:
 def _safe_external_library_name(function: Any) -> Optional[str]:
     if function is None:
         return None
-    get_external_location = getattr(function, "getExternalLocation", None)
+    get_external_location = _safe_getattr(function, "getExternalLocation")
     if not callable(get_external_location):
         return None
     try:
@@ -70,7 +97,7 @@ def _safe_external_library_name(function: Any) -> Optional[str]:
     if external_location is None:
         return None
     for method_name in ("getLibraryName", "getOriginalImportedName"):
-        method = getattr(external_location, method_name, None)
+        method = _safe_getattr(external_location, method_name)
         if not callable(method):
             continue
         try:
@@ -85,7 +112,7 @@ def _safe_external_library_name(function: Any) -> Optional[str]:
 def _safe_thunked_function(function: Any) -> Any:
     if function is None:
         return None
-    method = getattr(function, "getThunkedFunction", None)
+    method = _safe_getattr(function, "getThunkedFunction")
     if not callable(method):
         return None
     for args in ((True,), (False,), ()):
@@ -125,13 +152,13 @@ class CallTargetRef:
         entry_offset = None
         program_id = _safe_program_id(function)
         if function is not None:
-            get_name = getattr(function, "getName", None)
+            get_name = _safe_getattr(function, "getName")
             if callable(get_name):
                 try:
                     name = get_name()
                 except Exception:
                     name = None
-            get_entry = getattr(function, "getEntryPoint", None)
+            get_entry = _safe_getattr(function, "getEntryPoint")
             if callable(get_entry):
                 try:
                     entry_offset = _safe_offset(get_entry())

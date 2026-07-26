@@ -440,19 +440,27 @@ def _impl__render_summary_auxiliary_smt(
     node,
     symbol_specs: Sequence[dict],
 ) -> Optional[str]:
+    from ...model.render_smt import UnsupportedSmtIntrinsicError
+
     identity_to_spec = {
         spec.get("identity"): spec
         for spec in symbol_specs or []
         if spec.get("identity") is not None and spec.get("aux_name")
     }
-    if isinstance(node, Condition):
-        cloned_expr = self._clone_summary_expression_for_smt(node.expression, identity_to_spec)
-        if cloned_expr is None:
-            return None
-        return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
-    if isinstance(node, Expression):
-        cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
-        return cloned_expr.to_smt() if cloned_expr is not None else None
+    try:
+        if isinstance(node, Condition):
+            cloned_expr = self._clone_summary_expression_for_smt(node.expression, identity_to_spec)
+            if cloned_expr is None:
+                return None
+            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
+        if isinstance(node, Expression):
+            cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
+            return cloned_expr.to_smt() if cloned_expr is not None else None
+    except UnsupportedSmtIntrinsicError:
+        # Auxiliary recurrence proofs are optional promotion evidence.  An
+        # intrinsic without an exact SMT lowering must reject that proof
+        # attempt conservatively instead of aborting the whole analysis.
+        return None
     return None
 
 def _impl__clone_summary_expression_for_smt(

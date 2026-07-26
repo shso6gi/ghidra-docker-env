@@ -474,6 +474,24 @@ def test_summary_expression_equivalence_query_refuses_name_only_parameter_symbol
 
     assert query is None
 
+def test_summary_expression_equivalence_query_rejects_unsupported_intrinsic_without_error():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    unsupported = Expression.intrinsic(
+        "CALLOTHER",
+        [_const(1)],
+        size=4,
+        opcode=0,
+    )
+
+    query = summarizer._build_expression_equivalence_query(
+        unsupported,
+        _const(1),
+        [],
+        [],
+    )
+
+    assert query is None
+
 def test_summary_expression_equivalence_query_does_not_alias_duplicate_variable_names():
     summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
     left = Expression.variable("tmp", size=4)
