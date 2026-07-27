@@ -194,6 +194,7 @@ def test_command_fails_closed_without_deployment_signing_keys(tmp_path):
 
 def test_error_restart_rejects_every_checkpoint_authority_filename(tmp_path):
     expected = {
+        "pending-active-transaction.json",
         "checkpoint.json", "state.json", "checkpoint-prefix-stream.json",
         "continuation.json", "continuation-stream.json", "ready.json",
         "recovery-resolution.json", "claimed.json", "timeout.json",
@@ -312,6 +313,478 @@ def test_deadline_without_worker_checkpoint_gets_durable_process_timeout(tmp_pat
     classified = _classify_durable_projection(command)
     assert classified["canonical_outcome"] == "TIMEOUT"
     assert classified["classification_valid"] is True
+
+
+def test_deadline_recovers_active_transaction_interrupted_before_state_commit(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch = command.factory.issue_launch(
+        result_occurrence_id=config.result_occurrence_id,
+        manifest_entry_preimage_digest=config.manifest_entry_preimage_digest,
+        execution_nonce=config.execution_nonce,
+        child_pid=4242,
+        child_start_token="pid-start-token",
+        stream_id=config.stream_id,
+        source_snapshot_fingerprint=config.source_snapshot_fingerprint,
+        deadline_policy_digest=config.deadline_policy_digest,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    checkpoint = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+    )
+    command.store.persist_launch(launch)
+    original_replace = command.store._atomic_replace
+    interrupted = False
+
+    def interrupt_state_commit(path, data):
+        nonlocal interrupted
+        if path.name == "state.json" and not interrupted:
+            interrupted = True
+            raise RuntimeError("fault injection before ACTIVE state commit")
+        return original_replace(path, data)
+
+    monkeypatch.setattr(command.store, "_atomic_replace", interrupt_state_commit)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(checkpoint, authority["prefix"])
+    assert (command.store.directory / "pending-active-transaction.json").is_file()
+    assert (command.store.directory / "checkpoint-prefix-stream.json").is_file()
+    assert (command.store.directory / "checkpoint.json").is_file()
+    assert not (command.store.directory / "state.json").exists()
+
+    process = type("DeadlineProcess", (), {"returncode": 143})()
+    monkeypatch.setattr(
+        command,
+        "_terminate_exact_process_group",
+        lambda _process, _token: "EXITED_143_AFTER_SIGTERM",
+    )
+    exit_code, projection = command._finalize_deadline(
+        launch=launch,
+        process=process,
+        start_token="pid-start-token",
+    )
+    command._write_projection(projection)
+
+    assert exit_code == 124
+    assert projection["status"] == "TIMEOUT"
+    assert not (command.store.directory / "pending-active-transaction.json").exists()
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["classification_valid"] is True
+
+
+def test_deadline_ignores_uncommitted_continuation_stream(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch, checkpoint = _persist_active_for_command(command, authority)
+    continuation, stream = _completed_continuation(
+        authority, supervisor=command.factory, checkpoint=checkpoint,
+    )
+    original_write = command.store._atomic_write
+    continuation_member_writes = 0
+
+    def interrupt_continuation_marker(path, data, *, identical_ok=False):
+        nonlocal continuation_member_writes
+        if path.name in {"continuation.json", "continuation-stream.json"}:
+            continuation_member_writes += 1
+            if continuation_member_writes == 2:
+                raise RuntimeError("fault injection before continuation commit")
+        return original_write(path, data, identical_ok=identical_ok)
+
+    monkeypatch.setattr(
+        command.store, "_atomic_write", interrupt_continuation_marker,
+    )
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.worker_publish_continuation(
+            active=checkpoint, continuation=continuation,
+            prefix=authority["prefix"], continuation_stream=stream,
+        )
+    assert (command.store.directory / "continuation-stream.json").is_file()
+    assert not (command.store.directory / "continuation.json").exists()
+
+    monkeypatch.setattr(command.store, "_atomic_write", original_write)
+    process = type("DeadlineProcess", (), {"returncode": 143})()
+    monkeypatch.setattr(
+        command,
+        "_terminate_exact_process_group",
+        lambda _process, _token: "EXITED_143_AFTER_SIGTERM",
+    )
+    exit_code, projection = command._finalize_deadline(
+        launch=launch,
+        process=process,
+        start_token="pid-start-token",
+    )
+    command._write_projection(projection)
+
+    assert exit_code == 124
+    assert projection["status"] == "TIMEOUT"
+    classified = _classify_durable_projection(command)
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["classification_valid"] is True
+
+
+def test_active_transaction_recovers_when_interrupted_before_member_writes(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch = command.factory.issue_launch(
+        result_occurrence_id=config.result_occurrence_id,
+        manifest_entry_preimage_digest=config.manifest_entry_preimage_digest,
+        execution_nonce=config.execution_nonce,
+        child_pid=4242,
+        child_start_token="pid-start-token",
+        stream_id=config.stream_id,
+        source_snapshot_fingerprint=config.source_snapshot_fingerprint,
+        deadline_policy_digest=config.deadline_policy_digest,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    checkpoint = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+    )
+    command.store.persist_launch(launch)
+    original_write = command.store._atomic_write
+    interrupted = False
+
+    def interrupt_first_member(path, data, *, identical_ok=False):
+        nonlocal interrupted
+        if path.name == "checkpoint-prefix-stream.json" and not interrupted:
+            interrupted = True
+            raise RuntimeError("fault injection before ACTIVE member writes")
+        return original_write(path, data, identical_ok=identical_ok)
+
+    monkeypatch.setattr(command.store, "_atomic_write", interrupt_first_member)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(checkpoint, authority["prefix"])
+    assert (command.store.directory / "pending-active-transaction.json").is_file()
+    assert not (command.store.directory / "checkpoint-prefix-stream.json").exists()
+    assert not (command.store.directory / "checkpoint.json").exists()
+    assert not (command.store.directory / "state.json").exists()
+
+    monkeypatch.setattr(command.store, "_atomic_write", original_write)
+    recovered, recovered_prefix = command.store.recover_pending_active_commit()
+
+    assert recovered.receipt_digest == checkpoint.receipt_digest
+    assert recovered_prefix.prefix_authority_digest == (
+        authority["prefix"].prefix_authority_digest
+    )
+    assert command.store.read_state().receipt_digest == checkpoint.receipt_digest
+    assert not (command.store.directory / "pending-active-transaction.json").exists()
+
+
+def test_active_transaction_recovers_after_state_commit_before_pending_removal(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch = command.factory.issue_launch(
+        result_occurrence_id=config.result_occurrence_id,
+        manifest_entry_preimage_digest=config.manifest_entry_preimage_digest,
+        execution_nonce=config.execution_nonce,
+        child_pid=4242,
+        child_start_token="pid-start-token",
+        stream_id=config.stream_id,
+        source_snapshot_fingerprint=config.source_snapshot_fingerprint,
+        deadline_policy_digest=config.deadline_policy_digest,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    checkpoint = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+    )
+    command.store.persist_launch(launch)
+    original_remove = command.store._remove_pending_active_locked
+    interrupted = False
+
+    def interrupt_pending_removal():
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise RuntimeError("fault injection after ACTIVE state commit")
+        return original_remove()
+
+    monkeypatch.setattr(
+        command.store, "_remove_pending_active_locked",
+        interrupt_pending_removal,
+    )
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(checkpoint, authority["prefix"])
+    assert command.store.read_state().receipt_digest == checkpoint.receipt_digest
+    assert (command.store.directory / "checkpoint-prefix-stream.json").is_file()
+    assert (command.store.directory / "checkpoint.json").is_file()
+    assert (command.store.directory / "pending-active-transaction.json").is_file()
+
+    monkeypatch.setattr(
+        command.store, "_remove_pending_active_locked", original_remove,
+    )
+    recovered, _recovered_prefix = command.store.recover_pending_active_commit()
+
+    assert recovered.receipt_digest == checkpoint.receipt_digest
+    assert command.store.read_state().receipt_digest == checkpoint.receipt_digest
+    assert not (command.store.directory / "pending-active-transaction.json").exists()
+
+
+def test_active_transaction_recovery_rejects_cross_nonce_replay(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    source = ProcessSupervisorCommand(config)
+    launch = source.factory.issue_launch(
+        result_occurrence_id=config.result_occurrence_id,
+        manifest_entry_preimage_digest=config.manifest_entry_preimage_digest,
+        execution_nonce=config.execution_nonce,
+        child_pid=4242,
+        child_start_token="pid-start-token",
+        stream_id=config.stream_id,
+        source_snapshot_fingerprint=config.source_snapshot_fingerprint,
+        deadline_policy_digest=config.deadline_policy_digest,
+    )
+    assignment = source.factory.decode(authority["assignment"].to_dict())
+    checkpoint = source.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+    )
+    source.store.persist_launch(launch)
+    monkeypatch.setattr(
+        source.store, "_commit_pending_active_locked",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("fault injection after pending persistence")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="fault injection"):
+        source.store.persist_active(checkpoint, authority["prefix"])
+
+    replay_config = replace(config, execution_nonce="execution-nonce-2")
+    replay = ProcessSupervisorCommand(replay_config)
+    (replay.store.directory / "launch.json").write_bytes(
+        (source.store.directory / "launch.json").read_bytes()
+    )
+    pending = json.loads(
+        (source.store.directory / "pending-active-transaction.json").read_text()
+    )
+    pending["invocation_nonce"] = replay_config.execution_nonce
+    pending["transaction_digest"] = authority_digest({
+        key: value for key, value in pending.items()
+        if key != "transaction_digest"
+    })
+    (replay.store.directory / "pending-active-transaction.json").write_text(
+        json.dumps(pending, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+
+    with pytest.raises(
+        ValueError, match="pending ACTIVE transaction launch authority differs",
+    ):
+        replay.store.recover_pending_active_commit()
+    assert not (replay.store.directory / "checkpoint.json").exists()
+    assert not (replay.store.directory / "state.json").exists()
+
+
+def test_interrupted_next_active_transaction_retains_resolved_predecessor(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch, first = _persist_active_for_command(command, authority)
+    continuation, stream = _completed_continuation(
+        authority,
+        supervisor=command.factory,
+        checkpoint=first,
+    )
+    _ready, resolved = command.store.worker_publish_completion(
+        active=first,
+        continuation=continuation,
+        prefix=authority["prefix"],
+        continuation_stream=stream,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    second = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+        prior_resolved=resolved,
+    )
+    original_replace = command.store._atomic_replace
+    interrupted = False
+
+    def interrupt_state_commit(path, data):
+        nonlocal interrupted
+        if path.name == "state.json" and not interrupted:
+            interrupted = True
+            raise RuntimeError("fault injection before ACTIVE state commit")
+        return original_replace(path, data)
+
+    monkeypatch.setattr(command.store, "_atomic_replace", interrupt_state_commit)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(second, authority["prefix"])
+    history = (
+        command.store.directory
+        / "checkpoint-history"
+        / resolved.receipt_digest
+    )
+    assert (history / "state.json").is_file()
+    assert command.factory.decode(json.loads(
+        (history / "state.json").read_text(encoding="utf-8")
+    )).receipt_digest == resolved.receipt_digest
+
+    recovered, recovered_prefix = command.store.recover_pending_active_commit()
+
+    assert recovered.receipt_digest == second.receipt_digest
+    assert recovered_prefix.prefix_authority_digest == (
+        authority["prefix"].prefix_authority_digest
+    )
+    assert command.store.read_state().receipt_digest == second.receipt_digest
+    assert (history / "state.json").is_file()
+
+
+def test_interrupted_resolved_archive_is_resumed_before_active_commit(
+    tmp_path, monkeypatch,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch, first = _persist_active_for_command(command, authority)
+    continuation, stream = _completed_continuation(
+        authority,
+        supervisor=command.factory,
+        checkpoint=first,
+    )
+    _ready, resolved = command.store.worker_publish_completion(
+        active=first,
+        continuation=continuation,
+        prefix=authority["prefix"],
+        continuation_stream=stream,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    second = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+        prior_resolved=resolved,
+    )
+    original_replace = os.replace
+    interrupted = False
+
+    def interrupt_archive(source, destination):
+        nonlocal interrupted
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            source_path == command.store.directory / "checkpoint.json"
+            and destination_path.parent.name == resolved.receipt_digest
+            and not interrupted
+        ):
+            interrupted = True
+            raise RuntimeError("fault injection during RESOLVED archive")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", interrupt_archive)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(second, authority["prefix"])
+    history = (
+        command.store.directory
+        / "checkpoint-history"
+        / resolved.receipt_digest
+    )
+    assert (history / "checkpoint-prefix-stream.json").is_file()
+    assert not (history / "state.json").exists()
+    assert (command.store.directory / "state.json").is_file()
+
+    monkeypatch.setattr(os, "replace", original_replace)
+    recovered, _recovered_prefix = command.store.recover_pending_active_commit()
+
+    assert recovered.receipt_digest == second.receipt_digest
+    assert command.store.read_state().receipt_digest == second.receipt_digest
+    assert command.factory.decode(json.loads(
+        (history / "state.json").read_text(encoding="utf-8")
+    )).receipt_digest == resolved.receipt_digest
+
+
+@pytest.mark.parametrize(
+    ("tamper_name", "tamper_payload"),
+    (
+        ("checkpoint.json", b"{}\n"),
+        ("checkpoint-prefix-stream.json", b"{}\n"),
+        ("pending-active-transaction.json", b"{}\n"),
+    ),
+)
+def test_interrupted_active_transaction_rejects_tampered_authority(
+    tmp_path, monkeypatch, tamper_name, tamper_payload,
+):
+    authority, config = _config(tmp_path, (sys.executable, "-c", "pass"))
+    command = ProcessSupervisorCommand(config)
+    launch = command.factory.issue_launch(
+        result_occurrence_id=config.result_occurrence_id,
+        manifest_entry_preimage_digest=config.manifest_entry_preimage_digest,
+        execution_nonce=config.execution_nonce,
+        child_pid=4242,
+        child_start_token="pid-start-token",
+        stream_id=config.stream_id,
+        source_snapshot_fingerprint=config.source_snapshot_fingerprint,
+        deadline_policy_digest=config.deadline_policy_digest,
+    )
+    assignment = command.factory.decode(authority["assignment"].to_dict())
+    checkpoint = command.factory.issue_active_checkpoint(
+        launch=launch,
+        prefix=authority["prefix"],
+        projection=authority["projection"],
+        assignment=assignment,
+        invocation=authority["invocation"],
+        operational_factory=authority["operational_factory"],
+        worker_pid=4242,
+        worker_start_token="pid-start-token",
+    )
+    command.store.persist_launch(launch)
+    original_replace = command.store._atomic_replace
+
+    def interrupt_state_commit(path, data):
+        if path.name == "state.json":
+            raise RuntimeError("fault injection before ACTIVE state commit")
+        return original_replace(path, data)
+
+    monkeypatch.setattr(command.store, "_atomic_replace", interrupt_state_commit)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        command.store.persist_active(checkpoint, authority["prefix"])
+    (command.store.directory / tamper_name).write_bytes(tamper_payload)
+    with pytest.raises(ValueError, match="pending ACTIVE transaction"):
+        command.store.recover_pending_active_commit()
 
 
 def test_deadline_does_not_misclassify_resolved_child_checkpoint_as_pair_result(

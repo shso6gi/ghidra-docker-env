@@ -247,6 +247,45 @@ def test_worker_continuation_and_crash_window_forbid_timeout_claim(tmp_path):
     assert (store.directory / "recovery-resolution.json").exists()
 
 
+def test_worker_continuation_marker_is_committed_after_stream(
+    tmp_path, monkeypatch,
+):
+    authority = _active_process_authority()
+    supervisor = authority["supervisor"]
+    store = DurableCheckpointStore(tmp_path, supervisor, "execution-nonce-1")
+    store.persist_launch(authority["launch"])
+    store.persist_active(authority["checkpoint"], authority["prefix"])
+    continuation, continuation_stream = _completed_continuation(authority)
+    original_write = store._atomic_write
+    member_writes = []
+
+    def interrupt_second_member(path, data, *, identical_ok=False):
+        if path.name in {"continuation.json", "continuation-stream.json"}:
+            member_writes.append(path.name)
+            if len(member_writes) == 2:
+                raise RuntimeError("fault injection before continuation commit")
+        return original_write(path, data, identical_ok=identical_ok)
+
+    monkeypatch.setattr(store, "_atomic_write", interrupt_second_member)
+    with pytest.raises(RuntimeError, match="fault injection"):
+        store.worker_publish_continuation(
+            active=authority["checkpoint"], continuation=continuation,
+            prefix=authority["prefix"], continuation_stream=continuation_stream,
+        )
+
+    assert member_writes == [
+        "continuation-stream.json",
+        "continuation.json",
+    ]
+    assert (store.directory / "continuation-stream.json").is_file()
+    assert not (store.directory / "continuation.json").exists()
+    claimed = store.supervisor_claim_timeout(
+        active=authority["checkpoint"], prefix=authority["prefix"],
+        kill_disposition="SIGKILL_AFTER_DEADLINE",
+    )
+    assert claimed.payload["state"] == CheckpointState.TIMED_OUT_CLAIMED.value
+
+
 def test_worker_completion_uses_active_ready_resolved_chain(tmp_path):
     authority = _active_process_authority()
     supervisor = authority["supervisor"]

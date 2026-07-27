@@ -543,8 +543,13 @@ class ProcessSupervisorCommand:
         self, *, launch: Any, process: subprocess.Popen[Any], start_token: str,
     ) -> tuple[int, dict[str, Any]]:
         kill_disposition = self._terminate_exact_process_group(process, start_token)
+        recovered_pending = self.store.recover_pending_active_commit()
         state_path = self.store.directory / "state.json"
-        state = self.store.read_state() if state_path.exists() else None
+        state = (
+            recovered_pending[0]
+            if recovered_pending is not None
+            else self.store.read_state() if state_path.exists() else None
+        )
         if state is None or CheckpointState(
             state.payload["state"]
         ) is CheckpointState.RESOLVED:
@@ -580,6 +585,7 @@ class ProcessSupervisorCommand:
     def _resume(self) -> int:
         launch = self._load_durable_launch()
         try:
+            self.store.recover_pending_active_commit()
             canonical_receipt_path = (
                 self.store.directory / "canonical-resolved-receipt.json"
             )

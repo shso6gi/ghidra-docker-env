@@ -73,6 +73,7 @@ PROCESS_WORKER_ISSUER_ID = "decompiler-process-runner-v1"
 PROCESS_POLICY_ID = "decompiler-deadline-policy-v1"
 EMPTY_STREAM_ROOT = "0" * 64
 CHECKPOINT_AUTHORITY_FILENAMES = (
+    "pending-active-transaction.json",
     "checkpoint.json",
     "state.json",
     "checkpoint-prefix-stream.json",
@@ -86,6 +87,7 @@ CHECKPOINT_AUTHORITY_FILENAMES = (
     "terminal-stream.json",
     "child-exit.json",
 )
+ACTIVE_TRANSACTION_SCHEMA = "durable-active-checkpoint-transaction-v1"
 
 _OPERATIONAL_PROCESS_ROWS = {
     "function_decompilation_artifact_unavailable": (
@@ -1804,7 +1806,7 @@ class ProcessSupervisorAuthorityFactory:
 
 
 class DurableCheckpointStore:
-    """Atomic, fsync-backed state/continuation store with one directory lock."""
+    """Atomic, fsync-backed state/continuation store with a nonce-local lock."""
 
     def __init__(
         self, root: Path, factory: ProcessSupervisorAuthorityFactory,
@@ -1821,9 +1823,9 @@ class DurableCheckpointStore:
         self.invocation_nonce = invocation_nonce
         self.directory = self.root / invocation_nonce
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.lock_path = self.root / ".checkpoint-directory.lock"
+        self.lock_path = self.directory / ".checkpoint-transaction.lock"
         self.lock_directory_digest = authority_digest({
-            "checkpoint_directory": str(self.root.resolve())
+            "checkpoint_directory": str(self.directory.resolve())
         })
         self.codec = StrictV2JsonCodec(
             reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
@@ -1867,6 +1869,129 @@ class DurableCheckpointStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    def _atomic_replace(self, path: Path, data: bytes) -> None:
+        fd, temporary = tempfile.mkstemp(prefix=".replace-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb", closefd=True) as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    @property
+    def _pending_active_path(self) -> Path:
+        return self.directory / "pending-active-transaction.json"
+
+    def _active_transaction_bytes(
+        self, receipt: SignedProcessAuthorityReceipt,
+        prefix_stream: SealedEventStream,
+    ) -> bytes:
+        body = {
+            "schema": ACTIVE_TRANSACTION_SCHEMA,
+            "authority_kind": "DurableActiveCheckpointTransaction",
+            "invocation_nonce": self.invocation_nonce,
+            "checkpoint_receipt": receipt.to_dict(),
+            "checkpoint_receipt_digest": receipt.receipt_digest,
+            "launch_receipt_digest": receipt.payload["launch_receipt_digest"],
+            "prefix_stream": json.loads(self.codec.dumps(prefix_stream)),
+            "prefix_authority_digest": receipt.payload["prefix_digest"],
+            "prior_resolved_receipt_digest": receipt.payload.get(
+                "prior_resolved_receipt_digest"
+            ),
+        }
+        payload = {**body, "transaction_digest": authority_digest(body)}
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+
+    def _decode_active_transaction_locked(
+        self,
+    ) -> tuple[SignedProcessAuthorityReceipt, EventStreamPrefixView, bytes, bytes]:
+        try:
+            payload = json.loads(
+                self._pending_active_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            raise ValueError("pending ACTIVE transaction is missing or invalid") from exc
+        required = {
+            "schema", "authority_kind", "invocation_nonce",
+            "checkpoint_receipt", "checkpoint_receipt_digest",
+            "launch_receipt_digest", "prefix_stream",
+            "prefix_authority_digest", "prior_resolved_receipt_digest",
+            "transaction_digest",
+        }
+        body = {
+            key: value for key, value in payload.items()
+            if key != "transaction_digest"
+        }
+        if (
+            set(payload) != required
+            or payload["schema"] != ACTIVE_TRANSACTION_SCHEMA
+            or payload["authority_kind"]
+            != "DurableActiveCheckpointTransaction"
+            or payload["invocation_nonce"] != self.invocation_nonce
+            or payload["transaction_digest"] != authority_digest(body)
+        ):
+            raise ValueError("pending ACTIVE transaction authority drifted")
+        try:
+            checkpoint = self.factory.decode(payload["checkpoint_receipt"])
+            stream = self.codec.loads(json.dumps(
+                payload["prefix_stream"], sort_keys=True, separators=(",", ":")
+            ))
+            prefix = EventStreamPrefixView.from_sealed_stream(stream)
+            launch = self.factory.decode(json.loads(
+                (self.directory / "launch.json").read_text(encoding="utf-8")
+            ))
+        except Exception as exc:
+            raise ValueError("pending ACTIVE transaction members are invalid") from exc
+        if (
+            launch.receipt_kind != "SupervisorLaunchReceipt"
+            or launch.payload["execution_nonce"] != self.invocation_nonce
+            or payload["invocation_nonce"] != launch.payload["execution_nonce"]
+        ):
+            raise ValueError(
+                "pending ACTIVE transaction launch authority differs"
+            )
+        prefix.validate()
+        if (
+            checkpoint.payload["state"] != CheckpointState.ACTIVE.value
+            or checkpoint.receipt_digest
+            != payload["checkpoint_receipt_digest"]
+            or checkpoint.payload["launch_receipt_digest"]
+            != payload["launch_receipt_digest"]
+            or checkpoint.payload["launch_receipt_digest"]
+            != launch.receipt_digest
+            or checkpoint.payload["prefix_digest"]
+            != payload["prefix_authority_digest"]
+            or checkpoint.payload["prefix_digest"]
+            != prefix.prefix_authority_digest
+            or checkpoint.payload.get("prior_resolved_receipt_digest")
+            != payload["prior_resolved_receipt_digest"]
+        ):
+            raise ValueError("pending ACTIVE transaction members do not join")
+        return (
+            checkpoint,
+            prefix,
+            self.codec.dumps(stream).encode("utf-8"),
+            self._bytes(checkpoint),
+        )
+
+    def _remove_pending_active_locked(self) -> None:
+        self._pending_active_path.unlink()
+        directory_fd = os.open(self.directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def persist_launch(self, receipt: SignedProcessAuthorityReceipt) -> None:
         self.factory.validate(receipt)
@@ -1912,9 +2037,7 @@ class DurableCheckpointStore:
         self, resolved: SignedProcessAuthorityReceipt,
     ) -> None:
         history = self.directory / "checkpoint-history" / resolved.receipt_digest
-        if history.exists():
-            raise ValueError("resolved checkpoint history already exists")
-        history.mkdir(parents=True)
+        history.mkdir(parents=True, exist_ok=True)
         names = (
             "checkpoint-prefix-stream.json",
             "checkpoint.json",
@@ -1925,13 +2048,109 @@ class DurableCheckpointStore:
         )
         for name in names:
             source = self.directory / name
+            destination = history / name
+            if destination.exists():
+                if source.exists():
+                    if source.read_bytes() != destination.read_bytes():
+                        raise ValueError(
+                            "resolved checkpoint history member differs"
+                        )
+                    source.unlink()
+                continue
             if source.exists():
-                os.replace(source, history / name)
+                os.replace(source, destination)
+        try:
+            archived = self.factory.decode(json.loads(
+                (history / "state.json").read_text(encoding="utf-8")
+            ))
+        except Exception as exc:
+            raise ValueError(
+                "resolved checkpoint history is incomplete or invalid"
+            ) from exc
+        if archived.receipt_digest != resolved.receipt_digest:
+            raise ValueError("resolved checkpoint history authority differs")
         directory_fd = os.open(history, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _commit_pending_active_locked(
+        self,
+    ) -> tuple[SignedProcessAuthorityReceipt, EventStreamPrefixView]:
+        checkpoint, prefix, prefix_bytes, checkpoint_bytes = (
+            self._decode_active_transaction_locked()
+        )
+        state_path = self.directory / "state.json"
+        predecessor_digest = checkpoint.payload.get(
+            "prior_resolved_receipt_digest"
+        )
+        already_committed = False
+        if state_path.exists():
+            current = self.factory.decode(json.loads(
+                state_path.read_text(encoding="utf-8")
+            ))
+            if current.receipt_digest == checkpoint.receipt_digest:
+                already_committed = True
+            elif (
+                current.payload.get("state") != CheckpointState.RESOLVED.value
+                or current.receipt_digest != predecessor_digest
+            ):
+                raise ValueError(
+                    "pending ACTIVE transaction does not extend committed state"
+                )
+            else:
+                self._archive_resolved_checkpoint_locked(current)
+        elif predecessor_digest is not None:
+            history_state = (
+                self.directory / "checkpoint-history"
+                / predecessor_digest / "state.json"
+            )
+            try:
+                predecessor = self.factory.decode(json.loads(
+                    history_state.read_text(encoding="utf-8")
+                ))
+            except Exception as exc:
+                raise ValueError(
+                    "pending ACTIVE transaction lost its resolved predecessor"
+                ) from exc
+            if (
+                predecessor.receipt_digest != predecessor_digest
+                or predecessor.payload.get("state")
+                != CheckpointState.RESOLVED.value
+            ):
+                raise ValueError(
+                    "pending ACTIVE transaction predecessor history differs"
+                )
+
+        members = (
+            (self.directory / "checkpoint-prefix-stream.json", prefix_bytes),
+            (self.directory / "checkpoint.json", checkpoint_bytes),
+        )
+        for path, expected in members:
+            if path.exists() and path.read_bytes() != expected:
+                raise ValueError(
+                    "pending ACTIVE transaction conflicts with durable member"
+                )
+        if already_committed and any(not path.exists() for path, _ in members):
+            raise ValueError(
+                "committed ACTIVE transaction lost a durable member"
+            )
+        for path, expected in members:
+            if not path.exists():
+                self._atomic_write(path, expected)
+        if not already_committed:
+            self._atomic_replace(state_path, checkpoint_bytes)
+        self._remove_pending_active_locked()
+        return checkpoint, prefix
+
+    def recover_pending_active_commit(
+        self,
+    ) -> Optional[tuple[SignedProcessAuthorityReceipt, EventStreamPrefixView]]:
+        with self._locked():
+            if not self._pending_active_path.exists():
+                return None
+            return self._commit_pending_active_locked()
 
     def rematerialize_child_exit_resolution(self) -> SignedProcessAuthorityReceipt:
         receipt = self.factory.decode(json.loads(
@@ -1977,7 +2196,6 @@ class DurableCheckpointStore:
                     raise ValueError(
                         "ACTIVE checkpoint does not extend durable resolved state"
                     )
-                self._archive_resolved_checkpoint_locked(predecessor)
             elif predecessor_digest is not None:
                 raise ValueError("first ACTIVE checkpoint carries a predecessor")
             prefix_stream = SealedEventStream(
@@ -1991,13 +2209,10 @@ class DurableCheckpointStore:
             )
             prefix_stream.validate()
             self._atomic_write(
-                self.directory / "checkpoint-prefix-stream.json",
-                self.codec.dumps(prefix_stream).encode("utf-8"),
+                self._pending_active_path,
+                self._active_transaction_bytes(receipt, prefix_stream),
             )
-            self._atomic_write(
-                self.directory / "checkpoint.json", self._bytes(receipt)
-            )
-            self._atomic_write(self.directory / "state.json", self._bytes(receipt))
+            self._commit_pending_active_locked()
 
     def rematerialize_active_prefix(self) -> EventStreamPrefixView:
         try:
@@ -2035,13 +2250,13 @@ class DurableCheckpointStore:
         self.factory.validate_worker_continuation(
             receipt, prefix, continuation_stream
         )
-        self._atomic_write(
-            self.directory / "continuation.json", self._bytes(receipt),
-            identical_ok=True,
-        )
         stream_bytes = self.codec.dumps(continuation_stream).encode("utf-8")
         self._atomic_write(
             self.directory / "continuation-stream.json", stream_bytes,
+            identical_ok=True,
+        )
+        self._atomic_write(
+            self.directory / "continuation.json", self._bytes(receipt),
             identical_ok=True,
         )
 

@@ -256,6 +256,64 @@ def test_run_health_counts_verified_pair_status_metadata(tmp_path):
     assert health["supervisor_status_counts"] == {"TIMEOUT": 1}
 
 
+def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    path.with_suffix(".pair-status.json").write_text(json.dumps({
+        "classification_valid": False,
+        "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+        "detail": "ValueError: durable restart authority is invalid",
+    }))
+
+    record = read_validation_log_record(path, canonical_only=True)
+    summary = aggregate_validation_logs_by_function((path,), canonical_only=True)
+    health = build_run_health_summary(summary)
+
+    assert record.status == STATUS_ERROR
+    assert record.payloads == ()
+    assert record.pair_status_metadata == {
+        "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+        "child_returncode": None,
+        "supervisor_status": "INVALID",
+        "classification_valid": False,
+        "detail": "ValueError: durable restart authority is invalid",
+    }
+    assert summary.overall.count(STATUS_ERROR) == 1
+    assert health["error_kind_counts"] == {"PAIR_STATUS_AUTHORITY_INVALID": 1}
+    assert health["supervisor_status_counts"] == {"INVALID": 1}
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        {
+            "classification_valid": False,
+            "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+            "detail": "invalid",
+            "extra": "unsealed",
+        },
+        {
+            "classification_valid": False,
+            "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+            "detail": "",
+        },
+        {
+            "classification_valid": False,
+            "error_kind": "DIFFERENT_ERROR_KIND",
+            "detail": "invalid",
+        },
+    ),
+)
+def test_canonical_summary_rejects_other_unsigned_diagnostics(
+    tmp_path, diagnostic,
+):
+    path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    _write_pair_status(path, "TIMEOUT")
+    path.with_suffix(".pair-status.json").write_text(json.dumps(diagnostic))
+
+    with pytest.raises(ValueError, match="signed pair-status schema differs"):
+        read_validation_log_record(path, canonical_only=True)
+
+
 def test_canonical_pair_status_rejects_schema_extension(tmp_path):
     path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
     status_path = _write_pair_status(path, "TIMEOUT")

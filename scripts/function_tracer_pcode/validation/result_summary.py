@@ -262,16 +262,29 @@ def read_validation_log_record(
     text = log_path.read_text(errors="replace") if log_path.is_file() else ""
     payloads = extract_result_payloads_from_text(text)
     pair_status = None
+    operational_invalid = None
     if canonical_only:
         pair_status_path = log_path.with_suffix(".pair-status.json")
         if pair_status_path.is_file():
             pair_status_payload = json.loads(
                 pair_status_path.read_text(encoding="utf-8")
             )
-            pair_status = validate_signed_pair_status(
-                pair_status_payload,
-                public_key_path=find_pair_status_public_key(pair_status_path),
-            )
+            if (
+                set(pair_status_payload) == {
+                    "classification_valid", "error_kind", "detail",
+                }
+                and pair_status_payload["classification_valid"] is False
+                and pair_status_payload["error_kind"]
+                == "PAIR_STATUS_AUTHORITY_INVALID"
+                and type(pair_status_payload["detail"]) is str
+                and bool(pair_status_payload["detail"])
+            ):
+                operational_invalid = pair_status_payload
+            else:
+                pair_status = validate_signed_pair_status(
+                    pair_status_payload,
+                    public_key_path=find_pair_status_public_key(pair_status_path),
+                )
         events = _extract_final_result_events(text, matrix_context=True)
         final_payload = events[-1][2] if events else None
         payloads = (
@@ -310,6 +323,8 @@ def read_validation_log_record(
                 else pair_status["canonical_outcome"]
             )
             if pair_status is not None
+            else STATUS_ERROR
+            if operational_invalid is not None
             else STATUS_INCOMPLETE
             if canonical_only
             else classify_log_text(text, matrix_context=True)
@@ -321,7 +336,16 @@ def read_validation_log_record(
                 "child_returncode": pair_status["child_returncode"],
                 "supervisor_status": pair_status["supervisor_status"],
             }
-            if pair_status is not None else None
+            if pair_status is not None
+            else {
+                "error_kind": operational_invalid["error_kind"],
+                "child_returncode": None,
+                "supervisor_status": "INVALID",
+                "classification_valid": False,
+                "detail": operational_invalid["detail"],
+            }
+            if operational_invalid is not None
+            else None
         ),
     )
 
