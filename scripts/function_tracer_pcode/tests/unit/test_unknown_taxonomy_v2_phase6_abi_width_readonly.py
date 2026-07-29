@@ -1613,6 +1613,71 @@ def test_return_width_pair_sources_dual_write_disjoint_relational_causes(
         assert scheduled == {}
 
 
+def test_unformable_projection_seed_is_typed_unknown_not_shadow_error():
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    left = replace(
+        _width_seed("left"),
+        calling_convention_fact=("declared_return_type_width", 128),
+    )
+    right = replace(
+        _width_seed("right"),
+        payload_width=16,
+        payload_value_identity=("payload", "right", 16),
+        calling_convention_fact=("declared_return_type_width", 128),
+    )
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            AbiWidthReadonlyBlockerSignal: AbiWidthReadonlyPilotEncoder(),
+        }),
+    )
+    session = connector.begin({"case": "unformable-return-projection"})
+
+    with production_signal_scope(session):
+        blocked = build_top_level_observation_contract(left, right)
+
+    assert blocked.blockers[0].missing_slot == "projection_applicability"
+    assert session.domain_signal_error_kinds == []
+    assert session.domain_signal_error_details == []
+    projection = session.preview_lifecycle_projection()
+    assert [row.reason_id for row in projection.c_active_base] == [
+        "return_observation_contract_unproven"
+    ]
+    assert [row.proof_kind for row in projection.q_open_base] == [
+        "return_observation_contract"
+    ]
+
+    result = SimpleNamespace(
+        is_equivalent=True,
+        error_message=None,
+        failure_status=None,
+        failure_message=None,
+        unknown_reasons=[],
+        unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        session, result, case_id="unformable-return-projection"
+    )
+    assert (
+        evidence.pilot_result.candidate.decision_receipt.outcome
+        is Outcome.UNKNOWN
+    )
+
+
 def test_summary_width_deferred_occurrences_expand_to_exact_slice5_signals():
     from scripts.function_tracer_pcode.analysis.summary_returns import (
         _summary_blocker_occurrence,

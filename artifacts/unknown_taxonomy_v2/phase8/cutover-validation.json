@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "5c6b520ae6408640e21bf481efb2bfcf15d25a349336e2d2bc46a2ac402031c5",
+  "artifact_digest": "58e4b69f7a1a3ddc61c317fc2ab97bedb1a1a5e4a66b2888ee0b54add7080824",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "7b6b155aaa682a1b656094a82b5683c23f9d651832102c65777306cbeaed2e14"
+    "sha256": "128aa853ee43335f9ea37078a342dce401b7037a02a9e4bf07dcdeb06d47b1bc"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "19b893ff9931b60444d90402e0f8066a7dc4b0eb2702688c655392b2d503e201",
+    "manifest_digest": "c3bc942d9c94514c09383d2caf6ee9819ce5e1773a277d43190493745dd0a1e3",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "ea5d38f588b1def3cc7059d0d4ff4434cc3989a528fe8d65d8d69026230ab44c",
+    "sha256": "f4bf70689a0e83cfabc5f80dbd41b912b6ad750d4d1cb15ca1af5bedc18a5938",
     "site_count": 28
   },
   "source_files": [

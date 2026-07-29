@@ -1112,6 +1112,29 @@ def extract_function_return_width_seed(analysis: Any, case: Any) -> FunctionRetu
     )
 
 
+def _emit_return_observation_need_blocker(
+    left: FunctionReturnWidthSeed,
+    right: FunctionReturnWidthSeed,
+    pair_seed: PairReturnObservationSeed,
+) -> None:
+    """Publish the exact proof gap for a pair with no common observation width."""
+
+    from .v2.abi_width_readonly import (
+        AbiWidthReadonlyBlockerSignal,
+        ReturnObservationNeedSeed,
+    )
+    from .v2.production_signals import emit_abi_width_readonly_signal
+
+    emit_abi_width_readonly_signal(
+        AbiWidthReadonlyBlockerSignal.from_observation_need_seed(
+            ReturnObservationNeedSeed.from_pair_seed(left, right, pair_seed)
+        ),
+        producer_site_manifest_id=(
+            "return-width-observation-contract-blocker"
+        ),
+    )
+
+
 def build_top_level_observation_contract(
     left: FunctionReturnWidthSeed,
     right: FunctionReturnWidthSeed,
@@ -1172,20 +1195,9 @@ def build_top_level_observation_contract(
         provenance_kind = "common_validated_semantic_payload_width"
     if observation_width is None:
         try:
-            from .v2.abi_width_readonly import (
-                AbiWidthReadonlyBlockerSignal,
-                ReturnObservationNeedSeed,
-            )
-            from .v2.production_signals import emit_abi_width_readonly_signal
-
             pair_seed = build_pair_return_observation_seed(left, right)
-            emit_abi_width_readonly_signal(
-                AbiWidthReadonlyBlockerSignal.from_observation_need_seed(
-                    ReturnObservationNeedSeed.from_pair_seed(left, right, pair_seed)
-                ),
-                producer_site_manifest_id=(
-                    "return-width-observation-contract-blocker"
-                ),
+            _emit_return_observation_need_blocker(
+                left, right, pair_seed
             )
         except Exception as exc:
             from .v2.production_signals import record_production_pilot_shadow_error
@@ -1204,6 +1216,7 @@ def build_top_level_observation_contract(
         try:
             from .v2.abi_width_readonly import (
                 AbiWidthReadonlyBlockerSignal,
+                ProjectionNotFormable,
                 ReturnObservationProjectionSeed,
             )
             from .v2.production_signals import (
@@ -1212,26 +1225,32 @@ def build_top_level_observation_contract(
             )
 
             pair_seed = build_pair_return_observation_seed(left, right)
-            projection_seed = ReturnObservationProjectionSeed.from_pair_seed(
-                left, right, pair_seed
-            )
-            for reason_id in (
-                "return_observation_contract_unproven",
-                "return_high_bit_relation_unproven",
-            ):
-                signal = AbiWidthReadonlyBlockerSignal.from_projection_seed(
-                    reason_id, projection_seed
+            try:
+                projection_seed = ReturnObservationProjectionSeed.from_pair_seed(
+                    left, right, pair_seed
                 )
-                emit_abi_width_readonly_signal(
-                    signal,
-                    producer_site_manifest_id=(
-                        "return-width-projection-relation-blocker"
-                    ),
+            except ProjectionNotFormable:
+                _emit_return_observation_need_blocker(
+                    left, right, pair_seed
                 )
-                if reason_id == "return_high_bit_relation_unproven":
-                    register_abi_width_solver_candidate(
-                        signal, projection_seed
+            else:
+                for reason_id in (
+                    "return_observation_contract_unproven",
+                    "return_high_bit_relation_unproven",
+                ):
+                    signal = AbiWidthReadonlyBlockerSignal.from_projection_seed(
+                        reason_id, projection_seed
                     )
+                    emit_abi_width_readonly_signal(
+                        signal,
+                        producer_site_manifest_id=(
+                            "return-width-projection-relation-blocker"
+                        ),
+                    )
+                    if reason_id == "return_high_bit_relation_unproven":
+                        register_abi_width_solver_candidate(
+                            signal, projection_seed
+                        )
         except Exception as exc:
             from .v2.production_signals import record_production_pilot_shadow_error
 

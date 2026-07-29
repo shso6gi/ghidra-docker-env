@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "19b893ff9931b60444d90402e0f8066a7dc4b0eb2702688c655392b2d503e201",
+  "manifest_digest": "c3bc942d9c94514c09383d2caf6ee9819ce5e1773a277d43190493745dd0a1e3",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -852,10 +852,10 @@
         "typed-return-observation-need-signal-v2"
       ],
       "branch_or_attempt_contract_id": "return-width-observation-contract-blocker:invocation",
-      "column": 12,
+      "column": 4,
       "domain": "return_width",
       "emitter": "emit_abi_width_readonly_signal",
-      "enclosing_function": "build_top_level_observation_contract",
+      "enclosing_function": "_emit_return_observation_need_blocker",
       "expected_cause_slots": [
         {
           "allowed_reason_ids": [
@@ -868,10 +868,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1182,
+      "line": 1128,
       "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
       "producer_site_manifest_id": "return-width-observation-contract-blocker",
-      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+      "source_sha256": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154"
     },
     {
       "allowed_dispositions": [
@@ -951,7 +951,7 @@
         "typed-return-observation-signal-v2"
       ],
       "branch_or_attempt_contract_id": "return-width-projection-relation-blocker:invocation",
-      "column": 16,
+      "column": 20,
       "domain": "return_width",
       "emitter": "emit_abi_width_readonly_signal",
       "enclosing_function": "build_top_level_observation_contract",
@@ -977,10 +977,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1225,
+      "line": 1244,
       "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
       "producer_site_manifest_id": "return-width-projection-relation-blocker",
-      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+      "source_sha256": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154"
     },
     {
       "allowed_dispositions": [
@@ -1006,10 +1006,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1145,
+      "line": 1168,
       "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
-      "source_sha256": "48a7413c6ace9e3c8d14876772bd9125f0bedda73449084646e08f21b5865789"
+      "source_sha256": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154"
     },
     {
       "allowed_dispositions": [
