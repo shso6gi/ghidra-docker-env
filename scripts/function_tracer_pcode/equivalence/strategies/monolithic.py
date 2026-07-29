@@ -1758,11 +1758,16 @@ class MonolithicStrategy(CheckStrategy):
                         region_execution.session_certificate,
                     )
                     if not verify_monolithic_proof_bundle(proof_bundle):
+                        rejected_outcome = strategy_result.is_equivalent
                         strategy_result.is_equivalent = None
                         strategy_result.counterexample_raw = None
                         counterexample_raw = None
                         unknown_reasons.append(make_internal_v2_reason_diagnostic(
-                            "counterexample_analysis_safety_unproven",
+                            (
+                                "comparison_equivalence_closure_unproven"
+                                if rejected_outcome is True
+                                else "counterexample_analysis_safety_unproven"
+                            ),
                             stage="S_MONOLITHIC_FALLBACK",
                             evidence_refs=("monolithic_proof_bundle_invalid",),
                             detail=(
@@ -1772,6 +1777,31 @@ class MonolithicStrategy(CheckStrategy):
                         ))
                         strategy_result.unknown_reasons = unknown_reasons
                     dispatch_frame.monolithic_proof_bundle = proof_bundle
+                if (
+                    strategy_result.is_equivalent in {True, False}
+                    and proof_bundle is None
+                    and self.query_mode != "legacy"
+                ):
+                    rejected_outcome = strategy_result.is_equivalent
+                    strategy_result.is_equivalent = None
+                    strategy_result.counterexample_raw = None
+                    counterexample_raw = None
+                    unknown_reasons.append(make_internal_v2_reason_diagnostic(
+                        (
+                            "comparison_equivalence_closure_unproven"
+                            if rejected_outcome is True
+                            else "counterexample_analysis_safety_unproven"
+                        ),
+                        stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=(
+                            "monolithic_structured_proof_bundle_unavailable",
+                        ),
+                        detail=(
+                            "The legacy monolithic solver query did not carry "
+                            "canonical region proof-bundle authority."
+                        ),
+                    ))
+                    strategy_result.unknown_reasons = unknown_reasons
                 # Seal all decision authority while the prepared frame and its
                 # parent/child leases are still active.  Frame close only
                 # validates and revokes; it can never issue evidence.

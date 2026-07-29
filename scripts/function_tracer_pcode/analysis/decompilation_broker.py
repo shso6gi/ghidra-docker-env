@@ -54,6 +54,33 @@ def _emit(session: Any, signal: Any) -> int:
     )
 
 
+def _emit_with_active_checkpoint(
+    session: Any, signal: Any, prepared_checkpoint: Any, invocation: Any,
+) -> tuple[int, Any]:
+    """Commit one blocker and its ACTIVE checkpoint as one transaction."""
+
+    active = None
+
+    def persist_checkpoint() -> None:
+        nonlocal active
+        active = prepared_checkpoint.persist(invocation)
+
+    def rollback_checkpoint() -> None:
+        nonlocal active
+        if active is None:
+            raise ValueError("ACTIVE checkpoint rollback lacks committed authority")
+        active.rollback_initialization()
+        active = None
+
+    session.record_phase7_pre_emission_activation(
+        "decompilation-broker-operational-signal", signal
+    )
+    emitted = session._emit_domain_signal_with_commit(
+        signal, persist_checkpoint, rollback_checkpoint
+    )
+    return emitted, active
+
+
 def _program_seed(session: Any, factory: Any, program: Any) -> Any:
     seeds = session.domain_signal_state.setdefault("operational_program_seeds", {})
     existing = seeds.get(id(program))
@@ -70,14 +97,6 @@ def _program_seed(session: Any, factory: Any, program: Any) -> Any:
     )
     seeds[id(program)] = seed
     return seed
-
-
-def _next_ordinal(session: Any) -> int:
-    value = int(session.domain_signal_state.get(
-        "operational_decompilation_next_ordinal", 1
-    ))
-    session.domain_signal_state["operational_decompilation_next_ordinal"] = value + 1
-    return value
 
 
 class _BrokeredDecompileResults:
@@ -207,18 +226,17 @@ def _subordinate_decompile(
         program_seed = _program_seed(session, factory, analyzer.program)
         target = factory.target_from_ghidra(program_seed, function)
         input_surface = factory.input_surface_from_ghidra(function)
-        ordinal = _next_ordinal(session)
-        invocation = factory.issue_invocation(
+        attempt_identity = factory.issue_attempt_identity(
             target=target,
             input_surface=input_surface,
-            proof_requirement_id=assignment.proof_requirement_id,
-            invocation_identity=(
-                "subordinate-decompile-invocation-"
-                + session.identity.result_occurrence_id
-                + f"-{ordinal}"
-            ),
-            invocation_ordinal=ordinal,
+            source_contract_id=source_contract_id,
             configured_timeout_seconds=timeout,
+        )
+        invocation = factory.issue_invocation_for_attempt(
+            target=target,
+            input_surface=input_surface,
+            attempt_identity=attempt_identity,
+            proof_requirement_id=assignment.proof_requirement_id,
         )
         invocation_binding = assignment_factory.bind_invocation(
             assignment, projection=projection, prefix=prefix,
@@ -370,48 +388,67 @@ def decompile_function(
     try:
         from ..equivalence.v2.operational_extraction import OperationalBlockerSignal
 
-        program_seed = _program_seed(session, factory, analyzer.program)
-        target = factory.target_from_ghidra(program_seed, function)
-        input_surface = factory.input_surface_from_ghidra(function)
-        ordinal = _next_ordinal(session)
-        invocation_identity = (
-            "decompile-invocation-"
-            + session.identity.result_occurrence_id
-            + f"-{ordinal}"
-        )
-        blocker = OperationalBlockerSignal(
-            "function_decompilation_artifact_unavailable",
-            target,
-            (source_contract_id,),
-            "function-decompilation-artifact-producer-v2",
-            invocation_identity,
-        )
-        _emit(session, blocker)
-        authority = session.domain_signal_encoder.authority_for_signal(session, blocker)
-        decomp_q = authority.occurrence.proof_requirement_ids[0]
-        from ..equivalence.v2.process_worker_runtime import runtime_for_session
+        with session.domain_signal_transaction():
+            program_seed = _program_seed(session, factory, analyzer.program)
+            target = factory.target_from_ghidra(program_seed, function)
+            input_surface = factory.input_surface_from_ghidra(function)
+            attempt_identity = factory.issue_attempt_identity(
+                target=target,
+                input_surface=input_surface,
+                source_contract_id=source_contract_id,
+                configured_timeout_seconds=timeout,
+            )
+            blocker = OperationalBlockerSignal(
+                "function_decompilation_artifact_unavailable",
+                target,
+                (source_contract_id,),
+                "function-decompilation-artifact-producer-v2",
+                attempt_identity.attempt_id,
+            )
+            authority = session.domain_signal_encoder.authority_for_signal(
+                session, blocker
+            )
+            decomp_q = authority.occurrence.proof_requirement_ids[0]
+            from ..equivalence.v2.process_worker_runtime import runtime_for_session
 
-        runtime = runtime_for_session(session)
-        if runtime is not None:
-            prepared_checkpoint = runtime.prepare(
-                session=session, operational_factory=factory,
-                reason_id="function_decompilation_artifact_unavailable",
+            runtime = runtime_for_session(session)
+            if runtime is not None:
+                prepared_checkpoint = runtime.prepare_observation(
+                    session=session,
+                    operational_factory=factory,
+                    occurrence_authority=authority,
+                    reason_id="function_decompilation_artifact_unavailable",
+                    proof_requirement_id=decomp_q,
+                )
+                if prepared_checkpoint.assignment.payload[
+                    "proof_requirement_id"
+                ] != decomp_q:
+                    raise ValueError(
+                        "process assignment differs from prepared decompilation Q"
+                    )
+            invocation = factory.issue_invocation_for_attempt(
+                target=target,
+                input_surface=input_surface,
+                attempt_identity=attempt_identity,
                 proof_requirement_id=decomp_q,
             )
-            if prepared_checkpoint.assignment.payload[
-                "proof_requirement_id"
-            ] != decomp_q:
-                raise ValueError("process assignment differs from observed decompilation Q")
-        invocation = factory.issue_invocation(
-            target=target,
-            input_surface=input_surface,
-            proof_requirement_id=decomp_q,
-            invocation_identity=invocation_identity,
-            invocation_ordinal=ordinal,
-            configured_timeout_seconds=timeout,
-        )
-        if prepared_checkpoint is not None:
-            active_checkpoint = prepared_checkpoint.persist(invocation)
+            if prepared_checkpoint is None:
+                emitted = _emit(session, blocker)
+            else:
+                emitted, active_checkpoint = _emit_with_active_checkpoint(
+                    session, blocker, prepared_checkpoint, invocation
+                )
+            if emitted != 1:
+                raise ValueError(
+                    "decompilation blocker observation was not committed"
+                )
+            if (
+                prepared_checkpoint is not None
+                and active_checkpoint is None
+            ):
+                raise ValueError(
+                    "decompilation ACTIVE checkpoint was not committed"
+                )
     except Exception as exc:
         _record_shadow_error(exc)
         target = input_surface = invocation = blocker = None

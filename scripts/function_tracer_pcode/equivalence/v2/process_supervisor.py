@@ -2214,6 +2214,115 @@ class DurableCheckpointStore:
             )
             self._commit_pending_active_locked()
 
+    def rollback_active(
+        self, receipt: SignedProcessAuthorityReceipt,
+        prefix: EventStreamPrefixView,
+    ) -> None:
+        """Remove one exact ACTIVE transaction that has no committed event."""
+
+        self.factory.validate(receipt)
+        prefix.validate()
+        if (
+            receipt.payload["state"] != CheckpointState.ACTIVE.value
+            or receipt.payload["prefix_digest"] != prefix.prefix_authority_digest
+        ):
+            raise ValueError("ACTIVE rollback authority differs")
+        with self._locked():
+            if self._pending_active_path.exists():
+                pending, pending_prefix, _prefix_bytes, _checkpoint_bytes = (
+                    self._decode_active_transaction_locked()
+                )
+                if (
+                    pending.receipt_digest != receipt.receipt_digest
+                    or pending_prefix != prefix
+                ):
+                    raise ValueError(
+                        "pending ACTIVE rollback authority differs"
+                    )
+                self._commit_pending_active_locked()
+
+            state_path = self.directory / "state.json"
+            checkpoint_path = self.directory / "checkpoint.json"
+            prefix_path = self.directory / "checkpoint-prefix-stream.json"
+            active_paths = (state_path, checkpoint_path, prefix_path)
+            if not any(path.exists() for path in active_paths):
+                return
+            if not all(path.exists() for path in active_paths):
+                raise ValueError("ACTIVE rollback found partial durable authority")
+            try:
+                current = self.factory.decode(json.loads(
+                    state_path.read_text(encoding="utf-8")
+                ))
+                checkpoint = self.factory.decode(json.loads(
+                    checkpoint_path.read_text(encoding="utf-8")
+                ))
+                stream = self.codec.loads(prefix_path.read_text(encoding="utf-8"))
+                committed_prefix = EventStreamPrefixView.from_sealed_stream(stream)
+            except Exception as exc:
+                raise ValueError(
+                    "ACTIVE rollback durable authority is invalid"
+                ) from exc
+            if (
+                current.receipt_digest != receipt.receipt_digest
+                or checkpoint.receipt_digest != receipt.receipt_digest
+                or committed_prefix != prefix
+            ):
+                raise ValueError("committed ACTIVE rollback authority differs")
+            if any(
+                (self.directory / name).exists()
+                for name in (
+                    "continuation.json", "continuation-stream.json", "ready.json",
+                    "recovery-resolution.json", "claimed.json", "timeout.json",
+                    "terminal-segment.json", "terminal-stream.json",
+                )
+            ):
+                raise ValueError(
+                    "ACTIVE rollback cannot remove terminalized authority"
+                )
+
+            predecessor_digest = receipt.payload.get(
+                "prior_resolved_receipt_digest"
+            )
+            predecessor_names = (
+                "checkpoint-prefix-stream.json",
+                "checkpoint.json",
+                "continuation-stream.json",
+                "continuation.json",
+                "ready.json",
+                "state.json",
+            )
+            history = None
+            if predecessor_digest is not None:
+                history = (
+                    self.directory / "checkpoint-history" / predecessor_digest
+                )
+                if any(
+                    not (history / name).exists()
+                    for name in predecessor_names
+                ):
+                    raise ValueError(
+                        "ACTIVE rollback predecessor history is incomplete"
+                    )
+
+            for path in active_paths:
+                path.unlink()
+
+            if history is not None:
+                for name in predecessor_names:
+                    destination = self.directory / name
+                    if destination.exists():
+                        raise ValueError(
+                            "ACTIVE rollback predecessor destination exists"
+                        )
+                    os.replace(history / name, destination)
+                history.rmdir()
+
+            directory_fd = os.open(self.directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
     def rematerialize_active_prefix(self) -> EventStreamPrefixView:
         try:
             checkpoint = self.factory.decode(json.loads(

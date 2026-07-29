@@ -1,7 +1,7 @@
 {
-  "candidate_set_digest": "d69e884b3e31374c740d13f882c24242e510326e463c4195b0060e975fa549fa",
+  "candidate_set_digest": "14ef3539dc5d0d64711d3e12b016a252d3a891c952cff199b6281c681ec5ed03",
   "dynamic_site_decisions": [
-    {"path":"scripts/function_tracer_pcode/equivalence/strategies/monolithic.py","line":1881,"symbol":"check","in_scope":false,"disposition":"ReturnWidthMismatchError is sealed to non-retired return_width_bridge_missing"},
+    {"path":"scripts/function_tracer_pcode/equivalence/strategies/monolithic.py","line":1911,"symbol":"check","in_scope":false,"disposition":"ReturnWidthMismatchError is sealed to non-retired return_width_bridge_missing"},
     {"path":"scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py","line":743,"symbol":"_impl_check","in_scope":false,"disposition":"loop fallback classifier returns only sealed non-retired slice-4 reason IDs or fails closed"},
     {"path":"scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py","line":1400,"symbol":"_impl_check","in_scope":false,"disposition":"query-result blocker flow contains typed semantic reasons and no timeout-derived reason fallback"},
     {"path":"scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py","line":1489,"symbol":"_impl_check","in_scope":false,"disposition":"pending loop fallback is sealed to non-retired slice-4 reason IDs"},

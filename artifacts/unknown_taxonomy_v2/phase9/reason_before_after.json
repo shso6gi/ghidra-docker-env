@@ -1,10 +1,10 @@
 {
-  "artifact_digest": "6419f3df42cdc97d8a47159e03c4d7faf375218053d66c0cabb085a627f69557",
+  "artifact_digest": "b41265ab0ed003d000a818df8f0829cd44593e3e5fc7323292b5141ecb4ff7e1",
   "artifact_kind": "phase9-reason-before-after-v1",
   "internal_error_authority": {
     "focused_junit_sha256": "0fd550424066657f2140d06cd5e60de7e8ef315712d584aad7dd9201c85971d2",
     "outcome": "ERROR",
-    "phase8_artifact_digest": "4556396357573edb30bb62fe948bb8bcffe2887d9f1175d9208384ecf0c45218",
+    "phase8_artifact_digest": "5c6b520ae6408640e21bf481efb2bfcf15d25a349336e2d2bc46a2ac402031c5",
     "required_tests": [
       "test_cli_startup_error_emits_canonical_error_and_exit_four",
       "test_cli_no_solver_emits_canonical_error_and_exit_four",
@@ -15,7 +15,7 @@
     "after": "diagnostic-only; terminal timeout receipt finalizes TIMEOUT",
     "before": "UNKNOWN diagnostic reason could coexist with timeout",
     "final_outcome": "TIMEOUT",
-    "phase7_artifact_digest": "d4f031b2f1f6af79c6af8e77cd1b7a98e1244aeea4fb15cca003deba68f3ffbb",
+    "phase7_artifact_digest": "1b203ecb86929964d13b7c4749bc21c6cf5e7e808ee5bbc670bacaceeb1d3f3b",
     "production_emit_count": 0,
     "production_route_count": 0,
     "terminal_timeout_receipt_digest": "8dfb90936237ce45cce7578b64e1441cc9120986c809031dfddf3ae28d3dcb68"

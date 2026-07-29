@@ -762,3 +762,63 @@ def test_legacy_mode_is_an_explicit_validation_control() -> None:
     assert result.pairwise_debug_stats["monolithic_legacy_solver_checks"] == 1
     terminal = result.call_proof_terminal_provenance["monolithic_terminal_receipt"]
     assert terminal["outcome_kind"] == "eq_closure"
+
+
+def test_production_split_legacy_unsat_without_bundle_is_inconclusive(
+    monkeypatch,
+) -> None:
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        enable_rewrite=False,
+    )
+
+    def unavailable_split(*_args, **_kwargs):
+        raise TypeError("structured region plan unavailable")
+
+    monkeypatch.setattr(
+        checker.monolithic_strategy, "_execute_region_plan", unavailable_split,
+    )
+
+    result = checker.check(_analysis("left", 7), _analysis("right", 7))
+
+    assert result.is_equivalent is None
+    assert any(
+        reason.reason_id == "comparison_equivalence_closure_unproven"
+        and "monolithic_structured_proof_bundle_unavailable"
+        in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+    terminal = result.call_proof_terminal_provenance[
+        "monolithic_terminal_receipt"
+    ]
+    assert terminal["outcome_kind"] == "inconclusive_diagnostic"
+    assert terminal["validated"] is True
+
+
+def test_production_split_legacy_sat_without_bundle_is_inconclusive(
+    monkeypatch,
+) -> None:
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        enable_rewrite=False,
+    )
+
+    def unavailable_split(*_args, **_kwargs):
+        raise TypeError("structured region plan unavailable")
+
+    monkeypatch.setattr(
+        checker.monolithic_strategy, "_execute_region_plan", unavailable_split,
+    )
+
+    result = checker.check(_analysis("left", 7), _analysis("right", 8))
+
+    assert result.is_equivalent is None
+    assert any(
+        reason.reason_id == "counterexample_analysis_safety_unproven"
+        for reason in result.unknown_reasons
+    )
+    terminal = result.call_proof_terminal_provenance[
+        "monolithic_terminal_receipt"
+    ]
+    assert terminal["outcome_kind"] == "inconclusive_diagnostic"
+    assert terminal["validated"] is True

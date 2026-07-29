@@ -1163,14 +1163,29 @@ def emit_abi_width_readonly_signal(
     accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
     if callable(accepts) and not accepts(type(signal)):
         return 0
-    if getattr(session, "phase7_runtime", None) is not None:
-        session.record_phase7_pre_emission_activation(
-            producer_site_manifest_id, signal
+
+    def emit_once() -> int:
+        already_observed = getattr(
+            session.domain_signal_encoder, "has_observed", None
         )
-    emit = getattr(session, "emit_domain_signal", None)
-    if not callable(emit):
-        raise TypeError("active production pilot session lacks signal authority")
-    return int(emit(signal))
+        if callable(already_observed) and already_observed(session, signal):
+            return 0
+        if getattr(session, "phase7_runtime", None) is not None:
+            session.record_phase7_pre_emission_activation(
+                producer_site_manifest_id, signal
+            )
+        emit = getattr(session, "emit_domain_signal", None)
+        if not callable(emit):
+            raise TypeError(
+                "active production pilot session lacks signal authority"
+            )
+        return int(emit(signal))
+
+    transaction = getattr(session, "domain_signal_transaction", None)
+    if callable(transaction):
+        with transaction():
+            return emit_once()
+    return emit_once()
 
 
 def emit_operational_extraction_signal(

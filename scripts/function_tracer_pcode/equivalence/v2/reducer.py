@@ -255,7 +255,13 @@ class ShadowLifecycleReducer:
                 if occurrence.source_snapshot_fingerprint != stream.envelope.source_snapshot_fingerprint:
                     raise ShadowEvidenceIncomplete("occurrence source snapshot differs from stream")
                 if occurrence.occurrence_id in occurrences:
-                    raise ShadowEvidenceIncomplete("duplicate occurrence observation")
+                    prior = occurrences[occurrence.occurrence_id].occurrence
+                    raise ShadowEvidenceIncomplete(
+                        "duplicate occurrence observation: "
+                        f"{occurrence.occurrence_id}: "
+                        f"{prior.attempt_id} -> "
+                        f"{occurrence.attempt_id}"
+                    )
                 occurrences[occurrence.occurrence_id] = authority
                 active.add(occurrence.occurrence_id)
                 completed[occurrence.occurrence_id] = set()

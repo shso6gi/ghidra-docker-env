@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import secrets
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -430,6 +431,7 @@ def _function_lookup_keys(function: Any) -> tuple[Any, ...]:
 _TARGET_TOKEN = object()
 _INPUT_SURFACE_TOKEN = object()
 _INVOCATION_TOKEN = object()
+_ATTEMPT_IDENTITY_TOKEN = object()
 _INVOCATION_CENSUS_TOKEN = object()
 _OBSERVATION_TOKEN = object()
 _ATTEMPT_TOKEN = object()
@@ -585,6 +587,77 @@ class DecompilationAttemptInputSurface:
         return cls(
             prototype, calling, parameters, returned, authority_digest(payload),
             _factory_token=_INPUT_SURFACE_TOKEN,
+        )
+
+
+@dataclass(frozen=True)
+class DecompilationAttemptIdentityReceipt:
+    attempt_id: str
+    target_digest: str
+    input_surface_digest: str
+    result_occurrence_id: str
+    source_contract_id: str
+    invocation_ordinal: int
+    configured_timeout_seconds: int
+    execution_identity_digest: str
+    receipt_digest: str
+    _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _ATTEMPT_IDENTITY_TOKEN:
+            raise TypeError(
+                "decompilation attempt identity receipt must be factory-issued"
+            )
+
+    @classmethod
+    def _issue(
+        cls, *, target: FunctionDecompilationTarget,
+        input_surface: DecompilationAttemptInputSurface,
+        result_occurrence_id: str, source_contract_id: str,
+        invocation_ordinal: int, configured_timeout_seconds: int,
+        execution_identity_digest: str, authority_root_digest: str,
+        _factory_token: object,
+    ) -> "DecompilationAttemptIdentityReceipt":
+        if _factory_token is not _ATTEMPT_IDENTITY_TOKEN:
+            raise TypeError("decompilation attempt identity issuer is invalid")
+        for value in (
+            result_occurrence_id, source_contract_id,
+            execution_identity_digest, authority_root_digest,
+        ):
+            _exact_string("decompilation attempt identity", value)
+        if type(invocation_ordinal) is not int or invocation_ordinal <= 0:
+            raise TypeError("decompilation attempt ordinal is invalid")
+        if (
+            type(configured_timeout_seconds) is not int
+            or configured_timeout_seconds <= 0
+        ):
+            raise TypeError("decompilation attempt timeout is invalid")
+        identity_body = {
+            "authority_root_digest": authority_root_digest,
+            "target_digest": target.target_digest,
+            "input_surface_digest": input_surface.surface_digest,
+            "result_occurrence_id": result_occurrence_id,
+            "source_contract_id": source_contract_id,
+            "invocation_ordinal": invocation_ordinal,
+            "configured_timeout_seconds": configured_timeout_seconds,
+            "execution_identity_digest": execution_identity_digest,
+            "attempt_identity_schema": "decompilation-attempt-identity-v1",
+        }
+        attempt_id = (
+            "decompile-attempt-" + authority_digest(identity_body)[:40]
+        )
+        payload = {**identity_body, "attempt_id": attempt_id}
+        return cls(
+            attempt_id,
+            target.target_digest,
+            input_surface.surface_digest,
+            result_occurrence_id,
+            source_contract_id,
+            invocation_ordinal,
+            configured_timeout_seconds,
+            execution_identity_digest,
+            authority_digest(payload),
+            _factory_token=_ATTEMPT_IDENTITY_TOKEN,
         )
 
 
@@ -1502,9 +1575,14 @@ class OperationalExtractionAuthorityFactory:
         if type(allow_fixture_inputs) is not bool:
             raise TypeError("fixture-input policy must be exact bool")
         self._allow_fixture_inputs = allow_fixture_inputs
+        self._issuance_lock = RLock()
+        self._next_decompilation_attempt_ordinal = 1
         self._targets: dict[int, FunctionDecompilationTarget] = {}
         self._program_seeds: dict[int, GhidraProgramAuthoritySeed] = {}
         self._surfaces: dict[int, DecompilationAttemptInputSurface] = {}
+        self._attempt_identities: dict[
+            str, DecompilationAttemptIdentityReceipt
+        ] = {}
         self._invocations: dict[str, DecompilationInvocationReceipt] = {}
         self._invocation_censuses: dict[int, SealedDecompilationInvocationCensus] = {}
         self._observations: dict[str, DecompilationAttemptObservation] = {}
@@ -1635,6 +1713,112 @@ class OperationalExtractionAuthorityFactory:
         return surface
 
     def issue_invocation(
+        self, *, target: FunctionDecompilationTarget,
+        input_surface: DecompilationAttemptInputSurface,
+        proof_requirement_id: str, invocation_identity: str,
+        invocation_ordinal: int, configured_timeout_seconds: int,
+    ) -> DecompilationInvocationReceipt:
+        with self._issuance_lock:
+            return self._issue_invocation_locked(
+                target=target,
+                input_surface=input_surface,
+                proof_requirement_id=proof_requirement_id,
+                invocation_identity=invocation_identity,
+                invocation_ordinal=invocation_ordinal,
+                configured_timeout_seconds=configured_timeout_seconds,
+            )
+
+    def issue_attempt_identity(
+        self, *, target: FunctionDecompilationTarget,
+        input_surface: DecompilationAttemptInputSurface,
+        source_contract_id: str, configured_timeout_seconds: int,
+    ) -> DecompilationAttemptIdentityReceipt:
+        with self._issuance_lock:
+            if (
+                self._targets.get(id(target)) is not target
+                or self._surfaces.get(id(input_surface)) is not input_surface
+            ):
+                raise ValueError(
+                    "attempt identity target/input was not issued by this factory"
+                )
+            ordinal = self._next_decompilation_attempt_ordinal
+            self._next_decompilation_attempt_ordinal += 1
+            receipt = DecompilationAttemptIdentityReceipt._issue(
+                target=target,
+                input_surface=input_surface,
+                result_occurrence_id=self.result_occurrence_id,
+                source_contract_id=source_contract_id,
+                invocation_ordinal=ordinal,
+                configured_timeout_seconds=configured_timeout_seconds,
+                execution_identity_digest=self.execution_identity_digest,
+                authority_root_digest=self.authority_root_digest,
+                _factory_token=_ATTEMPT_IDENTITY_TOKEN,
+            )
+            if receipt.attempt_id in self._attempt_identities:
+                raise ValueError("duplicate decompilation attempt identity issuance")
+            self._attempt_identities[receipt.attempt_id] = receipt
+            return receipt
+
+    def issue_invocation_for_attempt(
+        self, *, target: FunctionDecompilationTarget,
+        input_surface: DecompilationAttemptInputSurface,
+        attempt_identity: DecompilationAttemptIdentityReceipt,
+        proof_requirement_id: str,
+    ) -> DecompilationInvocationReceipt:
+        with self._issuance_lock:
+            if (
+                type(attempt_identity) is not DecompilationAttemptIdentityReceipt
+                or self._attempt_identities.get(attempt_identity.attempt_id)
+                is not attempt_identity
+            ):
+                raise TypeError(
+                    "decompilation attempt identity is not exact factory membership"
+                )
+            if (
+                attempt_identity.target_digest != target.target_digest
+                or attempt_identity.input_surface_digest
+                != input_surface.surface_digest
+                or attempt_identity.result_occurrence_id
+                != self.result_occurrence_id
+                or attempt_identity.execution_identity_digest
+                != self.execution_identity_digest
+            ):
+                raise ValueError(
+                    "decompilation attempt identity surface authority differs"
+                )
+            return self._issue_invocation_locked(
+                target=target,
+                input_surface=input_surface,
+                proof_requirement_id=proof_requirement_id,
+                invocation_identity=attempt_identity.attempt_id,
+                invocation_ordinal=attempt_identity.invocation_ordinal,
+                configured_timeout_seconds=(
+                    attempt_identity.configured_timeout_seconds
+                ),
+            )
+
+    def validate_attempt_identity_for_signal(
+        self, attempt_id: str, target: FunctionDecompilationTarget,
+    ) -> DecompilationAttemptIdentityReceipt:
+        with self._issuance_lock:
+            receipt = self._attempt_identities.get(attempt_id)
+            if receipt is None:
+                raise ValueError(
+                    "decompilation blocker lacks factory-issued attempt identity"
+                )
+            if (
+                self._targets.get(id(target)) is not target
+                or receipt.target_digest != target.target_digest
+                or receipt.result_occurrence_id != self.result_occurrence_id
+                or receipt.execution_identity_digest
+                != self.execution_identity_digest
+            ):
+                raise ValueError(
+                    "decompilation blocker attempt identity authority differs"
+                )
+            return receipt
+
+    def _issue_invocation_locked(
         self, *, target: FunctionDecompilationTarget,
         input_surface: DecompilationAttemptInputSurface,
         proof_requirement_id: str, invocation_identity: str,
@@ -2200,6 +2384,10 @@ class OperationalExtractionPilotEncoder:
         authority_factory = self.authority_factory_for_session(session)
         if not authority_factory.owns_target(signal.target):
             raise ValueError("operational blocker target is not session-factory authority")
+        if signal.attempt_id.startswith("decompile-attempt-"):
+            authority_factory.validate_attempt_identity_for_signal(
+                signal.attempt_id, signal.target,
+            )
         if (
             authority_factory.result_occurrence_id
             != session.identity.result_occurrence_id

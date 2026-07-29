@@ -24,6 +24,12 @@ from .process_supervisor_command import (
     COMMAND_SCHEMA,
     read_process_start_token,
 )
+from .stream import (
+    CauseObservedEventAuthority,
+    EventIntent,
+    EventRecorder,
+    EventType,
+)
 
 
 _WORKER_ENVIRONMENT_KEYS = (
@@ -119,6 +125,7 @@ class PreparedWorkerCheckpoint:
     assignment: Any
     assignment_factory: Any
     subordinate: bool
+    observation_uncommitted: bool
     _token: object
 
     def persist(self, invocation: Any) -> "ActiveWorkerCheckpoint":
@@ -131,6 +138,19 @@ class PreparedWorkerCheckpoint:
         )
         if invocation.proof_requirement_id != assigned_requirement:
             raise ValueError("worker invocation differs from live assignment")
+        if self.observation_uncommitted:
+            committed_events = (
+                self.session.recorder.prefix_view().events
+                if self.session.recorder.event_count else ()
+            )
+            if committed_events != self.prefix.events[:-1]:
+                raise ValueError(
+                    "worker pre-observation prefix differs from prepared event prefix"
+                )
+        elif self.session.recorder.prefix_view() != self.prefix:
+            raise ValueError(
+                "worker observation commit differs from prepared event prefix"
+            )
         issue = (
             self.runtime.process_factory.issue_subordinate_active_checkpoint
             if self.subordinate
@@ -150,20 +170,28 @@ class PreparedWorkerCheckpoint:
         if self.subordinate:
             arguments["assignment_factory"] = self.assignment_factory
         checkpoint = issue(**arguments)
-        self.runtime.store.persist_active(checkpoint, self.prefix)
-        active = ActiveWorkerCheckpoint(
-            runtime=self.runtime, session=self.session,
-            operational_factory=self.operational_factory,
+        records = self.session.domain_signal_state.setdefault(
+            "process_worker_checkpoint_records", []
+        )
+        active = None
+        try:
+            self.runtime.store.persist_active(checkpoint, self.prefix)
+            active = ActiveWorkerCheckpoint(
+                runtime=self.runtime, session=self.session,
+                operational_factory=self.operational_factory,
             prefix=self.prefix, projection=self.projection,
             assignment=self.assignment,
             assignment_factory=self.assignment_factory,
             subordinate=self.subordinate, invocation=invocation,
-            checkpoint=checkpoint, _token=_ACTIVE_TOKEN,
-        )
-        self.session.domain_signal_state.setdefault(
-            "process_worker_checkpoint_records", []
-        ).append(active)
-        return active
+                checkpoint=checkpoint, _token=_ACTIVE_TOKEN,
+            )
+            records.append(active)
+            return active
+        except Exception:
+            if active is not None:
+                records[:] = [row for row in records if row is not active]
+            self.runtime.store.rollback_active(checkpoint, self.prefix)
+            raise
 
 
 @dataclass(frozen=True)
@@ -179,6 +207,19 @@ class ActiveWorkerCheckpoint:
     invocation: Any
     checkpoint: Any
     _token: object
+
+    def rollback_initialization(self) -> None:
+        """Remove an ACTIVE checkpoint whose observation was not committed."""
+
+        if self._token is not _ACTIVE_TOKEN:
+            raise TypeError("ACTIVE worker checkpoint is not runtime issued")
+        records = self.session.domain_signal_state.get(
+            "process_worker_checkpoint_records", []
+        )
+        if sum(row is self for row in records) != 1:
+            raise ValueError("ACTIVE worker checkpoint record is not exact")
+        self.runtime.store.rollback_active(self.checkpoint, self.prefix)
+        records[:] = [row for row in records if row is not self]
 
     def resolve(
         self, *, attempt: Any = None, completed_artifact: Any = None,
@@ -294,7 +335,51 @@ class ProcessWorkerRuntime:
         )
         return PreparedWorkerCheckpoint(
             self, session, operational_factory, prefix, projection, assignment,
-            None, False, _PREPARED_TOKEN,
+            None, False, False, _PREPARED_TOKEN,
+        )
+
+    def prepare_observation(
+        self, *, session: Any, operational_factory: Any,
+        occurrence_authority: Any, reason_id: str,
+        proof_requirement_id: str,
+    ) -> PreparedWorkerCheckpoint:
+        """Validate assignment authority against an uncommitted observation."""
+
+        if session.recorder.event_count:
+            prospective = EventRecorder.continue_from_prefix(
+                session.recorder.prefix_view()
+            )
+        else:
+            prospective = EventRecorder(
+                stream_id=f"stream-{session.identity.result_occurrence_id}",
+                result_occurrence_id=session.identity.result_occurrence_id,
+                source_snapshot_fingerprint=(
+                    session.identity.source_snapshot_fingerprint
+                ),
+            )
+        prospective.append(EventIntent(
+            EventType.CAUSE_OBSERVED,
+            CauseObservedEventAuthority(occurrence_authority),
+        ))
+        prefix = prospective.prefix_view()
+        projection = session.reducer.replay_prefix(prefix)
+        if (
+            session.identity.result_occurrence_id
+            != self.launch.payload["result_occurrence_id"]
+            or session.identity.source_snapshot_fingerprint
+            != self.launch.payload["source_snapshot_fingerprint"]
+            or prefix.stream_id != self.launch.payload["stream_id"]
+        ):
+            raise ValueError("worker session identity differs from supervisor launch")
+        assignment = self.process_factory.issue_live_assignment(
+            prefix=prefix,
+            projection=projection,
+            reason_id=reason_id,
+            proof_requirement_id=proof_requirement_id,
+        )
+        return PreparedWorkerCheckpoint(
+            self, session, operational_factory, prefix, projection, assignment,
+            None, False, True, _PREPARED_TOKEN,
         )
 
     def prepare_subordinate(
@@ -313,7 +398,7 @@ class ProcessWorkerRuntime:
         assignment_factory.validate(assignment, projection, prefix)
         return PreparedWorkerCheckpoint(
             self, session, operational_factory, prefix, projection, assignment,
-            assignment_factory, True, _PREPARED_TOKEN,
+            assignment_factory, True, False, _PREPARED_TOKEN,
         )
 
 

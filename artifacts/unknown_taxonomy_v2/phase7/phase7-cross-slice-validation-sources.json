@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "ee91b86c9a97a4376add84552019ba8ee80c7d651d818849683432ba0d1987cb",
+  "artifact_digest": "1926461acaad1e24eb5ed2c38324971ebc474b906d9b0ef64adc5d8b200aa647",
   "declared_external_fixture_skips": [
     {
       "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -18,7 +18,7 @@
     }
   ],
   "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
-  "junit_sha256": "5c1688b9a167e160a8a74017886c5f3f8c1d8be6972a4e26fc4b5132c9c82bff",
+  "junit_sha256": "524c7111eb63347010eec16242ef6b703b17e66ba792d16ba7dc0d8aebf84663",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
   "pytest_selection": [
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -65,7 +65,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py",
-      "sha256": "82802bc5f96ec1dca31c0f3f3a09b5dd172d27672a0cbef0c0d558b33aba9e11"
+      "sha256": "29bf1573918054028454493a76901ebc2ab32208919765f968f4e3aa9274e433"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py",
@@ -77,7 +77,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_operational_extraction.py",
-      "sha256": "fae8ff9e63946c1eed771eb7eb5204982ef26c2cc3c0ce0194ecc8571ddd8ebc"
+      "sha256": "11b4aa7d0a3169e5620e9e969cc0705ac324d99921964e131299ed95c62e5fec"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_census.py",
@@ -93,7 +93,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_worker_runtime.py",
-      "sha256": "a0473af044bfb2edb41752fb42dea08189cd0cae051a4f43ee37a99566149842"
+      "sha256": "36fcf4d4f30c1bbc923844a73006c3dd80fd6004ed1e42572237f1079136c4d5"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
@@ -124,5 +124,5 @@
       "sha256": "f4b028a768241364df68de1220e71a4c68964cdd3c330a7273632dea246d4aec"
     }
   ],
-  "test_count": 571
+  "test_count": 575
 }

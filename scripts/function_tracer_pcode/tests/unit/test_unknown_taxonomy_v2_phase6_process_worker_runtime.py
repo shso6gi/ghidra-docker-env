@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -222,6 +223,150 @@ def test_worker_runtime_chains_sequential_decompile_checkpoints(tmp_path):
     )
     assert (history / "checkpoint.json").is_file()
     assert (history / "state.json").is_file()
+
+
+def test_worker_prepare_failure_does_not_commit_observation(
+    tmp_path, monkeypatch,
+):
+    session, _store, analyzer, function = _runtime_case(
+        tmp_path, result=Result(completed=True), case="prepare-failure",
+    )
+    runtime = session.domain_signal_state[
+        "unknown_taxonomy_v2_process_worker_runtime"
+    ]
+
+    def reject_assignment(**_kwargs):
+        raise ValueError("forced prospective assignment failure")
+
+    monkeypatch.setattr(
+        runtime.process_factory, "issue_live_assignment", reject_assignment,
+    )
+
+    with production_signal_scope(session):
+        observed = decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        )
+
+    assert observed is analyzer.decompiler.result
+    assert session.recorder.event_count == 0
+    assert session.domain_signal_state.get(
+        "process_worker_checkpoint_records", []
+    ) == []
+    assert any(
+        "forced prospective assignment failure" in detail
+        for detail in session.domain_signal_error_details
+    )
+
+
+def test_worker_persist_failure_rolls_back_observation_phase7_and_store(
+    tmp_path, monkeypatch,
+):
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
+        build_phase7_producer_manifest,
+    )
+
+    session, store, analyzer, function = _runtime_case(
+        tmp_path, result=Result(completed=True), case="persist-failure",
+    )
+    root = Path(__file__).resolve().parents[4]
+    phase7 = runtime_from_audited_manifest(
+        build_phase7_producer_manifest(root), session.identity
+    )
+    session.phase7_runtime = phase7
+    persist_active = store.persist_active
+
+    def persist_then_fail(receipt, prefix):
+        persist_active(receipt, prefix)
+        raise OSError("forced post-persist failure")
+
+    monkeypatch.setattr(store, "persist_active", persist_then_fail)
+
+    with production_signal_scope(session):
+        observed = decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        )
+
+    assert observed is analyzer.decompiler.result
+    assert session.recorder.event_count == 0
+    assert session.domain_signal_state.get(
+        "process_worker_checkpoint_records", []
+    ) == []
+    assert phase7._pending == {}
+    assert phase7._materialized == []
+    assert phase7._execution_intents == []
+    assert phase7._signal_transactions == {}
+    assert phase7._discovery_factory._issued == {}
+    assert phase7._discovery_factory._ordinals == {}
+    for filename in (
+        "pending-active-transaction.json",
+        "checkpoint-prefix-stream.json",
+        "checkpoint.json",
+        "state.json",
+    ):
+        assert not (store.directory / filename).exists()
+    assert any(
+        "forced post-persist failure" in detail
+        for detail in session.domain_signal_error_details
+    )
+
+
+def test_worker_phase7_commit_failure_rolls_back_observation_and_checkpoint(
+    tmp_path, monkeypatch,
+):
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
+        build_phase7_producer_manifest,
+    )
+
+    session, store, analyzer, function = _runtime_case(
+        tmp_path, result=Result(completed=True), case="phase7-commit-failure",
+    )
+    root = Path(__file__).resolve().parents[4]
+    phase7 = runtime_from_audited_manifest(
+        build_phase7_producer_manifest(root), session.identity
+    )
+    session.phase7_runtime = phase7
+
+    def reject_commit(_transaction):
+        raise OSError("forced Phase 7 commit failure")
+
+    monkeypatch.setattr(phase7, "commit_signal_transaction", reject_commit)
+
+    with production_signal_scope(session):
+        observed = decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+        )
+
+    assert observed is analyzer.decompiler.result
+    assert session.recorder.event_count == 0
+    assert session.domain_signal_state.get(
+        "process_worker_checkpoint_records", []
+    ) == []
+    assert phase7._pending == {}
+    assert phase7._materialized == []
+    assert phase7._execution_intents == []
+    assert phase7._signal_transactions == {}
+    assert phase7._discovery_factory._issued == {}
+    assert phase7._discovery_factory._ordinals == {}
+    for filename in (
+        "pending-active-transaction.json",
+        "checkpoint-prefix-stream.json",
+        "checkpoint.json",
+        "state.json",
+    ):
+        assert not (store.directory / filename).exists()
+    assert any(
+        "forced Phase 7 commit failure" in detail
+        for detail in session.domain_signal_error_details
+    )
 
 
 def process_factory_receipt(store, filename):

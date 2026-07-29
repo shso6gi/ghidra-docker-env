@@ -2933,11 +2933,40 @@ class AbiWidthReadonlyPilotEncoder:
     ) -> tuple[EventIntent, ...]:
         if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
             return self._solver_batch_intents(session, signal)
+        if self.has_observed(session, signal):
+            return ()
         authority = self.authority_for_signal(session, signal)
         return (EventIntent(
             EventType.CAUSE_OBSERVED,
             CauseObservedEventAuthority(authority),
         ),)
+
+    def has_observed(
+        self, session: Any, signal: AbiWidthReadonlyBlockerSignal,
+    ) -> bool:
+        """Accept only byte-identical retransmission of one occurrence."""
+
+        authority = self.authority_for_signal(session, signal)
+        recorder = getattr(session, "recorder", None)
+        if recorder is None or int(getattr(recorder, "event_count", 0)) == 0:
+            return False
+        occurrence_id = authority.occurrence.occurrence_id
+        for event in recorder.prefix_view().events:
+            if event.header.event_type is not EventType.CAUSE_OBSERVED:
+                continue
+            payload = event.authority_payload
+            if (
+                type(payload) is not CauseObservedEventAuthority
+                or payload.occurrence_authority.occurrence.occurrence_id
+                != occurrence_id
+            ):
+                continue
+            if payload.occurrence_authority != authority:
+                raise ValueError(
+                    "ABI/width occurrence retransmission authority conflicts"
+                )
+            return True
+        return False
 
     def build_execution_context(
         self, session: Any, blocker: AbiWidthReadonlyBlockerSignal,

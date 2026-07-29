@@ -6,9 +6,9 @@
     "scripts/function_tracer_pcode/equivalence/checker.py": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de",
     "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b",
     "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "524ae3a80819411b47c546eff8868ed18649f5f1081e0efc708dd58eeee966e2",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f18cb30cc52c4d1bc8f5afc0867198ddd0c0fada49b54848832a4c188a3f61ab",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "87b6c124398c9bdd9161697787c31aa632213fafa862ca2b38361d699e792628",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
   },
   "gate_test": {
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "90c8e698d0c312d179a235d8d0eb4fb75867a7561b3be686172ec7ba8725ca6e",
+  "manifest_digest": "d0da9db1d2dd926b431b29b99be0e3182f6e48a87b8ac32254c4159c56894fe2",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

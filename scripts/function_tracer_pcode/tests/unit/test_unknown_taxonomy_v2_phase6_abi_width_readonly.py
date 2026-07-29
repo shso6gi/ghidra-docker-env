@@ -1459,6 +1459,102 @@ def test_return_width_production_source_dual_writes_exact_unary_c_and_q():
     assert session.domain_signal_error_kinds == []
 
 
+def test_exact_abi_width_blocker_retransmission_is_producer_idempotent():
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        emit_abi_width_readonly_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    signal = AbiWidthReadonlyBlockerSignal.from_width_seed(
+        _width_seed("left", missing=("return_storage_fact",)),
+        "return_storage_fact",
+    )
+    session = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            AbiWidthReadonlyBlockerSignal: AbiWidthReadonlyPilotEncoder(),
+        }),
+    ).begin({"case": "abi-width-identical-retransmission"})
+
+    with production_signal_scope(session):
+        assert emit_abi_width_readonly_signal(signal) == 1
+        assert emit_abi_width_readonly_signal(signal) == 0
+
+    assert session.recorder.event_count == 1
+    projection = session.preview_lifecycle_projection()
+    assert len(projection.c_active_base) == 1
+    assert len(projection.q_open_base) == 1
+    assert session.domain_signal_error_details == []
+
+
+def test_conflicting_abi_width_blocker_retransmission_is_rejected(monkeypatch):
+    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+        CauseOccurrenceAuthority,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        emit_abi_width_readonly_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    signal = AbiWidthReadonlyBlockerSignal.from_width_seed(
+        _width_seed("left", missing=("return_storage_fact",)),
+        "return_storage_fact",
+    )
+    encoder = AbiWidthReadonlyPilotEncoder()
+    session = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            AbiWidthReadonlyBlockerSignal: encoder,
+        }),
+    ).begin({"case": "abi-width-conflicting-retransmission"})
+
+    with production_signal_scope(session):
+        assert emit_abi_width_readonly_signal(signal) == 1
+        original = encoder.authority_for_signal(session, signal)
+        conflicting = CauseOccurrenceAuthority(
+            replace(
+                original.occurrence,
+                evidence_refs=original.occurrence.evidence_refs + (
+                    "conflicting-retransmission",
+                ),
+            ),
+            original.bound_contract,
+        )
+        monkeypatch.setattr(
+            encoder,
+            "authority_for_signal",
+            lambda active_session, active_signal: conflicting,
+        )
+        with pytest.raises(
+            ValueError,
+            match="ABI/width occurrence retransmission authority conflicts",
+        ):
+            emit_abi_width_readonly_signal(signal)
+
+    assert session.recorder.event_count == 1
+    assert session.domain_signal_error_details == []
+
+
 @pytest.mark.parametrize(
     ("left", "right", "expected_reasons"),
     (

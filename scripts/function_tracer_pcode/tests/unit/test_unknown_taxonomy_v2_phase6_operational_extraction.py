@@ -1,4 +1,5 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -286,6 +287,38 @@ def test_signature_change_keeps_target_but_changes_input_surface():
     assert first.target_digest == retry.target_digest
     assert first.input_surface_digest == retry.input_surface_digest
     assert first.receipt_digest != retry.receipt_digest
+
+
+def test_factory_issues_unique_attempt_identities_under_concurrency():
+    factory = OperationalExtractionAuthorityFactory.for_testing()
+    shared_target = target(factory=factory)
+    shared_surface = surface(factory=factory)
+
+    def issue(_index):
+        return factory.issue_attempt_identity(
+            target=shared_target,
+            input_surface=shared_surface,
+            source_contract_id="concurrent-decompilation-test-v1",
+            configured_timeout_seconds=60,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        receipts = tuple(executor.map(issue, range(64)))
+
+    assert len({item.attempt_id for item in receipts}) == 64
+    assert {item.invocation_ordinal for item in receipts} == set(range(1, 65))
+    invocations = tuple(
+        factory.issue_invocation_for_attempt(
+            target=shared_target,
+            input_surface=shared_surface,
+            attempt_identity=receipt,
+            proof_requirement_id=f"q-{receipt.invocation_ordinal}",
+        )
+        for receipt in receipts
+    )
+    assert {
+        item.invocation_identity for item in invocations
+    } == {item.attempt_id for item in receipts}
 
 
 def test_same_digest_copied_target_is_not_exact_factory_membership():

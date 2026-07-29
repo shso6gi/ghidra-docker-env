@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 import secrets
+from threading import RLock
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 from .candidate import CandidateDecisionProjection, build_candidate_projection
@@ -526,11 +528,32 @@ class ProductionDualWritePilotSession:
         self.phase7_runtime_result: Any = None
         self._phase7_signal_sites: dict[int, str] = {}
         self._phase7_signal_transactions: dict[int, Any] = {}
+        self._domain_signal_transaction_lock = RLock()
+
+    @contextmanager
+    def domain_signal_transaction(self) -> Any:
+        """Serialize one producer transaction across preview and commit."""
+
+        with self._domain_signal_transaction_lock:
+            yield
 
     def emit(self, intent: Any) -> int:
         return self.emit_many((intent,))[0]
 
     def emit_many(
+        self, intents: Sequence[Any], commit_callback: Any = None, *,
+        phase7_execution_intents_prebuffered: bool = False,
+    ) -> tuple[int, ...]:
+        with self._domain_signal_transaction_lock:
+            return self._emit_many_locked(
+                intents,
+                commit_callback,
+                phase7_execution_intents_prebuffered=(
+                    phase7_execution_intents_prebuffered
+                ),
+            )
+
+    def _emit_many_locked(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
         phase7_execution_intents_prebuffered: bool = False,
     ) -> tuple[int, ...]:
@@ -550,10 +573,18 @@ class ProductionDualWritePilotSession:
                 for intent in batch:
                     if intent.event_type is not EventType.CAUSE_OBSERVED:
                         self.phase7_runtime.buffer_execution_intent(intent)
-            recorded = self.recorder.append_many(batch, commit_callback)
-            if transaction is not None:
-                self._commit_phase7_transaction(transaction)
-                transaction = None
+
+            def commit_before_publication() -> None:
+                nonlocal transaction
+                if commit_callback is not None:
+                    commit_callback()
+                if transaction is not None:
+                    self._commit_phase7_transaction(transaction)
+                    transaction = None
+
+            recorded = self.recorder.append_many(
+                batch, commit_before_publication
+            )
             return tuple(item.header.sequence_number for item in recorded)
         except Exception:
             if transaction is not None:
@@ -637,11 +668,28 @@ class ProductionDualWritePilotSession:
         ))
 
     def emit_domain_signal(self, signal: Any) -> int:
+        return self._emit_domain_signal_with_commit(signal)
+
+    def _emit_domain_signal_with_commit(
+        self, signal: Any, external_commit: Any = None,
+        external_rollback: Any = None,
+    ) -> int:
+        """Commit one signal together with an optional external authority."""
+
         if self.closed:
             raise ValueError("production dual-write pilot session is closed")
+        if (external_commit is None) != (external_rollback is None):
+            raise TypeError(
+                "external signal commit and rollback must be supplied together"
+            )
+        if external_commit is not None and (
+            not callable(external_commit) or not callable(external_rollback)
+        ):
+            raise TypeError("external signal transaction callbacks must be callable")
         self.observed_domain_signal_count += 1
         if self.domain_signal_encoder is None:
             return 0
+        external_committed = False
         try:
             intents = tuple(self.domain_signal_encoder(self, signal))
             if self.phase7_runtime is not None:
@@ -658,29 +706,59 @@ class ProductionDualWritePilotSession:
             commit = getattr(
                 self.domain_signal_encoder, "commit_emitted_signal", None
             )
-            commit_callback = (
-                (lambda: commit(self, signal, intents))
-                if callable(commit) else None
-            )
+
+            def commit_all() -> None:
+                nonlocal external_committed
+                if callable(commit):
+                    commit(self, signal, intents)
+                if external_commit is not None:
+                    external_commit()
+                    external_committed = True
+                self._commit_phase7_signal_transaction(signal)
+
             self.emit_many(
                 intents,
-                commit_callback,
+                commit_all,
                 phase7_execution_intents_prebuffered=(
                     self.phase7_runtime is not None
                 ),
             )
-            self._commit_phase7_signal_transaction(signal)
             return len(intents)
         except Exception as exc:
+            rollback_failures = []
+            if external_committed:
+                try:
+                    external_rollback()
+                except Exception as rollback_exc:
+                    rollback_failures.append(
+                        "external rollback: "
+                        + f"{type(rollback_exc).__name__}: {rollback_exc}"
+                    )
             rollback = getattr(
                 self.domain_signal_encoder, "rollback_emitted_signal", None
             )
             if callable(rollback):
-                rollback(self, signal)
-            self._rollback_phase7_signal_transaction(signal)
+                try:
+                    rollback(self, signal)
+                except Exception as rollback_exc:
+                    rollback_failures.append(
+                        "encoder rollback: "
+                        + f"{type(rollback_exc).__name__}: {rollback_exc}"
+                    )
+            try:
+                self._rollback_phase7_signal_transaction(signal)
+            except Exception as rollback_exc:
+                rollback_failures.append(
+                    "Phase 7 rollback: "
+                    + f"{type(rollback_exc).__name__}: {rollback_exc}"
+                )
             self.domain_signal_error_kinds.append(type(exc).__name__)
             self.domain_signal_error_details.append(
                 f"{type(signal).__name__}: {exc}"
+                + (
+                    " | rollback failures: " + "; ".join(rollback_failures)
+                    if rollback_failures else ""
+                )
             )
             return 0
 
