@@ -2659,6 +2659,7 @@ def test_recurrence_completion_signal_requires_exact_validated_promotion():
     side = _validated_side_promotion()
     signal = RecurrenceValidationCompletionSignal.from_side_promotion(side)
     assert signal.blocker.reason_id == "recurrence_proposal_validation_unproven"
+    assert signal.producer_id == "equivalence_recurrence_validator"
     with pytest.raises(TypeError, match="promotion-factory issued"):
         RecurrenceValidationCompletionSignal(
             signal.blocker,
@@ -2670,6 +2671,47 @@ def test_recurrence_completion_signal_requires_exact_validated_promotion():
         )
     with pytest.raises(TypeError, match="exact side promotion"):
         RecurrenceValidationCompletionSignal.from_side_promotion(object())
+
+
+def test_recurrence_completion_uses_manifest_sealed_completion_producer():
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        emit_loop_recurrence_signal,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    side = _validated_side_promotion()
+    completion = RecurrenceValidationCompletionSignal.from_side_promotion(side)
+    blocker = completion.blocker
+    encoder, session = _loop_production_session(
+        LoopBlockerProductionSignal,
+        RecurrenceValidationCompletionSignal,
+        phase7_manifest=manifest,
+        case_id="recurrence-completion-manifest-producer",
+    )
+
+    with production_signal_scope(session):
+        assert emit_loop_recurrence_signal(
+            blocker,
+            producer_site_manifest_id="checker-recurrence-proposal-blocker",
+        ) == 1
+        assert emit_loop_recurrence_signal(
+            completion,
+            producer_site_manifest_id="checker-recurrence-validation-completed",
+        ) == 1
+
+    assert session.recorder.event_count == 2
+    assert len(encoder._completed(session)) == 1
+    assert [
+        materialized[3].producer_id
+        for materialized in session.phase7_runtime._materialized
+    ] == [
+        "typed-recurrence-proposal-signal-v2",
+        "equivalence_recurrence_validator",
+    ]
+    assert session.domain_signal_error_kinds == []
 
 
 def test_recurrence_completion_rejects_inner_target_in_production_payload():

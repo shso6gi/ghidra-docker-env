@@ -1006,21 +1006,18 @@ def _impl__build_block_edge_condition(
     *,
     placeholders: Dict[object, Expression],
 ) -> Optional[Condition]:
-    cbranch = self._find_cbranch_op(block)
-    if cbranch is None or int(getattr(cbranch, "getNumInputs", lambda: 0)() or 0) < 2:
-        return None
-    expr = self._build_pcode_expression(cbranch.getInput(1), placeholders=placeholders)
-    if expr is None or self._expression_is_unresolved(expr):
-        return None
+    from .proof_utils import (
+        _PcodeExpressionTraversalContext,
+        _build_block_edge_condition_with_context,
+    )
 
-    true_out = getattr(block, "getTrueOut", lambda: None)()
-    false_out = getattr(block, "getFalseOut", lambda: None)()
-    successor_key = self._block_key(successor)
-    if true_out is not None and self._block_key(true_out) == successor_key:
-        return Condition(expr, False)
-    if false_out is not None and self._block_key(false_out) == successor_key:
-        return Condition(expr, True)
-    return None
+    return _build_block_edge_condition_with_context(
+        self,
+        block,
+        successor,
+        placeholders=placeholders,
+        context=_PcodeExpressionTraversalContext(),
+    )
 
 def _impl__normalize_loop_continue_guard(
     self,

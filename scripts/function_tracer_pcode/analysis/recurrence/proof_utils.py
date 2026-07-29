@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 from ._shared import (
     Condition,
@@ -28,6 +30,29 @@ def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
 
 def implementation(_service_name: str):
     return globals().get(f"_impl_{_service_name}")
+
+
+class _PcodeExpressionTraversalState(Enum):
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass
+class _PcodeExpressionTraversalContext:
+    states: dict = field(default_factory=dict)
+    expressions: dict = field(default_factory=dict)
+    cycle_count: int = 0
+    legacy_memo: Optional[dict] = None
+
+
+def _pcode_expression_traversal_key(self, varnode, placeholders) -> tuple:
+    placeholder_keys = tuple(sorted(
+        repr(self._varnode_cache_key(candidate))
+        for candidate in placeholders
+    ))
+    return (self._varnode_cache_key(varnode), placeholder_keys)
+
 
 def _impl__implied_counter_constant_expression(
     self,
@@ -548,55 +573,105 @@ def _impl__build_pcode_expression(
 ) -> Optional[Expression]:
     if varnode is None:
         return None
-    if _memo is None:
-        _memo = {}
+    return _build_pcode_expression_with_context(
+        self,
+        varnode,
+        placeholders=placeholders,
+        context=_PcodeExpressionTraversalContext(legacy_memo=_memo),
+    )
 
-    placeholder_keys = tuple(sorted(id(candidate) for candidate in placeholders))
-    memo_key = (self._varnode_cache_key(varnode), placeholder_keys)
-    cached = _memo.get(memo_key)
-    if cached is not None:
+
+def _build_pcode_expression_with_context(
+    self,
+    varnode,
+    *,
+    placeholders: Dict[object, Expression],
+    context: _PcodeExpressionTraversalContext,
+) -> Optional[Expression]:
+    if varnode is None:
+        return None
+    key = _pcode_expression_traversal_key(self, varnode, placeholders)
+    state = context.states.get(key)
+    if state is _PcodeExpressionTraversalState.ACTIVE:
+        context.cycle_count += 1
+        return None
+    if state is _PcodeExpressionTraversalState.UNAVAILABLE:
+        return None
+    if state is _PcodeExpressionTraversalState.COMPLETED:
+        return context.expressions[key]
+    if context.legacy_memo is not None:
+        cached = context.legacy_memo.get(key)
         if cached is False:
+            context.states[key] = _PcodeExpressionTraversalState.UNAVAILABLE
             return None
-        return cached
-    _memo[memo_key] = False
+        if cached is not None:
+            context.states[key] = _PcodeExpressionTraversalState.COMPLETED
+            context.expressions[key] = cached
+            return cached
 
+    context.states[key] = _PcodeExpressionTraversalState.ACTIVE
+    cycle_count = context.cycle_count
+    try:
+        result = _build_pcode_expression_active(
+            self,
+            varnode,
+            placeholders=placeholders,
+            context=context,
+        )
+    except Exception:
+        context.states[key] = _PcodeExpressionTraversalState.UNAVAILABLE
+        if context.legacy_memo is not None:
+            context.legacy_memo[key] = False
+        raise
+    if context.cycle_count != cycle_count:
+        result = None
+    if result is None:
+        context.states[key] = _PcodeExpressionTraversalState.UNAVAILABLE
+        if context.legacy_memo is not None:
+            context.legacy_memo[key] = False
+        return None
+    context.states[key] = _PcodeExpressionTraversalState.COMPLETED
+    context.expressions[key] = result
+    if context.legacy_memo is not None:
+        context.legacy_memo[key] = result
+    return result
+
+
+def _build_pcode_expression_active(
+    self,
+    varnode,
+    *,
+    placeholders: Dict[object, Expression],
+    context: _PcodeExpressionTraversalContext,
+) -> Optional[Expression]:
     for candidate, replacement in placeholders.items():
         if self._same_placeholder_varnode(varnode, candidate):
-            _memo[memo_key] = replacement
             return replacement
 
     current = self._follow_passthrough_varnode(varnode)
-    current_memo_key = memo_key
     if current is not varnode:
-        current_memo_key = (self._varnode_cache_key(current), placeholder_keys)
-        cached = _memo.get(current_memo_key)
-        if cached is not None:
-            if cached is False:
-                return None
-            _memo[memo_key] = cached
-            return cached
-        _memo[current_memo_key] = False
+        current_key = _pcode_expression_traversal_key(
+            self, current, placeholders
+        )
+        varnode_key = _pcode_expression_traversal_key(
+            self, varnode, placeholders
+        )
+        if current_key != varnode_key:
+            return _build_pcode_expression_with_context(
+                self,
+                current,
+                placeholders=placeholders,
+                context=context,
+            )
     for candidate, replacement in placeholders.items():
         if self._same_placeholder_varnode(current, candidate):
-            _memo[memo_key] = replacement
-            _memo[current_memo_key] = replacement
             return replacement
-
-    if _seen is None:
-        _seen = set()
-    current_id = id(current)
-    if current_id in _seen:
-        return None
-    _seen = set(_seen)
-    _seen.add(current_id)
 
     def_op = getattr(current, "getDef", lambda: None)()
     if def_op is None:
         traced = self._trace_varnode_expression(current)
         if traced is None or self._expression_is_unresolved(traced):
             return None
-        _memo[memo_key] = traced
-        _memo[current_memo_key] = traced
         return traced
 
     mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
@@ -608,88 +683,77 @@ def _impl__build_pcode_expression(
         input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
         branches = []
         for index in range(input_count):
-            value = self._build_pcode_expression(
+            value = _build_pcode_expression_with_context(
+                self,
                 def_op.getInput(index),
                 placeholders=placeholders,
-                _seen=_seen,
-                _memo=_memo,
+                context=context,
             )
             if value is None:
                 continue
             condition = None
             if parent_block is not None and index < int(getattr(parent_block, "getInSize", lambda: 0)() or 0):
                 predecessor = parent_block.getIn(index)
-                condition = self._build_block_edge_condition(
+                condition = _build_block_edge_condition_with_context(
+                    self,
                     predecessor,
                     parent_block,
                     placeholders=placeholders,
+                    context=context,
                 )
             branches.append((condition, value))
         if not branches:
             return None
         if len(branches) == 1 and branches[0][0] is None:
-            result = branches[0][1]
-            _memo[memo_key] = result
-            _memo[current_memo_key] = result
-            return result
+            return branches[0][1]
         phi = Expression.phi(branches)
         phi.size = output_size
-        _memo[memo_key] = phi
-        _memo[current_memo_key] = phi
         return phi
 
     if mnemonic in {"COPY", "CAST", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}:
-        expr = self._build_pcode_expression(
+        expr = _build_pcode_expression_with_context(
+            self,
             def_op.getInput(0),
             placeholders=placeholders,
-            _seen=_seen,
-            _memo=_memo,
+            context=context,
         )
         if expr is None:
             return None
         if mnemonic in {"COPY", "CAST"}:
             expr.size = output_size
-            _memo[memo_key] = expr
-            _memo[current_memo_key] = expr
             return expr
         if mnemonic in {"INT_ZEXT", "INT_SEXT"}:
             widened = Expression.unary_op(mnemonic, expr)
             widened.size = output_size
-            _memo[memo_key] = widened
-            _memo[current_memo_key] = widened
             return widened
         if mnemonic == "SUBPIECE":
             if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
                 return None
-            offset_expr = self._build_pcode_expression(
+            offset_expr = _build_pcode_expression_with_context(
+                self,
                 def_op.getInput(1),
                 placeholders=placeholders,
-                _seen=_seen,
-                _memo=_memo,
+                context=context,
             )
             if offset_expr is None:
                 return None
             subpiece = Expression.binary_op("SUBPIECE", expr, offset_expr)
             subpiece.size = output_size
-            _memo[memo_key] = subpiece
-            _memo[current_memo_key] = subpiece
             return subpiece
 
     if mnemonic in {"INT_NEGATE", "INT_2COMP", "BOOL_NEGATE"}:
         if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) != 1:
             return None
-        operand = self._build_pcode_expression(
+        operand = _build_pcode_expression_with_context(
+            self,
             def_op.getInput(0),
             placeholders=placeholders,
-            _seen=_seen,
-            _memo=_memo,
+            context=context,
         )
         if operand is None:
             return None
         unary = Expression.unary_op(mnemonic, operand)
         unary.size = output_size
-        _memo[memo_key] = unary
-        _memo[current_memo_key] = unary
         return unary
 
     if mnemonic in {
@@ -715,27 +779,58 @@ def _impl__build_pcode_expression(
     }:
         if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) != 2:
             return None
-        left = self._build_pcode_expression(
+        left = _build_pcode_expression_with_context(
+            self,
             def_op.getInput(0),
             placeholders=placeholders,
-            _seen=_seen,
-            _memo=_memo,
+            context=context,
         )
-        right = self._build_pcode_expression(
+        right = _build_pcode_expression_with_context(
+            self,
             def_op.getInput(1),
             placeholders=placeholders,
-            _seen=_seen,
-            _memo=_memo,
+            context=context,
         )
         if left is None or right is None:
             return None
         expr = Expression.binary_op(mnemonic, left, right)
         expr.size = output_size
-        _memo[memo_key] = expr
-        _memo[current_memo_key] = expr
         return expr
 
     return None
+
+
+def _build_block_edge_condition_with_context(
+    self,
+    block,
+    successor,
+    *,
+    placeholders: Dict[object, Expression],
+    context: _PcodeExpressionTraversalContext,
+) -> Optional[Condition]:
+    cbranch = self._find_cbranch_op(block)
+    if cbranch is None or int(
+        getattr(cbranch, "getNumInputs", lambda: 0)() or 0
+    ) < 2:
+        return None
+    expr = _build_pcode_expression_with_context(
+        self,
+        cbranch.getInput(1),
+        placeholders=placeholders,
+        context=context,
+    )
+    if expr is None or self._expression_is_unresolved(expr):
+        return None
+
+    true_out = getattr(block, "getTrueOut", lambda: None)()
+    false_out = getattr(block, "getFalseOut", lambda: None)()
+    successor_key = self._block_key(successor)
+    if true_out is not None and self._block_key(true_out) == successor_key:
+        return Condition(expr, False)
+    if false_out is not None and self._block_key(false_out) == successor_key:
+        return Condition(expr, True)
+    return None
+
 
 def _impl__copy_symbol_expression(self, expr: Expression, size: int) -> Expression:
     if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:

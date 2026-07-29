@@ -2,24 +2,24 @@
   "added": [
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "2f0171a7d17e499fb90a4b3eab5df4f6d57bc381cd6fea869085d89ecdc655a6",
-      "line": 1671,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "04d5491ac607c6f15db91415c95397b92e88c92ca5f5a0ff72d5b7f3fb146829",
+      "line": 176,
+      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "field_initialization_or_nonproducing_transfer",
         "refs": [
-          "0020457fbfa7fd8041867b88e031c0f10752de937d6a46a618693c59767c85d0"
+          "003b8afe9fd6e691a3a9a316e4a5613d30705990b546523579d90a64685f1086"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "0020457fbfa7fd8041867b88e031c0f10752de937d6a46a618693c59767c85d0",
-      "source": "reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_attach_recurrence_proposal_blockers"
+      "site_id": "003b8afe9fd6e691a3a9a316e4a5613d30705990b546523579d90a64685f1086",
+      "source": "_CAUSE_REASON_IDS_BY_SITE = {",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -318,6 +318,27 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "7430a1aa4f3e03e1619336de870cfbf7565074f88b189eccc480d0381f6912bc",
+      "line": 1293,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "0a2c95e2a17a8096f45325e83428faa8b98c15a926d4bed4f5f7103aaa33b1ad"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "0a2c95e2a17a8096f45325e83428faa8b98c15a926d4bed4f5f7103aaa33b1ad",
+      "source": "strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
       "line": 1248,
@@ -445,27 +466,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "9bd673fc2f0227fc6d261cacee57f12550fec2408a4e918dfb4293925dabe97b",
-      "line": 490,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "0f6957c070f120f664c9319d7959420bafe38f3d2def070de0f9b9783d569db3"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "0f6957c070f120f664c9319d7959420bafe38f3d2def070de0f9b9783d569db3",
-      "source": "def _impl__make_sat_unsafety_unknown_reason(",
-      "symbol": "_impl__make_sat_unsafety_unknown_reason"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "f3f4a9d5e6acbd1d34237b9cdcb76838de1efe8566643058ef3ad1aeac87751b",
@@ -484,6 +484,27 @@
       "site_id": "10b0d9d3b6568cef630e1179ef933c72f51f4ad676fd68e73948da957a309a34",
       "source": "export UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE=\"$execution_authority_root/worker.key\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "2f0171a7d17e499fb90a4b3eab5df4f6d57bc381cd6fea869085d89ecdc655a6",
+      "line": 1672,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "13936834055404af3c854fa5228512bbbf8210eecbc1761f3ccdf0af081427e5"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "13936834055404af3c854fa5228512bbbf8210eecbc1761f3ccdf0af081427e5",
+      "source": "reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_attach_recurrence_proposal_blockers"
     },
     {
       "authority_role": "derived_projection",
@@ -550,27 +571,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "a23ff786a95c45c9b8acbab44c7d08f687a8da7e1ee5065d584bfb37eb1312e1",
-      "line": 147,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "174c214426da2185101dc9a4bd1021947e974d994600f6b2ccb4f1c760ac688a"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "174c214426da2185101dc9a4bd1021947e974d994600f6b2ccb4f1c760ac688a",
-      "source": "return self._make_return_coverage_unknown_reason(",
-      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "93dae9fa4251d98c9bfcb4a9c0559d2aa497f63665b3d5cb926c84ee802d27b5",
@@ -589,6 +589,27 @@
       "site_id": "17525ef3029559492d4404597a08cf043331c6e80e2f1107acb8cb6962a99209",
       "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
       "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "a23ff786a95c45c9b8acbab44c7d08f687a8da7e1ee5065d584bfb37eb1312e1",
+      "line": 153,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "17cf554c0b717c028d703186edeb98ab0e991f10943389cf9257bc39563ebc07"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "17cf554c0b717c028d703186edeb98ab0e991f10943389cf9257bc39563ebc07",
+      "source": "return self._make_return_coverage_unknown_reason(",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
       "authority_role": "production",
@@ -634,27 +655,6 @@
       "shell_role": null,
       "site_id": "1946f73201ad8a690a9e4245280d0da234fe69f74a28e400bcf3241044794229",
       "source": "unknown_reasons=[",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "a86a083cda2e449e22e06e855d74f19460bbf241fe2cfeaf06b6d1c9f705e2a8",
-      "line": 1286,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "1ae7aca53faff81dea829a7151c4e916704e8e6b0b6e32fb2e74a5f4e98a9fd8"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "1ae7aca53faff81dea829a7151c4e916704e8e6b0b6e32fb2e74a5f4e98a9fd8",
-      "source": "strategy_result.unknown_reasons = self._attach_recurrence_proposal_blockers(",
       "symbol": "check"
     },
     {
@@ -786,6 +786,27 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "c25cc6ce959f84477de67228658c887c6c1e3a584a5ff5039b3fbacb7a425aa1",
+      "line": 1598,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "2040715591ca46f090db7e63aa0044279d2f0a8d0f60b16b00685971cffb9986"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "2040715591ca46f090db7e63aa0044279d2f0a8d0f60b16b00685971cffb9986",
+      "source": "reasons = tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_recurrence_promotion_authority"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "f569ea5bb4ab43ec2f4849d6ca22d2b8e0430c3fb125b97cb24fb27ab95d1684",
       "line": 1800,
@@ -803,6 +824,27 @@
       "site_id": "2092948c0561316a6a0f434e6de62b2674a5872b3e087eb07e9cbe7b0ecd2a44",
       "source": "result = list(pair_unknown_reasons)",
       "symbol": "_impl__append_blocking_unknown_reasons"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "final_primary",
+      "inventory_source_fingerprint": "7c205fc97fd171814b79e9266cc4929ca2aaf5e6d3f6ca80cfcb6aaab84c7cd6",
+      "line": 526,
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "20e26ffe2049c854ad39c29052e0e490577c4c9c7d32b4cacb930fc2d0eca47e"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "20e26ffe2049c854ad39c29052e0e490577c4c9c7d32b4cacb930fc2d0eca47e",
+      "source": "if include_unknown_reason_summary:",
+      "symbol": "format_function_results_summary"
     },
     {
       "authority_role": "production",
@@ -848,27 +890,6 @@
       "site_id": "21a30abb01baa3fa1a48670b8b0b4f7632e5df1c74984281e2efc07aa80f07d7",
       "source": "unknown_counts[phase] + 0, \\",
       "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "10bff4ce48424aea909f55e61f99529770ec11338010e02918eca02ae498f45b",
-      "line": 2233,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "21dd3592f956d5ff2053c4256a3fefd3d9805485f697fe8be86c342de2c0c48e"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "21dd3592f956d5ff2053c4256a3fefd3d9805485f697fe8be86c342de2c0c48e",
-      "source": "raw_reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_apply_phase2_relational_call_discharge"
     },
     {
       "authority_role": "derived_projection",
@@ -976,6 +997,27 @@
       "site_id": "2709f767d373bfbb9e77e5f65ea487559d192314d02a198066785db6d0e62a03",
       "source": "reason_id = _SUMMARY_BLOCKER_REASONS.get(source_code)",
       "symbol": "classify_summary_blocker"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "20499989e874d1c354377da83f904914d343113b98e3744491fcd11e13bfed12",
+      "line": 558,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "272791e9f475e4d31709d9f034c3a410dc34629f3fadd82360e7954a92f65906"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "272791e9f475e4d31709d9f034c3a410dc34629f3fadd82360e7954a92f65906",
+      "source": "def _impl__make_sat_counterexample_ambiguous_unknown_reason(",
+      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -1168,6 +1210,48 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "28901d282b399a3b7da37b902ff2c4c572aef33573c616522de8777fcc8d9c44",
+      "line": 2305,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "2d3b7ca9c86829e6a149ce14f460b1e00605e6b7a7b82c145935ef9e8f9e21d0"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "2d3b7ca9c86829e6a149ce14f460b1e00605e6b7a7b82c145935ef9e8f9e21d0",
+      "source": "strategy_result.unknown_reasons = []",
+      "symbol": "_apply_phase2_relational_call_discharge"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "a86a083cda2e449e22e06e855d74f19460bbf241fe2cfeaf06b6d1c9f705e2a8",
+      "line": 1287,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "2e434ffe714be407524fa05977395d88b204272487e123e3b1f45132e6d41025"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "2e434ffe714be407524fa05977395d88b204272487e123e3b1f45132e6d41025",
+      "source": "strategy_result.unknown_reasons = self._attach_recurrence_proposal_blockers(",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "46a39f8893262298125e8ebbe6743a58ef48fb05e07c752038042bf3e7fda7b9",
@@ -1328,6 +1412,27 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
+      "consumer_class": "final_primary",
+      "inventory_source_fingerprint": "1b7093c170eaed0787be4394488f1549b05930c4497bb4d12b5ed5bb7e245cb0",
+      "line": 1238,
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "38e14da757ca8209341af6baee97725a68e89262b9b41ab62dbc39e2c656650c"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "38e14da757ca8209341af6baee97725a68e89262b9b41ab62dbc39e2c656650c",
+      "source": "records = tuple(coerce_unknown_reason_records(payload.get(\"unknown_reasons\") or ()))",
+      "symbol": "_canonical_blocking_reason"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
       "line": 1399,
@@ -1410,6 +1515,29 @@
       "site_id": "3c77dec3384c49f6a44698227e33680a14844b1692b19cf9046bb432723328da",
       "source": "result.unknown_reasons = list(strategy_result.unknown_reasons)",
       "symbol": "run_obligation_branch_plan"
+    },
+    {
+      "authority_role": "production",
+      "construct_kind": "reason_constructor",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "ceb076658b1800ad03514d596ab7eb5e2c266d60c0a64f07370214acaf25cdd3",
+      "line": 652,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "static_set",
+      "resolution_basis": {
+        "kind": "symbol_or_file_flow_proposal",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/checker.py:_retry_with_abi_constraints"
+        ]
+      },
+      "resolved_reason_ids": [
+        "return_width_bridge_missing"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "3e7798efa74394db269a6b15cab8f78d9f748b50a7f677aa08582d4060e2e0c4",
+      "source": "make_unknown_reason(",
+      "symbol": "_retry_with_abi_constraints"
     },
     {
       "authority_role": "derived_projection",
@@ -1564,6 +1692,27 @@
       "symbol": "<shell>"
     },
     {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "10bff4ce48424aea909f55e61f99529770ec11338010e02918eca02ae498f45b",
+      "line": 2250,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "43fa2e74474e1c1809b68e2e0dae92c8a1749d4f06ee5a5f5e626d57442ee9cc"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "43fa2e74474e1c1809b68e2e0dae92c8a1749d4f06ee5a5f5e626d57442ee9cc",
+      "source": "raw_reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_apply_phase2_relational_call_discharge"
+    },
+    {
       "authority_role": "production",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "fallback_retry",
@@ -1634,6 +1783,27 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "22cee14550b0a4b9eaa5189945b23a067cf42094dd2a9c2d3b07c70ffadbd33e",
+      "line": 1975,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "4629abf0a8ce523325a1d6e491878854f5198e3728ebb06aa71d91a01a29e2ec"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "4629abf0a8ce523325a1d6e491878854f5198e3728ebb06aa71d91a01a29e2ec",
+      "source": "strategy_result.unknown_reasons.append(",
+      "symbol": "_apply_preflight_final_gate"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "37ed3b458cbe5d80b1058dfac48335d60c804e04b6a68dc57a86c54fbb8afc72",
       "line": 1408,
@@ -1676,21 +1846,42 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
-      "consumer_class": "final_primary",
-      "inventory_source_fingerprint": "01126f6d9bbc36fa2973777ea6128d6b34cfa96a3137e0183e9a523ae7bae977",
-      "line": 484,
-      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "adbddba6ccbfcb9f958bad5b54ac4b2f967902942659df758f99183de7370465",
+      "line": 185,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "48409d6fb516cf0cbe2484f303b525fde2cca5c6425bcb5eeb37c32fb7ab821d"
+          "47b6f7c8f785f1e138ea678e3c7d4681d4e7a4f6bf818bb68bad0d27a71411ae"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "48409d6fb516cf0cbe2484f303b525fde2cca5c6425bcb5eeb37c32fb7ab821d",
+      "site_id": "47b6f7c8f785f1e138ea678e3c7d4681d4e7a4f6bf818bb68bad0d27a71411ae",
+      "source": "else make_unknown_reason",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "final_primary",
+      "inventory_source_fingerprint": "01126f6d9bbc36fa2973777ea6128d6b34cfa96a3137e0183e9a523ae7bae977",
+      "line": 508,
+      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "48e58e8187fdc7f51903d5b3a6c67433b501667955eaab2236df502af42370b0"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "48e58e8187fdc7f51903d5b3a6c67433b501667955eaab2236df502af42370b0",
       "source": "include_unknown_reason_summary: bool = True,",
       "symbol": "format_function_results_summary"
     },
@@ -1801,27 +1992,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "efa0436541a399fa4cdb9142c82ca5bc8bfb9f28791f6e9f562013823f2433b5",
-      "line": 1293,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "50ab96de575c8d41a43f5e37403590e7e5665780fd6311f7a0d2d46c4e0b0fc5"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "50ab96de575c8d41a43f5e37403590e7e5665780fd6311f7a0d2d46c4e0b0fc5",
-      "source": "list(getattr(strategy_result, \"unknown_reasons\", ()) or ()),",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
@@ -1908,45 +2078,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "4b1cde51e48ee15ebb0d057953d1d62479513bc5865e3543a12533bf28e6490a",
-      "line": 1968,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "537090b1be3dfdd95a463b1784e12439fb309d60767f095a06bbaf5fc391c810"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "537090b1be3dfdd95a463b1784e12439fb309d60767f095a06bbaf5fc391c810",
-      "source": "for reason in tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_apply_preflight_final_gate"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "c25cc6ce959f84477de67228658c887c6c1e3a584a5ff5039b3fbacb7a425aa1",
-      "line": 1597,
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 651,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "53822c184beb97d45f9abf808488b65ab580d3baf1b1e9e722c280147180d73f"
+          "5363ed656e0bf95caaa00a7007e033b166d9cce86623f4c700ee0c6aaee9bcfa"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "53822c184beb97d45f9abf808488b65ab580d3baf1b1e9e722c280147180d73f",
-      "source": "reasons = tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_recurrence_promotion_authority"
+      "site_id": "5363ed656e0bf95caaa00a7007e033b166d9cce86623f4c700ee0c6aaee9bcfa",
+      "source": "unknown_reasons=[",
+      "symbol": "_retry_with_abi_constraints"
     },
     {
       "authority_role": "derived_projection",
@@ -2057,27 +2206,6 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "1a211cebabc6ec4a082ca8a874762b2a1a291bed5c7d2b052474d5a7280ddffe",
-      "line": 86,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "580fb0e0acc8befab0c401b2ad2530efb460f99c2f0cad651bb97d24f76f665b"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "580fb0e0acc8befab0c401b2ad2530efb460f99c2f0cad651bb97d24f76f665b",
-      "source": "def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):",
-      "symbol": "_impl__unknown_reason_id_for_blocking_unsafety"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
       "inventory_source_fingerprint": "4efef5d4456e872edf58c2640c8c6836db2281b9286df2034d8a4b4fa71c7f7e",
       "line": 1519,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -2162,80 +2290,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "22cee14550b0a4b9eaa5189945b23a067cf42094dd2a9c2d3b07c70ffadbd33e",
-      "line": 1974,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "5bcbc7926b2e5e1a3695dcfc6d4fc178a21defa40a507b9947f5561498a93749"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5bcbc7926b2e5e1a3695dcfc6d4fc178a21defa40a507b9947f5561498a93749",
-      "source": "strategy_result.unknown_reasons.append(",
-      "symbol": "_apply_preflight_final_gate"
-    },
-    {
-      "authority_role": "production",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "46ac3076d561b963d9fb8d291d8b72701b5a1b7e9a4b4ea1d0017fafa79dd0e6",
-      "line": 142,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "static_set",
-      "resolution_basis": {
-        "kind": "symbol_or_file_flow_proposal",
-        "refs": [
-          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_blocking_unsafety_unknown_reason"
-        ]
-      },
-      "resolved_reason_ids": [
-        "outcome_cfg_reachability_incomplete",
-        "outcome_cross_kind_overlap",
-        "outcome_member_unclassified",
-        "outcome_partition_residual_sat",
-        "outcome_partition_totality_timeout",
-        "outcome_path_region_incomplete",
-        "outcome_return_consistency_unknown",
-        "outcome_return_value_conflict",
-        "return_coverage_gap",
-        "return_coverage_inconclusive"
-      ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5c4ab6247d9c89932a5d30db3cf50329826692a5661535df8f3ee7f1f01da0dd",
-      "source": "typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)",
-      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
-      "line": 177,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "5c5397cd98581fb460566bf21deb48fc028c2db3c2ce27549bfa8591c0462341"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5c5397cd98581fb460566bf21deb48fc028c2db3c2ce27549bfa8591c0462341",
-      "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "adbddba6ccbfcb9f958bad5b54ac4b2f967902942659df758f99183de7370465",
@@ -2254,27 +2308,6 @@
       "site_id": "5c85491e20a8f27d6eaae94e81abc55ab48b836bce454950193b8306821917e7",
       "source": "else make_unknown_reason",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "adbddba6ccbfcb9f958bad5b54ac4b2f967902942659df758f99183de7370465",
-      "line": 179,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "5d7081e300298b3b989874743ba3e62e81766864abc650dbee92718a485c645e"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5d7081e300298b3b989874743ba3e62e81766864abc650dbee92718a485c645e",
-      "source": "else make_unknown_reason",
-      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -2341,48 +2374,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "proof_backlog",
-      "inventory_source_fingerprint": "d2c4616bff45efacddc4833dbebef6a1826760810d783fb77c144a38f30ea534",
-      "line": 1297,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "6182ae8d05e79c41c8d25bef6de335c3109652af068e75e936e0b6f2e2b07197"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "6182ae8d05e79c41c8d25bef6de335c3109652af068e75e936e0b6f2e2b07197",
-      "source": "strategy_result.unknown_reasons = self._attach_root_blocker_identities(",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "4a41f5fdb7efec7945dbc5a4aada05e2b323f8141b2fbb315fca282dc713c18e",
-      "line": 1447,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "61ec3bf5d70af205c67729cd4d5e607a09245cab207eaf9bacc7a6b22a1ee775"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "61ec3bf5d70af205c67729cd4d5e607a09245cab207eaf9bacc7a6b22a1ee775",
-      "source": "unknown_reasons=strategy_result.unknown_reasons,",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "0124fa40ae0be0c6fd78a912f205f27b9d397d996fd4387769afa9f0321024e6",
@@ -2401,6 +2392,27 @@
       "site_id": "627ffa86dd4af725e6996292408ebeff3cf5d870f4262fe4698491ab435aeb9b",
       "source": "TIMEOUT)",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "1a211cebabc6ec4a082ca8a874762b2a1a291bed5c7d2b052474d5a7280ddffe",
+      "line": 92,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "646d9caa3487f0da3e33148ccff8f039e1d0bdbf5aff58213afa47557febe03e"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "646d9caa3487f0da3e33148ccff8f039e1d0bdbf5aff58213afa47557febe03e",
+      "source": "def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):",
+      "symbol": "_impl__unknown_reason_id_for_blocking_unsafety"
     },
     {
       "authority_role": "production",
@@ -2745,6 +2757,27 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "efa0436541a399fa4cdb9142c82ca5bc8bfb9f28791f6e9f562013823f2433b5",
+      "line": 1294,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "76f26d9ec6806ff7610b8b2e5d1331092a9bf236473f7fccb89ce72329b95dad"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "76f26d9ec6806ff7610b8b2e5d1331092a9bf236473f7fccb89ce72329b95dad",
+      "source": "list(getattr(strategy_result, \"unknown_reasons\", ()) or ()),",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "07f4faa0ef8b95110439fa4807dc94caf0c53e473e073841e15468c44919444a",
       "line": 399,
@@ -2809,6 +2842,27 @@
       "site_id": "7a000c2a13a7799c693c7e97718b1763c15f73223cf9b40f222cea83826ee470",
       "source": "__all__ = ('Any', 'COUNTED_LOOP_SUM_OPCODE', 'COUNTED_STATE_TRANSITION_VALUE_OPCODE', 'CheckStrategy', 'Condition', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'CountedLoopSummaryRef', 'CountedStateTransitionLoopSummaryRef', 'Dict', 'Expression', 'ExpressionSafetyChecker', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'LoopSummaryComparisonResult', 'LoopSummaryRef', 'LoopTermDescriptorRef', 'Mapping', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'Optional', 'ParallelResult', 'ParameterInfo', 'QueryResult', 'ReadonlyReductionRef', 'ReadonlyReductionTermRef', 'ReturnCase', 'Sequence', 'SignFacts', 'SolverResult', 'SolverStatus', 'StorageInfo', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'Z3Solver', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', '_counted_loop_sum_has_exact_lowering', '_loop_summary_term_at_index', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_parameter_semantic_constraints', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'collect_float_predicate_smt_declarations', 'collect_intrinsic_smt_declarations', 'collect_unknown_smt_declarations', 'compare_loop_summaries', 'contains_udiv', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_smt_bit_width', 'expression_uses_smt_float_theory', 'expression_uses_smt_uf', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'hashlib', 'infer_parameter_semantics', 'json', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'replace', 'save_unknown_query', 'smt_logic_name', 'solve_query_internal', 'solve_query_twostage', 'time', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')",
       "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "15386b089a67f7ee3cb45e978e2d76ebb466d0095dab9d2d63d8c8a2d6a878fa",
+      "line": 2322,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "7a03ae67ed6defca3385578d31cf0aad0c85667871e0079ed31634bb59eea4e4"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "7a03ae67ed6defca3385578d31cf0aad0c85667871e0079ed31634bb59eea4e4",
+      "source": "def _specialize_call_effect_unknown_reasons(",
+      "symbol": "_specialize_call_effect_unknown_reasons"
     },
     {
       "authority_role": "derived_projection",
@@ -2985,27 +3039,6 @@
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 650,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "846b1885cfa1608ac46452a70d929d7cb5a4e6afb0184cf719636cf147617f98"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "846b1885cfa1608ac46452a70d929d7cb5a4e6afb0184cf719636cf147617f98",
-      "source": "unknown_reasons=[",
-      "symbol": "_retry_with_abi_constraints"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
       "line": 1914,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
@@ -3084,27 +3117,6 @@
       "site_id": "87e61df4e70813a61001a5971f7470b2a11f72e92fc38d4808be0745f098a85f",
       "source": "def _impl__append_blocking_unknown_reasons(",
       "symbol": "_impl__append_blocking_unknown_reasons"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "final_primary",
-      "inventory_source_fingerprint": "7c205fc97fd171814b79e9266cc4929ca2aaf5e6d3f6ca80cfcb6aaab84c7cd6",
-      "line": 502,
-      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "87f2916f10ad8153ac27e22b5112d448b46a548d5b6e64ea7034b56993c9bd50"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "87f2916f10ad8153ac27e22b5112d448b46a548d5b6e64ea7034b56993c9bd50",
-      "source": "if include_unknown_reason_summary:",
-      "symbol": "format_function_results_summary"
     },
     {
       "authority_role": "derived_projection",
@@ -3194,22 +3206,22 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "095a3abb51383d0641f2a949590a48389f3a02a06d95663d28feb64bcbdcde0e",
-      "line": 2240,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "inventory_source_fingerprint": "9bd673fc2f0227fc6d261cacee57f12550fec2408a4e918dfb4293925dabe97b",
+      "line": 496,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "8d0b17b95d2b3e4e35425b4a8bf3a4d71e472222cb5fc9f9061860c4bf6b48c0"
+          "8ca6bfc07e19feee1a38ec899decc56be1020e9f589f0314d372ac02a545402d"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "8d0b17b95d2b3e4e35425b4a8bf3a4d71e472222cb5fc9f9061860c4bf6b48c0",
-      "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
-      "symbol": "_apply_phase2_relational_call_discharge"
+      "site_id": "8ca6bfc07e19feee1a38ec899decc56be1020e9f589f0314d372ac02a545402d",
+      "source": "def _impl__make_sat_unsafety_unknown_reason(",
+      "symbol": "_impl__make_sat_unsafety_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -3320,6 +3332,50 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
+      "inventory_source_fingerprint": "51b09e802bc9894acd1f69a134afe1d6ad0308c3f588beb3d8bd2a788f87246f",
+      "line": 140,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "90c319d9625db0b8c82b032f9437339ba7ddfbd82141b06eac2cb35e57fc2142"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "90c319d9625db0b8c82b032f9437339ba7ddfbd82141b06eac2cb35e57fc2142",
+      "source": "def _impl__make_blocking_unsafety_unknown_reason(",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
+    },
+    {
+      "authority_role": "production",
+      "construct_kind": "reason_constructor",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "7557115d34884ecb8834230f84100ac656012a8167e38cce6517cfa101f0a6fa",
+      "line": 577,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "static_set",
+      "resolution_basis": {
+        "kind": "symbol_or_file_flow_proposal",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_sat_counterexample_ambiguous_unknown_reason"
+        ]
+      },
+      "resolved_reason_ids": [
+        "sat_counterexample_ambiguous"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "90c782d987ebfa1fedff73880ac956ff4a625c4a4d38d6e20f582587ef9a0fe2",
+      "source": "return _v2_observe_sat_ambiguity_reason(make_unknown_reason(",
+      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
       "inventory_source_fingerprint": "2e129eb78d8a4ca69e9ffca612c3b380b99a468e393e87c21fcc0bc3d9c4c391",
       "line": 1581,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -3359,6 +3415,38 @@
       "symbol": "<module>"
     },
     {
+      "authority_role": "production",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "46ac3076d561b963d9fb8d291d8b72701b5a1b7e9a4b4ea1d0017fafa79dd0e6",
+      "line": 148,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "static_set",
+      "resolution_basis": {
+        "kind": "symbol_or_file_flow_proposal",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_blocking_unsafety_unknown_reason"
+        ]
+      },
+      "resolved_reason_ids": [
+        "outcome_cfg_reachability_incomplete",
+        "outcome_cross_kind_overlap",
+        "outcome_member_unclassified",
+        "outcome_partition_residual_sat",
+        "outcome_partition_totality_timeout",
+        "outcome_path_region_incomplete",
+        "outcome_return_consistency_unknown",
+        "outcome_return_value_conflict",
+        "return_coverage_gap",
+        "return_coverage_inconclusive"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "960d97d8bf04edce0fea60f9f01c3ef1e04d03c42c8622dde4a342982186fc41",
+      "source": "typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
+    },
+    {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
@@ -3378,27 +3466,6 @@
       "site_id": "9699826832196b606fbd39e4cce399005d3a6636c62293fcd45251863f6f9125",
       "source": "if coverage_unknown_reasons:",
       "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "51b09e802bc9894acd1f69a134afe1d6ad0308c3f588beb3d8bd2a788f87246f",
-      "line": 134,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "96fcb68b828cd2824a15b87d4af5079d698f0d1a93b94bd026f0e397a39a0bab"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "96fcb68b828cd2824a15b87d4af5079d698f0d1a93b94bd026f0e397a39a0bab",
-      "source": "def _impl__make_blocking_unsafety_unknown_reason(",
-      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -3443,29 +3510,6 @@
       "symbol": "_impl_check"
     },
     {
-      "authority_role": "production",
-      "construct_kind": "reason_constructor",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "ceb076658b1800ad03514d596ab7eb5e2c266d60c0a64f07370214acaf25cdd3",
-      "line": 651,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "static_set",
-      "resolution_basis": {
-        "kind": "symbol_or_file_flow_proposal",
-        "refs": [
-          "scripts/function_tracer_pcode/equivalence/checker.py:_retry_with_abi_constraints"
-        ]
-      },
-      "resolved_reason_ids": [
-        "return_width_bridge_missing"
-      ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "97cfc6bc716fc44001a98f818f79b1f3d798185a9d4e9022dab0363405ce8703",
-      "source": "make_unknown_reason(",
-      "symbol": "_retry_with_abi_constraints"
-    },
-    {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
@@ -3485,6 +3529,38 @@
       "site_id": "98147d1dabe30680b755448cbce52a31b2c1cef5523d773c1e44463cf43afb61",
       "source": "unknown_reasons.append(sat_replay_reason)",
       "symbol": "check"
+    },
+    {
+      "authority_role": "production",
+      "construct_kind": "reason_constructor",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "a30979531ff5d5c7fa38534c0f76fb4a21167bc1c5f5ad7158acfa600630d8df",
+      "line": 215,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "static_set",
+      "resolution_basis": {
+        "kind": "symbol_or_file_flow_proposal",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_blocking_unsafety_unknown_reason"
+        ]
+      },
+      "resolved_reason_ids": [
+        "outcome_cfg_reachability_incomplete",
+        "outcome_cross_kind_overlap",
+        "outcome_member_unclassified",
+        "outcome_partition_residual_sat",
+        "outcome_partition_totality_timeout",
+        "outcome_path_region_incomplete",
+        "outcome_return_consistency_unknown",
+        "outcome_return_value_conflict",
+        "return_coverage_gap",
+        "return_coverage_inconclusive"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "991eb09b2289e0af72fdaf44115cd18c71bc2df2f4e1d1dd001789694f6e15aa",
+      "source": "return make_unknown_reason(",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -3552,22 +3628,43 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "28901d282b399a3b7da37b902ff2c4c572aef33573c616522de8777fcc8d9c44",
-      "line": 2288,
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "cea928534c795b261a155e4471671609590a3341d19421934ee23301b8ba1131",
+      "line": 620,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "a0c6a6e8cfc89d74bf46d5cd53e2666986afb034ab1d52dfe3a5086b7c2d0d68"
+          "9e397c9341bd1699b4db8f6ce3bbf88e42b0a998087eb1e3db012ce3917cd4ce"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "a0c6a6e8cfc89d74bf46d5cd53e2666986afb034ab1d52dfe3a5086b7c2d0d68",
-      "source": "strategy_result.unknown_reasons = []",
+      "site_id": "9e397c9341bd1699b4db8f6ce3bbf88e42b0a998087eb1e3db012ce3917cd4ce",
+      "source": "unknown_reasons=[],",
+      "symbol": "_retry_with_abi_constraints"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "095a3abb51383d0641f2a949590a48389f3a02a06d95663d28feb64bcbdcde0e",
+      "line": 2257,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "a085f47899310cf1260d98aa310083d796bbe1e84f57c83662ab32139750610a"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "a085f47899310cf1260d98aa310083d796bbe1e84f57c83662ab32139750610a",
+      "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
       "symbol": "_apply_phase2_relational_call_discharge"
     },
     {
@@ -3590,27 +3687,6 @@
       "site_id": "a14714ca338b812eea7e2b20cb7e667381a59a259953ce291c50869109f85eb4",
       "source": "equiv_timeout=$EQUIV_TIMEOUT",
       "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "15386b089a67f7ee3cb45e978e2d76ebb466d0095dab9d2d63d8c8a2d6a878fa",
-      "line": 2305,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "a20759f80f8d672a329d46f4385e4c0960848e88507443b4d3eb5e9f9b74294d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "a20759f80f8d672a329d46f4385e4c0960848e88507443b4d3eb5e9f9b74294d",
-      "source": "def _specialize_call_effect_unknown_reasons(",
-      "symbol": "_specialize_call_effect_unknown_reasons"
     },
     {
       "authority_role": "derived_projection",
@@ -3677,6 +3753,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "4a41f5fdb7efec7945dbc5a4aada05e2b323f8141b2fbb315fca282dc713c18e",
+      "line": 1448,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "a878f214857177c9e9b40932574343a8e7e3804131ff2d0be46d2c4535c6dba2"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "a878f214857177c9e9b40932574343a8e7e3804131ff2d0be46d2c4535c6dba2",
+      "source": "unknown_reasons=strategy_result.unknown_reasons,",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "82e83200de58949ac46e82bf8476d663ed9f94f72ac0ff53819dc2bffa0b10b3",
@@ -3695,6 +3792,27 @@
       "site_id": "a989ca2e797560f0128841ca6dc8af8909289e7230c508ef78bfa945733ea3ea",
       "source": "--pairwise-timeout \"$PAIRWISE_TIMEOUT\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "proof_backlog",
+      "inventory_source_fingerprint": "d2c4616bff45efacddc4833dbebef6a1826760810d783fb77c144a38f30ea534",
+      "line": 1298,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "ab4d55d796de9b3b135ff943a30913e048eaa9c468d0f32abb7adf4c6335518a"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "ab4d55d796de9b3b135ff943a30913e048eaa9c468d0f32abb7adf4c6335518a",
+      "source": "strategy_result.unknown_reasons = self._attach_root_blocker_identities(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -3737,27 +3855,6 @@
       "site_id": "abeb196d1dc7a25fabf86a705f059f354d2ba997e2756acfb7d4fa96cad1c119",
       "source": "blocking_unknown_reasons = coverage_unknown_reasons + equivalence_unknown_reasons",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "7430a1aa4f3e03e1619336de870cfbf7565074f88b189eccc480d0381f6912bc",
-      "line": 1292,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "acd85748110da830effc38b8b60e7ab40d8fa74cc2e424569406e6872885c211"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "acd85748110da830effc38b8b60e7ab40d8fa74cc2e424569406e6872885c211",
-      "source": "strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(",
-      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -3952,6 +4049,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
+      "line": 178,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "bad802b8759612c19f815bafb89ac2d6a11d34b30036d99927f8adfeb6639e26"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "bad802b8759612c19f815bafb89ac2d6a11d34b30036d99927f8adfeb6639e26",
+      "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
+      "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "9661dcd109174084bc098c38e85c0384162aba3b3e3bc0ea3e321984196f1169",
@@ -3991,27 +4109,6 @@
       "site_id": "bc530a650ac8b22f89afaa66989a6a2212a659c3c7a9fbcd713e5560a87c4f2f",
       "source": "reason_record = self._make_blocking_unsafety_unknown_reason(",
       "symbol": "_impl__unresolved_return_coverage_unknown_reasons"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "20499989e874d1c354377da83f904914d343113b98e3744491fcd11e13bfed12",
-      "line": 552,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "bd6b624b541ca7177b845fbc1ff337127806cc3c6b378e5b3f3cbd277cc46f3a"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "bd6b624b541ca7177b845fbc1ff337127806cc3c6b378e5b3f3cbd277cc46f3a",
-      "source": "def _impl__make_sat_counterexample_ambiguous_unknown_reason(",
-      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -4161,27 +4258,6 @@
       "symbol": "<shell>"
     },
     {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "04d5491ac607c6f15db91415c95397b92e88c92ca5f5a0ff72d5b7f3fb146829",
-      "line": 159,
-      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "c22b1df6af143ae040896a94f40e0b7bdc640d86610088f632d80c723ef2ca70"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c22b1df6af143ae040896a94f40e0b7bdc640d86610088f632d80c723ef2ca70",
-      "source": "_CAUSE_REASON_IDS_BY_SITE = {",
-      "symbol": "<module>"
-    },
-    {
       "authority_role": "production",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
@@ -4329,27 +4405,6 @@
       "site_id": "c74f7f9d29670cc5aaa4ffec8f0764864b70e1ccca088e602299db8b9a703300",
       "source": "blocking_unknown_reasons,",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "14e47768fe25201929be466cc6126ae826240c00c918a36065ef12678da065d5",
-      "line": 1298,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "c77f44755bccc95ac834b77c2a1628621d105f3c33acfd7f07622c815beac458"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c77f44755bccc95ac834b77c2a1628621d105f3c33acfd7f07622c815beac458",
-      "source": "strategy_result.unknown_reasons,",
-      "symbol": "check"
     },
     {
       "authority_role": "production",
@@ -4650,45 +4705,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "final_primary",
-      "inventory_source_fingerprint": "1b7093c170eaed0787be4394488f1549b05930c4497bb4d12b5ed5bb7e245cb0",
-      "line": 1214,
-      "path": "scripts/function_tracer_pcode/validation/result_summary.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "dcd162f17976f52fe0d9c24837efeaa8c4cd8171204686b4ad597f1b6bdb063b"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "dcd162f17976f52fe0d9c24837efeaa8c4cd8171204686b4ad597f1b6bdb063b",
-      "source": "records = tuple(coerce_unknown_reason_records(payload.get(\"unknown_reasons\") or ()))",
-      "symbol": "_canonical_blocking_reason"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "cea928534c795b261a155e4471671609590a3341d19421934ee23301b8ba1131",
-      "line": 619,
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "14e47768fe25201929be466cc6126ae826240c00c918a36065ef12678da065d5",
+      "line": 1299,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "dd6c22bd8cbb7b361284b4406fd0d117cbc05a114f1853dc080fc5862dbfad6d"
+          "e0bff2402295ddd3a9267cb52c512b6dfe0dc823a9dfecce51e4728863176018"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "dd6c22bd8cbb7b361284b4406fd0d117cbc05a114f1853dc080fc5862dbfad6d",
-      "source": "unknown_reasons=[],",
-      "symbol": "_retry_with_abi_constraints"
+      "site_id": "e0bff2402295ddd3a9267cb52c512b6dfe0dc823a9dfecce51e4728863176018",
+      "source": "strategy_result.unknown_reasons,",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -4901,29 +4935,6 @@
       "symbol": "<shell>"
     },
     {
-      "authority_role": "production",
-      "construct_kind": "reason_constructor",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "7557115d34884ecb8834230f84100ac656012a8167e38cce6517cfa101f0a6fa",
-      "line": 571,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
-      "reason_resolution": "static_set",
-      "resolution_basis": {
-        "kind": "symbol_or_file_flow_proposal",
-        "refs": [
-          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_sat_counterexample_ambiguous_unknown_reason"
-        ]
-      },
-      "resolved_reason_ids": [
-        "sat_counterexample_ambiguous"
-      ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "ea4e5d7bee5d1b8b58500920acd0c1a448037abe3725b9fc6b744479779051e0",
-      "source": "return _v2_observe_sat_ambiguity_reason(make_unknown_reason(",
-      "symbol": "_impl__make_sat_counterexample_ambiguous_unknown_reason"
-    },
-    {
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
@@ -4943,6 +4954,27 @@
       "site_id": "ea9d1d1939ca5bd6847ec76cbb4cee95116e4fcc68fb609fe09672a814c8b933",
       "source": "decompile_timeout=$DECOMPILE_TIMEOUT",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "4b1cde51e48ee15ebb0d057953d1d62479513bc5865e3543a12533bf28e6490a",
+      "line": 1969,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "ebeabae08648512697b3c40f8f95c3874b45fc348dc86bfb79c4d8dc16c3ffc3"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "ebeabae08648512697b3c40f8f95c3874b45fc348dc86bfb79c4d8dc16c3ffc3",
+      "source": "for reason in tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_apply_preflight_final_gate"
     },
     {
       "authority_role": "derived_projection",
@@ -5178,27 +5210,6 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "ccdf272d479fc24c414f3e0a8d70386d183780a4ff4f6294db591a1d7f404210",
-      "line": 249,
-      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "fb9dc391082b3f2dd65792c0f6b3b9347ca5f71be0e2ecb7eff0ff2c799b787a"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "fb9dc391082b3f2dd65792c0f6b3b9347ca5f71be0e2ecb7eff0ff2c799b787a",
-      "source": "_REASON_IDENTITY_SCOPES = {",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "3f6b4d7474c84d745d73e7c40659bbf23df220de72f82b6cfe87843ffbe6877a",
       "line": 27,
@@ -5215,6 +5226,27 @@
       "shell_role": null,
       "site_id": "fbd6baaac4f5b581d6a1a2b1ee7b6b94ef63ee055873d00716d55e0e1990b7b3",
       "source": "OUTCOME_STAGE_REASON_MATRIX = MappingProxyType({",
+      "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "ccdf272d479fc24c414f3e0a8d70386d183780a4ff4f6294db591a1d7f404210",
+      "line": 264,
+      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "fc69fd54ffc5b027d95e3d0b72646627eefbcfd681175af7ba4380db580c6fc1"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "fc69fd54ffc5b027d95e3d0b72646627eefbcfd681175af7ba4380db580c6fc1",
+      "source": "_REASON_IDENTITY_SCOPES = {",
       "symbol": "<module>"
     },
     {
@@ -5369,7 +5401,7 @@
   ],
   "current_source": {
     "candidate_count": 601,
-    "candidate_set_digest": "a4840070de18c325e7636db7d0ca78173a078a5f5260aa7b58a977131f5853bb"
+    "candidate_set_digest": "4ce88a5322165bb55e89a2eaba0b0873b9a103045a3c84491645089a33ba3b7c"
   },
   "delta_kind": "unknown_taxonomy_v2_phase6_slice2_source_inventory_delta",
   "previous_slice": {
@@ -5392,7 +5424,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0162e303d637caa604b1e7d6fd7121db50fcb9360e3cafe48b9a9534d06af52c",
       "source": "unknown_reasons.append(",
@@ -5413,7 +5445,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "status_authority",
       "site_id": "038dbd7dbad369e46131125080863d4f0a38ecb7214f4fc4f146226697f41930",
       "source": "status=\"UNKNOWN\"",
@@ -5434,7 +5466,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "05242e7263a1aded8c30c3995798a3e5d9af61a24988cf20d32b92b2ab250969",
       "source": "strategy_result.unknown_reasons = []",
@@ -5455,7 +5487,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "05da9b616edcf4431df73a7bc77a5beb50632368633a3d77b98b939a0c43bbed",
       "source": "timeout_counts[phase] + 0, \\",
@@ -5479,7 +5511,7 @@
       "resolved_reason_ids": [
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "06d97ef9fa0b1eed3ecec3d43e5d1d2cc980a0175dda4720629471dc417563f7",
       "source": "make_unknown_reason(",
@@ -5500,7 +5532,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "083b0c5d57da854f07b2b811520e52fb6a6389081fce5ae10e5e4e350150f9ce",
       "source": "\"$indent\" \"$phase\" \"$total\" \"$used\" \"$no_changes\" \"$not_reached\" \"$attempts\" \"$rechecks\" \"$unsat\" \"$sat\" \"$sat_phase4b\" \"$unknown\" \"$timeout\" \"$critical\"",
@@ -5521,7 +5553,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0a2f52fa2486a26a51b6b65a6be404c1f0f8ef9590e210dc6afa763ae5edd42b",
       "source": "result = list(pair_unknown_reasons)",
@@ -5542,7 +5574,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0af912ba1e87a47692021127cc722953305e2cf50990c76182301a183a51384f",
       "source": "blocking_unknown_reasons",
@@ -5563,7 +5595,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "0c4dca7cd18338e856c74401e8ddecab12c889fd74fb870eaabd63a90091b896",
       "source": "DECOMPILE_TIMEOUT=\"${DECOMPILE_TIMEOUT:-60}\"",
@@ -5584,7 +5616,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0d11a1b072454b2ce5377299765f58174097fcdca1c739ce944290aee560a921",
       "source": "def _impl__append_blocking_unknown_reasons(",
@@ -5605,7 +5637,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0d4c83f13e0e4e356b064360f2201b8b195fbed771472d7a18b54e11c5257c19",
       "source": "equivalence_unknown_reasons = self._unresolved_equivalence_blocking_unknown_reasons(",
@@ -5629,7 +5661,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0e7ce2dcb39cc67fd7afadfe173e9c03a4481fcdd543ac26aa6a2168da70f9f0",
       "source": "make_unknown_reason(",
@@ -5650,7 +5682,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "0f2e14d206dc73280400df3a636a026fee314cd2f32924bd4c62be02889602ad",
       "source": "recovery_backlog = summarize_unknown_recovery_backlog(self.unknown_reasons)",
@@ -5671,7 +5703,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "10a083f0a9115a048673473465effaff67cd70de02c7190c6340e616ba6d76bc",
       "source": "unknown_reasons.append(",
@@ -5692,7 +5724,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1141a476259901033d5c786151bc922194054b9bb87fd8cb2b0f46ba88844725",
       "source": "return coerce_unknown_reason_records(attempt.get(\"unknown_reasons\") or ())",
@@ -5713,7 +5745,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "129af51efaf7c6b5a726f2f5f7a9429e1e1a5b81756ae39254b2a29744e3097f",
       "source": "def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownReasonRecord, ...]:",
@@ -5734,7 +5766,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1353ac251bf6a5ca170c5c3a263f7100d94ea92e967174c2dc224513948848b5",
       "source": "pair_unknown_reasons: Sequence[Any],",
@@ -5757,7 +5789,7 @@
       "resolved_reason_ids": [
         "unknown"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "1425e5d2da6d000cc81ac93f5e2d98e437f66a9806a7e628c16bc29844b188bf",
       "source": "totals[\"unknown\"] + 0",
@@ -5778,7 +5810,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "14a551124b096e1d9ad3202967ce740c2c410ae9d29fb6be8b64868cf7c901e1",
       "source": "coverage_unknown_reasons: Sequence[Any],",
@@ -5799,7 +5831,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "14cb114c69b25cc59d2200cbf90eeb50806f668451589e5fab71197df0eaf9b1",
       "source": "unknown_reasons.append(",
@@ -5820,7 +5852,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "18c59099a0689bc8d43e784fc7789f9f650acc57a29248b9abbf1948def4732d",
       "source": "printf \"%s  - %-22s LOGS=%3d | USED=%3d, NO_CHANGES=%3d, NOT_REACHED=%3d | ATTEMPTS=%3d, RECHECKS=%3d | UNSAT=%3d, SAT=%3d, SAT->Phase4B=%3d, UNKNOWN=%3d, TIMEOUT=%3d, CRITICAL=%3d\\n\" \\",
@@ -5843,7 +5875,7 @@
       "resolved_reason_ids": [
         "unknown"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "19ebdfb560bd01349008890266330a682cb93143a62601e18dd5b4b9c40362bb",
       "source": "else if (key == \"unknown\") unknown_counts[phase] += value",
@@ -5864,7 +5896,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1a1acda131261fb0df8c3aed3c6580846f347a0d2f0175abda413e87db72bd5a",
       "source": "*list(strategy_result.unknown_reasons or ()), mismatch_reason",
@@ -5885,7 +5917,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1a1cf8849c0c3b64586fc8e09a2a7d908613c4dad6d95153d0b505a1bfe005d1",
       "source": "pair_unknown_reasons: Sequence[Any],",
@@ -5909,7 +5941,7 @@
       "resolved_reason_ids": [
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1ab3dc93ff12b2586487126a56afe645282a04537c589b8a8ecaf4531bf56c84",
       "source": "make_unknown_reason(",
@@ -5930,7 +5962,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1b3739a3b140b2d955e8f229bb7400a3b62813d1ec72e5946c539fea2b1fc853",
       "source": "unknown_reasons.append(sat_replay_reason)",
@@ -5954,7 +5986,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1c57ec79c8e6e6c721f891813f6f00bb26a0cd245105a49b3af8d07e3031da36",
       "source": "make_unknown_reason(",
@@ -5978,7 +6010,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1dbc3d12781224d667ff1d0ecdbba6d71ea53730c018c612db3a877ecb3a1bb5",
       "source": "make_unknown_reason(",
@@ -6006,7 +6038,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "1e01c40c6c04944d20bed00ecaefbfb90ccc29c1b6479eaddd755fa005258a86",
       "source": "equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(",
@@ -6027,7 +6059,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "20748c80fd38910394ee076da0fe7cf3ed845aa28660ba96c159b7975b8a0477",
       "source": "make_unknown_reason,",
@@ -6048,7 +6080,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "20e99063712f31f220321e0df4442b461d776ad440cf8adbe372b46dfc014eec",
       "source": "unknown_reasons=[",
@@ -6069,7 +6101,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "225739d91ae133607d692f7d60b300b20e901ec439f89ac08a6ae9895d1adece",
       "source": "if timeout --kill-after=\"$PAIR_PROCESS_KILL_AFTER\" \"$PAIR_PROCESS_TIMEOUT\" \\",
@@ -6090,7 +6122,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "22dee36445121d75e9af02626cb30783395a4b5ffefab16bd7054bbbd112ffc2",
       "source": "unknown_reasons=[",
@@ -6120,7 +6152,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "2493423efe8299d894ae2d5e747f3009f6f95528fcb4f72743a3cb60683a7cb4",
       "source": "blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons",
@@ -6141,7 +6173,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "25ab3abfd211e7c3d4f309d9971fc5815d018f5049585a677a468ef0c5ea5bf7",
       "source": "unknown_reasons = self._append_blocking_unknown_reasons(",
@@ -6162,7 +6194,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "26bc6cdc465416f19050dbe80d01e44de82e5648f2abb79b0e0c98ca05fc9de4",
       "source": "unknown_reasons=unknown_reasons,",
@@ -6183,7 +6215,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "275d18c0ac3f63fdaf32957c07198b4c5f1178cc20d9e8041440db9bf74da05c",
       "source": "if coverage_unknown_reasons:",
@@ -6204,7 +6236,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "29111a8f01f02b6ae08353d37f6e5c197226dd5d7d8eae4309d940dd46b38693",
       "source": "from ...unknown_reason import UnknownRecoveryActionStatus, UnknownRecoveryProofKind, UnknownRecoveryProofObligation, UnknownReasonId, UnknownReasonRecord, build_proof_obligation_id, build_unknown_recovery_actions, coerce_unknown_reason_records, make_unknown_reason",
@@ -6225,7 +6257,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "29eac9ff8a00366b3e3ebcf8e31e43580db0c82304d3196bfe8a2e611ac865bb",
       "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
@@ -6246,7 +6278,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "2dac4adfc051ae6371f263c2b148a69379dbf4a6887e3db46c046e96130ba014",
       "source": "--pairwise-timeout-hard \"$PAIRWISE_TIMEOUT_HARD\"",
@@ -6267,7 +6299,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "2e2a0d596737679fe3f173795ad39ecd62bdad92069c1a752037e60d156a6688",
       "source": "reason_record = self._make_blocking_unsafety_unknown_reason(",
@@ -6288,7 +6320,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "2ecbe8e6e97872c8c536fcba412fe9d69a0644c76b9620d242464b0bf67419fd",
       "source": "EQUIV_TIMEOUT=\"${EQUIV_TIMEOUT:-10}\"",
@@ -6309,7 +6341,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "2f783b1a756c75a11d60c4ec7882f6c62407884d997b8c3da4c82d227b9ab2cc",
       "source": "TIMEOUT)",
@@ -6332,7 +6364,7 @@
       "resolved_reason_ids": [
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "305c04fd187ec705a5616255ed4a7ec9ddd531d4e018da8af930b1839ce5fb8c",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
@@ -6353,7 +6385,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3263a9d11a45acb98ab142f4d099a65bdc82be8723ae3be32f88a30e6585ec5b",
       "source": "__all__ = ('Any', 'COUNTED_LOOP_SUM_OPCODE', 'COUNTED_STATE_TRANSITION_VALUE_OPCODE', 'CheckStrategy', 'Condition', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'CountedLoopSummaryRef', 'CountedStateTransitionLoopSummaryRef', 'Dict', 'Expression', 'ExpressionSafetyChecker', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'LoopSummaryComparisonResult', 'LoopSummaryRef', 'LoopTermDescriptorRef', 'Mapping', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'Optional', 'ParallelResult', 'ParameterInfo', 'QueryResult', 'ReadonlyReductionRef', 'ReadonlyReductionTermRef', 'ReturnCase', 'Sequence', 'SignFacts', 'SolverResult', 'SolverStatus', 'StorageInfo', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'Z3Solver', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', '_counted_loop_sum_has_exact_lowering', '_loop_summary_term_at_index', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_parameter_semantic_constraints', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'collect_float_predicate_smt_declarations', 'collect_intrinsic_smt_declarations', 'collect_unknown_smt_declarations', 'compare_loop_summaries', 'contains_udiv', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_smt_bit_width', 'expression_uses_smt_float_theory', 'expression_uses_smt_uf', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'hashlib', 'infer_parameter_semantics', 'json', 'make_unknown_reason', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'replace', 'save_unknown_query', 'smt_logic_name', 'solve_query_internal', 'solve_query_twostage', 'time', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')",
@@ -6374,7 +6406,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "329ddc9b20fc510a06b997f9916bdba5616a0cf3f00e193c3b003c475d878e5a",
       "source": "echo \"UNKNOWN\"",
@@ -6395,7 +6427,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "330210c05c02d7f83789acb9e10574720d96b8dff49d1553c7b587893c070341",
       "source": "PAIRWISE_TIMEOUT=\"${PAIRWISE_TIMEOUT:-5}\"",
@@ -6416,7 +6448,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "347bf124c5e8104f43801d90fe65b5b449a644e1f7cabd3f371f8f9a85b15644",
       "source": "strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(",
@@ -6437,7 +6469,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "360cb79fb4dff534c0ecea6285e3d582900aad52c4db9c8a80c67bb9dbeff26e",
       "source": "echo \"Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)\"",
@@ -6458,7 +6490,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "36802f7da9682b2498460b85474413e6184ea1ffca93a516e332615b718119b7",
       "source": "return coerce_unknown_reason_records(payload.get(\"unknown_reasons\") or ())",
@@ -6479,7 +6511,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "36cdc2836d4a2e04d21a7722a84182d6d7b70c23dbbba6bcd33a1d7ede4dcf06",
       "source": "unknown_reasons=[",
@@ -6500,7 +6532,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "36d1a3940ba050609d6dae7f5bc0d0aed1911331eec943f7292d05ddb7b781eb",
       "source": "validation_append_pair_process_timeout_payload() {",
@@ -6521,7 +6553,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3787095c3fd69e7954b67085b4dfdce2775d19c362254c48bf112050dc70ba09",
       "source": "reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
@@ -6542,7 +6574,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "37ceb1c68cfeaeeef3e2a6494e406c3ca37bc71823b375858966b3ca96afa112",
       "source": "def _impl__make_sat_unsafety_unknown_reason(",
@@ -6563,7 +6595,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "38344ccd43a0af5c63f6ab3cfccf3414785939a36475da649fe9c22101f4f3e6",
       "source": "elif grep -q \"^Result: UNKNOWN\" \"$LOG_FILE\"; then",
@@ -6586,7 +6618,7 @@
       "resolved_reason_ids": [
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "386652a069eec5a17a5b943bd339ee66d8a3620eb489c3e18f3dfb32dfbcfed6",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
@@ -6607,7 +6639,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "391f8a20f3060cf1fc3b611e3951c1cfad5267165198c39a3edd38e7810fb326",
       "source": "reasons = tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
@@ -6628,7 +6660,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3a22618a3273fb5f7889407ddfd7f41b1fab6769c1dfbd65e6fa259aded12024",
       "source": "build_unknown_recovery_actions(self.unknown_reasons)",
@@ -6649,7 +6681,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3a977b1c9fdb4f94eabd68cdedab51f757b19147081110910a3f781581caf818",
       "source": "replay_reason = self._make_sat_unsafety_unknown_reason(",
@@ -6670,7 +6702,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3e187e2473caf7f7013e62663f80048b86a86b935330b45de42cd0267892e8ff",
       "source": "for reason in pair_unknown_reasons",
@@ -6691,7 +6723,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3e2cc947863eb70206bd07236045e19fdeb65cf76c7093a2b3c9bd5175f4b971",
       "source": "self._unknown_reason_id_for_loop_fallback(pending.reason),",
@@ -6712,7 +6744,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3e8bca8a57a9c326493e19831b03d865e44a511303b686d1506ed98102ea7544",
       "source": "unknown_reasons.append(",
@@ -6733,7 +6765,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3ebdcb40e057f10091cc02fd8dad52cda934aeb73d89d7487a3ffb95329f1755",
       "source": "list(getattr(strategy_result, \"unknown_reasons\", ()) or ()),",
@@ -6754,7 +6786,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "3f56fcb420a3358b2ee958e0cc5e571ed7dd0ea0ffbcc5ebe79094c7ca14348e",
       "source": "strategy_result.unknown_reasons,",
@@ -6775,7 +6807,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "413d6f12e2bd0dfeccff2b292af4d8f7cbeb1d84fb116819e654f8074601c80c",
       "source": "declare -a TIMEOUT_PAIRS=()",
@@ -6796,7 +6828,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "414ce509e5e9ecc351ec30ca5f67d702119bba8610b181eebd8687e0784aef46",
       "source": "echo \"Decompile timeout: $DECOMPILE_TIMEOUT\"",
@@ -6819,7 +6851,7 @@
       "resolved_reason_ids": [
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "41ea0df8f2bae33db14ddb2f5ca613cd0934b55407d328606ed1dbbc028129bb",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
@@ -6842,7 +6874,7 @@
       "resolved_reason_ids": [
         "loop_summary_proof_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "425a8323be7fcdb57aef4ef846572d86976f74a3ece07ba39409eb8a2cf099b9",
       "source": "reasons.append(make_unknown_reason(",
@@ -6863,7 +6895,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "42e9510cf61f5a25cf53a2377231ff3300695c4ec081a09062492c90df6a7e9a",
       "source": "echo \"UNKNOWN\"",
@@ -6893,7 +6925,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "43fb1da6379586a31e22939e954cc73ff17c20b0ac29a4aa0e3578cacaaf0e84",
       "source": "equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(",
@@ -6914,7 +6946,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "4475a109c10df430da8d1f292f1fdc0d9a96be66af90ea4f8473b34b9d0166da",
       "source": "make_unknown_reason,",
@@ -6935,7 +6967,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "4529629db81c9bd5312189ea32f323f4926bacd3c1526f6f6cb43ac41be588e1",
       "source": "--pairwise-timeout \"$PAIRWISE_TIMEOUT\"",
@@ -6956,7 +6988,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "452cdebf64a7d9adabead07e76706ed9cb48ab221570387b9b6b7673b67906a5",
       "source": "unknown_reasons = []",
@@ -6977,7 +7009,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "47570278012290c06b8629b2568fcf39c697a700131105e9410b8a3ee9c74da0",
       "source": "--equiv-timeout \"$EQUIV_TIMEOUT\"",
@@ -6998,7 +7030,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "47d178037aad111701657a50c05d204daa16ff39758dd57942ea0398f6b97551",
       "source": "result.unknown_reasons = [*list(result.unknown_reasons or ()), mismatch_reason]",
@@ -7019,7 +7051,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "48565d6c0491cdf78d4f47ec0256b3bdc2220c5d36c35030c0b4a1afd846c18c",
       "source": "if not pair_unknown_reasons:",
@@ -7040,7 +7072,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "491991d4879f21ee00f9d1dbd14fa0370d38784f25584a7884877686a0df97d0",
       "source": "coerce_unknown_reason_records,",
@@ -7063,7 +7095,7 @@
       "resolved_reason_ids": [
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "4be18c73a1ca07508858bb8246a95130b2c924cb07c9d47c867f4df2a1f343fe",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
@@ -7086,7 +7118,7 @@
       "resolved_reason_ids": [
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "4c7d9849285d501f56e40323d23f284249601640b1afab8b566bc97194f50529",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
@@ -7107,7 +7139,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "4c9a5841685c6ba3ab02ac250e3d08965bc6f19109b7f15dc336c08675a97abb",
       "source": "self._make_sat_counterexample_ambiguous_unknown_reason(",
@@ -7131,7 +7163,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "4db634b7f3c427ec0f2f438497e25f7b57ea0f060e097fdbe154a542a9d083bd",
       "source": "make_unknown_reason(",
@@ -7152,7 +7184,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "4e80c0f7d9c44f62b8b02d3c41b7c797e74d745dc88f27f49abdd1dd860a2897",
       "source": "PAIR_PROCESS_TIMEOUT=\"${PAIR_PROCESS_TIMEOUT:-300s}\"",
@@ -7176,7 +7208,7 @@
       "resolved_reason_ids": [
         "solver_unknown_timeout"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "50ca6c70f2520237b4fde2d2477b39873a4c456944acc9a6d3254cb4ebdd22cf",
       "source": "make_unknown_reason(",
@@ -7197,7 +7229,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5523b0453e2f6ead278d8a7ff423995338c8d0ccb5ae3d184b34b8d50d306374",
       "source": "coverage_unknown_reasons,",
@@ -7218,7 +7250,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "56ade5bca7aaed203c1ef4fac79bb962bf81c8e0b32aa6dacd1b9709e6500726",
       "source": "sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(",
@@ -7242,7 +7274,7 @@
       "resolved_reason_ids": [
         "return_width_bridge_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5701177439a126a69b72e66693640b4c0fd588426c5d7f404b170ba727a12f48",
       "source": "make_unknown_reason(",
@@ -7284,7 +7316,7 @@
         "summary_return_candidate_invalid",
         "summary_return_overlap_unproven"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "575e7336ea186ea4caec7963c5fd8ea8d8a35f8260481fc8a373526df6a13a08",
       "source": "typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)",
@@ -7305,7 +7337,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "580890adcc411761dc1d18bdaee194591cf618cf7475f794b5b6b6bd516fe4db",
       "source": "unknown_reasons=[",
@@ -7326,7 +7358,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "58f16ae8dbc85c244fb0fd71647d47e31b3a0dbe86053fb1698d3ff0991d6fcf",
       "source": "unknown_reasons,",
@@ -7347,7 +7379,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "592e1ea3d47fc87fcda7f0ff9493a7660efb6844b70920fae7b7a45f0599157c",
       "source": "unknown_reasons=[",
@@ -7368,7 +7400,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "59f655a9d421953542a2524059ba0be29a4e189cacfad69999515fc5e0ba0299",
       "source": "unsafe_reason = self._make_sat_unsafety_unknown_reason(",
@@ -7391,7 +7423,7 @@
       "resolved_reason_ids": [
         "unresolved_value_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5a3f6a9bdc31ffb1526bab2b667bbc7758d11474941d44696ab9ece7ea979820",
       "source": "result.blocking_reason = \"unresolved_value_expression\"",
@@ -7412,7 +7444,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5a8bb4f1b080356c8b346b1d683aa62d533ca7527a890ed5676313502b2a358f",
       "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
@@ -7433,7 +7465,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5a963e94b8e5a01859ade4767895bde03f0b3a27d4d96b5eeba121bebe25f10c",
       "source": "unknown_reasons.append(reason_record)",
@@ -7454,7 +7486,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "5b039a27b4c95df743a5532216814b3e48db337dc039b3f5f9ac6e7192957350",
       "source": "echo \"TIMEOUT\"",
@@ -7475,7 +7507,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "5e6eeee8243f9ce63cbda457203dc60da78da894ec861d7e6b9f76c41b147c19",
       "source": "export -f validation_append_pair_process_timeout_payload",
@@ -7496,7 +7528,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5e73eb2b4502793ebc62b3e6abc3d9459061710d9f3f755fd8fc26958dc13cd7",
       "source": "unknown_reasons.extend(unresolved_blocking_reasons)",
@@ -7517,7 +7549,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5ed779d1076c82169460d1d04a4b49cfa9bbedf25c3380e6606ccaa7fe8f3bdd",
       "source": "for reason in tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
@@ -7538,7 +7570,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "5f864bf3c21d82a198f5db372a2e80856d0b14e0e30d4a5e3fea843beee5735c",
       "source": "\"unknown_recovery_backlog\": summarize_unknown_recovery_backlog(self.unknown_reasons),",
@@ -7561,7 +7593,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "60a7b99603cfc9269a429a166784133fd63ef54d1b552fb2ad46e48a8d644bca",
       "source": "make_unknown_reason(",
@@ -7582,7 +7614,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "6109bb3c9ef3f56168cac139ced4ac078464b604314f1ab19d837567aebb3f74",
       "source": "if include_unknown_reason_summary:",
@@ -7603,7 +7635,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "610ef4f2ca5ab2d9681b0a8a65c2018dd389afb6030c99bcb9a9bacf67db7ed0",
       "source": "unknown_reasons=(",
@@ -7624,7 +7656,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "637f27439f2ead243d5268f99860e60d96b58fcf9165784406619aac153a7391",
       "source": "include_unknown_reason_summary: bool = True,",
@@ -7645,7 +7677,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "64a06cdfdba6712cbc127edd73af8b6d9695260fe38d66c2d701c53409adafe5",
       "source": "UNKNOWN)",
@@ -7668,7 +7700,7 @@
       "resolved_reason_ids": [
         "unknown"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "64af2070d3f86e2ca43769bbe68ecacea4aeecf6801e385149cb82372fb0441f",
       "source": "\"unknown_reason_target\", getattr(reason, \"reason_id\", \"unknown\"),",
@@ -7689,7 +7721,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "64e5b260e7cf9b774152172b11c7ff9632214fdc7a02fb53ef5256486eda0aeb",
       "source": "elif grep -q \"^Result: UNKNOWN\" \"$log_file\"; then",
@@ -7710,7 +7742,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "66215cacaa6531ceedcb9c009a3d73e55fde60b30bcc24e1b3e14bcb2cb825b3",
       "source": "echo '{\"is_equivalent\": null, \"is_timeout\": true, \"timeout_class\": \"pair_process_timeout\"}'",
@@ -7731,7 +7763,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "674916cf9dd81522ae1c0001cadff918ff643c6a29c6b9d67e70e8a3171d62f7",
       "source": "unknown_reasons = blocking_unknown_reasons",
@@ -7755,7 +7787,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "6944de627dc85d98dc27b9eb258aaa8714d42a0c020f2a835a6bbab2ea6e211d",
       "source": "unknown_reasons.append(make_unknown_reason(",
@@ -7776,7 +7808,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "69ab1ad7f85dd61aefadf28e6aaa12196110c7bd69861e157a0ddff5835217ca",
       "source": "def _specialize_call_effect_unknown_reasons(",
@@ -7800,7 +7832,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "6a6628b1fa263a525e17d43c96f5ee1856125493dbbe4537088e17e72233627d",
       "source": "return make_unknown_reason(",
@@ -7821,7 +7853,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "6b4a5366f37069749fe2428b2f7fcce81326c2507ed4d083374e5cd529c4ad54",
       "source": "def _impl__make_blocking_unsafety_unknown_reason(",
@@ -7842,7 +7874,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "6c92203e23e33cbd5926231da34e928900ac24c86bf90a8cbdd7db6ab97fc9b0",
       "source": "decompile_timeout=$DECOMPILE_TIMEOUT",
@@ -7863,7 +7895,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "6e47068b8181706a8ab6d4bc82016f310357e9faa34969fc2785223e06a95b20",
       "source": "return self._make_return_coverage_unknown_reason(",
@@ -7884,7 +7916,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "72afd5c02c705eb6cfdf4312e5b504848884da192976f366d5a1817311b3ef66",
       "source": "unknown_reasons.append(sat_unsafety_reason)",
@@ -7905,7 +7937,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "75f08c7c40c7ee08c95958c6dbbbfcdf301021e14e84053841e9e8319370a499",
       "source": "result.unknown_reasons = list(strategy_result.unknown_reasons)",
@@ -7926,7 +7958,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "75f1aba671416abc980a42065fd92a6437be22a0deebf3a7d49b3b3d196d37ac",
       "source": "TIMEOUT)",
@@ -7947,7 +7979,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "76c9f6b5394e85de36ac3adbfae3808af73b8c4ec089ed868d80f3b8a6360e60",
       "source": "def _impl__make_return_coverage_unknown_reason(",
@@ -7968,7 +8000,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "77607d56f6b19a9b51e7e9d27711e87184bd9b3790ad76a1b89daac71e772c99",
       "source": "unknown_counts[phase] + 0, \\",
@@ -7992,7 +8024,7 @@
       "resolved_reason_ids": [
         "solver_unknown_timeout"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "77832d46aa0bb18fca079a81ff79c9ae55a6da86350ffc9137a40a2510f502f7",
       "source": "make_unknown_reason(",
@@ -8013,7 +8045,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "77aa3e1dd636914d76add8d7d725da7e6cea73374e979c5106a9cdd9bef9b6c8",
       "source": "echo \"Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER\"",
@@ -8034,7 +8066,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "77da84ca7168c0436ea90bc5ef78c9afe6292fc5cc5265a738835eaad8fc01d0",
       "source": "unknown_reasons.extend(coverage_unknown_reasons)",
@@ -8055,7 +8087,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7833c7f304751191dadbf027f7652f4179ffac27c6ceec7cf9a19db854fa97a3",
       "source": "if self.unknown_reasons:",
@@ -8076,7 +8108,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7952e7bd9ff21b508cb60c086475f722ce1a344124c2e860cd0874e41b82c919",
       "source": "unknown_reasons=strategy_result.unknown_reasons,",
@@ -8097,7 +8129,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7ad26422c13ee928bd1c7eda7128a9e873a7698a65f6e3be1c8a05500673e458",
       "source": "unknown_reasons,",
@@ -8118,7 +8150,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "7b6a4f40e510a6bae5a62cb73adae8d6f11a0bf52387b62605973eec919c0445",
       "source": "else if (key == \"timeout\") timeout_counts[phase] += value",
@@ -8139,7 +8171,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7b9f73b00bd5511fbd7ad02a5dc1724458b6ae16bf644fc0af81bc46c79ac70a",
       "source": "return self._unknown_reason_id_for_blocking_unsafety(reason_text)",
@@ -8160,7 +8192,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7c24477ef890c4ea5fc4d2976744969065dd0a3cd1a26b9296455de3b1140cb6",
       "source": "def _impl__make_sat_counterexample_ambiguous_unknown_reason(",
@@ -8181,7 +8213,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "7c61df9c42b6212ce83c2705919cb41964454e3c3daadbe1ace141a46fecfcc1",
       "source": "--timeout \"$DECOMPILE_TIMEOUT\"",
@@ -8202,7 +8234,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7c859ce733a13f49cac81c2923427dfe30a32fe18d1129f001c1ba3df826170b",
       "source": "unknown_reasons.append(",
@@ -8223,7 +8255,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7dbe4d7a9bc25af8ac60df49ac859098ba65ce9c6801c1b08ae95a58e192dc73",
       "source": "for reason in (unknown_reasons or (\"solver_inconclusive\",))",
@@ -8249,7 +8281,7 @@
         "method_b_closure_blocked",
         "readonly_identity_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "7eeacc4f672985b228ed444b16ea67b79d76cdc5dd70944ebb57de73ff465a05",
       "source": "reason_id = self._unknown_reason_id_for_loop_fallback(",
@@ -8270,7 +8302,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "7f333813f3ea10d10edb14f2cf60792b6b92dfbab8b8272d61d363538ba2a5c2",
       "source": "TIMEOUT)",
@@ -8295,7 +8327,7 @@
         "solver_proven_rewrite_no_change",
         "solver_proven_rewrite_proof_failed"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "82795cd7710ab935e798d6d63c88cbdafe1b88d3b062402b588d03502c6c552c",
       "source": "stage2_result.blocking_reason = rewrite_result.blocking_reason",
@@ -8316,7 +8348,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "82a9a190659a1a687fc3413bf9a03b2385432d5a12b03b31665fb4662161bded",
       "source": "equiv_timeout=$EQUIV_TIMEOUT",
@@ -8341,7 +8373,7 @@
         "return_coverage_gap",
         "return_coverage_inconclusive"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "8341262c28d57b72856c560bc4ed7a5d3cbf059bdf663c18d5d6cc6b74f4b924",
       "source": "return make_unknown_reason(",
@@ -8362,7 +8394,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "843e8bf21144b74f2b31a10c68a6a40fbd43e9aded36776e5920e35860bafa83",
       "source": "unknown_reasons = []",
@@ -8383,7 +8415,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "85c3b71605b3aafec17357b67fcdf63330d6a11fd247889fad2d66ac643508f0",
       "source": "echo \"TIMEOUT\"",
@@ -8404,7 +8436,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "869b1cd0233bfdfcf38c765858d682e43b6bb7361c5c3fe27e8b6f4ed624622e",
       "source": "echo \"${indent}Pairwise Timeout Normalization Summary:\"",
@@ -8432,7 +8464,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "875f1662548f3cf8db1ddd71167a05335db8c733b3146152301dcabd0326ac29",
       "source": "equivalence_blocking_reasons = [",
@@ -8453,7 +8485,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "8851fac58233393d24b472ac5c949ae93ad276a0d0df9c59bc60bfa00bcbcfef",
       "source": "while IFS=$'\\t' read -r phase total used no_changes not_reached attempts rechecks unsat sat sat_phase4b unknown timeout critical; do",
@@ -8474,7 +8506,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "897088e5804ece686610a3718da49d8ef641f05894ba0474a4ad0aedbc8d4f15",
       "source": "def _impl__unknown_reason_dedup_key(reason: Any) -> Tuple[Any, ...]:",
@@ -8495,7 +8527,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "89edc7c12301011827c16c5364acec5c5142270d90f0ed80b552791113701513",
       "source": "TIMEOUT_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
@@ -8535,7 +8567,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "8faf5446f42e44b3d0fcac4976af1bc35b90a0395e067bf57d3b4acada8c463f",
       "source": "pair_process_timeout=$PAIR_PROCESS_TIMEOUT",
@@ -8556,7 +8588,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "94c5e059236b83fee1d17a8a46215e75a505bc5bb0a73ba6f90b644d0ea70be3",
       "source": "sat_replay_reason = self._make_sat_unsafety_unknown_reason(",
@@ -8594,11 +8626,35 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "98364afbadbc81e043230993c9965e8e4b7248f2ea2affbe26f51bf39bbd2fb8",
       "source": "IFS=$'\\t' read -r logs attempts changed no_change unsat sat unknown <<< \"$summary_line\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "production",
+      "construct_kind": "reason_constructor",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "a30979531ff5d5c7fa38534c0f76fb4a21167bc1c5f5ad7158acfa600630d8df",
+      "line": 209,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py",
+      "reason_resolution": "static_single",
+      "resolution_basis": {
+        "kind": "reviewed_control_flow_finite_set",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:209",
+          "scripts/function_tracer_pcode/equivalence/strategies/proof_gates/sat_safety.py:_impl__make_blocking_unsafety_unknown_reason"
+        ]
+      },
+      "resolved_reason_ids": [
+        "equivalence_blocking_unsafety"
+      ],
+      "review_status": "reviewed",
+      "shell_role": null,
+      "site_id": "984948111d02d14f9fec4c0fe862fb6bfdf246364250c9192c468d37b8173167",
+      "source": "return make_unknown_reason(",
+      "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
       "authority_role": "derived_projection",
@@ -8624,7 +8680,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "989ae2ace0115536f236a7a392db2c1ee401a215e54855184ad920d0fd9efdcb",
       "source": "blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons",
@@ -8645,7 +8701,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "98e68cd44909de36e0ddd32f5208d088ccb19ed3c8af7fba8145efb2e68b695f",
       "source": "unknown_reasons.append(",
@@ -8666,7 +8722,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "996002bae7bbb99ef789e940ddb1c938043b0e57d946459417c521159ac57390",
       "source": "/^[[:space:]]+attempts=[0-9]+, changed=[0-9]+, no_change=[0-9]+, unsat=[0-9]+, sat=[0-9]+, unknown=[0-9]+/ {",
@@ -8687,7 +8743,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "9a3bc826495467ced9afc8ef551eab617bad876d9d14fa0b26101a338965dd92",
       "source": "echo \"TIMEOUT\"",
@@ -8708,7 +8764,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "9dd59971b4bcb21e907a899097e8a4c2f2f6b02a4c46e47b8f022cda48e8d37b",
       "source": "unknown_reasons.append(sat_unsafety_reason)",
@@ -8729,7 +8785,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "9def3fd4062a5fb85c82a0b9d760f527bcd6d2706944fa8c48ab3fc932838c1d",
       "source": "echo \"Result: TIMEOUT (pair process exceeded wall-clock time limit)\"",
@@ -8757,7 +8813,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "9ec23db10de053c90716974f35766afde7179376e978004a74d568464800e075",
       "source": "unresolved_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(",
@@ -8789,7 +8845,7 @@
         "outcome_return_consistency_unknown",
         "outcome_return_value_conflict"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "9ffa74fb8ad36ac71d295a38ba5bee59e06250dc9566da67832d09a7508a9a3a",
       "source": "return make_unknown_reason(",
@@ -8810,7 +8866,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a0b3db6ffa9a197315473a4ab433e9da1bdfdf183a5588ae641318dd1e629f67",
       "source": "strategy_result.unknown_reasons.append(",
@@ -8831,7 +8887,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a22b1e3f7a3c8ce39eba4ba5429dd83d48a2944d6c9259cb4fe7a1098f56725b",
       "source": "def _impl__blocking_unknown_reasons_should_replace_pair_unknowns(",
@@ -8852,7 +8908,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "a2be021f520c865b38d5aaf9c914ac675c28968c86a83646861f451a0f026a80",
       "source": "UNKNOWN)",
@@ -8875,7 +8931,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a2c18c34276bc7515b66750d5c06610ecf07ae428dadf38587364e656e95ba4b",
       "source": "mismatch_reason = make_unknown_reason(",
@@ -8896,7 +8952,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a2eafdb12e17bdfca70704907fe0f85580fb50f895ba85778359fd78756e4f91",
       "source": "seen = {cls._unknown_reason_dedup_key(reason) for reason in result}",
@@ -8922,7 +8978,7 @@
         "method_b_closure_blocked",
         "readonly_identity_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a316013e28b1e639f9515459d2ee73539f40956f38b59bc5827499b554c4af50",
       "source": "reason_record = make_unknown_reason(",
@@ -8947,7 +9003,7 @@
         "normalization_no_change",
         "return_width_bridge_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a39ed441852c000f84be74ef66f9bca522dd1e88a2ef108ac340462dff31fbc5",
       "source": "stage2_result.blocking_reason = norm_result.blocking_reason",
@@ -8976,7 +9032,7 @@
         "solver_unknown_timeout",
         "unresolved_value_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a3cbb813e6002729b78a1cd83cc43e0bc88ec8e02371c4d53ab53870d8cc7cfa",
       "source": "make_unknown_reason(",
@@ -8997,7 +9053,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a5bdc8f19fc7041ee236d4a5d2ec4e618e1dd7450300ad17c1ab7b532bf341e8",
       "source": "lines.append(f\"  ... ({len(self.unknown_reasons) - 10} more)\")",
@@ -9018,7 +9074,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a62877543cf000f0a47c744b88b88a095b25f182f16897b72bed7500b0aad1ff",
       "source": "self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))",
@@ -9039,7 +9095,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "a6af49905ad82388ff3ee7ffc7364df35413417af3098de089acab308db8c666",
       "source": "printf \"%s  LOGS=%3d | ATTEMPTS=%3d, CHANGED=%3d, NO_CHANGE=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d\\n\" \\",
@@ -9063,7 +9119,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a80891936d4ea5a0777bb2992e819ba1be681ed1bacd1b12b6cec35d50fd6d96",
       "source": "unknown_reasons.append(make_unknown_reason(",
@@ -9084,7 +9140,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "a85ead99bc4fed4322cf12b039debab453af12e8aa2c46a005dbb6b282f5b698",
       "source": "reasons = _extract_final_unknown_reasons(payload)",
@@ -9105,7 +9161,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "b01f33a710858f57d4263f0d3e4e3c95041b5daa05d22f77920da78124937dc7",
       "source": "UNKNOWN_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
@@ -9126,7 +9182,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "b0cb783326c2f6edc006aac451b58ca211861b7a018ffd5e193b0b3c4810518f",
       "source": "echo \"UNKNOWN\"",
@@ -9147,7 +9203,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b1aae1d799889b89d43a54a3f8bdba1b31f157787b1d1cfe2cda30385f325a53",
       "source": "raw_reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
@@ -9168,7 +9224,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b1e9a58ca28d2fe389bacf49ea0de657a3dcb07e0a67ca069f7a97878490337d",
       "source": "strategy_result.unknown_reasons = self._attach_recurrence_proposal_blockers(",
@@ -9191,7 +9247,7 @@
       "resolved_reason_ids": [
         "solver_unknown_timeout"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b5330447be84090a1b9d75ec1008cf31ed8f393a074e110a93a74709df3a6959",
       "source": "stage2_result.blocking_reason = \"solver_unknown_timeout\"",
@@ -9212,7 +9268,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b63778504ee66ebfecd98b42891e71aa587dde29f011e213a5fa3774a16669f6",
       "source": "for reason_index, reason in enumerate(payload.get(\"unknown_reasons\") or ()):",
@@ -9236,7 +9292,7 @@
       "resolved_reason_ids": [
         "equivalence_blocking_unsafety"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b697efae22fd33a783782270ced64826a64a7290b077e68b6f5a39268c6abb76",
       "source": "unknown_reasons.append(make_unknown_reason(",
@@ -9260,7 +9316,7 @@
       "resolved_reason_ids": [
         "return_width_bridge_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b78cf82a8145daee376eae556c5d8dba17f1c1e9f9abc482dc819334381a552a",
       "source": "make_unknown_reason(",
@@ -9281,7 +9337,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "b7fc82f66b38d09f1dae7fd71af11ce9f2296ff3e55e95252b18a5359a779eca",
       "source": "elif blocking_unknown_reasons:",
@@ -9302,7 +9358,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "ba47cd4676d297d7eec981b33725a801e4becfe7aed087b1129c18e17f757ab0",
       "source": "for reason_index, reason in enumerate(attempt.get(\"unknown_reasons\") or ()):",
@@ -9323,7 +9379,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "bb53fcf9d7ddfa026bb4a1e4e1fbdec67dedcf7eff0e1dd601de877130533fbe",
       "source": "/^Result: UNKNOWN/ { status = \"UNKNOWN\"; status_line = NR }",
@@ -9344,7 +9400,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "bbda653983e15269b1d0c99153bed27b0e98f01b83b3cef546d09dda4e964c7a",
       "source": "def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):",
@@ -9365,7 +9421,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "bd4c7285124f92cee392d0c2f4dab0aa76d8a1018490a3fc17be0c451bf7c5f1",
       "source": "unknown_reasons.append(sat_replay_reason)",
@@ -9386,7 +9442,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "bf39fca0e13b3d0b20b4d466662aab7daf5e3658cb3541f651afd7a01b3c7104",
       "source": "echo \"Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\"",
@@ -9407,7 +9463,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "bf4cf461b4046176c32737ffdf6a191adab1f09b8c5014d460bf1b24307ed63e",
       "source": "strategy_result.unknown_reasons = unknown_reasons",
@@ -9437,7 +9493,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "bf7b7cc62b3d37a168eb8b55a74706a73eb47391d92b4f2e58b782c644fba945",
       "source": "blocking_reasons_replace_pair_unknowns = (",
@@ -9458,7 +9514,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c1acc7e52d187dec3497925d9ae9f9915bf1e99b4eec38c14d1aecf25e126a75",
       "source": "sat_replay_reason = self._make_sat_unsafety_unknown_reason(",
@@ -9479,7 +9535,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c31516ee069aee895cb0c0b7a43e680d080de9955f8fe94d174edc44a80f8f5d",
       "source": "for reason in self.unknown_reasons[:10]:",
@@ -9500,7 +9556,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "c398951c72deeca1ce7b322b48cac7a607e46a8a37c9816e38dce0b0681ca5db",
       "source": "echo \"Error: GNU coreutils timeout command is required for pair process timeouts\" >&2",
@@ -9524,7 +9580,7 @@
       "resolved_reason_ids": [
         "strategy_exception"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c4359a3ed24e54b86d53fe7a403c570aa8e07fc1b3603eead8e058daa1f98425",
       "source": "make_unknown_reason(",
@@ -9562,7 +9618,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c6705eb6a8e0f0c9024fc7de4754ac7320a1e0f9f3e6401b82af87e1a04c4f6e",
       "source": "unknown_reasons=[",
@@ -9583,7 +9639,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c6ed9217731086a66ba97c9d87c7fe608f1639ba17c5a1b0e8ee423044eb226d",
       "source": "blocking_unknown_reasons,",
@@ -9604,7 +9660,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "c783b995879584c04c077d49921f553c1202906323d53cc80054bea93bee623c",
       "source": "if len(self.unknown_reasons) > 10:",
@@ -9625,7 +9681,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "c8f3b35a968c8d6de69b5259972e865db98d988a1a1baf400675d37b25533be9",
       "source": "PAIRWISE_TIMEOUT_HARD=\"${PAIRWISE_TIMEOUT_HARD:-30}\"",
@@ -9655,7 +9711,7 @@
         "summary_return_candidate_invalid",
         "summary_return_overlap_unproven"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "cb14fff980a886a6b05bffb1f95f9b45403b59f0b38bd69b256c771654f0186e",
       "source": "return make_unknown_reason(",
@@ -9676,7 +9732,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "cd679ba78ad9a62adea7c488772eff87024d2ac69919fb1007e0d42635256426",
       "source": "pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD",
@@ -9697,7 +9753,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d1010bb323828e1c2bce6389c3fe26b4d77572b118ce24127d3476ba9d0574ef",
       "source": "pair_key, \"proof_incomplete\", tuple(reason.reason_id for reason in unknown_reasons),",
@@ -9718,7 +9774,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "d205fcf9699edf7a9e1f740ed9bcc0e1f18f334dbe8c0c63225b12ccdd8dbeaa",
       "source": "/^Result: TIMEOUT/ { status = \"TIMEOUT\"; status_line = NR }",
@@ -9739,7 +9795,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d48a9bdf01f88d4c5778373603b2405c8a5d94d77b747d27ac0213bec3f1558d",
       "source": "blocking_unknown_reasons = coverage_unknown_reasons + equivalence_unknown_reasons",
@@ -9760,7 +9816,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d4b0f3023cd33fbbf6ad3fba0a674c82965433363480a1f5ed55c7828879124b",
       "source": "equivalence_unknown_reasons: Sequence[Any],",
@@ -9781,7 +9837,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d4e4ee05d7e46fa8680873e170ec7e5c3019e8ae3624da0412b033c8cf2aa7c4",
       "source": "blocking_unknown_reasons: Sequence[Any],",
@@ -9802,7 +9858,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d4e88d5b5d4b300f0eaabf5874ec567c60a8c8136ccc4091c764941680119b75",
       "source": "def _impl__unresolved_return_coverage_unknown_reasons(",
@@ -9823,7 +9879,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d600f5961bad07b5cdceacef19a80a428ff3e655c3937707ef5c1adbf977f650",
       "source": "key = cls._unknown_reason_dedup_key(reason)",
@@ -9844,7 +9900,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "status_authority",
       "site_id": "d6b73ad69468c425154432e6bc103393b89227ea22515c90d62f707c244536fe",
       "source": "status=\"TIMEOUT\"",
@@ -9865,7 +9921,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d74846d27c545a78417a10d6734dfb70ed2070379020c823a18a23cfd4361a9f",
       "source": "reason_record = self._make_blocking_unsafety_unknown_reason(",
@@ -9886,7 +9942,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "d859b46bd085569d743f5c175639e23061c5093588381d5806920a8ce6b0e1ce",
       "source": "declare -a UNKNOWN_PAIRS=()",
@@ -9907,7 +9963,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "d8ba56b0538ae438ffc0d3c330af6315d6b2a3979978687be326e79fbfdf1b26",
       "source": "equivalence_unknown_reasons,",
@@ -9928,7 +9984,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "da02d67b1c6fbf7e8504545382627db0506304fd5486e543a11e0a89cabbf549",
       "source": "self._blocking_unknown_reasons_should_replace_pair_unknowns(",
@@ -9949,7 +10005,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "da45fc081bc673d410ff45ec3bee3ee964c7ba106abb45d7d88c6a51a4deeb5e",
       "source": "records = tuple(coerce_unknown_reason_records(payload.get(\"unknown_reasons\") or ()))",
@@ -9970,7 +10026,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "da6754b93c4d0852fdf233f805098b39613ce07d64f4cd93c234b4fcb2af87e3",
       "source": "self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))",
@@ -9991,7 +10047,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_preflight",
       "site_id": "dcbed74f4cd6f481dd38de08155c5d7c866f80a9aa014c835b3f3bed8462b4b9",
       "source": "if ! command -v timeout >/dev/null 2>&1; then",
@@ -10012,7 +10068,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "ded871df2b923a804fee9b196b5e5e4a38fd00760b72156a6248c092f43f65e6",
       "source": "if not coverage_unknown_reasons and not equivalence_unknown_reasons:",
@@ -10033,7 +10089,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "df1edf42b86b9d0209a592dc9b48d1fbee6fdfe9f1bb4a50ef97ba3c29f5ae43",
       "source": "sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(",
@@ -10054,7 +10110,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "e101abefde1f6aefe879185fee3b5a96355afd0c6128c93f2eb91bc1bbeb452f",
       "source": "echo \"Equiv timeout: $EQUIV_TIMEOUT\"",
@@ -10075,7 +10131,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "e1beb3dd26d8fd802933a29ffbbc68e05ba40d4428745f268e1dc0c62117b4b7",
       "source": "reasons=getattr(result, \"unknown_reasons\", ()) or (),",
@@ -10096,7 +10152,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "e65e6fc67eb54585878c16cd2c762973bb7bbcbc9aecf6095cd617a25bc3d3d2",
       "source": "elif grep -q \"^Result: TIMEOUT\" \"$LOG_FILE\"; then",
@@ -10117,7 +10173,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "e788ac317b8f540db1da87cc360c7685fb9337129c6f46f98abf6d87113a4299",
       "source": "if blocking_unknown_reasons:",
@@ -10138,7 +10194,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "e87853aad05ee0ef8253c6dc0d0f135ffcb550e0eb38f34630d161a6b5e42dca",
       "source": "unknown_reasons=unknown_reasons,",
@@ -10159,7 +10215,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "execution_config",
       "site_id": "e8d2b882bb44a41ebf23e25d36a8ea001a66c52c7856e11775a60ce746d9883e",
       "source": "pairwise_timeout=$PAIRWISE_TIMEOUT",
@@ -10180,7 +10236,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "e8f4c9757c854106c643f1d51d1942913eb4ebd12957c1aa2fb1fa889146c7fc",
       "source": "self._make_sat_counterexample_ambiguous_unknown_reason(",
@@ -10201,7 +10257,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "e8f5b7861a4fe801f7f3f4674fd3c6b06348cb66e1910011d112ebdc3e3cb309",
       "source": "validation_append_pair_process_timeout_payload \"$log_file\"",
@@ -10222,7 +10278,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "e97d50f6f146dcedfbeb6bda1d47b793db931c94a262c5ba676bc8aecb2fb0df",
       "source": "UNKNOWN)",
@@ -10243,7 +10299,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "eb34b7448317d55ee74f722f749d41484def83b7474d1d2fa7fdc3c977b66b1f",
       "source": "strategy_result.unknown_reasons = unknown_reasons",
@@ -10266,7 +10322,7 @@
       "resolved_reason_ids": [
         "return_width_bridge_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "ec71ec75b38c6ce95cf7ae4fe278756788bc1b02f63985c3d55287e66ccd3bc5",
       "source": "result.blocking_reason = getattr(exc, \"reason_id\", \"return_width_bridge_missing\")",
@@ -10290,7 +10346,7 @@
       "resolved_reason_ids": [
         "unexpected_pairwise_state"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "edaecd5fc28ddf5c4c3d4135c7e94d5792a7c538edf57b9cdc9af4a29df86b74",
       "source": "make_unknown_reason(",
@@ -10311,7 +10367,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f002df16861784fed12fabcedf2ab5a4ebb1c06dde680e9648e4ff144f58668d",
       "source": "strategy_result.unknown_reasons = self._attach_root_blocker_identities(",
@@ -10332,7 +10388,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "f03afba11553b16c213d073f0663e30b9b0b2e63387d1658d8f24698a9013bef",
       "source": "elif grep -q \"^Result: TIMEOUT\" \"$log_file\"; then",
@@ -10353,7 +10409,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f0463465f9b7633bee6cb1c7fc0fb393fa679e247dab340607613e621fe347bb",
       "source": "strategy_result.unknown_reasons = [",
@@ -10374,7 +10430,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f0cd5ac815f5e85f100defc45384f5b3a928df30a74902d1d103cbff3d8a0208",
       "source": "unknown_reasons = blocking_unknown_reasons",
@@ -10395,7 +10451,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f3cb402cd7d0ade53ef642e39f223363f0a0040c9bf74e4735ccdc6993d1a6b6",
       "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
@@ -10416,7 +10472,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "parser",
       "site_id": "f4c25f05d5ace007e0db8603ed3bd88ad44b9df6708a0d341078cfb789894f28",
       "source": "grep -qE \"^Result: (EQUIVALENT|NOT EQUIVALENT|ERROR|TIMEOUT|UNKNOWN)\" \"$log_file\"",
@@ -10437,7 +10493,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "f50694b6f7a4ccc8982227206353caa1e39611b7fe3238f7b111bce4229a2b79",
       "source": "\"$indent\" \"$logs\" \"$attempts\" \"$changed\" \"$no_change\" \"$unsat\" \"$sat\" \"$unknown\"",
@@ -10458,7 +10514,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f6c2919513f90accb4a596df7dd28bb223cd6f9c3d7b0688f3763c175307a308",
       "source": "unknown_reasons.append(",
@@ -10479,7 +10535,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f6fbe47f0b7da4c212a430812fb48bc8632fb1b5c2fd2e70f626de2f4269f0a8",
       "source": "for reason in blocking_unknown_reasons:",
@@ -10500,7 +10556,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f7b5c6266a1cb0150e2ccf03ce326e57951ac242eefec61ee430f4665435be40",
       "source": "reasons = tuple(getattr(result, \"unknown_reasons\", ()) or ())",
@@ -10521,7 +10577,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f837c22b62fd8cba39e7375f15492195dd54ba4aec5ad877e89e2699deb13175",
       "source": "\"unknown_reasons\": [reason.to_dict() for reason in self.unknown_reasons],",
@@ -10547,7 +10603,7 @@
         "method_b_closure_blocked",
         "readonly_identity_missing"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "f8a9fb0af493d5a3726c56ea5350c6eec4efdc1858f3144484c2cdcf3e52b624",
       "source": "unknown_reasons.append(make_unknown_reason(",
@@ -10568,7 +10624,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": "reporting_only",
       "site_id": "fa08a4f79fe3cb166d2eb94275f5542464372068af8a8d3c332704bc21c7cc02",
       "source": "echo \"Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)\"",
@@ -10589,7 +10645,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "fd2aca6e00bedf6a10b56d9bd944d93985e0631788cc92b48b6ac063cac00f86",
       "source": "if final_is_equivalent is None and not unknown_reasons:",
@@ -10610,7 +10666,7 @@
         ]
       },
       "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "fedcc5856aa49cf0ad17b85c3c9a515c311b66b5b74aa42e5e0f4a3005de4b16",
       "source": "__all__ = ('ABC', 'Any', 'Condition', 'ConditionSMTOracle', 'Dict', 'Expression', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'Mapping', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Sequence', 'Set', 'SimpleNamespace', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'abstractmethod', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_provenance_key', 'expression_smt_bit_width', 'field', 'hashlib', 'json', 'make_unknown_reason', 're')",
@@ -10640,7 +10696,7 @@
         "unknown",
         "unresolved_expression"
       ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
+      "review_status": "reviewed",
       "shell_role": null,
       "site_id": "ffd4da3362a17b41309b2fe9c883ea329a590d486b0d3aeacee3325b6b492413",
       "source": "equivalence_blocking_reasons = [",

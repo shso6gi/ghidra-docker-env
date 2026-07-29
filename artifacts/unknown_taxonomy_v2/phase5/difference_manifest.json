@@ -3,12 +3,12 @@
   "case_13_canonical_census_status": "INVALID",
   "evidence_class": "deterministic_production_boundary_pilot",
   "files": {
-    "scripts/function_tracer_pcode/equivalence/checker.py": "0deb2ac4630e6d9e79bde1f5fd39f1615b29b82fb3f8e73f18e2f93cc007df8d",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de",
     "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b",
     "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7f2b7fcaf118b22f06e31d8dbdf8167129c5c3c612658932f6fc167764dcbb12",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "27a701b358fca507c8ed3e43513a9f2abfa25ba8a88e095a5623d9b58a631a17",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f18cb30cc52c4d1bc8f5afc0867198ddd0c0fada49b54848832a4c188a3f61ab",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
   },
   "gate_test": {
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "6095b476ccf2f6513ba12e6fbb689b2ebf579d832e019693ad5995d67978882e",
+  "manifest_digest": "90c8e698d0c312d179a235d8d0eb4fb75867a7561b3be686172ec7ba8725ca6e",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

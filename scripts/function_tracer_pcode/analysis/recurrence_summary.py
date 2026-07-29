@@ -283,7 +283,14 @@ class StructuralRecurrenceSummarizer:
         _memo=None,
     ) -> Optional[Expression]:
         from .recurrence.proof_utils import invoke as _invoke
-        return _invoke("_build_pcode_expression", self, varnode, placeholders=placeholders, _seen=_seen, _memo=_memo)
+        return _invoke(
+            "_build_pcode_expression",
+            self,
+            varnode,
+            placeholders=placeholders,
+            _seen=_seen,
+            _memo=_memo,
+        )
 
 
 

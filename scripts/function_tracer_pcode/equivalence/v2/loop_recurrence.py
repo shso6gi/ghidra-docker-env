@@ -1699,6 +1699,7 @@ class RecurrenceValidationCompletionSignal:
     proposal: Any
     seed_core: Any
     validated_entry: Any
+    producer_id: str
 
     def __init__(
         self,
@@ -1720,6 +1721,7 @@ class RecurrenceValidationCompletionSignal:
             ("proposal", proposal),
             ("seed_core", seed_core),
             ("validated_entry", validated_entry),
+            ("producer_id", "equivalence_recurrence_validator"),
         ):
             object.__setattr__(self, name, value)
         _validate_recurrence_completion_inputs(self)

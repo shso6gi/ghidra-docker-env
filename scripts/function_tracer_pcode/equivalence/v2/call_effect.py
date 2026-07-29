@@ -498,6 +498,8 @@ CALL_EFFECT_PRODUCER_EXCEPTION_PATTERNS = frozenset((
     "Q_open assignment must be a duplicate-preserving key/row pair",
     "Q_open assignment key must be obligation/stage strings",
     "Q_open assignment row is not live in lifecycle projection",
+    "suppressed call/effect obligation IDs must be strings",
+    "suppressed call/effect obligation IDs repeat",
     "v2 solver stage lacks live Q_open assignment",
     "v2 solver stage has ambiguous live Q_open assignments",
     "{}_alias_relation_missing", "{}_caller_call_effect_census_mismatch",
@@ -526,6 +528,8 @@ _PRODUCER_INFRASTRUCTURE_PATTERNS = frozenset((
     "Q_open assignment must be a duplicate-preserving key/row pair",
     "Q_open assignment key must be obligation/stage strings",
     "Q_open assignment row is not live in lifecycle projection",
+    "suppressed call/effect obligation IDs must be strings",
+    "suppressed call/effect obligation IDs repeat",
     "v2 solver stage lacks live Q_open assignment",
     "v2 solver stage has ambiguous live Q_open assignments",
     "structural_coverage_certificate_missing",
@@ -1507,21 +1511,51 @@ class CallEffectPilotEncoder:
             # materialized.  Its semantic-arm requirement intentionally stays
             # open, but the solver stages must not be executed a second time.
             return None
+        requirements_by_obligation = {}
+        for requirement_id, (obligation_id, _stage) in requirement_to_key.items():
+            requirements_by_obligation.setdefault(obligation_id, []).append(
+                requirement_id
+            )
+        suppressed_obligation_ids = []
+        for obligation_id, requirement_ids in requirements_by_obligation.items():
+            completed = [
+                requirement_id
+                for requirement_id in requirement_ids
+                if requirement_id in completed_stage_requirements
+            ]
+            if not completed:
+                continue
+            if completed != requirement_ids[:len(completed)]:
+                raise ValueError(
+                    "call/effect completed stage frontier is not an ordered prefix"
+                )
+            # A later visit cannot reconstruct the dependency proof IDs for
+            # the unfinished suffix without replaying completed solver stages.
+            # Keep the suffix open and suppress this obligation for the
+            # remainder of the result occurrence.
+            suppressed_obligation_ids.append(obligation_id)
+        active_requirement_ids = {
+            requirement_id
+            for requirement_id, (obligation_id, _stage) in requirement_to_key.items()
+            if obligation_id not in suppressed_obligation_ids
+        }
+        if not active_requirement_ids:
+            return None
         assignments = tuple(
             (requirement_to_key[row.proof_requirement_id], row)
             for row in projection.q_open_base
-            if row.proof_requirement_id in requirement_to_key
+            if row.proof_requirement_id in active_requirement_ids
         )
-        if len(assignments) != len(requirement_to_key):
+        if len(assignments) != len(active_requirement_ids):
             live_requirement_ids = {
                 row.proof_requirement_id for row in projection.q_open_base
             }
             missing_requirement_ids = tuple(sorted(
-                set(requirement_to_key) - live_requirement_ids
+                active_requirement_ids - live_requirement_ids
             ))
             raise ValueError(
                 "call/effect execution context lacks exact live stage frontier: "
-                f"expected={len(requirement_to_key)} assigned={len(assignments)} "
+                f"expected={len(active_requirement_ids)} assigned={len(assignments)} "
                 f"missing={missing_requirement_ids!r} "
                 f"live_count={len(live_requirement_ids)} "
                 f"completed_stage_count={len(completed_stage_requirements)} "
@@ -1549,6 +1583,7 @@ class CallEffectPilotEncoder:
             session.identity.result_occurrence_id,
             assignments,
             record_refusal,
+            tuple(suppressed_obligation_ids),
         )
 
     def finalize_terminal_timeout_bindings(

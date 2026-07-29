@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     RegionFact,
     RelationalCallEffectObligation,
     SolverProofRecord,
+    apply_solver_proof_artifacts_to_manifest,
     build_call_effect_shadow_manifest,
     build_structural_coverage_certificate,
     evaluate_obligation_proof_readiness,
@@ -2601,9 +2602,22 @@ def test_v2_call_effect_pilot_completes_stages_but_keeps_semantic_arms_open():
         assert [artifact.record.proof_stage for artifact in v2.artifacts] == [
             "guard_relation", "argument_relation", "return_relation",
         ]
-        emitted = session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+        batch = CallEffectProofBatchProductionSignal(
             legacy.v2_blocker_signals[0], v2.artifacts
-        ))
+        )
+        assert batch.producer_id == "call-effect-proof-batch-v2"
+        assert batch._phase7_signal_authority()["producer_id"] == (
+            "call-effect-proof-batch-v2"
+        )
+        with pytest.raises(
+            ValueError, match="proof batch producer is not sealed"
+        ):
+            CallEffectProofBatchProductionSignal(
+                legacy.v2_blocker_signals[0],
+                v2.artifacts,
+                producer_id="internal_typed_pure_direct_call_stage_producer",
+            )
+        emitted = session.emit_domain_signal(batch)
         assert emitted == 3
     completed = session.preview_lifecycle_projection()
     assert len(completed.c_active_base) == 1
@@ -2859,6 +2873,104 @@ def test_v2_call_effect_live_solver_timeout_finalizes_as_timeout(monkeypatch):
         registry=CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
     )
     assert rematerialized.evidence_digest == body["evidence_digest"]
+
+
+def test_v2_call_effect_partial_stage_prefix_is_not_replayed(monkeypatch):
+    pytest.importorskip("z3")
+    install_execution_authority_signing_key(
+        "v2-call-partial-prefix-key", b"p" * 32
+    )
+    activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "v2-call-partial-prefix-policy",
+            1,
+            "test-owner",
+            "test-source",
+            "v2-call-partial-prefix-key",
+            (),
+            3600,
+            "test-revocation",
+        )
+    )
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+
+    monkeypatch.setattr(
+        authority_module,
+        "_PINNED_PARALLEL_RUN_IMPL",
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
+        ]),
+    )
+    encoder = CallEffectPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        CallEffectBlockerProductionSignal: encoder,
+        CallEffectProofBatchProductionSignal: encoder,
+    })
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    )
+    session = connector.begin({"case": "v2-call-partial-prefix"})
+    left, right, manifest = _call_to_region_proof_inputs()
+    with production_signal_scope(session):
+        legacy = produce_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            solver_runner=EquivalenceChecker(
+                timeout=5,
+                enable_rewrite=False,
+            ).solver_runner,
+            timeout_seconds=5,
+        )
+        context = composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        )
+        v2 = produce_v2_pure_direct_call_proofs(
+            manifest,
+            left,
+            right,
+            execution_context=context,
+            timeout_seconds=5,
+        )
+        assert [artifact.record.proof_stage for artifact in v2.artifacts] == [
+            "guard_relation",
+            "argument_relation",
+            "return_relation",
+        ]
+        assert session.emit_domain_signal(CallEffectProofBatchProductionSignal(
+            legacy.v2_blocker_signals[0],
+            v2.artifacts[:2],
+        )) == 2
+        assert composite.build_call_effect_execution_context(
+            session,
+            legacy.v2_blocker_signals,
+            CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+        ) is None
+    evidence = connector.finish(
+        session,
+        SimpleNamespace(
+            error_message=None,
+            is_equivalent=None,
+            failure_status=None,
+            failure_message=None,
+            is_timeout=lambda: False,
+        ),
+        case_id="v2-call-partial-prefix",
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome.value == "UNKNOWN"
+    open_proof_kinds = {
+        row.proof_kind
+        for row in evidence.pilot_result.reduction.projection.q_open_base
+    }
+    assert "call_return_relation" in open_proof_kinds
+    assert "call_guard_relation" not in open_proof_kinds
+    assert "call_argument_relation" not in open_proof_kinds
 
 
 def test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences(monkeypatch):
@@ -3871,6 +3983,22 @@ def test_typed_return_stage_rejects_potentially_trapping_integer_ops(operator):
         "argument_relation",
     ]
     assert any("unsupported_return_expression" in item for item in production.failure_causes)
+    apply_solver_proof_artifacts_to_manifest(
+        manifest,
+        production.artifacts,
+    )
+    assert manifest["proof_readiness"] == [
+        {
+            "obligation_id": manifest["relational_obligations"][0][
+                "obligation_id"
+            ],
+            "decision_eligible": False,
+            "completed_stages": ["guard_relation", "argument_relation"],
+            "missing_stages": ["return_relation"],
+            "invalid_stages": [],
+            "blockers": ["required_solver_stages_missing"],
+        }
+    ]
 
 
 @pytest.mark.parametrize("solver_status", [SolverStatus.UNKNOWN, SolverStatus.TIMEOUT])

@@ -360,6 +360,13 @@ def test_phase7_stored_cutover_artifact_is_current_and_closes_coverage():
     assert stored["production_runtime_timeout"]["final_outcome"] == "TIMEOUT"
     assert stored["production_runtime_timeout"]["terminal_timeout_event_count"] == 1
     assert stored["production_runtime_timeout"]["timeout_derived_reason_count"] == 0
+    declared_skips = stored["cross_slice_validation"][
+        "declared_external_fixture_skips"
+    ]
+    assert len(declared_skips) == 3
+    assert {
+        row["reason"] for row in declared_skips
+    } == {"requires the external 411-summary legacy diagnostic fixture"}
 
 
 def test_phase7_cutover_artifact_rejects_tampered_coverage():

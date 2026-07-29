@@ -52,6 +52,7 @@ from .call_effect_producer import (
     produce_v2_pure_direct_call_proofs,
 )
 from .v2.call_effect import CALL_EFFECT_PRODUCTION_STAGE_REGISTRY
+from .v2.call_effect_sites import CALL_EFFECT_PROOF_BATCH_SITE
 from .v2.production_signals import (
     CallEffectProofBatchProductionSignal,
     build_active_call_effect_execution_context,
@@ -2022,12 +2023,25 @@ class EquivalenceChecker:
                             execution_context=v2_context,
                             timeout_seconds=self.timeout,
                         )
+                        apply_solver_proof_artifacts_to_manifest(
+                            manifest,
+                            v2_production.artifacts,
+                        )
+                        completed_obligation_ids = {
+                            str(item.get("obligation_id") or "")
+                            for item in manifest.get("proof_readiness", ()) or ()
+                            if isinstance(item, Mapping)
+                            and item.get("decision_eligible") is True
+                        }
+                        required_obligation_ids = {
+                            signal.obligation_id
+                            for signal in production.v2_blocker_signals
+                        }
                         if (
                             v2_production.failure_causes
-                            and v2_production.artifacts
-                            and all(
-                                artifact.record.status == "proven"
-                                for artifact in v2_production.artifacts
+                            and required_obligation_ids
+                            and required_obligation_ids.issubset(
+                                completed_obligation_ids
                             )
                         ):
                             raise ValueError(
@@ -2048,13 +2062,16 @@ class EquivalenceChecker:
                                         signal, artifacts
                                     ),
                                     producer_site_manifest_id=(
-                                        "checker-call-effect-proof-batch"
+                                        CALL_EFFECT_PROOF_BATCH_SITE.site_id
                                     ),
                                 )
                         manifest["v2_call_effect_shadow_producer"] = {
                             "mode": "pinned_execution_dual_write",
                             "artifact_count": len(v2_production.artifacts),
                             "failure_causes": list(v2_production.failure_causes),
+                            "completed_obligation_ids": sorted(
+                                completed_obligation_ids
+                            ),
                         }
                 except Exception as exc:
                     record_production_pilot_shadow_error(exc)

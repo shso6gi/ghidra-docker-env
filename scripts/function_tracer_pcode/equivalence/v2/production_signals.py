@@ -18,6 +18,7 @@ from .production_context import (
     production_pilot_session_scope,
 )
 from .comparison_closure import ComparisonClosureProductionSignal
+from .call_effect_sites import CALL_EFFECT_PROOF_BATCH_SITE
 from .registry import (
     SatisfactionBindingFactory, SealedReasonRegistry, SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
@@ -656,6 +657,7 @@ class CallEffectBlockerProductionSignal:
 class CallEffectProofBatchProductionSignal:
     blocker: CallEffectBlockerProductionSignal
     artifacts: tuple[Any, ...]
+    producer_id: str = CALL_EFFECT_PROOF_BATCH_SITE.producer_id
 
     def __post_init__(self) -> None:
         if type(self.blocker) is not CallEffectBlockerProductionSignal:
@@ -663,6 +665,8 @@ class CallEffectProofBatchProductionSignal:
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
         if not self.artifacts:
             raise ValueError("call/effect proof batch cannot be empty")
+        if self.producer_id != CALL_EFFECT_PROOF_BATCH_SITE.producer_id:
+            raise ValueError("call/effect proof batch producer is not sealed")
 
     def _phase7_signal_authority(self) -> Mapping[str, Any]:
         return {
@@ -670,6 +674,7 @@ class CallEffectProofBatchProductionSignal:
             "proof_records": tuple(
                 artifact.record.to_dict() for artifact in self.artifacts
             ),
+            "producer_id": self.producer_id,
         }
 
 

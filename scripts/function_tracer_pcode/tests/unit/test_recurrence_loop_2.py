@@ -1,5 +1,94 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
 
+
+def _phi_with_cfg_edge_condition(*, condition_depends_on_phi: bool):
+    seed = _FakeVarnode(
+        "seed",
+        expr=Expression.constant(0, size=4),
+        storage_offset=0x10,
+    )
+    update = _FakeVarnode(
+        "update",
+        expr=Expression.constant(1, size=4),
+        storage_offset=0x14,
+    )
+    phi_output = _FakeVarnode("phi", size=4, storage_offset=0x18)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [seed, update], phi_output)
+
+    independent = _FakeVarnode(
+        "limit",
+        expr=Expression.parameter("param_1", index=0, data_type="int", size=4),
+        storage_offset=0x20,
+    )
+    zero = _FakeVarnode(
+        "zero",
+        expr=Expression.constant(0, size=4),
+        storage_offset=0,
+        storage_space="const",
+    )
+    condition_output = _FakeVarnode(
+        "condition",
+        size=1,
+        storage_offset=0x24,
+    )
+    _FakePcodeOp(
+        "INT_NOTEQUAL",
+        [phi_output if condition_depends_on_phi else independent, zero],
+        condition_output,
+    )
+    branch_target = _FakeVarnode(
+        "branch_target",
+        expr=Expression.constant(0, size=8),
+        storage_offset=0x100,
+    )
+    branch_op = _FakePcodeOp("CBRANCH", [branch_target, condition_output])
+
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1, [phi_op])
+    latch = _FakeCfgBlock(2, [branch_op])
+    exit_block = _FakeCfgBlock(3)
+    preheader.add_edge(header)
+    latch.add_edge(header, truth=True)
+    latch.add_edge(exit_block, truth=False)
+
+    summarizer = StructuralRecurrenceSummarizer(_IdentityTracer(), debug=False)
+    return summarizer, phi_output
+
+
+def test_pcode_expression_marks_phi_edge_condition_cycle_unavailable():
+    summarizer, phi_output = _phi_with_cfg_edge_condition(
+        condition_depends_on_phi=True
+    )
+
+    assert summarizer._build_pcode_expression(phi_output, placeholders={}) is None
+
+
+def test_pcode_expression_builds_noncyclic_phi_edge_condition():
+    summarizer, phi_output = _phi_with_cfg_edge_condition(
+        condition_depends_on_phi=False
+    )
+
+    expression = summarizer._build_pcode_expression(phi_output, placeholders={})
+
+    assert expression is not None
+    assert expression.expr_type == ExpressionType.PHI
+    assert len(expression.value) == 2
+    assert expression.value[0][0] is None
+    assert expression.value[1][0].expression.operator == "INT_NOTEQUAL"
+
+
+def test_pcode_expression_does_not_approximate_cyclic_phi_as_unconditional_seed():
+    summarizer, phi_output = _phi_with_cfg_edge_condition(
+        condition_depends_on_phi=True
+    )
+
+    first = summarizer._build_pcode_expression(phi_output, placeholders={})
+    second = summarizer._build_pcode_expression(phi_output, placeholders={})
+
+    assert first is None
+    assert second is None
+
+
 def test_phi_input_resolution_keeps_cross_storage_parameter_seed_over_later_def():
     pointer_high = _FakeHighVar("param_1")
     end_high = _FakeHighVar("end_pointer")

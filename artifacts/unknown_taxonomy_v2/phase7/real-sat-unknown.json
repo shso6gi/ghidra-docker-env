@@ -1,6 +1,6 @@
 {
   "active_cause_count": 1,
-  "artifact_digest": "185fcf5f5b9b9ac2271995428bc48717065a99de4cb2bf4b65dbce51d9bcced1",
+  "artifact_digest": "67724a7ab422f0401059bfebdfc79ee99885b51b0d31a933a4cec8ecd4f5ddf4",
   "binary_content_identities": [
     "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
     "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -40,7 +40,7 @@
   },
   "discovered_activation_count": 1,
   "expected_activation_count": 1,
-  "expected_activation_ledger_digest": "f2f9a42fc511f94c7a93fc23f4259fd949f470bcebf2ff437252d4effba844e0",
+  "expected_activation_ledger_digest": "880d55c1bae14fd08e162f4f92294b3b693fc4bc0cbb21c032f420a908f90064",
   "final_outcome": "UNKNOWN",
   "function_pair": [
     "phase7_sat_witness",
@@ -49,8 +49,8 @@
   "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
   "not_reached_activation_count": 0,
   "open_requirement_count": 1,
-  "producer_manifest_digest": "bf73b46f6f42363ed8ab70cbdaf500f03eb8e1cf4ca6e82a3d4df2dbe4487eff",
-  "producer_site_count": 27,
+  "producer_manifest_digest": "9bfd10918c5f1f964bb6ccba8ae96fe8363ae19a737f5b8fcdc18401ef60951e",
+  "producer_site_count": 28,
   "q_open_rows": [
     {
       "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
@@ -67,7 +67,7 @@
       "disposition": "sat",
       "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
       "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-      "premise_digest": "dafd68e4a696b9d4f984d227ed290b3e1ca9aae24f6ea5f5f6dcf77af42e79b2",
+      "premise_digest": "dbd6ce753558a1ecb28ef7b96f3b9fc581cc4cb385d9ccdd9bc4b5ed3109aedc",
       "proof_kind": "monolithic_region_guard",
       "query_label": "monolithic.region:0:0:guard",
       "return_width_binding_receipt_digest": "",
@@ -79,7 +79,7 @@
       "disposition": "sat",
       "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
       "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-      "premise_digest": "83035735d29b5016344b484437c116342328056207c9889cd01b61c2767413be",
+      "premise_digest": "721fd986ce8c11a7ae54de127f48df8841841ac4e300d6c4d045bcbbcc787259",
       "proof_kind": "monolithic_region_value_inequality",
       "query_label": "monolithic.region:0:0:value",
       "return_width_binding_receipt_digest": "",
@@ -108,7 +108,7 @@
     ]
   },
   "runtime_activation_count": 1,
-  "runtime_activation_ledger_digest": "643bf6593bb3cf1050b4291a1c5ea2f58f865d0afbd89f912a5db19e0853aba3",
+  "runtime_activation_ledger_digest": "d2e43e4e0016bd59d72ebbe0e23542405defe800f7a892c7efa5ded8156b0b22",
   "sealed_event_stream": {
     "object_type": "SealedEventStream",
     "payload": {
@@ -355,11 +355,11 @@
     "80bd2ee4db1c612bb7d5f6d12fa66e4b1245f83c1d85e28a55e97265e5f1fff4",
     "f44c7cc5269a495ac380c9f1f3cb526f34b9857dbad8ce5cc057814bc6b18738"
   ],
-  "static_producer_site_count": 27,
+  "static_producer_site_count": 28,
   "terminal_timeout_assignment_count": 0,
   "terminal_timeout_receipt_count": 0,
   "typed_projection_receipt": {
-    "activation_id": "discovered-3bd630617f6e241ca04b67e417ddb01f3a31b293cccef7060c267dfe6bfb48de",
+    "activation_id": "discovered-7820db269eb058a9e7098119a76a50d477f60e06e13a0f68630f7800f984c603",
     "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
     "event_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
     "event_stream_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
@@ -369,7 +369,7 @@
     "projection_schema": "typed-result-projection-v1",
     "reason_id": "counterexample_analysis_safety_unproven",
     "reason_registry_digest": "af5e8dca9e1634206ef7b56ea004031d432b743e46e2d8e4ac4ea9b92b99cf2e",
-    "receipt_digest": "09defff183e881f70dc584153bc6ba1fbdde520278be3f5365cf1434278a459b",
+    "receipt_digest": "d1723219a635c336e15224a3138dc7d36a3c84e8f7cb1505ad4412320cbe007b",
     "recovery_registry_digest": "6c7136c7c091fac2754f55736f24db7b533d4eba26f2ddfca58096e2e5f411c3",
     "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
     "semantic_projection_digest": "e01690afbb9e11d5fefb640ae87c9c15580837b908c475704fbdf6492b462464",

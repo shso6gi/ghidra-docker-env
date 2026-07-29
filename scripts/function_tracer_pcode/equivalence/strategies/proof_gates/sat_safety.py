@@ -15,6 +15,12 @@ from ._shared import (
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
+from ...v2.sat_safety_sites import (
+    SAT_SAFETY_AMBIGUITY_COMPLETED_SITE,
+    SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
+    SAT_SAFETY_BLOCKER_COMPLETED_SITE,
+    SAT_SAFETY_BLOCKER_OBSERVED_SITE,
+)
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -837,21 +843,17 @@ def _impl__sat_unsafety_reason_object_target_key(
 
 
 def _v2_observe_sat_unsafety_reason(reason_record: UnknownReasonRecord) -> UnknownReasonRecord:
-    _emit_v2_sat_safety_blockers(
-        "OBSERVED",
+    _emit_v2_sat_safety_blockers_observed(
         tuple(str(ref) for ref in reason_record.evidence_refs),
         reason_record.object_target_key,
-        producer_id="sat_unsafety_reason_producer",
     )
     return reason_record
 
 
 def _v2_observe_sat_ambiguity_reason(reason_record: UnknownReasonRecord) -> UnknownReasonRecord:
-    _emit_v2_sat_safety_ambiguity(
-        "OBSERVED",
+    _emit_v2_sat_safety_ambiguity_observed(
         tuple(str(ref) for ref in reason_record.evidence_refs),
         reason_record.object_target_key,
-        producer_id="sat_counterexample_ambiguity_producer",
     )
     return reason_record
 
@@ -861,11 +863,9 @@ def _v2_complete_sat_unsafety_and_true(
     reason_record: UnknownReasonRecord,
     proof_content: Mapping[str, Any],
 ) -> bool:
-    _emit_v2_sat_safety_blockers(
-        "COMPLETED",
+    _emit_v2_sat_safety_blockers_completed_if_observed(
         tuple(str(ref) for ref in reason_record.evidence_refs),
         owner._normalize_nested_tuple(reason_record.object_target_key),
-        producer_id="sat_unsafety_resolution_producer",
         proof_artifact_digest=_v2_sat_safety_proof_digest(proof_content),
     )
     return True
@@ -893,7 +893,6 @@ def _impl__complete_v2_sat_counterexample_ambiguity_if_observed(
     _emit_v2_sat_safety_ambiguity_if_observed(
         tuple(str(ref) for ref in evidence_refs or ()),
         object_target_key,
-        producer_id="sat_counterexample_disambiguation_producer",
         proof_artifact_digest=_v2_sat_safety_proof_digest({
             "object_target_key": object_target_key,
             "counterexample_raw": counterexample_raw,
@@ -920,11 +919,9 @@ def _impl__observe_v2_sat_counterexample_ambiguity(
         case2=case2,
         pair_id=pair_id,
     )
-    _emit_v2_sat_safety_ambiguity(
-        "OBSERVED",
+    _emit_v2_sat_safety_ambiguity_observed(
         tuple(str(ref) for ref in evidence_refs or ()),
         object_target_key,
-        producer_id="sat_counterexample_partition_validation_precondition",
     )
 
 
@@ -934,13 +931,9 @@ def _v2_sat_safety_reason_for_ref(reason_ref: str) -> str:
     return "counterexample_analysis_safety_unproven"
 
 
-def _emit_v2_sat_safety_blockers(
-    action: str,
+def _emit_v2_sat_safety_blockers_observed(
     reason_refs: Sequence[str],
     object_target_key: Any,
-    *,
-    producer_id: str,
-    proof_artifact_digest: Optional[str] = None,
 ) -> None:
     from ...v2.production_signals import (
         SatSafetyBlockerProductionSignal,
@@ -949,23 +942,41 @@ def _emit_v2_sat_safety_blockers(
 
     for reason_ref in tuple(dict.fromkeys(str(item) for item in reason_refs)):
         emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
-            action=action,
+            action="OBSERVED",
             reason_id=_v2_sat_safety_reason_for_ref(reason_ref),
             canonical_target_key=(object_target_key, ("safety_gate_ref", reason_ref)),
             missing_semantic_fact=("counterexample_safety_gate_unproven", reason_ref),
             evidence_refs=(reason_ref,),
-            producer_id=producer_id,
-            proof_artifact_digest=proof_artifact_digest,
+            producer_id=SAT_SAFETY_BLOCKER_OBSERVED_SITE.producer_id,
         ), producer_site_manifest_id="sat-safety-blocker-observed")
 
 
-def _emit_v2_sat_safety_ambiguity(
-    action: str,
-    evidence_refs: Sequence[str],
+def _emit_v2_sat_safety_blockers_completed_if_observed(
+    reason_refs: Sequence[str],
     object_target_key: Any,
     *,
-    producer_id: str,
-    proof_artifact_digest: Optional[str] = None,
+    proof_artifact_digest: str,
+) -> None:
+    from ...v2.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_completion_if_observed,
+    )
+
+    for reason_ref in tuple(dict.fromkeys(str(item) for item in reason_refs)):
+        emit_sat_safety_completion_if_observed(SatSafetyBlockerProductionSignal(
+            action="COMPLETED",
+            reason_id=_v2_sat_safety_reason_for_ref(reason_ref),
+            canonical_target_key=(object_target_key, ("safety_gate_ref", reason_ref)),
+            missing_semantic_fact=("counterexample_safety_gate_unproven", reason_ref),
+            evidence_refs=(reason_ref,),
+            producer_id=SAT_SAFETY_BLOCKER_COMPLETED_SITE.producer_id,
+            proof_artifact_digest=proof_artifact_digest,
+        ), producer_site_manifest_id="sat-safety-blocker-completed")
+
+
+def _emit_v2_sat_safety_ambiguity_observed(
+    evidence_refs: Sequence[str],
+    object_target_key: Any,
 ) -> None:
     from ...v2.production_signals import (
         SatSafetyBlockerProductionSignal,
@@ -973,13 +984,12 @@ def _emit_v2_sat_safety_ambiguity(
     )
 
     emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
-        action=action,
+        action="OBSERVED",
         reason_id="counterexample_partition_replay_ambiguous",
         canonical_target_key=object_target_key,
         missing_semantic_fact=("unique_counterexample_partition_witness", False),
         evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
-        producer_id=producer_id,
-        proof_artifact_digest=proof_artifact_digest,
+        producer_id=SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.producer_id,
     ), producer_site_manifest_id="sat-safety-ambiguity-observed")
 
 
@@ -987,7 +997,6 @@ def _emit_v2_sat_safety_ambiguity_if_observed(
     evidence_refs: Sequence[str],
     object_target_key: Any,
     *,
-    producer_id: str,
     proof_artifact_digest: str,
 ) -> None:
     from ...v2.production_signals import (
@@ -1001,7 +1010,7 @@ def _emit_v2_sat_safety_ambiguity_if_observed(
         canonical_target_key=object_target_key,
         missing_semantic_fact=("unique_counterexample_partition_witness", False),
         evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
-        producer_id=producer_id,
+        producer_id=SAT_SAFETY_AMBIGUITY_COMPLETED_SITE.producer_id,
         proof_artifact_digest=proof_artifact_digest,
     ), producer_site_manifest_id="sat-safety-ambiguity-completed")
 

@@ -541,8 +541,10 @@ class AuditedManifestPhase7Runtime:
                 signal_producer = getattr(
                     getattr(signal, "blocker", None), "producer_id", None
                 )
-            producer_id = signal_producer if signal_producer in allowed else (
-                allowed[0] if len(allowed) == 1 else None
+            producer_id = (
+                signal_producer
+                if signal_producer is not None
+                else (allowed[0] if len(allowed) == 1 else None)
             )
             if producer_id is None:
                 raise ValueError("decisive activation producer is ambiguous")

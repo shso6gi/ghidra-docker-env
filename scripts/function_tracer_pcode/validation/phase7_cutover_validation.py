@@ -107,9 +107,43 @@ _CROSS_SLICE_TEST_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_producer_manifest.py",
 )
 
+_DECLARED_EXTERNAL_FIXTURE_SKIPS = (
+    {
+        "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
+        "name": "test_phase7_legacy_manifest_binds_exact_ordered_411_raw_files",
+        "reason": "requires the external 411-summary legacy diagnostic fixture",
+    },
+    {
+        "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
+        "name": "test_phase7_legacy_manifest_rejects_drop_duplicate_reorder_and_digest_drift",
+        "reason": "requires the external 411-summary legacy diagnostic fixture",
+    },
+    {
+        "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
+        "name": "test_phase7_legacy_validator_rejects_self_consistent_source_and_id_substitution",
+        "reason": "requires the external 411-summary legacy diagnostic fixture",
+    },
+)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _declared_cross_slice_skips(xml: ElementTree.Element) -> tuple[Mapping[str, str], ...]:
+    rows = []
+    for case in xml.iter("testcase"):
+        skipped = case.find("skipped")
+        if skipped is None:
+            continue
+        rows.append({
+            "classname": case.attrib.get("classname", ""),
+            "name": case.attrib.get("name", ""),
+            "reason": skipped.attrib.get("message", ""),
+        })
+    return tuple(sorted(rows, key=lambda row: (
+        row["classname"], row["name"], row["reason"],
+    )))
 
 
 def _require_passing_junit(path: Path, test_name: str) -> None:
@@ -135,20 +169,22 @@ def write_cross_slice_validation_source_map(
     suites = tuple(xml.iter("testsuite"))
     cases = tuple(xml.iter("testcase"))
     test_count = sum(int(item.attrib.get("tests", "0")) for item in suites)
+    declared_skips = _declared_cross_slice_skips(xml)
     if (
         test_count != len(cases)
         or test_count < 403
         or any(int(item.attrib.get("errors", "0")) for item in suites)
         or any(int(item.attrib.get("failures", "0")) for item in suites)
-        or any(int(item.attrib.get("skipped", "0")) for item in suites)
+        or declared_skips != _DECLARED_EXTERNAL_FIXTURE_SKIPS
     ):
         raise ValueError("cross-slice JUnit is not a complete passing run")
     body = {
-        "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v1",
+        "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
         "pytest_selection": _CROSS_SLICE_TEST_PATHS,
         "junit_path": junit.relative_to(root).as_posix(),
         "junit_sha256": _sha256(junit),
         "test_count": test_count,
+        "declared_external_fixture_skips": declared_skips,
         "source_files": tuple({
             "path": path,
             "sha256": _sha256(root / path),
@@ -182,12 +218,15 @@ def _verify_cross_slice_validation_source_map(
     xml = ElementTree.parse(junit).getroot()
     suites = tuple(xml.iter("testsuite"))
     cases = tuple(xml.iter("testcase"))
+    declared_skips = _declared_cross_slice_skips(xml)
     if (
         payload.get("test_count") != len(cases)
         or payload.get("test_count", 0) < 403
         or any(int(item.attrib.get("errors", "0")) for item in suites)
         or any(int(item.attrib.get("failures", "0")) for item in suites)
-        or any(int(item.attrib.get("skipped", "0")) for item in suites)
+        or declared_skips != _DECLARED_EXTERNAL_FIXTURE_SKIPS
+        or tuple(payload.get("declared_external_fixture_skips", ()))
+        != declared_skips
     ):
         raise ValueError("cross-slice validation JUnit is incomplete")
 

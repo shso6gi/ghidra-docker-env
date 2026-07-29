@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.equivalence.v2.pilot import (
     ProductionDualWritePilotConnector,
 )
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
     emit_sat_safety_signal,
     production_signal_scope,
@@ -53,6 +54,35 @@ def _connector():
     )
 
 
+def _manifest_connector():
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+    )
+    from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
+        build_phase7_producer_manifest,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    manifest = build_phase7_producer_manifest(root)
+    encoder = SatSafetyPilotEncoder()
+    return ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=SAT_SAFETY_REASON_REGISTRY,
+            recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            SatSafetyBlockerProductionSignal: encoder,
+            SafeCounterexampleProductionSignal: encoder,
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            manifest, identity
+        ),
+    )
+
+
 def _strategy_and_surface():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     strategy.enable_completed_recovery_proofs = True
@@ -87,7 +117,7 @@ def test_sat_observation_without_safety_completion_remains_unknown():
 
 
 def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authority():
-    connector = _connector()
+    connector = _manifest_connector()
     session = connector.begin({"phase": "6.1", "case": "sat-safety-complete"})
     strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
     model = {"x_1": 0, "x_2": 1}
@@ -165,7 +195,7 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
 
 
 def test_real_ambiguity_producer_is_distinct_from_analysis_safety_cause():
-    connector = _connector()
+    connector = _manifest_connector()
     session = connector.begin({"phase": "6.1", "case": "ambiguity"})
     strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
     model = {"x_1": 0, "x_2": 1}
@@ -218,6 +248,134 @@ def test_real_ambiguity_producer_is_distinct_from_analysis_safety_cause():
     assert evidence.pilot_result.reduction.projection.c_active_base == ()
     assert evidence.pilot_result.reduction.projection.q_open_base == ()
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
+
+
+def test_manifest_bound_ambiguity_observation_remains_unknown_until_completed():
+    connector = _manifest_connector()
+    session = connector.begin({
+        "phase": "7",
+        "case": "manifest-bound-ambiguity-open",
+    })
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    with production_signal_scope(session):
+        strategy._observe_v2_sat_counterexample_ambiguity(
+            ("partition-a", "partition-b"),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+        )
+
+    evidence = connector.finish(
+        session,
+        _LegacyResult(Outcome.UNKNOWN),
+        case_id="manifest-bound-ambiguity-open",
+    )
+    assert [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ] == ["CAUSE_OBSERVED"]
+    assert {
+        row.reason_id
+        for row in evidence.pilot_result.reduction.projection.c_active_base
+    } == {"counterexample_partition_replay_ambiguous"}
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_manifest_bound_multiple_sat_case_pairs_deduplicate_per_occurrence():
+    connector = _manifest_connector()
+    session = connector.begin({
+        "phase": "7",
+        "case": "manifest-bound-multiple-sat-case-pairs",
+    })
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    _, alternate_case1 = _case("B10", 0x1100, 2)
+    _, alternate_case2 = _case("B9", 0x2100, 3)
+    with production_signal_scope(session):
+        for current_case1, current_case2, pair_id in (
+            (case1, case2, "(0,1)"),
+            (alternate_case1, alternate_case2, "(2,3)"),
+            (case1, case2, "(0,1)"),
+        ):
+            strategy._observe_v2_sat_counterexample_ambiguity(
+                ("partition-a", "partition-b"),
+                analysis1,
+                analysis2,
+                case1=current_case1,
+                case2=current_case2,
+                pair_id=pair_id,
+            )
+
+    evidence = connector.finish(
+        session,
+        _LegacyResult(Outcome.UNKNOWN),
+        case_id="manifest-bound-multiple-sat-case-pairs",
+    )
+    observed = [
+        event
+        for event in evidence.pilot_result.sealed_event_stream.events
+        if event.header.event_type.value == "CAUSE_OBSERVED"
+    ]
+    assert len(observed) == 2
+    assert len({
+        event.authority_payload.occurrence_authority.occurrence.occurrence_id
+        for event in observed
+    }) == 2
+    assert len(evidence.pilot_result.reduction.projection.c_active_base) == 2
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_phase7_rejects_explicit_invalid_sat_completion_producer():
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        emit_sat_safety_completion_if_observed,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.sat_safety_sites import (
+        SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
+    )
+
+    connector = _manifest_connector()
+    session = connector.begin({
+        "phase": "7",
+        "case": "invalid-explicit-completion-producer",
+    })
+    observed = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_partition_replay_ambiguous",
+        canonical_target_key=("invalid-explicit-completion-producer",),
+        missing_semantic_fact=("unique_counterexample_partition_witness", False),
+        evidence_refs=("partition-a", "partition-b"),
+        producer_id=SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.producer_id,
+    )
+    invalid_completion = SatSafetyBlockerProductionSignal(
+        action="COMPLETED",
+        reason_id=observed.reason_id,
+        canonical_target_key=observed.canonical_target_key,
+        missing_semantic_fact=observed.missing_semantic_fact,
+        evidence_refs=observed.evidence_refs,
+        producer_id="explicit-invalid-completion-producer",
+        proof_artifact_digest="invalid-completion-producer-proof",
+    )
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(
+            observed,
+            producer_site_manifest_id="sat-safety-ambiguity-observed",
+        ) == 1
+        assert emit_sat_safety_completion_if_observed(
+            invalid_completion,
+            producer_site_manifest_id="sat-safety-ambiguity-completed",
+        ) == 0
+
+    assert session.recorder.event_count == 1
+    assert "sat_safety_completed" not in session.domain_signal_state
+    assert session.domain_signal_error_details == [
+        "SatSafetyBlockerProductionSignal: "
+        "discovered activation producer is not site-sealed"
+    ]
+    assert session.phase7_runtime._pending == {}
+    assert len(session.phase7_runtime._materialized) == 1
+    assert session._phase7_signal_sites == {}
+    assert session._phase7_signal_transactions == {}
 
 
 def test_sat_safety_dedup_state_is_isolated_between_identical_sessions():

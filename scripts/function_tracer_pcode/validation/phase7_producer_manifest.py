@@ -12,10 +12,15 @@ from typing import Any, Mapping, Optional, Sequence
 from ..equivalence.v2.contracts import authority_digest
 from ..equivalence.v2.abi_width_readonly import ABI_WIDTH_READONLY_REASON_SPECS
 from ..equivalence.v2.call_effect import CALL_EFFECT_REASON_SPECS
+from ..equivalence.v2.call_effect_sites import (
+    CALL_EFFECT_PROOF_BATCH_SITE,
+    CALL_EFFECT_PRODUCER_SITE_SPECS,
+)
 from ..equivalence.v2.loop_recurrence import LOOP_REASON_SPECS
 from ..equivalence.v2.operational_extraction import OPERATIONAL_REASON_SPECS
 from ..equivalence.v2.process_supervisor import PROCESS_DURABLE_REASON_REGISTRY
 from ..equivalence.v2.return_outcome import OUTCOME_STAGE_REASON_MATRIX
+from ..equivalence.v2.sat_safety_sites import SAT_SAFETY_PRODUCER_SITE_SPECS
 
 
 EMITTERS = frozenset({
@@ -48,6 +53,10 @@ _DOMAIN_BY_SITE_OVERRIDE = {
     "return-width-pair-assessment": "abi",
 }
 
+_SEALED_SITE_SPEC_IDS = {
+    "CALL_EFFECT_PROOF_BATCH_SITE": CALL_EFFECT_PROOF_BATCH_SITE.site_id,
+}
+
 _PRODUCER_IDS_BY_SITE = {
     "call-effect-producer-blocker": (
         "internal_typed_pure_direct_call_stage_producer",
@@ -55,7 +64,10 @@ _PRODUCER_IDS_BY_SITE = {
     "call-effect-producer-prerequisite": (
         "internal_typed_pure_direct_call_stage_producer",
     ),
-    "checker-call-effect-proof-batch": ("call-effect-proof-batch-v2",),
+    **{
+        spec.site_id: (spec.producer_id,)
+        for spec in CALL_EFFECT_PRODUCER_SITE_SPECS
+    },
     "checker-recurrence-proposal-blocker": (
         "typed-recurrence-proposal-signal-v2",
     ),
@@ -65,9 +77,10 @@ _PRODUCER_IDS_BY_SITE = {
     "pairwise-loop-sat-safety-observed": (
         "loop-model-bound-refutation-handoff-v1",
     ),
-    "sat-safety-blocker-observed": ("sat_unsafety_reason_producer",),
-    "sat-safety-ambiguity-observed": ("sat_counterexample_ambiguity_producer",),
-    "sat-safety-ambiguity-completed": ("sat_counterexample_ambiguity_resolution_producer",),
+    **{
+        spec.site_id: (spec.producer_id,)
+        for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
+    },
     "pair-disposition-safe-counterexample": (
         "pair-disposition-safe-counterexample-v2",
     ),
@@ -122,7 +135,10 @@ _PRODUCER_IDS_BY_SITE = {
 _DISPOSITIONS_BY_SITE = {
     "call-effect-producer-blocker": ("ELIGIBLE",),
     "call-effect-producer-prerequisite": ("ELIGIBLE",),
-    "checker-call-effect-proof-batch": ("DECISIVE",),
+    **{
+        spec.site_id: (spec.disposition,)
+        for spec in CALL_EFFECT_PRODUCER_SITE_SPECS
+    },
     "checker-recurrence-proposal-blocker": ("ELIGIBLE",),
     "checker-recurrence-validation-completed": ("DECISIVE",),
     "pairwise-loop-sat-safety-observed": ("ELIGIBLE",),
@@ -145,9 +161,10 @@ _DISPOSITIONS_BY_SITE = {
     "return-width-projection-relation-blocker": ("ELIGIBLE",),
     "return-width-unary-provenance-blocker": ("ELIGIBLE",),
     "return-width-pair-unary-provenance-blocker": ("ELIGIBLE",),
-    "sat-safety-ambiguity-completed": ("DECISIVE",),
-    "sat-safety-ambiguity-observed": ("ELIGIBLE",),
-    "sat-safety-blocker-observed": ("ELIGIBLE",),
+    **{
+        spec.site_id: (spec.disposition,)
+        for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
+    },
     "comparison-inconclusive-terminal": ("ELIGIBLE",),
 }
 
@@ -233,13 +250,11 @@ _CAUSE_REASON_IDS_BY_SITE = {
     "return-width-pair-unary-provenance-blocker": (
         "return_width_provenance_unavailable",
     ),
-    "sat-safety-ambiguity-observed": (
-        "counterexample_partition_replay_ambiguous",
-    ),
-    "sat-safety-blocker-observed": (
-        "counterexample_analysis_safety_unproven",
-        "counterexample_same_function_replay_unproven",
-    ),
+    **{
+        spec.site_id: spec.reason_ids
+        for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
+        if spec.reason_ids
+    },
     "pairwise-loop-sat-safety-observed": (
         "counterexample_analysis_safety_unproven",
         "counterexample_same_function_replay_unproven",
@@ -268,6 +283,22 @@ def _call_name(node: ast.Call) -> Optional[str]:
         return node.func.id
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
+    return None
+
+
+def _sealed_site_id(node: ast.AST) -> Optional[str]:
+    if (
+        isinstance(node, ast.Constant)
+        and type(node.value) is str
+        and node.value
+    ):
+        return node.value
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "site_id"
+        and isinstance(node.value, ast.Name)
+    ):
+        return _SEALED_SITE_SPEC_IDS.get(node.value.id)
     return None
 
 
@@ -337,11 +368,8 @@ def build_phase7_producer_manifest(repo_root: Path) -> Mapping[str, Any]:
                 if item.arg == "producer_site_manifest_id"
             ), None)
             site_id = (
-                keyword.value.value
+                _sealed_site_id(keyword.value)
                 if keyword is not None
-                and isinstance(keyword.value, ast.Constant)
-                and type(keyword.value.value) is str
-                and keyword.value.value
                 else None
             )
             if site_id is None:

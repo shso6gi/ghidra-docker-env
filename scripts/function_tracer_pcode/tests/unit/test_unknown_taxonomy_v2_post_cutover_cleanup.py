@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from scripts.function_tracer_pcode.validation.phase7_legacy_baseline import (
     decode_and_validate_phase7_legacy_baseline,
 )
@@ -153,6 +155,16 @@ def test_cleanup_keeps_lossless_legacy_reading_but_not_legacy_decision_authority
     manifest = _current_json(
         "artifacts/unknown_taxonomy_v2/phase7/legacy-baseline-manifest.json"
     )
+    saved_summaries = tuple(
+        (
+            _root()
+            / "logs/EqBench/all_eq_matrix_current"
+        ).rglob("results_summary.txt")
+    )
+    if len(saved_summaries) != 411:
+        pytest.skip(
+            "requires the external 411-summary legacy diagnostic fixture"
+        )
     decoded = decode_and_validate_phase7_legacy_baseline(_root(), manifest)
     assert len(decoded) == 411
 

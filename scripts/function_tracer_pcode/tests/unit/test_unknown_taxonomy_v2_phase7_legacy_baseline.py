@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.equivalence.v2.legacy_codec import (
 )
 from scripts.function_tracer_pcode.validation.phase7_legacy_baseline import (
     EXPECTED_LEGACY_SUMMARY_COUNT,
+    LEGACY_BASELINE_RELATIVE_ROOT,
     _entry_id,
     _json_digest,
     build_phase7_legacy_baseline_manifest,
@@ -35,6 +36,15 @@ def _redigest(manifest):
 
 @pytest.fixture(scope="module")
 def manifest():
+    saved_summaries = tuple(
+        (REPO_ROOT / LEGACY_BASELINE_RELATIVE_ROOT).rglob(
+            "results_summary.txt"
+        )
+    )
+    if len(saved_summaries) != EXPECTED_LEGACY_SUMMARY_COUNT:
+        pytest.skip(
+            "requires the external 411-summary legacy diagnostic fixture"
+        )
     return build_phase7_legacy_baseline_manifest(REPO_ROOT)
 
 

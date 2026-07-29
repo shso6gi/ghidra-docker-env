@@ -111,6 +111,7 @@ class V2CallEffectExecutionContext:
     result_occurrence_id: str
     q_open_assignments: Sequence[Tuple[Tuple[str, str], Any]]
     execution_refusal_sink: Any = None
+    suppressed_obligation_ids: Sequence[str] = ()
     attempt_ordinals: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _attempt_lock: Any = field(default_factory=threading.RLock, repr=False)
     _q_open_rows_by_obligation_stage: Dict[Tuple[str, str], Tuple[Any, ...]] = field(
@@ -141,9 +142,18 @@ class V2CallEffectExecutionContext:
                 raise ValueError("Q_open assignment row is not live in lifecycle projection")
             grouped.setdefault(key, []).append(row)
         self.q_open_assignments = normalized
+        suppressed = tuple(self.suppressed_obligation_ids)
+        if any(type(item) is not str or not item for item in suppressed):
+            raise TypeError("suppressed call/effect obligation IDs must be strings")
+        if len(set(suppressed)) != len(suppressed):
+            raise ValueError("suppressed call/effect obligation IDs repeat")
+        self.suppressed_obligation_ids = suppressed
         self._q_open_rows_by_obligation_stage = {
             key: tuple(rows) for key, rows in grouped.items()
         }
+
+    def suppresses_replay(self, obligation_id: str) -> bool:
+        return obligation_id in self.suppressed_obligation_ids
 
     def membership_for(self, query_authority: "CallEffectSolverQueryAuthority") -> Any:
         from .v2.execution_authority import (
@@ -2573,6 +2583,11 @@ def produce_pure_direct_call_proofs(
     artifacts: List[InternalSolverProofArtifact] = []
     failure_list = list(failures)
     for proof_input in proof_inputs:
+        if (
+            v2_execution_context is not None
+            and v2_execution_context.suppresses_replay(proof_input.obligation_id)
+        ):
+            continue
         dependencies: Tuple[str, ...] = ()
         try:
             if isinstance(proof_input, PureCallRegionProofInput):
