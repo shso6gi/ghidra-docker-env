@@ -1312,6 +1312,8 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
 
     assert 'EQBENCH_RUN_TMPDIR="$(mktemp -d "$EQBENCH_TMPDIR/eqbench-run.XXXXXX")"' in script
     assert 'pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"' in script
+    assert 'checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"' in script
+    assert 'checkpoint_root="${output_dir}/.process-authority"' not in script
     assert 'env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"' in script
     assert 'trap cleanup_eqbench_run_tmpdir EXIT' in script
     assert 'rm -rf -- "$pair_tmpdir"' in script
@@ -1325,6 +1327,9 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "--classify-pair-log" in script
     assert "validation_result_log_is_complete" not in script
     assert "signed_pair_status_is_complete" in script
+    assert "validate_current_pair_status" in script
+    assert "remove_pair_process_authority" in script
+    assert "validation.process_authority_cleanup" in script
     assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
     assert "--validate-private-key" in script
     assert "expected_pair_status_paths.txt" in script
@@ -1338,6 +1343,92 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
         'write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt"', 1
     )[1].split("\nfi", 1)[0]
     assert '"${ALL_LOG_FILES[@]}"' not in overall_summary_call
+
+
+def test_eqbench_runner_cleans_authority_after_validation_diagnostics():
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    validation_call = script.index(
+        'if pair_status_validation_detail="$(validate_current_pair_status'
+    )
+    cleanup_call = script.index(
+        "if cleanup_pair_process_authority_with_run_health",
+        validation_call,
+    )
+    validation_failure = script.index(
+        "generated pair status failed authority validation",
+        validation_call,
+    )
+    log_copy = script.index(
+        "Pair-status authority validation failed:",
+        validation_failure,
+    )
+    assert validation_call < validation_failure < log_copy < cleanup_call
+
+
+def test_eqbench_runner_reports_cleanup_failure_as_independent_run_health_error():
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    cleanup_start = script.index("cleanup_pair_process_authority_with_run_health() {")
+    cleanup_end = script.index(
+        "pair_is_selected() {",
+        cleanup_start,
+    )
+    cleanup_block = script[cleanup_start:cleanup_end]
+
+    assert "PAIR_STATUS_AUTHORITY_INVALID" not in cleanup_block
+    assert "Process-authority cleanup run-health failure:" in cleanup_block
+    assert '>> "$PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE"' in cleanup_block
+    assert '> "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE"' in cleanup_block
+    assert "Stopping new pair scheduling after process-authority cleanup failure." in script
+    assert "process_authority_cleanup_failure_count=" in script
+    assert "process-authority cleanup run-health failure(s)" in script
+
+
+def test_eqbench_cleanup_failure_preserves_pair_classification_and_records_run_health(
+    tmp_path,
+):
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    function_source = script[
+        script.index("cleanup_pair_process_authority_with_run_health() {"):
+        script.index("pair_is_selected() {")
+    ]
+    log_file = tmp_path / "pair.log"
+    failure_file = tmp_path / "cleanup-failures.txt"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "remove_pair_process_authority() { "
+            + 'echo "injected cleanup failure" >&2; return 23; }\n'
+            + function_source
+            + '\nPROCESS_AUTHORITY_CLEANUP_FAILURES_FILE="$1"\n'
+            + 'PROCESS_AUTHORITY_CLEANUP_STOP_FILE="$8"\n'
+            + "cleanup_pair_process_authority_with_run_health "
+            + '"$2" "$3" "$4" "$5" "$6" "$7"',
+            "bash",
+            str(failure_file),
+            str(tmp_path / "checkpoint"),
+            "0123456789abcdef01234567",
+            str(log_file),
+            str(tmp_path / "pair-status.json"),
+            "sample",
+            "foo_B1_B2",
+            str(tmp_path / "cleanup-stop"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 23
+    assert "PAIR_STATUS_AUTHORITY_INVALID" not in result.stdout + result.stderr
+    assert "injected cleanup failure" in log_file.read_text()
+    assert failure_file.read_text().strip().split("\t") == [
+        "sample",
+        "foo_B1_B2",
+        "0123456789abcdef01234567",
+    ]
+    assert (tmp_path / "cleanup-stop").is_file()
 
 
 def test_eqbench_summary_failure_preserves_actual_exit_status(tmp_path):

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "4c0eb9b6bdd0c7fdedbfeed77929f5c1f5e1cc324961cd8828db16d082739e68",
+  "artifact_digest": "40909510f675131e41ec4e2c2b491f4221a701646748c63beca1e662adcd4cb6",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,7 +246,7 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "a3058212ec93e9b7806cdf25f5a5658e0a36d596a6c96f82a04a5ce035875d30",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "00fada701e28c43d014eb49769506fb3f0504a69af760b4b2caddf87bda5c7be",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/checker.py": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
@@ -315,7 +315,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 603,
-      "candidate_set_digest": "307d970c8fa9625f853fd5c06810759589c684f16a9cf94928ed09c923f0170d"
+      "candidate_set_digest": "b6d5ebf37bb08b5feb7891a276ec66469b609b44b0e22ba403611f16ff5ca743"
     },
     "live_delta": {
       "added": 0,

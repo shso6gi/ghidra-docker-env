@@ -1,10 +1,10 @@
 {
-  "artifact_digest": "cfce1801927849083934f4e7cf6e11afe726de7b59d8cce518d5af9587ae1935",
+  "artifact_digest": "92d7552d2fc545936dea44c4ea626d2a1522f671a71bc5e0dd183b96821e6682",
   "artifact_kind": "phase9-reason-before-after-v1",
   "internal_error_authority": {
     "focused_junit_sha256": "0fd550424066657f2140d06cd5e60de7e8ef315712d584aad7dd9201c85971d2",
     "outcome": "ERROR",
-    "phase8_artifact_digest": "58e4b69f7a1a3ddc61c317fc2ab97bedb1a1a5e4a66b2888ee0b54add7080824",
+    "phase8_artifact_digest": "3af372fd5c6823f752132b2b20feabeb4bd33a56d0e75910d5cfea758d2251f3",
     "required_tests": [
       "test_cli_startup_error_emits_canonical_error_and_exit_four",
       "test_cli_no_solver_emits_canonical_error_and_exit_four",

@@ -117,6 +117,7 @@ cleanup_stale_codex_ghidra_tmp() {
 cleanup_stale_codex_ghidra_tmp
 
 EQBENCH_RUN_TMPDIR="$(mktemp -d "$EQBENCH_TMPDIR/eqbench-run.XXXXXX")"
+PROCESS_AUTHORITY_CLEANUP_STOP_FILE="$EQBENCH_RUN_TMPDIR/process-authority-cleanup.stop"
 cleanup_eqbench_run_tmpdir() {
     local run_tmpdir="${EQBENCH_RUN_TMPDIR:-}"
     [[ -n "$run_tmpdir" ]] || return 0
@@ -208,6 +209,56 @@ signed_pair_status_is_complete() {
         --resume-disposition 2>/dev/null | grep -q '^COMPLETE_'
 }
 
+validate_current_pair_status() {
+    local pair_status_file="$1"
+    local pair_target_file="$2"
+    "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        --validate-pair-status "$pair_status_file" \
+        --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
+        --expected-pair-target "$pair_target_file"
+}
+
+remove_pair_process_authority() {
+    local checkpoint_root="$1"
+    local execution_nonce="$2"
+    "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.validation.process_authority_cleanup \
+        --tmp-root "$EQBENCH_TMPDIR" \
+        --run-tmpdir "$EQBENCH_RUN_TMPDIR" \
+        --checkpoint-root "$checkpoint_root" \
+        --execution-nonce "$execution_nonce"
+}
+
+cleanup_pair_process_authority_with_run_health() {
+    local checkpoint_root="$1"
+    local execution_nonce="$2"
+    local log_file="$3"
+    local pair_status_file="$4"
+    local sample_label="$5"
+    local pair_label="$6"
+    local cleanup_detail cleanup_ec
+
+    if cleanup_detail="$(remove_pair_process_authority \
+        "$checkpoint_root" "$execution_nonce" 2>&1)"; then
+        return 0
+    else
+        cleanup_ec=$?
+    fi
+    echo "Run-health error: process-authority cleanup failed: $pair_status_file" >&2
+    echo "$cleanup_detail" >&2
+    {
+        echo ""
+        echo "Process-authority cleanup run-health failure:"
+        echo "$cleanup_detail"
+    } >> "$log_file"
+    printf '%s\t%s\t%s\n' "$sample_label" "$pair_label" "$execution_nonce" \
+        >> "$PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE"
+    printf '%s\t%s\t%s\n' "$sample_label" "$pair_label" "$execution_nonce" \
+        > "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE"
+    return "$cleanup_ec"
+}
+
 pair_is_selected() {
     local pair_id="$1"
     [[ -z "$EQBENCH_PAIR_FILTER" ]] && return 0
@@ -260,7 +311,7 @@ run_pair() {
         <<< "$identity_line"
     local execution_nonce checkpoint_root authority_output
     execution_nonce="${result_occurrence_id#production-pilot-}"
-    checkpoint_root="${output_dir}/.process-authority"
+    checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"
     authority_output="${checkpoint_root}/${execution_nonce}/supervisor-projection.json"
     mkdir -p "$checkpoint_root"
 
@@ -315,6 +366,8 @@ run_pair() {
     fi
 
     local pair_status_file classification_ec status error_kind child_returncode
+    local pair_status_validation_ec pair_status_validation_detail
+    local cleanup_ec run_pair_ec
     pair_status_file="${output_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.equivalence.v2.canonical_result \
@@ -334,21 +387,49 @@ run_pair() {
     else
         classification_ec=$?
     fi
-    status="$("$PYTHON_BIN" -c \
-        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("canonical_outcome", "ERROR"))' \
-        "$pair_status_file")"
-    error_kind="$("$PYTHON_BIN" -c \
-        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' \
-        "$pair_status_file")"
-    child_returncode="$("$PYTHON_BIN" -c \
-        'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' \
-        "$pair_status_file")"
+    if pair_status_validation_detail="$(validate_current_pair_status \
+        "$pair_status_file" "$pair_target_file" 2>&1)"; then
+        pair_status_validation_ec=0
+        status="$pair_status_validation_detail"
+        error_kind="$("$PYTHON_BIN" -c \
+            'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' \
+            "$pair_status_file")"
+        child_returncode="$("$PYTHON_BIN" -c \
+            'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' \
+            "$pair_status_file")"
+    else
+        pair_status_validation_ec=$?
+        status="ERROR"
+        error_kind="PAIR_STATUS_AUTHORITY_INVALID"
+        child_returncode="-"
+        echo "Error: generated pair status failed authority validation: $pair_status_file" >&2
+        echo "$pair_status_validation_detail" >&2
+        {
+            echo ""
+            echo "Pair-status authority validation failed:"
+            echo "$pair_status_validation_detail"
+        } >> "$log_file"
+    fi
+    if (( pair_status_validation_ec != 0 && classification_ec == 0 )); then
+        classification_ec="$pair_status_validation_ec"
+    fi
+    if cleanup_pair_process_authority_with_run_health \
+        "$checkpoint_root" "$execution_nonce" "$log_file" "$pair_status_file" \
+        "$sample_label" "${function_name}_${left_id}_${right_id}"; then
+        cleanup_ec=0
+    else
+        cleanup_ec=$?
+    fi
     printf '[%s] [%s %s/%s] %s <-> %s : %s' \
         "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id" "$status"
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
         "$error_kind" "$child_returncode" "$ec"
     printf '\n'
-    return "$classification_ec"
+    run_pair_ec="$classification_ec"
+    if (( cleanup_ec != 0 && run_pair_ec == 0 )); then
+        run_pair_ec="$cleanup_ec"
+    fi
+    return "$run_pair_ec"
 }
 
 wait_for_slot() {
@@ -537,6 +618,8 @@ MISSING_BINARY_AXES_FILE="$OUTPUT_BASE_DIR/missing_binary_axes.txt"
 : > "$MISSING_BINARY_AXES_FILE"
 FUNCTION_CENSUS_FAILURES_FILE="$OUTPUT_BASE_DIR/function_census_failures.txt"
 : > "$FUNCTION_CENSUS_FAILURES_FILE"
+PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"
+: > "$PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE"
 USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
 : > "$USED_BUILD_RECEIPTS_FILE"
 ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
@@ -617,6 +700,10 @@ fi
 mapfile -t REQUIRED_BINARY_IDS < <(required_binary_ids)
 
 for source_path in "${SAMPLE_SOURCES[@]}"; do
+    if [[ -s "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE" ]]; then
+        echo "Stopping new pair scheduling after process-authority cleanup failure." >&2
+        break
+    fi
     eq_dir="$(dirname "$source_path")"
     source_name="$(basename "$source_path")"
     source_base="${source_name%.c}"
@@ -807,6 +894,10 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
     COMPLETED_SAMPLES=$((COMPLETED_SAMPLES + 1))
 
     for function_name in "${FUNCTIONS[@]}"; do
+        if [[ -s "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE" ]]; then
+            echo "Stopping new pair scheduling after process-authority cleanup failure." >&2
+            break
+        fi
         output_function_dir="$output_sample_dir/$function_name"
         pair_count=0
         total_pairs=0
@@ -859,8 +950,12 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     continue
                 fi
 
-                TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
                 wait_for_slot
+                if [[ -s "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE" ]]; then
+                    echo "Stopping new pair scheduling after process-authority cleanup failure." >&2
+                    break 2
+                fi
+                TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
                 run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
                     "$left_bin" "$right_bin" "$output_function_dir" "$pair_count" "$total_pairs" \
                     "$pair_target_file" &
@@ -892,6 +987,11 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
 done
 
 wait_for_all_jobs
+
+PROCESS_AUTHORITY_CLEANUP_FAILURES="$(
+    awk 'NF { count += 1 } END { print count + 0 }' \
+        "$PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE"
+)"
 
 mapfile -t ALL_LOG_FILES < <(
     find "$OUTPUT_BASE_DIR" -type f -name "*.log" \
@@ -925,6 +1025,7 @@ compiled_binary_count=$COMPILED_BINARY_COUNT
 compile_failure_count=$RUN_COMPILE_FAILURES
 missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
+process_authority_cleanup_failure_count=$PROCESS_AUTHORITY_CLEANUP_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
@@ -968,6 +1069,9 @@ echo "Overall summary: $OUTPUT_BASE_DIR/overall_summary.txt"
 echo "Run manifest: $OUTPUT_BASE_DIR/run_manifest.txt"
 
 if (( FINAL_RUN_EXIT_STATUS > 0 )); then
-    echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification." >&2
+    echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification or run-health checks." >&2
+    if (( PROCESS_AUTHORITY_CLEANUP_FAILURES > 0 )); then
+        echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES process-authority cleanup run-health failure(s)." >&2
+    fi
     exit "$FINAL_RUN_EXIT_STATUS"
 fi
