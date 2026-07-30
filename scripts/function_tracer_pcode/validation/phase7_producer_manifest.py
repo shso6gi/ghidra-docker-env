@@ -179,7 +179,10 @@ _CAUSE_REASON_IDS_BY_SITE = {
     ),
     "call-effect-producer-blocker": ("pure_call_semantics_unproven",),
     "call-effect-producer-prerequisite": (
+        "abi_argument_relation_unproven",
         "callsite_correspondence_unproven",
+        "memory_final_state_correspondence_unproven",
+        "pure_call_semantics_unproven",
     ),
     "checker-recurrence-proposal-blocker": (
         "recurrence_proposal_validation_unproven",

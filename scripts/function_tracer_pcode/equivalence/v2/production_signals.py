@@ -688,6 +688,7 @@ class CallEffectPrerequisiteProductionSignal:
     right_fact_id: str
     structural_certificate_id: str
     eligibility_blockers: tuple[str, ...]
+    reason_id: str = "callsite_correspondence_unproven"
     producer_id: str = "internal_typed_pure_direct_call_stage_producer"
 
     def __post_init__(self) -> None:
@@ -698,6 +699,7 @@ class CallEffectPrerequisiteProductionSignal:
             self.obligation_id,
             self.observation_contract_id,
             self.structural_certificate_id,
+            self.reason_id,
             self.producer_id,
         ):
             if type(value) is not str or not value:
@@ -710,8 +712,11 @@ class CallEffectPrerequisiteProductionSignal:
             and (type(self.right_fact_id) is not str or not self.right_fact_id)
         ) or (self.left_fact_id is None and self.right_fact_id is None):
             raise TypeError("call/effect prerequisite endpoints are incomplete")
-        if self.eligibility_blockers != ("phase2_requires_paired_call_sites",):
-            raise ValueError("call/effect prerequisite blocker set is not sealed")
+        if not self.eligibility_blockers:
+            raise ValueError("call/effect prerequisite blocker set is empty")
+        if any(type(blocker) is not str or not blocker
+               for blocker in self.eligibility_blockers):
+            raise TypeError("call/effect prerequisite blocker is invalid")
 
     def _phase7_signal_authority(self) -> Mapping[str, Any]:
         return {

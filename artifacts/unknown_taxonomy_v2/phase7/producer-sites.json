@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "c3bc942d9c94514c09383d2caf6ee9819ce5e1773a277d43190493745dd0a1e3",
+  "manifest_digest": "d223abd22dff5780e227b60b121cf2ec96650f9f4c4de756bd7c7816ec97d56b",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -27,10 +27,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2579,
+      "line": 2607,
       "path": "scripts/function_tracer_pcode/equivalence/call_effect_producer.py",
       "producer_site_manifest_id": "call-effect-producer-blocker",
-      "source_sha256": "c06a107eb74837f92bf110753a479f6a936fc6172e1548c55a82d3367cdc5a64"
+      "source_sha256": "20c9a89aca2d1498515cb5c7df93bc3425d830aa276586bddb43033c21fceced"
     },
     {
       "allowed_dispositions": [
@@ -47,6 +47,16 @@
       "expected_cause_slots": [
         {
           "allowed_reason_ids": [
+            "abi_argument_relation_unproven"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "call_obligation",
+          "slot_id": "call-effect-producer-prerequisite:abi_argument_relation_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
             "callsite_correspondence_unproven"
           ],
           "expected_domain": "expression_call_effect_memory",
@@ -54,12 +64,32 @@
           "expected_target_kind": "call_correspondence",
           "slot_id": "call-effect-producer-prerequisite:callsite_correspondence_unproven",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "memory_final_state_correspondence_unproven"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "memory_coupling",
+          "slot_id": "call-effect-producer-prerequisite:memory_final_state_correspondence_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "pure_call_semantics_unproven"
+          ],
+          "expected_domain": "expression_call_effect_memory",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "call_semantic_obligation",
+          "slot_id": "call-effect-producer-prerequisite:pure_call_semantics_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2574,
+      "line": 2602,
       "path": "scripts/function_tracer_pcode/equivalence/call_effect_producer.py",
       "producer_site_manifest_id": "call-effect-producer-prerequisite",
-      "source_sha256": "c06a107eb74837f92bf110753a479f6a936fc6172e1548c55a82d3367cdc5a64"
+      "source_sha256": "20c9a89aca2d1498515cb5c7df93bc3425d830aa276586bddb43033c21fceced"
     },
     {
       "allowed_dispositions": [
@@ -74,10 +104,10 @@
       "emitter": "emit_call_effect_signal",
       "enclosing_function": "_call_effect_shadow_manifest",
       "expected_cause_slots": [],
-      "line": 2060,
+      "line": 2063,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de"
+      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
     },
     {
       "allowed_dispositions": [
@@ -103,10 +133,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1691,
+      "line": 1697,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-recurrence-proposal-blocker",
-      "source_sha256": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de"
+      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
     },
     {
       "allowed_dispositions": [
@@ -124,7 +154,7 @@
       "line": 1350,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-recurrence-validation-completed",
-      "source_sha256": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de"
+      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
     },
     {
       "allowed_dispositions": [
@@ -150,10 +180,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1085,
+      "line": 1083,
       "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "524ae3a80819411b47c546eff8868ed18649f5f1081e0efc708dd58eeee966e2"
+      "source_sha256": "d2bc9e1b64ac43679787aade53ba7ffc8d7cdeb78d2757e0a2fe2d432ac17670"
     },
     {
       "allowed_dispositions": [
@@ -476,10 +506,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1445,
+      "line": 1450,
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "87b6c124398c9bdd9161697787c31aa632213fafa862ca2b38361d699e792628"
+      "source_sha256": "b894685adbe0739d19bdf347f85225878a7f59b0e76e3c815ff18875092e09d2"
     },
     {
       "allowed_dispositions": [

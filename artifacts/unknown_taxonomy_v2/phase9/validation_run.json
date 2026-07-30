@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "f2beba417b0791a9d87a5443299eb0c8e2e80018d7cb6704878003dc42be5bdc",
+  "artifact_digest": "6b7eef47729b9749791dab57587bc901fd3b62cb19c6cd4f41218fe2d3dddf5c",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "0395b6f5212b9ef1f45a81e3c971fa949a00b0e5ba5d63c3e889d1d8ff53379d",
+    "current_contract_digest": "454cbf6309a98a2d110854736a9a81a4291c12951fef08d75702777261701ac0",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -2996,7 +2996,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.call_effect",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_classify_summary_occurrence",
-        822
+        906
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.codecs",
@@ -3020,7 +3020,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        1365
+        1370
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -3212,25 +3212,25 @@
         "scripts.function_tracer_pcode.tests.unit.test_call_effect_obligations",
         "scripts.function_tracer_pcode.equivalence.call_effect_obligations",
         "_cross_binary_expression_shape",
-        94
+        95
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_call_effect_obligations",
         "scripts.function_tracer_pcode.equivalence.call_effect_producer",
         "_RenderedStage",
-        44
+        45
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_call_effect_obligations",
         "scripts.function_tracer_pcode.equivalence.call_effect_producer",
         "_execute_rendered_stage",
-        44
+        45
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_call_effect_preflight",
         "scripts.function_tracer_pcode.tests.unit.test_call_effect_obligations",
         "_phase2_caller_analysis",
-        561
+        586
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_call_inline_and_counterexample_validation",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "2871c7643e403b072b295bbc9590ca2a623f2121f0b079c9ee51d8918f8ac58c",
+    "current_source_tree_hash": "b46779ab5f1122bb91c09bedb322955834aa19c7ec06c992208d5c37e0b20296",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

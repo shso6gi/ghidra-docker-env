@@ -143,6 +143,12 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
     from scripts.function_tracer_pcode.equivalence.strategies import (
         monolithic as monolithic_module,
     )
+    from scripts.function_tracer_pcode.equivalence import (
+        monolithic_authority,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.comparison_closure import (
+        InconclusiveComparisonAuthority,
+    )
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     checker = EquivalenceChecker(
@@ -154,12 +160,21 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
         formula = "(set-logic QF_BV)\n(assert false)\n(check-sat)"
         import hashlib
         digest = hashlib.sha256(formula.encode("utf-8")).hexdigest()
-        record = QueryExecutionRecord(
+        guard_record = QueryExecutionRecord(
             query_label="monolithic.region:0:0:guard",
             premise_digest=plan.plan_digest,
             formula_digest=digest,
-            disposition="unsat",
+            disposition="sat",
             proof_kind="monolithic_region_guard",
+            projection_binding_ids=(),
+            formula_text=formula,
+        )
+        value_record = QueryExecutionRecord(
+            query_label="monolithic.region:0:0:value",
+            premise_digest=plan.plan_digest,
+            formula_digest=digest,
+            disposition="unsat",
+            proof_kind="monolithic_region_value",
             projection_binding_ids=(),
             formula_text=formula,
         )
@@ -168,9 +183,9 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
             ParallelResult(results=[], is_equivalent=True),
             None,
             formula,
-            (record,),
+            (guard_record, value_record),
             {
-                "total": 1, "unsat": 1, "sat": 0, "unknown": 0, "error": 0,
+                "total": 2, "unsat": 1, "sat": 1, "unknown": 0, "error": 0,
                 "planned_regions": 1, "closed_regions": 1,
             },
             {
@@ -181,6 +196,30 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
         )
 
     monkeypatch.setattr(checker.monolithic_strategy, "_execute_region_plan", forged_execute)
+    original_seal = monolithic_authority.seal_terminal_decision
+    alternate_terminal = {}
+
+    def seal_with_alternate_query_membership(*args, **kwargs):
+        sealed = original_seal(*args, **kwargs)
+        region_digests = tuple(kwargs["region_receipt_digests"])
+        if (
+            kwargs["outcome_kind"] == "inconclusive_diagnostic"
+            and len(region_digests) > 1
+        ):
+            alternate_kwargs = dict(kwargs)
+            alternate_kwargs["region_receipt_digests"] = tuple(
+                reversed(region_digests)
+            )
+            alternate_terminal["receipt"] = original_seal(
+                *args, **alternate_kwargs
+            )
+        return sealed
+
+    monkeypatch.setattr(
+        monolithic_authority,
+        "seal_terminal_decision",
+        seal_with_alternate_query_membership,
+    )
 
     result = checker.check(_analysis("left", 7), _analysis("right", 7))
 
@@ -191,6 +230,29 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
     )
     terminal = result.call_proof_terminal_provenance["monolithic_terminal_receipt"]
     assert terminal["outcome_kind"] == "inconclusive_diagnostic"
+    authority = result._inconclusive_comparison_authority
+    assert authority.validates()
+    assert authority.matches_provenance(
+        result.call_proof_terminal_provenance
+    )
+    tampered = dict(result.call_proof_terminal_provenance)
+    tampered_queries = [
+        dict(row) for row in tampered["query_execution_receipts"]
+    ]
+    tampered_queries[0]["disposition"] = "error"
+    tampered["query_execution_receipts"] = tampered_queries
+    assert not authority.matches_provenance(tampered)
+    mismatched_terminal = alternate_terminal["receipt"]
+    assert mismatched_terminal.validates()
+    frame = authority._dispatch_frame
+    original_terminal = frame.monolithic_terminal_receipt
+    frame.monolithic_terminal_receipt = mismatched_terminal
+    with pytest.raises(
+        ValueError,
+        match="terminal and comparison query receipt sets differ",
+    ):
+        InconclusiveComparisonAuthority.issue(frame)
+    frame.monolithic_terminal_receipt = original_terminal
 
 
 def test_production_split_uses_import_pinned_query_builder(monkeypatch) -> None:

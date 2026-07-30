@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -3159,6 +3160,124 @@ def test_ineligible_call_obligation_emits_typed_prerequisite_frontier():
         "callsite_correspondence_unproven"
     }
     assert len(projection.q_open_base) == 1
+
+
+def test_totality_ineligible_call_obligation_emits_pure_semantics_frontier():
+    install_execution_authority_signing_key(
+        "call-totality-prerequisite-key", b"t" * 32
+    )
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "call-totality-prerequisite-policy", 1, "test-owner", "test-source",
+        "call-totality-prerequisite-key", (), 3600, "test-revocation",
+    ))
+    encoder = CallEffectPilotEncoder()
+    root = Path(__file__).resolve().parents[4]
+    phase7_manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            CallEffectBlockerProductionSignal: encoder,
+            CallEffectPrerequisiteProductionSignal: encoder,
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            phase7_manifest, identity
+        ),
+    )
+    left, right, manifest = _call_to_region_proof_inputs()
+    manifest = deepcopy(manifest)
+    manifest["phase2_direct_call_eligibility"][0]["status"] = "ineligible"
+    manifest["phase2_direct_call_eligibility"][0]["blockers"] = [
+        "call_callee_not_total_trap_free_scalar",
+        "inline_region_not_total_trap_free_scalar",
+    ]
+    session = connector.begin({"case": "ineligible-call-totality"})
+    with production_signal_scope(session):
+        production = produce_pure_direct_call_proofs(
+            manifest, left, right,
+            solver_runner=EquivalenceChecker(
+                timeout=5, enable_rewrite=False
+            ).solver_runner,
+            timeout_seconds=5,
+        )
+    projection = session.preview_lifecycle_projection()
+    assert len(production.v2_prerequisite_signals) == 1
+    assert production.v2_prerequisite_signals[0].reason_id == (
+        "pure_call_semantics_unproven"
+    )
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "pure_call_semantics_unproven"
+    }
+    assert len(projection.q_open_base) == 5
+
+
+def test_ineligible_call_obligation_splits_blockers_by_sealed_reason():
+    encoder = CallEffectPilotEncoder()
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            CallEffectBlockerProductionSignal: encoder,
+            CallEffectPrerequisiteProductionSignal: encoder,
+        }),
+    )
+    left, right, manifest = _call_to_region_proof_inputs()
+    manifest = deepcopy(manifest)
+    manifest["phase2_direct_call_eligibility"][0]["status"] = "ineligible"
+    manifest["phase2_direct_call_eligibility"][0]["blockers"] = [
+        "call_callee_not_total_trap_free_scalar",
+        "argument_relation_missing",
+    ]
+    session = connector.begin({"case": "split-call-prerequisites"})
+    with production_signal_scope(session):
+        production = produce_pure_direct_call_proofs(
+            manifest, left, right,
+            solver_runner=EquivalenceChecker(
+                timeout=5, enable_rewrite=False
+            ).solver_runner,
+            timeout_seconds=5,
+        )
+    assert {
+        signal.reason_id for signal in production.v2_prerequisite_signals
+    } == {
+        "abi_argument_relation_unproven",
+        "pure_call_semantics_unproven",
+    }
+    projection = session.preview_lifecycle_projection()
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "abi_argument_relation_unproven",
+        "pure_call_semantics_unproven",
+    }
+    assert len(projection.q_open_base) == 6
+
+
+def test_call_prerequisite_rejects_unknown_infrastructure_blocker_code():
+    left, right, manifest = _call_to_region_proof_inputs()
+    manifest = deepcopy(manifest)
+    manifest["phase2_direct_call_eligibility"][0]["status"] = "ineligible"
+    manifest["phase2_direct_call_eligibility"][0]["blockers"] = [
+        "call_callee_not_total_trap_free_scalar",
+        "new_unsealed_blocker"
+    ]
+    with pytest.raises(
+        ValueError, match="unclassified Phase 2 call eligibility blocker"
+    ):
+        produce_pure_direct_call_proofs(
+            manifest, left, right,
+            solver_runner=EquivalenceChecker(
+                timeout=5, enable_rewrite=False
+            ).solver_runner,
+            timeout_seconds=5,
+        )
 
 
 def test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists():

@@ -572,6 +572,90 @@ def classify_failure(
     return classification
 
 
+_CALL_ELIGIBILITY_BLOCKER_BASE_CODES = frozenset({
+    "argument_arity_relation_missing",
+    "argument_relation_missing",
+    "call_callee_memory_effect_summary_ambiguous",
+    "call_callee_not_total_trap_free_scalar",
+    "call_callee_return_shape_missing",
+    "call_callee_return_summary_missing",
+    "call_dependency_closure_missing",
+    "call_invocation_multiplicity_unproven",
+    "call_output_reaching_definition_unproven",
+    "call_parameter_alignment_incomplete",
+    "call_recursive_scc_unproven",
+    "call_to_region_call_target_incomplete",
+    "call_unsupported_effect",
+    "callee_control_profile_missing",
+    "callee_dependency_closure_missing",
+    "callee_effect_summary_incomplete",
+    "callee_memory_effect_summary_ambiguous",
+    "callee_nested_call_incomplete",
+    "callee_not_total_trap_free_scalar_effect",
+    "callee_parameter_alignment_incomplete",
+    "callee_return_shape_missing",
+    "callee_return_summary_missing",
+    "noninternal_call_target",
+    "not_resolved_internal_call_candidate",
+    "recursive_callee_summary_unproven",
+    "target_relation_input_incomplete",
+    "unsupported_call_effect",
+    "inline_region_cross_edge_coverage_missing",
+    "inline_region_exit_coverage_missing",
+    "inline_region_not_total_trap_free_scalar",
+    "inline_region_return_partition_missing",
+    "inline_region_single_entry_unproven",
+    "inline_region_state_transformer_missing",
+    "phase2_requires_paired_call_sites",
+})
+_CALL_ELIGIBILITY_EXTRACTION_CODES = frozenset({
+    "argument_coverage_incomplete",
+    "argument_evidence_missing",
+    "argument_group_missing",
+    "argument_groups_ambiguous",
+    "call_operation_kind_unsupported",
+    "call_target_ambiguous",
+    "call_target_evidence_missing",
+    "pcode_op_identity_missing",
+    "unsupported_call_effect",
+})
+
+
+def classify_call_eligibility_blocker(
+    blocker: str,
+) -> FailureClassification:
+    """Classify one Phase 2 ineligibility code into relational authority."""
+
+    if type(blocker) is not str or not blocker:
+        raise TypeError("call eligibility blocker code is invalid")
+    normalized = blocker
+    for prefix in ("left_", "right_"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    extraction = False
+    for prefix in ("call_extraction_", "extraction_"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            extraction = True
+            break
+    if extraction:
+        known = normalized in _CALL_ELIGIBILITY_EXTRACTION_CODES
+    else:
+        known = normalized in _CALL_ELIGIBILITY_BLOCKER_BASE_CODES
+    if not known:
+        return FailureClassification(
+            FailureDisposition.INFRASTRUCTURE_INVALID, None, None
+        )
+    if normalized == "phase2_requires_paired_call_sites":
+        return _semantic("callsite_correspondence_unproven")
+    if "argument" in normalized or "parameter_alignment" in normalized:
+        return _semantic("abi_argument_relation_unproven")
+    if "memory" in normalized:
+        return _semantic("memory_final_state_correspondence_unproven")
+    return _semantic("pure_call_semantics_unproven")
+
+
 @dataclass(frozen=True)
 class ArtifactCapabilityRule:
     artifact_type: type
@@ -1083,10 +1167,22 @@ class CallEffectPilotEncoder:
     def _prerequisite_authority(
         self, session: Any, signal: CallEffectPrerequisiteProductionSignal,
     ) -> CauseOccurrenceAuthority:
-        reason_id = "callsite_correspondence_unproven"
+        reason_id = signal.reason_id
+        for blocker in signal.eligibility_blockers:
+            classification = classify_call_eligibility_blocker(blocker)
+            if (
+                classification.disposition
+                != FailureDisposition.TYPED_SEMANTIC_CAUSE
+                or classification.reason_id != reason_id
+                or classification.expected_scope != IdentityScope.RELATIONAL
+            ):
+                raise ValueError(
+                    "call/effect prerequisite blocker routing is not sealed"
+                )
         spec = CALL_EFFECT_REASON_SPECS[reason_id]
         target = (
-            "callsite_correspondence_obligation",
+            spec.target_kind,
+            "call_effect_prerequisite",
             signal.obligation_id,
             signal.observation_contract_id,
             signal.left_fact_id,
@@ -1098,8 +1194,13 @@ class CallEffectPilotEncoder:
             identity_scope=IdentityScope.RELATIONAL,
             target_kind=spec.target_kind,
             canonical_target_key=target,
-            missing_semantic_fact=("paired_callsite_correspondence",),
-            semantic_proposition=("callsite_correspondence_is_complete", target),
+            missing_semantic_fact=(
+                "phase2_call_eligibility_blockers",
+                signal.eligibility_blockers,
+            ),
+            semantic_proposition=(
+                "call_effect_prerequisite_is_proven", reason_id, target
+            ),
             observation_surface=(
                 signal.observation_contract_id,
                 signal.structural_certificate_id,
@@ -1113,21 +1214,28 @@ class CallEffectPilotEncoder:
                 signal.right_fact_id,
             ),
         )
-        semantic_target = (
-            "typed_callsite_correspondence_requirement_v1", target
-        )
-        requirement_id = "call-effect-prereq-" + authority_digest({
-            "cause_id": cause.value,
-            "proof_kind": "callsite_correspondence",
-            "semantic_target": semantic_target,
-        })[:32]
-        requirement = ProofRequirement(
-            requirement_id, "callsite_correspondence", semantic_target
-        )
+        semantic_target_kind = "typed_call_effect_prerequisite_v2"
+        requirements = {}
+        for proof_kind in spec.proof_kinds:
+            semantic_target = (
+                semantic_target_kind, proof_kind, target
+            )
+            requirement_id = "call-effect-prereq-" + authority_digest({
+                "cause_id": cause.value,
+                "proof_kind": proof_kind,
+                "semantic_target": semantic_target,
+            })[:32]
+            requirements[proof_kind] = ProofRequirement(
+                requirement_id, proof_kind, semantic_target
+            )
         bound = self._binding_factory.bind(
             contract_definition_id=spec.contract_definition_id,
             contract_version=1,
-            bindings={"proof": requirement},
+            bindings=(
+                {"proof": next(iter(requirements.values()))}
+                if len(requirements) == 1
+                else requirements
+            ),
         )
         occurrence = CauseOccurrence(
             "call-effect-prereq-occ-" + authority_digest({
@@ -1143,7 +1251,10 @@ class CallEffectPilotEncoder:
             bound.contract_version,
             bound.normalized_expression_digest,
             bound.bound_expression_digest,
-            (requirement_id,),
+            tuple(
+                requirement.requirement_id
+                for requirement in requirements.values()
+            ),
             (
                 signal.structural_certificate_id,
                 *signal.eligibility_blockers,

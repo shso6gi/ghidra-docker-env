@@ -3,13 +3,13 @@
   "case_13_canonical_census_status": "INVALID",
   "evidence_class": "deterministic_production_boundary_pilot",
   "files": {
-    "scripts/function_tracer_pcode/equivalence/checker.py": "5b863e2975b74549216a3fd46ab8145de2c31b5c3a4851da3f75d97f7a38f3de",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8",
     "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b",
     "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "524ae3a80819411b47c546eff8868ed18649f5f1081e0efc708dd58eeee966e2",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "d2bc9e1b64ac43679787aade53ba7ffc8d7cdeb78d2757e0a2fe2d432ac17670",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "87b6c124398c9bdd9161697787c31aa632213fafa862ca2b38361d699e792628",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b894685adbe0739d19bdf347f85225878a7f59b0e76e3c815ff18875092e09d2",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py": "0749b7ed021d0f44859cfb469d91f5b34bae6312f3b98391772a326f982682e1"
   },
   "gate_test": {
     "command": "./.venv-pyghidra/bin/python -m pytest -q scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py",
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "d0da9db1d2dd926b431b29b99be0e3182f6e48a87b8ac32254c4159c56894fe2",
+  "manifest_digest": "b9cd594c818f39d20decb3651b043382cab56003d493e5a08ce49401be861d14",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

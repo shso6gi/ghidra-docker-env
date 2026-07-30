@@ -1414,6 +1414,9 @@ class EquivalenceChecker:
                 analysis1,
                 analysis2,
             )
+            from .v2.comparison_closure import (
+                query_execution_record_projection,
+            )
             
             equivalence_result = EquivalenceResult(
                 is_equivalent=strategy_result.is_equivalent,
@@ -1480,11 +1483,15 @@ class EquivalenceChecker:
                         "monolithic_terminal_receipt": (
                             {
                                 "receipt_digest": dispatch_frame.monolithic_terminal_receipt.receipt_digest,
+                                "comparison_receipt_id": dispatch_frame.monolithic_terminal_receipt.comparison_receipt_id,
                                 "outcome_kind": dispatch_frame.monolithic_terminal_receipt.outcome_kind,
                                 "parent_lease_digest": dispatch_frame.monolithic_terminal_receipt.parent_lease_digest,
                                 "execution_lease_digest": dispatch_frame.monolithic_terminal_receipt.execution_lease_digest,
                                 "frozen_surface_digest": dispatch_frame.monolithic_terminal_receipt.frozen_surface_digest,
                                 "census_digest": dispatch_frame.monolithic_terminal_receipt.census_digest,
+                                "region_receipt_digests": list(
+                                    dispatch_frame.monolithic_terminal_receipt.region_receipt_digests
+                                ),
                                 "sat_region_id": dispatch_frame.monolithic_terminal_receipt.sat_region_id,
                                 "model_digest": dispatch_frame.monolithic_terminal_receipt.model_digest,
                                 "fixed_model_assertion_digest": dispatch_frame.monolithic_terminal_receipt.fixed_model_assertion_digest,
@@ -1505,24 +1512,7 @@ class EquivalenceChecker:
                             else None
                         ),
                         "query_execution_receipts": [
-                            {
-                                "query_label": record.query_label,
-                                "premise_digest": record.premise_digest,
-                                "formula_digest": record.formula_digest,
-                                "disposition": record.disposition,
-                                "proof_kind": record.proof_kind,
-                                "return_width_observation_view_digest": (
-                                    record.return_width_observation_view_digest
-                                ),
-                                "return_width_binding_receipt_digest": (
-                                    record.return_width_binding_receipt_digest
-                                ),
-                                "canonical_return_width_receipt_digests": list(
-                                    record.canonical_return_width_receipt_digests
-                                ),
-                                "formula_text": record.formula_text,
-                                "validated": record.validate(),
-                            }
+                            query_execution_record_projection(record)
                             for record in tuple(getattr(
                                 getattr(dispatch_frame, "receipt", None),
                                 "query_records",
@@ -1545,6 +1535,22 @@ class EquivalenceChecker:
             # capability objects private; they are never serialized.
             equivalence_result._prepared_dispatch_frame = dispatch_frame
             equivalence_result._strategy_result = strategy_result
+            if (
+                dispatch_frame is not None
+                and dispatch_frame.receipt is not None
+                and dispatch_frame.monolithic_terminal_receipt is not None
+                and dispatch_frame.monolithic_terminal_receipt.outcome_kind
+                == "inconclusive_diagnostic"
+                and tuple(dispatch_frame.receipt.query_records)
+            ):
+                from .v2.comparison_closure import (
+                    InconclusiveComparisonAuthority,
+                )
+                equivalence_result._inconclusive_comparison_authority = (
+                    InconclusiveComparisonAuthority.issue(dispatch_frame)
+                )
+            else:
+                equivalence_result._inconclusive_comparison_authority = None
             return equivalence_result
         
         except Exception as e:
@@ -1793,14 +1799,11 @@ class EquivalenceChecker:
             is True
         )
         terminal_receipt = frame.monolithic_terminal_receipt
-        terminal_region_digests = tuple(
-            hashlib.sha256(repr((
-                record.query_label,
-                record.premise_digest,
-                record.formula_digest,
-                record.disposition,
-            )).encode("utf-8")).hexdigest()
-            for record in receipt_queries
+        from .query_receipt_authority import (
+            canonical_region_query_receipt_digests,
+        )
+        terminal_region_digests = (
+            canonical_region_query_receipt_digests(receipt_queries)
         )
         terminal_receipt_valid = bool(
             terminal_receipt is not None

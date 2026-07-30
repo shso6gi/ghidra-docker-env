@@ -22,6 +22,9 @@ from ..return_width_pipeline import (
     prepare_pair_return_observation,
     return_coverage_artifact_ids,
 )
+from ..query_receipt_authority import (
+    canonical_region_query_receipt_digests,
+)
 from ..unknown_reason import (
     UnknownReasonId,
     make_internal_v2_reason_diagnostic,
@@ -1846,14 +1849,8 @@ class MonolithicStrategy(CheckStrategy):
                     if final_is_equivalent is False
                     and counterexample_safety_receipt is not None else ""
                 )
-                region_receipt_digests = tuple(
-                    hashlib.sha256(repr((
-                        record.query_label,
-                        record.premise_digest,
-                        record.formula_digest,
-                        record.disposition,
-                    )).encode("utf-8")).hexdigest()
-                    for record in query_records
+                region_receipt_digests = (
+                    canonical_region_query_receipt_digests(query_records)
                 )
                 terminal_receipt = seal_terminal_decision(
                     parent_lease,

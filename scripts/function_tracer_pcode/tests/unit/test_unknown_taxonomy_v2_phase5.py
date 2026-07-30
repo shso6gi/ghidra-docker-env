@@ -927,6 +927,50 @@ def test_inconclusive_comparison_materializes_receipt_bound_typed_backlog():
     )
 
 
+def test_inconclusive_comparison_rejects_provenance_only_sat_unsat_queries():
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            ComparisonClosureProductionSignal: ComparisonClosurePilotEncoder(),
+        }),
+    )
+    result = _ObservedLegacyResult(Outcome.UNKNOWN)
+    result.call_proof_terminal_provenance = {
+        "comparison_receipt_id": "comparison-receipt",
+        "terminal_branch_id": "S_MONOLITHIC_FALLBACK",
+        "terminal_runtime_premise_digest": "runtime-premise",
+        "terminal_runtime_view_id": ("derived-view", "pair"),
+        "monolithic_terminal_receipt": {
+            "receipt_digest": "terminal-receipt",
+            "comparison_receipt_id": "comparison-receipt",
+            "outcome_kind": "inconclusive_diagnostic",
+            "validated": True,
+        },
+        "query_execution_receipts": (
+            {
+                "query_label": "guard-feasibility",
+                "disposition": "sat",
+                "validated": True,
+            },
+            {
+                "query_label": "value-inequality",
+                "disposition": "unsat",
+                "validated": True,
+            },
+        ),
+    }
+    session = connector.begin({"production_fixture": "mixed-sat-unsat"})
+    with pytest.raises(
+        ValueError, match="authority is not canonical"
+    ):
+        connector.finish(
+            session, result, case_id="mixed-sat-unsat-inconclusive"
+        )
+
+
 def test_production_signal_encoder_failure_is_shadow_only_and_fail_closed():
     def broken_encoder(_session, _signal):
         raise RuntimeError("shadow encoder failure")

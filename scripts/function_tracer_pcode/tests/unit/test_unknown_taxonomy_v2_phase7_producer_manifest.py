@@ -36,6 +36,21 @@ def test_phase7_producer_manifest_is_current_complete_and_unique():
     assert tuple(call_effect_batch["allowed_dispositions"]) == (
         CALL_EFFECT_PROOF_BATCH_SITE.disposition,
     )
+    prerequisite_site = next(
+        row
+        for row in stored["sites"]
+        if row["producer_site_manifest_id"]
+        == "call-effect-producer-prerequisite"
+    )
+    assert {
+        tuple(slot["allowed_reason_ids"])
+        for slot in prerequisite_site["expected_cause_slots"]
+    } == {
+        ("abi_argument_relation_unproven",),
+        ("callsite_correspondence_unproven",),
+        ("memory_final_state_correspondence_unproven",),
+        ("pure_call_semantics_unproven",),
+    }
     sat_sites = {
         row["producer_site_manifest_id"]: (
             tuple(row["allowed_producer_ids"]),

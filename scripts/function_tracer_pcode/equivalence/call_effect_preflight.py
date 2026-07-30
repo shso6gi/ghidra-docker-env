@@ -1106,6 +1106,42 @@ class QueryExecutionRecord:
     canonical_return_width_receipt_digests: Tuple[str, ...] = ()
 
     def validate(self) -> bool:
+        scalar_strings = (
+            self.query_label,
+            self.premise_digest,
+            self.formula_digest,
+            self.disposition,
+            self.proof_kind,
+            self.formula_text,
+            self.return_width_observation_view_digest,
+            self.return_width_binding_receipt_digest,
+        )
+        string_tuples = (
+            self.projection_binding_ids,
+            self.call_site_return_width_receipt_digests,
+            self.canonical_return_width_receipt_digests,
+        )
+        if (
+            any(type(value) is not str for value in scalar_strings)
+            or any(type(values) is not tuple for values in string_tuples)
+            or any(
+                type(value) is not str
+                for values in string_tuples
+                for value in values
+            )
+            or type(
+                self.call_site_return_width_receipt_assertion_digests
+            ) is not tuple
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or any(type(value) is not str for value in item)
+                for item in (
+                    self.call_site_return_width_receipt_assertion_digests
+                )
+            )
+        ):
+            return False
         evidence = projection_binding_evidence_from_query(self.formula_text)
         call_width_receipts = call_site_return_width_evidence_from_query(
             self.formula_text

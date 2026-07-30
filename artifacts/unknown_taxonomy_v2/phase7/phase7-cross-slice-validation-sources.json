@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "45d6fe7d4ab684e07c0c0466e5b2bc56cec9d55853a04af193d29f7b0a14af99",
+  "artifact_digest": "e9d8cf94c1175d75f8bbc769971c2bccb2eee71589be3eaef7ea04580c8e6959",
   "declared_external_fixture_skips": [
     {
       "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -61,7 +61,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase5.py",
-      "sha256": "d114732cf87fb8abf2f75b8e2f9105f8652959be91274ba344393dd349bf8c2d"
+      "sha256": "0749b7ed021d0f44859cfb469d91f5b34bae6312f3b98391772a326f982682e1"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py",
@@ -121,7 +121,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_producer_manifest.py",
-      "sha256": "f4b028a768241364df68de1220e71a4c68964cdd3c330a7273632dea246d4aec"
+      "sha256": "16cf0928beef06150e5f773eecdc95dc64bbf10384c1861ac2fd6fe8b840e0da"
     }
   ],
   "test_count": 576

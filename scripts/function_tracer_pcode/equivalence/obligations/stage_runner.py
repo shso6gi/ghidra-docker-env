@@ -456,6 +456,10 @@ def run_obligation_branch_plan(
             provenance = getattr(result, "call_proof_terminal_provenance", None)
             receipt = getattr(dispatch_frame, "receipt", None)
             if isinstance(provenance, dict):
+                from ..v2.comparison_closure import (
+                    InconclusiveComparisonAuthority,
+                    query_execution_record_projection,
+                )
                 trusted = bool(
                     receipt is not None and receipt.is_trusted_for(dispatch_frame)
                 )
@@ -466,11 +470,17 @@ def run_obligation_branch_plan(
                 provenance["monolithic_terminal_receipt"] = (
                     {
                         "receipt_digest": terminal_receipt.receipt_digest,
+                        "comparison_receipt_id": (
+                            terminal_receipt.comparison_receipt_id
+                        ),
                         "outcome_kind": terminal_receipt.outcome_kind,
                         "parent_lease_digest": terminal_receipt.parent_lease_digest,
                         "execution_lease_digest": terminal_receipt.execution_lease_digest,
                         "frozen_surface_digest": terminal_receipt.frozen_surface_digest,
                         "census_digest": terminal_receipt.census_digest,
+                        "region_receipt_digests": list(
+                            terminal_receipt.region_receipt_digests
+                        ),
                         "sat_region_id": terminal_receipt.sat_region_id,
                         "model_digest": terminal_receipt.model_digest,
                         "fixed_model_assertion_digest": terminal_receipt.fixed_model_assertion_digest,
@@ -482,26 +492,7 @@ def run_obligation_branch_plan(
                     if terminal_receipt is not None else None
                 )
                 provenance["query_execution_receipts"] = [
-                    {
-                        "query_label": record.query_label,
-                        "premise_digest": record.premise_digest,
-                        "formula_digest": record.formula_digest,
-                        "disposition": record.disposition,
-                        "proof_kind": record.proof_kind,
-                        "projection_binding_ids": list(
-                            record.projection_binding_ids
-                        ),
-                        "return_width_observation_view_digest": (
-                            record.return_width_observation_view_digest
-                        ),
-                        "return_width_binding_receipt_digest": (
-                            record.return_width_binding_receipt_digest
-                        ),
-                        "canonical_return_width_receipt_digests": list(
-                            record.canonical_return_width_receipt_digests
-                        ),
-                        "validated": record.validate(),
-                    }
+                    query_execution_record_projection(record)
                     for record in tuple(
                         getattr(receipt, "query_records", ()) or ()
                     )
@@ -539,6 +530,18 @@ def run_obligation_branch_plan(
                 provenance["receipt_successor_ledger_reused"] = (
                     bool(trusted and dispatch_frame.successor_ledger_reused)
                     if dispatch_frame.replan_successor_plan is not None
+                    else None
+                )
+                terminal_receipt = dispatch_frame.monolithic_terminal_receipt
+                result._inconclusive_comparison_authority = (
+                    InconclusiveComparisonAuthority.issue(dispatch_frame)
+                    if (
+                        trusted
+                        and terminal_receipt is not None
+                        and terminal_receipt.outcome_kind
+                        == "inconclusive_diagnostic"
+                        and tuple(receipt.query_records)
+                    )
                     else None
                 )
         from ..v2.production_signals import active_production_pilot_session

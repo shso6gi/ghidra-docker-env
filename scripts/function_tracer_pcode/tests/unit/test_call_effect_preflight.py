@@ -24,6 +24,9 @@ from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
     validate_call_resolution_projection,
     finalize_pairwise_comparison_receipt,
 )
+from scripts.function_tracer_pcode.equivalence.query_receipt_authority import (
+    canonical_region_query_receipt_digest,
+)
 from scripts.function_tracer_pcode.equivalence.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
@@ -199,6 +202,28 @@ def test_query_record_recomputes_projection_consumption_from_formula():
 
     tampered = query.replace("(_ bv1 32)", "(_ bv2 32)", 1)
     assert projection_binding_evidence_from_query(tampered) == {}
+
+
+def test_query_record_rejects_string_coercion_identity_collision():
+    formula = "(set-logic QF_BV)\n(check-sat)"
+    digest = hashlib.sha256(formula.encode("utf-8")).hexdigest()
+    record = QueryExecutionRecord(
+        query_label="1",
+        premise_digest=digest,
+        formula_digest=digest,
+        disposition="unsat",
+        proof_kind="monolithic_region_guard",
+        formula_text=formula,
+    )
+    wrong_type = replace(record, query_label=1)
+
+    assert record.validate()
+    assert not wrong_type.validate()
+    assert canonical_region_query_receipt_digest(record)
+    with pytest.raises(
+        ValueError, match="canonical region query receipt is invalid"
+    ):
+        canonical_region_query_receipt_digest(wrong_type)
 
 
 def test_dispatch_frame_is_single_use_and_cleanup_revokes_copied_capability(monkeypatch):

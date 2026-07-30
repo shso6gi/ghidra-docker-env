@@ -2536,40 +2536,68 @@ def produce_pure_direct_call_proofs(
         CallEffectPrerequisiteProductionSignal,
         emit_call_effect_signal,
     )
+    from .v2.call_effect import (
+        FailureDisposition,
+        classify_call_eligibility_blocker,
+    )
     blocker_signals = tuple(
         CallEffectBlockerProductionSignal.from_proof_input(proof_input)
         for proof_input in proof_inputs
     )
-    prerequisite_signals = tuple(
-        CallEffectPrerequisiteProductionSignal(
-            obligation_id=str(obligation.get("obligation_id") or ""),
-            observation_contract_id=str(
-                obligation.get("observation_contract_id") or ""
-            ),
-            left_fact_id=obligation.get("left_fact_id"),
-            right_fact_id=obligation.get("right_fact_id"),
-            structural_certificate_id=str(
-                (manifest.get("structural_coverage_certificate") or {}).get(
-                    "certificate_id"
-                )
-                or ""
-            ),
-            eligibility_blockers=tuple(eligibility.get("blockers", ()) or ()),
+    prerequisite_signal_rows = []
+    eligibility_by_obligation = {
+        item.get("obligation_id"): item
+        for item in manifest.get("phase2_direct_call_eligibility", ()) or ()
+        if isinstance(item, Mapping)
+    }
+    structural_certificate_id = str(
+        (manifest.get("structural_coverage_certificate") or {}).get(
+            "certificate_id"
         )
-        for obligation in manifest.get("relational_obligations", ()) or ()
-        if isinstance(obligation, Mapping)
-        for eligibility in (
-            next((
-                item
-                for item in manifest.get("phase2_direct_call_eligibility", ()) or ()
-                if isinstance(item, Mapping)
-                and item.get("obligation_id") == obligation.get("obligation_id")
-            ), {}),
-        )
-        if eligibility.get("status") == "ineligible"
-        and tuple(eligibility.get("blockers", ()) or ())
-        == ("phase2_requires_paired_call_sites",)
+        or ""
     )
+    for obligation in manifest.get("relational_obligations", ()) or ():
+        if not isinstance(obligation, Mapping):
+            continue
+        eligibility = eligibility_by_obligation.get(
+            obligation.get("obligation_id"), {}
+        )
+        if eligibility.get("status") != "ineligible":
+            continue
+        blockers_by_reason: Dict[str, List[str]] = {}
+        for blocker in tuple(eligibility.get("blockers", ()) or ()):
+            classification = classify_call_eligibility_blocker(blocker)
+            if (
+                classification.disposition
+                != FailureDisposition.TYPED_SEMANTIC_CAUSE
+                or classification.reason_id is None
+            ):
+                raise ValueError(
+                    "unclassified Phase 2 call eligibility blocker: "
+                    + repr(blocker)
+                )
+            blockers_by_reason.setdefault(
+                classification.reason_id, []
+            ).append(blocker)
+        for reason_id, reason_blockers in sorted(
+            blockers_by_reason.items()
+        ):
+            prerequisite_signal_rows.append(
+                CallEffectPrerequisiteProductionSignal(
+                    obligation_id=str(
+                        obligation.get("obligation_id") or ""
+                    ),
+                    observation_contract_id=str(
+                        obligation.get("observation_contract_id") or ""
+                    ),
+                    left_fact_id=obligation.get("left_fact_id"),
+                    right_fact_id=obligation.get("right_fact_id"),
+                    structural_certificate_id=structural_certificate_id,
+                    eligibility_blockers=tuple(reason_blockers),
+                    reason_id=reason_id,
+                )
+            )
+    prerequisite_signals = tuple(prerequisite_signal_rows)
     for signal in prerequisite_signals:
         emit_call_effect_signal(
             signal,

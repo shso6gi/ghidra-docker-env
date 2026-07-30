@@ -1049,23 +1049,19 @@ class ProductionDualWritePilotConnector:
                 raise ValueError(
                     "inconclusive comparison lacks receipt-bound provenance"
                 )
-            terminal = provenance.get("monolithic_terminal_receipt")
-            queries = tuple(provenance.get("query_execution_receipts", ()) or ())
+            from .comparison_closure import InconclusiveComparisonAuthority
+            comparison_authority = getattr(
+                result, "_inconclusive_comparison_authority", None
+            )
             if (
-                not isinstance(terminal, Mapping)
-                or terminal.get("validated") is not True
-                or terminal.get("outcome_kind") != "inconclusive_diagnostic"
-                or not queries
-                or any(
-                    not isinstance(row, Mapping)
-                    or row.get("validated") is not True
-                    or row.get("disposition") not in {"unknown", "error"}
-                    for row in queries
-                )
+                type(comparison_authority)
+                is not InconclusiveComparisonAuthority
+                or not comparison_authority.matches_provenance(provenance)
             ):
                 raise ValueError(
                     "inconclusive comparison authority is not canonical"
                 )
+            terminal = provenance["monolithic_terminal_receipt"]
             from .production_context import production_pilot_session_scope
             from .production_signals import (
                 ComparisonClosureProductionSignal,
@@ -1079,7 +1075,9 @@ class ProductionDualWritePilotConnector:
                     "terminal_runtime_premise_digest"
                 ],
                 runtime_view_id=provenance["terminal_runtime_view_id"],
-                query_receipt_digests=tuple(authority_digest(row) for row in queries),
+                query_receipt_digests=(
+                    comparison_authority.query_receipt_digests
+                ),
             )
             with production_pilot_session_scope(session):
                 emitted = emit_comparison_closure_signal(
