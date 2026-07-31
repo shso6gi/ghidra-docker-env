@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "6ee3250ea348399e67007bfb0385c3ea560ad97a6833a0d9dc526fccdb137c1c",
+  "artifact_digest": "ff5ccdb7f263614b86809971aed9ceab0e4cd0097bff6696c3415ff710a2078e",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -100,7 +100,7 @@
     },
     {
       "path": "eqbench_run_all_32jobs.sh",
-      "sha256": "68d71ca221356aebdc954bb0288f27381a80a250c7b06f220ca9f56274c3dac3"
+      "sha256": "fc7f0d7ae3fd1352a85deabdbae48a49f2200ecf5326e6cdf8904f5b27938726"
     },
     {
       "path": "scripts/validation_matrix_common.sh",
@@ -152,7 +152,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/validation/result_summary.py",
-      "sha256": "4675233dbd1231dffb7a5c6357a7741d7c6a3a03cb03e19c3a06d2214f8e0d48"
+      "sha256": "40f5467059c91cbcdb0bdbb0b3f8a1fd5b18dc76c161d898707fd761b0b3c1b4"
     },
     {
       "path": "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
@@ -168,14 +168,22 @@
     },
     {
       "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
-      "sha256": "33542eaf3ca5b291f321614f5e6cd35dda12fbff7d4dc24f30a876d44c8183f7"
+      "sha256": "de1f1cbde768b7e5006cb971a02534c4756f926cab156fc557d71c000eb78043"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+      "sha256": "fa6dab46eae7b7f1fc156626f3f8598501a301335ee9cc5ae783819735bd055c"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
+      "sha256": "fdec5f173c2094a7a15893c96efa8d03d52851bac59c61d75254c1c2f652e860"
     }
   ],
-  "source_tree_digest": "ec9496115a9a7459dcb6a5775bc5ef169a3a5961d8b5f0b957f231ea9e09a273",
+  "source_tree_digest": "47b32e41db491da7d225f83a0ea52553449b13c460dc258514c61d85832c0d23",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-    "sha256": "e1308c0d2ae91f3b9d789fd050ad64ccc0fe4d812e1786c0f53954a9234b7bd6",
+    "sha256": "497dc0e053b15d679f6014a4dd370a30b3a0d95e27882c0617a8b5ec1a6ab8ed",
     "source_files": [
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_recovery.py",
@@ -215,9 +223,9 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py",
-        "sha256": "9bbdee859b6f802811cf93d458eff2f250d8456e6ea4a00ac92afcae184d0672"
+        "sha256": "064d09b737d1e2c3b8e45416757e9e11e78ef652f21b96464d98befdd29ba673"
       }
     ],
-    "test_count": 173
+    "test_count": 185
   }
 }

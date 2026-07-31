@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "82c420b39f893cde6e4d0516fbfdcfeb8e9dcac2954276bad8f51f647692f322",
+  "artifact_digest": "2ec66bc68d24661dc07b8736c41204177dee654cd066934fa3d02d09eb3491e9",
   "artifact_kind": "phase9-decision-transition-matrix-v1",
   "batch_resume": {
     "EQUIVALENT": "COMPLETE_EQ",
@@ -18,8 +18,8 @@
   "eq_not_eq_decisive_receipts_unchanged_authority": {
     "all_five_test_family": "test_decision_receipt_is_only_serialized_status_authority",
     "focused_junit_sha256": "0fd550424066657f2140d06cd5e60de7e8ef315712d584aad7dd9201c85971d2",
-    "phase8_artifact_digest": "6ee3250ea348399e67007bfb0385c3ea560ad97a6833a0d9dc526fccdb137c1c",
-    "phase8_artifact_sha256": "fad1b579da1b67043daec479d26504a3635fb72aad69e0af8018296d278107bd"
+    "phase8_artifact_digest": "ff5ccdb7f263614b86809971aed9ceab0e4cd0097bff6696c3415ff710a2078e",
+    "phase8_artifact_sha256": "0c1bb6c6f66553578e458f664039894ad33b001679325e9ea309bbaf144149e2"
   },
   "retry_fallback": {
     "EQUIVALENT": [

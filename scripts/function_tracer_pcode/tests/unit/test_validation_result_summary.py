@@ -13,6 +13,7 @@ import pytest
 from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
     PAIR_STATUS_PUBLIC_KEY_FILE,
     generate_pair_status_keypair,
+    pair_status_operational_diagnostic,
     seal_pair_status,
 )
 from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
@@ -280,6 +281,111 @@ def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
     assert summary.overall.count(STATUS_ERROR) == 1
     assert health["error_kind_counts"] == {"PAIR_STATUS_AUTHORITY_INVALID": 1}
     assert health["supervisor_status_counts"] == {"INVALID": 1}
+
+
+def test_pair_status_operational_diagnostic_requires_exact_schema():
+    diagnostic = {
+        "classification_valid": False,
+        "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+        "detail": "ValueError: primary classification failure",
+    }
+
+    assert pair_status_operational_diagnostic(diagnostic) == diagnostic
+    assert pair_status_operational_diagnostic({**diagnostic, "extra": True}) is None
+    assert pair_status_operational_diagnostic({**diagnostic, "detail": ""}) is None
+    assert pair_status_operational_diagnostic({
+        **diagnostic, "error_kind": "DIFFERENT_ERROR_KIND",
+    }) is None
+
+
+def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_path):
+    status_path = tmp_path / "pair-status.json"
+    status_path.write_text(json.dumps({
+        "classification_valid": False,
+        "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+        "detail": "ValueError: primary classification failure",
+    }))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.equivalence.v2.pair_status_authority",
+            "--validate-pair-status",
+            str(status_path),
+            "--allow-operational-diagnostic",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "ERROR"
+    assert "signed pair-status schema differs" not in result.stderr
+
+
+def test_operational_diagnostic_mode_still_verifies_signed_status(tmp_path):
+    log_path = _write_log(tmp_path, "client_B7_B13.log", "Result: TIMEOUT")
+    status_path = _write_pair_status(log_path, "TIMEOUT")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.equivalence.v2.pair_status_authority",
+            "--validate-pair-status",
+            str(status_path),
+            "--public-key",
+            str(tmp_path / PAIR_STATUS_PUBLIC_KEY_FILE),
+            "--allow-operational-diagnostic",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "TIMEOUT"
+
+
+def test_runner_canonical_result_subprocess_persists_primary_classification_error(
+    tmp_path,
+):
+    paths = [tmp_path / f"input-{index}" for index in range(8)]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.equivalence.v2.canonical_result",
+            "--classify-pair-log", str(paths[0]),
+            "--supervisor-projection", str(paths[1]),
+            "--checkpoint-root", str(paths[2]),
+            "--execution-nonce", "execution-nonce",
+            "--supervisor-signing-key-id", "supervisor-key",
+            "--supervisor-signing-key-file", str(paths[3]),
+            "--worker-signing-key-id", "worker-key",
+            "--worker-signing-key-file", str(paths[4]),
+            "--pair-status-signing-private-key-file", str(paths[5]),
+            "--pair-status-verification-key-file", str(paths[6]),
+            "--pair-execution-target-file", str(paths[7]),
+            "--classification-diagnostic-log", str(paths[0]),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    message = f"Primary pair classification error: {payload['detail']}"
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == message
+    assert paths[0].read_text(encoding="utf-8").strip() == message
+    assert payload == {
+        "classification_valid": False,
+        "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+        "detail": payload["detail"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -1363,6 +1469,21 @@ def test_eqbench_runner_cleans_authority_after_validation_diagnostics():
         validation_failure,
     )
     assert validation_call < validation_failure < log_copy < cleanup_call
+
+
+def test_eqbench_runner_reports_primary_diagnostic_before_signature_validation():
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    validation_start = script.index("validate_current_pair_status() {")
+    validation_end = script.index(
+        "remove_pair_process_authority() {", validation_start
+    )
+    validation_block = script[validation_start:validation_end]
+
+    assert "--allow-operational-diagnostic" in validation_block
+    assert '--classification-diagnostic-log "$log_file"' in script
+    assert "Primary pair classification error:" in Path(
+        "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py"
+    ).read_text()
 
 
 def test_eqbench_runner_reports_cleanup_failure_as_independent_run_health_error():

@@ -193,7 +193,17 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     workflow_junit = root / (
         "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml"
     )
-    workflow = _passing_junit(workflow_junit, minimum=162)
+    workflow = _passing_junit(
+        workflow_junit,
+        minimum=185,
+        required_names=(
+            "test_pair_status_operational_diagnostic_requires_exact_schema",
+            "test_pair_status_validation_classifies_operational_diagnostic_as_error",
+            "test_operational_diagnostic_mode_still_verifies_signed_status",
+            "test_runner_canonical_result_subprocess_persists_primary_classification_error",
+            "test_eqbench_runner_reports_primary_diagnostic_before_signature_validation",
+        ),
+    )
     phase7_junit = root / (
         "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml"
     )
@@ -339,6 +349,12 @@ def main() -> int:
                           encoding="utf-8")
     print(output)
     return 0
+
+
+SOURCE_PATHS += (
+    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
+)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "f993551dabc5f7e99a036c1d7ceddcefc388916d52e3c8b8ccb69926fe1ffec7",
+  "artifact_digest": "8cad823e8c65e0921614cca8be396f827ceab483b08c4f6572c47b3b1d723e71",
   "artifact_kind": "phase9-source-tree-manifest-v3",
   "closeout_bindings": [
     {
@@ -8,14 +8,14 @@
       "sha256": "f669755785476aec433ca3d9e4220f80c3451682859e06c75fdd71923b6d7e87"
     },
     {
-      "artifact_digest": "d99b453af5468bf7509b45fa95f9f220881b52d91f5963f15f084863fe7dd8d5",
+      "artifact_digest": "e7951802b1977b83bb050d371b7e088ae624b9e405b027abae3ec03b1a50f375",
       "path": "decision_receipt.json",
-      "sha256": "003c322d4e83fa2be7e0e20ec26149d7a89d16969e4d2a0958dd70b580905ddd"
+      "sha256": "a09d83f3b2f38a5ba9de349e7d231c31776454440650b326edb91c25d29834b7"
     },
     {
-      "artifact_digest": "82c420b39f893cde6e4d0516fbfdcfeb8e9dcac2954276bad8f51f647692f322",
+      "artifact_digest": "2ec66bc68d24661dc07b8736c41204177dee654cd066934fa3d02d09eb3491e9",
       "path": "decision_transition_matrix.json",
-      "sha256": "a8900edbac66eb0b0f281763012d72ea8092346317f84a191f769fcdcda3efd0"
+      "sha256": "83183852495de230468240a951d0359a344a9fc501009b13e8ef48ef6e2f126a"
     },
     {
       "artifact_digest": "fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087",
@@ -28,18 +28,18 @@
       "sha256": "f554367c7b45b326f2ecd2fa4082e0e5afa974336add795976def1303a3a3c0b"
     },
     {
-      "artifact_digest": "777c4cd111ee9529cfd80b86c5518ec1f7bc19f16f1dcc24db8a7e056d751568",
+      "artifact_digest": "92df22e26c3647db44e384c1d1455ee381d59b21493d6a0e21e15c9db6853e38",
       "path": "reason_before_after.json",
-      "sha256": "90b395db8d28cce625e74479555a858cd654902dea17ddf4c068986eb9a1273a"
+      "sha256": "3161c14fdb29d24f03f81f53aced74f7dc5536b0933bbaa060a64c65d67a6b73"
     },
     {
-      "artifact_digest": "6b7eef47729b9749791dab57587bc901fd3b62cb19c6cd4f41218fe2d3dddf5c",
+      "artifact_digest": "77fb53cc59c104a231a50abf9fafbc2d8a210b4ebc17732271c763bd06a97d81",
       "path": "validation_run.json",
-      "sha256": "9aa757da2f12a1ac8bc578c209016b8240d4a44bedc8b07eb5514ad5381d0c8c"
+      "sha256": "35ed40d29f57901dabde572fa09469d261b019763319f783d7824ba895960698"
     }
   ],
   "phase7_artifact_sha256": "44d3dfa7b6d8fab5360f860a80963214f57a4f579b12aa7d1024314f29d8cd56",
-  "phase8_artifact_sha256": "fad1b579da1b67043daec479d26504a3635fb72aad69e0af8018296d278107bd",
+  "phase8_artifact_sha256": "0c1bb6c6f66553578e458f664039894ad33b001679325e9ea309bbaf144149e2",
   "phase9_focused_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase9/phase9-focused-validation.xml",
     "sha256": "c47e4ff330b39cebcc07b0760ccf1070cdb379282e3d139f76f676434fe38689",
@@ -73,17 +73,25 @@
     },
     {
       "path": "scripts/function_tracer_pcode/validation/result_summary.py",
-      "sha256": "4675233dbd1231dffb7a5c6357a7741d7c6a3a03cb03e19c3a06d2214f8e0d48"
+      "sha256": "40f5467059c91cbcdb0bdbb0b3f8a1fd5b18dc76c161d898707fd761b0b3c1b4"
     },
     {
       "path": "scripts/function_tracer_pcode/validation/phase9_completion_validation.py",
-      "sha256": "ddbab203c479097b4618a38ee33c1a66550189cefdc75bf072a543e527e07aea"
+      "sha256": "9e90b96774e4cefc0a45d0cfc8ca56e69f2d1779c3cedeef77d2f00819f7e197"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase9_completion.py",
       "sha256": "8b86efd4d945fc4035117e7a2e05fbdac44a5f9f635e86e09ddabfbdd68c5c9b"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+      "sha256": "fa6dab46eae7b7f1fc156626f3f8598501a301335ee9cc5ae783819735bd055c"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
+      "sha256": "fdec5f173c2094a7a15893c96efa8d03d52851bac59c61d75254c1c2f652e860"
     }
   ],
-  "source_tree_digest": "d950cd68ebf3ecac5171ae05dd929f62c5e2e7ccf57621fe345260fae6321983",
-  "validation_run_log_sha256": "d513c84e70108653b19c3bd1e5ca6d2064137ee1e0b3ae09bbdd5daadc504fad"
+  "source_tree_digest": "aad315c108c2c3213c93e35d11cf0ba6d81ad066201f344f1fb4360519f33de6",
+  "validation_run_log_sha256": "7411800ded614172a6a622588e78a0b7a02c5b1900a3f738920540a0fc8a08f0"
 }

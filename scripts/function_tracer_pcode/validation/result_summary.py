@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from ..equivalence.v2.pair_status_authority import (
-    find_pair_status_public_key,
+    find_pair_status_public_key, pair_status_operational_diagnostic,
     validate_signed_pair_status,
 )
 from ..equivalence.unknown_reason import (
@@ -269,18 +269,18 @@ def read_validation_log_record(
             pair_status_payload = json.loads(
                 pair_status_path.read_text(encoding="utf-8")
             )
-            if (
-                set(pair_status_payload) == {
-                    "classification_valid", "error_kind", "detail",
-                }
-                and pair_status_payload["classification_valid"] is False
-                and pair_status_payload["error_kind"]
-                == "PAIR_STATUS_AUTHORITY_INVALID"
-                and type(pair_status_payload["detail"]) is str
-                and bool(pair_status_payload["detail"])
-            ):
-                operational_invalid = pair_status_payload
-            else:
+            # Operational diagnostics are deliberately outside signed authority.
+            # They preserve the primary classifier exception when sealing could
+            # not begin, and therefore cannot make any canonical outcome claim.
+            # Recognize only the shared exact schema before signature validation.
+            # Any extension, missing detail, or different error kind continues
+            # into signed validation and is rejected fail-closed.  Keeping this
+            # boundary explicit also prevents an unsigned diagnostic from being
+            # accepted as a resumable or publication-grade pair-status record.
+            operational_invalid = pair_status_operational_diagnostic(
+                pair_status_payload
+            )
+            if operational_invalid is None:
                 pair_status = validate_signed_pair_status(
                     pair_status_payload,
                     public_key_path=find_pair_status_public_key(pair_status_path),

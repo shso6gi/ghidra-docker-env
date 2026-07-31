@@ -216,7 +216,7 @@ validate_current_pair_status() {
         scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
         --validate-pair-status "$pair_status_file" \
         --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
-        --expected-pair-target "$pair_target_file"
+        --expected-pair-target "$pair_target_file" --allow-operational-diagnostic
 }
 
 remove_pair_process_authority() {
@@ -381,7 +381,7 @@ run_pair() {
         --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
         --pair-status-signing-private-key-file "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
         --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
-        --pair-execution-target-file "$pair_target_file" \
+        --pair-execution-target-file "$pair_target_file" --classification-diagnostic-log "$log_file" \
         > "$pair_status_file"; then
         classification_ec=0
     else

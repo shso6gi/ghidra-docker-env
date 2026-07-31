@@ -758,5 +758,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
+SOURCE_PATHS += (
+    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
+)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 from typing import Any, Mapping
 
@@ -1073,6 +1074,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--pair-status-signing-private-key-file")
     parser.add_argument("--pair-status-verification-key-file")
     parser.add_argument("--pair-execution-target-file")
+    parser.add_argument("--classification-diagnostic-log")
     args = parser.parse_args(arguments)
     if not all((
         args.classify_pair_log, args.supervisor_projection,
@@ -1101,10 +1103,25 @@ def main(arguments: list[str] | None = None) -> int:
             public_key_path=Path(args.pair_status_verification_key_file),
         )
     except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        message = f"Primary pair classification error: {detail}"
+        print(message, file=sys.stderr)
+        if args.classification_diagnostic_log:
+            try:
+                with Path(args.classification_diagnostic_log).open(
+                    "a", encoding="utf-8"
+                ) as stream:
+                    stream.write(f"\n{message}\n")
+            except OSError as log_exc:
+                print(
+                    "Pair classification diagnostic log append failed: "
+                    f"{type(log_exc).__name__}: {log_exc}",
+                    file=sys.stderr,
+                )
         print(json.dumps({
             "classification_valid": False,
             "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
-            "detail": f"{type(exc).__name__}: {exc}",
+            "detail": detail,
         }, sort_keys=True))
         return 2
     print(json.dumps(sealed_status, sort_keys=True))

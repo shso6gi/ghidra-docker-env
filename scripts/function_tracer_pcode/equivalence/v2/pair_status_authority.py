@@ -61,6 +61,28 @@ PAIR_STATUS_SEAL_FIELDS = frozenset({
     "pair_status_body_digest",
     "pair_status_signature",
 })
+PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_FIELDS = frozenset({
+    "classification_valid",
+    "error_kind",
+    "detail",
+})
+
+
+def pair_status_operational_diagnostic(
+    payload: Any,
+) -> Mapping[str, Any] | None:
+    """Recognize the exact unsigned diagnostic emitted on classification failure."""
+
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != set(PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_FIELDS)
+        or payload.get("classification_valid") is not False
+        or payload.get("error_kind") != "PAIR_STATUS_AUTHORITY_INVALID"
+        or type(payload.get("detail")) is not str
+        or not payload["detail"]
+    ):
+        return None
+    return dict(payload)
 
 
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
@@ -402,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export-public-from-private")
     parser.add_argument("--public-key")
     parser.add_argument("--validate-pair-status")
+    parser.add_argument("--allow-operational-diagnostic", action="store_true")
     parser.add_argument("--resume-disposition", action="store_true")
     parser.add_argument("--expected-pair-target")
     args = parser.parse_args(argv)
@@ -433,12 +456,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--write-public-key requires key generation or export")
     if args.validate_pair_status:
         pair_status_path = Path(args.validate_pair_status)
+        payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
+        diagnostic = pair_status_operational_diagnostic(payload)
+        if args.allow_operational_diagnostic and diagnostic is not None:
+            print("ERROR")
+            return 0
         public_key_path = (
             Path(args.public_key) if args.public_key
             else find_pair_status_public_key(pair_status_path)
         )
         body = validate_signed_pair_status(
-            json.loads(pair_status_path.read_text(encoding="utf-8")),
+            payload,
             public_key_path=public_key_path,
         )
         if args.expected_pair_target:
