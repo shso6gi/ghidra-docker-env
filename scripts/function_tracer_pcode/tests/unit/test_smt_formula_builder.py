@@ -491,6 +491,57 @@ class TestCheckerABIRetryIntegration:
             for reason in result.unknown_reasons
         )
 
+    def test_retry_with_abi_constraints_unsupported_operator_is_unknown(self):
+        from scripts.function_tracer_pcode.equivalence.checker import (
+            EquivalenceChecker,
+        )
+        from scripts.function_tracer_pcode.model.render_smt import (
+            UnsupportedSmtOperatorError,
+        )
+        from unittest.mock import patch
+
+        analysis = FunctionReturnAnalysis(
+            function_name="abi_retry_unsupported_operator",
+            entry_point="0x00401000",
+            parameters=[],
+            returns=[
+                ReturnInfo(
+                    "0x00401010",
+                    Expression.constant(7, size=4),
+                    [],
+                )
+            ],
+            return_type="int",
+        )
+        checker = EquivalenceChecker(debug=False)
+        rejection = UnsupportedSmtOperatorError(
+            operator="FLOAT2INT",
+            reason="unsupported unary operator",
+            operand_bits=64,
+            result_bits=32,
+        )
+
+        with patch.object(
+            checker.formula_builder,
+            "build_equivalence_formula_extended",
+            side_effect=rejection,
+        ):
+            result = checker._retry_with_abi_constraints(
+                self._phase_context(analysis, analysis),
+                {},
+                retry_count=1,
+            )
+
+        assert result.is_equivalent is None
+        assert result.error_message is None
+        assert result.pairwise_debug_stats == {"unsupported_smt_operator": 1}
+        assert any(
+            reason.reason_id == "expression_semantics_unsupported"
+            and reason.stage == "ABI_RETRY"
+            and "unsupported_smt_operator" in tuple(reason.evidence_refs or ())
+            for reason in result.unknown_reasons
+        )
+
     def test_retry_with_abi_constraints_unsat_has_no_counterexample_raw(self):
         from scripts.function_tracer_pcode.equivalence.checker import (
             EquivalenceChecker,

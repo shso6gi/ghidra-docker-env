@@ -52,9 +52,25 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/equivalence/v2/production_context.py",
     "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
     "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
+    "scripts/function_tracer_pcode/equivalence/checker.py",
+    "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/_shared.py",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/auxiliary_smt.py",
+    "scripts/function_tracer_pcode/analysis/recurrence/proof_utils.py",
+    "scripts/function_tracer_pcode/model/expression.py",
+    "scripts/function_tracer_pcode/model/render_smt.py",
+    "scripts/function_tracer_pcode/transform/expander.py",
     "scripts/function_tracer_pcode/validation/result_summary.py",
     "scripts/function_tracer_pcode/validation/phase9_completion_validation.py",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase9_completion.py",
+    "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
+    "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
+    "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
+    "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
 )
 
 _SERVICE_INTERNAL_PREFIXES = (
@@ -756,12 +772,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_phase9_evidence(Path(args.repo_root))
     print(ARTIFACT_DIR)
     return 0
-
-
-SOURCE_PATHS += (
-    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
-    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
-)
 
 
 if __name__ == "__main__":

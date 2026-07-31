@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "f96b7dd722332520049aac91ecfddb5a0366016e48473f44a25159cce2d68ffe",
+  "artifact_digest": "17a325393a48fbff1784ad50d44bcd01ceb827f3b4762ebc371b66f56d9ba469",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "c6ddbd073c628840de5139de3cbfc8a99151a18919707504a2dd5856703c75c7"
+    "sha256": "419911703fdd29b9e7b673ce915e8ce0a308a837e9d6b2a992091a5bf42b4e1d"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "b226b5c48fcc1b585fb459ea6c1d4e15dc2d2f9609a336e2d75385ae6609064b",
+    "manifest_digest": "e49ff26f8ecb5ba79f331c1a3759ea5cb11620c65e637b2ef32e2ecd92a2f5a5",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "08b4f803b53465301d59e9ab084d5b0b62aee84043344d36833906f5390c0c3e",
+    "sha256": "8b92c42f771e34b024bb216147f5efa24356381c7171864d90a2ebf030784b78",
     "site_count": 28
   },
   "source_files": [
@@ -112,7 +112,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "sha256": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f"
+      "sha256": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
@@ -128,7 +128,31 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "sha256": "cc94c2f2b32951d65312ddf7b0cd9fcff3244192a706c97a33f647fa3659f7fd"
+      "sha256": "8d8295bdf079d5b6bffad2b32361953bd66bf9b979bc22aa89bb673a74f4b80c"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/_shared.py",
+      "sha256": "f7b50648a6eaf3951936bd6b194c808984a4862e3ac89b845ee9245208b3ccf5"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/auxiliary_smt.py",
+      "sha256": "16072f3751b2d3c5a2dfdb2f462ede706474b428aa7c95739384057dc8006c38"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/analysis/recurrence/proof_utils.py",
+      "sha256": "522982b83217c3efbdfd183721e0e92c91142b0099b17b6dde578b6c45b74a94"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/model/expression.py",
+      "sha256": "bcab2b8e7682d5f9cfcfa67cbf65986570ae699d4a2cced4574817c517c6b18b"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/model/render_smt.py",
+      "sha256": "438577f6ed19f800ccd225e31f2e5217ca5e9eea9537b3ceb301c38743c6a6ea"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/transform/expander.py",
+      "sha256": "6ae1aed8357c510e21948ddd1be3314e7a37414f4d276bb9f274cef25fd4a5a1"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -167,8 +191,32 @@
       "sha256": "126637313554fdacb575060c88bc842f747fdab5ff6b4c97c4580c01921d7896"
     },
     {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
+      "sha256": "425a5411af8e3a48888ce44e8045f082b814aa0e04fec726396b5123cd035124"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
+      "sha256": "0f08e2beba4919dd70065724b402784d5bfa0c38c023c51d86d2db378deb2051"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
+      "sha256": "5a65e9140d928e09cec309368285e5b94522b506e53b1cf9cc4a2f94a6f20faf"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
+      "sha256": "4d68fe042cb3e9515f6f41d044339a692074f565eab2a73a1a7a0d7bd6f94904"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+      "sha256": "430b0ed296f50d345fa799d566b0b4cc3b813b17b8815f712adcb48ceec87767"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+      "sha256": "c958c8333f368e3517a9fcc9787df367b1993cc90e7a32f44691b7c13a80e0dd"
+    },
+    {
       "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
-      "sha256": "de1f1cbde768b7e5006cb971a02534c4756f926cab156fc557d71c000eb78043"
+      "sha256": "3c81731d23d0b8993151e0acee6a8fe8e884bbaad9dec780532ae344cd93bb2c"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
@@ -179,11 +227,11 @@
       "sha256": "fdec5f173c2094a7a15893c96efa8d03d52851bac59c61d75254c1c2f652e860"
     }
   ],
-  "source_tree_digest": "42b217f01fe26a5f7b147b6ca2cf0018fe1cd903ad7a91a224ea896199284ac7",
+  "source_tree_digest": "e5bb7c5d3d620d63b152ccd8b4053a8412e4cdcdd85f607856d2aa674c08cafc",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-    "sha256": "497dc0e053b15d679f6014a4dd370a30b3a0d95e27882c0617a8b5ec1a6ab8ed",
+    "sha256": "b9779a5552f30f0d64098e88c67636d644713d97080c6a333c271483e6b46e31",
     "source_files": [
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_recovery.py",
@@ -224,8 +272,32 @@
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py",
         "sha256": "064d09b737d1e2c3b8e45416757e9e11e78ef652f21b96464d98befdd29ba673"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
+        "sha256": "425a5411af8e3a48888ce44e8045f082b814aa0e04fec726396b5123cd035124"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
+        "sha256": "0f08e2beba4919dd70065724b402784d5bfa0c38c023c51d86d2db378deb2051"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
+        "sha256": "5a65e9140d928e09cec309368285e5b94522b506e53b1cf9cc4a2f94a6f20faf"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
+        "sha256": "4d68fe042cb3e9515f6f41d044339a692074f565eab2a73a1a7a0d7bd6f94904"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+        "sha256": "430b0ed296f50d345fa799d566b0b4cc3b813b17b8815f712adcb48ceec87767"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+        "sha256": "c958c8333f368e3517a9fcc9787df367b1993cc90e7a32f44691b7c13a80e0dd"
       }
     ],
-    "test_count": 185
+    "test_count": 477
   }
 }

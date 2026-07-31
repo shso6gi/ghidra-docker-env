@@ -28,7 +28,11 @@ from .runtime_refs import (
 )
 
 
-class UnsupportedSmtIntrinsicError(ValueError):
+class UnsupportedSmtSemanticsError(ValueError):
+    """Base class for typed refusals of unavailable exact SMT semantics."""
+
+
+class UnsupportedSmtIntrinsicError(UnsupportedSmtSemanticsError):
     """Typed semantic-lowering refusal; message text is diagnostic only."""
 
     def __init__(self, *, mnemonic: Optional[str], opcode: Optional[str]) -> None:
@@ -49,6 +53,28 @@ class UnknownSmtExtensionWidthError(ValueError):
         super().__init__(
             f"{operator} output width is unavailable "
             f"(operand width: {self.operand_bits or 'unknown'} bits)"
+        )
+
+
+class UnsupportedSmtOperatorError(UnsupportedSmtSemanticsError):
+    """Typed refusal for an operator that has no exact SMT lowering."""
+
+    def __init__(
+        self,
+        *,
+        operator: Optional[str],
+        reason: str,
+        operand_bits: int = 0,
+        result_bits: int = 0,
+    ) -> None:
+        self.operator = operator
+        self.reason = reason
+        self.operand_bits = int(operand_bits or 0)
+        self.result_bits = int(result_bits or 0)
+        super().__init__(
+            f"{operator or 'unknown operator'} has no exact SMT lowering: {reason} "
+            f"(operand width: {self.operand_bits or 'unknown'} bits, "
+            f"result width: {self.result_bits or 'unknown'} bits)"
         )
 
 
@@ -145,6 +171,7 @@ _SUPPORTED_BINARY_OPERATORS = (
     | {"PIECE", "SUBPIECE", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}
 )
 _SUPPORTED_UNARY_OPERATORS = {
+    "INT2FLOAT",
     "INT_ZEXT",
     "INT_SEXT",
     "INT_NEGATE",
@@ -230,7 +257,7 @@ def expression_smt_bit_width(expr) -> int:
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0] if getattr(expr, "operands", None) else None
         operand_bits = expression_smt_bit_width(operand)
-        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+        if expr.operator in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT"}:
             explicit_bits = (expr.size or 0) * 8
             return explicit_bits
         if expr.operator == "BOOL_NEGATE":
@@ -313,8 +340,14 @@ def expression_contains_signed_comparison(expr) -> bool:
     return False
 
 
-def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -> bool:
-    """SMT renderer が直接扱えない演算子を含むか判定する。"""
+def expression_node_has_unsupported_smt_ops(
+    expr, *, allow_call: bool = False,
+) -> bool:
+    """Return whether one node lacks an exact SMT lowering.
+
+    Direct operands are retained so local arity, width, and precision
+    invariants can be checked. Descendants are deliberately not traversed.
+    """
     if expr is None:
         return False
 
@@ -324,14 +357,38 @@ def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -
     if expr_type == expr_kind.CALL and not allow_call:
         return True
 
-    if expr_type == expr_kind.BINARY_OP and expr.operator not in _SUPPORTED_BINARY_OPERATORS:
-        return True
+    if expr_type == expr_kind.BINARY_OP:
+        if expr.operator not in _SUPPORTED_BINARY_OPERATORS:
+            return True
+        if expr.operator in _FLOAT_ARITHMETIC_FP_SPECS:
+            operands = getattr(expr, "operands", None) or []
+            if len(operands) == 2 and any(
+                _is_float_rendered_expr(operand) for operand in operands
+            ):
+                left_bits = expression_smt_bit_width(operands[0])
+                right_bits = expression_smt_bit_width(operands[1])
+                result_bits = expression_smt_bit_width(expr)
+                if not (
+                    left_bits == right_bits == result_bits
+                    and result_bits in _FLOAT_BV_WIDTH_TO_SORT
+                ):
+                    return True
 
     if expr_type == expr_kind.UNARY_OP:
         if expr.operator not in _SUPPORTED_UNARY_OPERATORS:
             return True
         if expr.operator in {"INT_ZEXT", "INT_SEXT"} and int(expr.size or 0) <= 0:
             return True
+        if expr.operator == "INT2FLOAT":
+            operands = getattr(expr, "operands", None) or []
+            operand_bits = (
+                expression_smt_bit_width(operands[0])
+                if len(operands) == 1
+                else 0
+            )
+            result_bits = int(expr.size or 0) * 8
+            if operand_bits <= 0 or result_bits not in _FLOAT_BV_WIDTH_TO_SORT:
+                return True
 
     if expr_type == expr_kind.INTRINSIC:
         if not is_supported_pcode_intrinsic(
@@ -341,6 +398,20 @@ def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -
             return True
         if getattr(expr, "name", None) == "NEON_ext" and not _neon_ext_operands_are_smt_supported(expr):
             return True
+
+    return False
+
+
+def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -> bool:
+    """SMT renderer が直接扱えない演算子を含むか判定する。"""
+    if expr is None:
+        return False
+
+    if expression_node_has_unsupported_smt_ops(expr, allow_call=allow_call):
+        return True
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
 
     if getattr(expr, "operands", None):
         for operand in expr.operands:
@@ -534,6 +605,14 @@ def expression_uses_smt_float_theory(expr) -> bool:
                 expression_smt_bit_width(operands[1]),
             ):
                 return True
+        elif node.expr_type == expr_kind.UNARY_OP and getattr(node, "operator", None) == "INT2FLOAT":
+            operands = getattr(node, "operands", None) or []
+            if (
+                len(operands) == 1
+                and int(expression_smt_bit_width(operands[0]) or 0) > 0
+                and int(expression_smt_bit_width(node) or 0) in _FLOAT_BV_WIDTH_TO_SORT
+            ):
+                return True
         elif node.expr_type == expr_kind.UNARY_OP and getattr(node, "operator", None) == "FLOAT_NAN":
             operands = getattr(node, "operands", None) or []
             if len(operands) == 1 and int(expression_smt_bit_width(operands[0]) or 0) in _FLOAT_BV_WIDTH_TO_SORT:
@@ -669,6 +748,13 @@ def _is_float_rendered_expr(expr) -> bool:
                 expression_smt_bit_width(expr.operands[1]) if expr.operands else 0,
             )
         )
+    if expr_type == expr_kind.UNARY_OP and getattr(expr, "operator", None) == "INT2FLOAT":
+        operands = getattr(expr, "operands", None) or []
+        return (
+            len(operands) == 1
+            and int(expression_smt_bit_width(operands[0]) or 0) > 0
+            and int(expression_smt_bit_width(expr) or 0) in _FLOAT_BV_WIDTH_TO_SORT
+        )
     if expr_type == expr_kind.PHI:
         # Keep this classifier in lockstep with the PHI renderer below. PHI
         # branches are normalized through _coerce_expr_to_bitvec_width before
@@ -755,6 +841,24 @@ def _float_binary_to_smt(
     left_bits = int(left_bits or 0)
     right_bits = int(right_bits or 0)
     result_bits = int(result_bits or 0)
+    if (
+        fp_op is not None
+        and float_mode == "fp"
+        and (
+            _is_float_rendered_expr(left_expr)
+            or _is_float_rendered_expr(right_expr)
+        )
+        and not (
+            left_bits == right_bits == result_bits
+            and result_bits in _FLOAT_BV_WIDTH_TO_SORT
+        )
+    ):
+        raise UnsupportedSmtOperatorError(
+            operator=operator,
+            reason="floating-point operand/result precisions do not match",
+            operand_bits=max(left_bits, right_bits),
+            result_bits=result_bits,
+        )
     if fp_op is not None and float_mode == "fp" and _float_binary_can_use_fp_theory_for_operator(
         operator,
         left_bits,
@@ -2070,6 +2174,13 @@ def _to_smt_internal(
                 f"{_coerce_expr_to_bool(right, right_smt)})"
             )
 
+        if expr.operator not in _SUPPORTED_BINARY_OPERATORS:
+            raise UnsupportedSmtOperatorError(
+                operator=expr.operator,
+                reason="unsupported binary operator",
+                operand_bits=max(left_bits, right_bits),
+                result_bits=expression_smt_bit_width(expr),
+            )
         op = expr._get_smt_operator(expr.operator)
         return f"({op} {left_smt} {right_smt})"
 
@@ -2083,6 +2194,33 @@ def _to_smt_internal(
             float_mode,
         )
         operand_bits = expression_smt_bit_width(operand)
+
+        if expr.operator == "INT2FLOAT":
+            output_bits = int(expr.size or 0) * 8
+            if float_mode != "fp":
+                raise UnsupportedSmtOperatorError(
+                    operator=expr.operator,
+                    reason="exact integer-to-float lowering requires FP theory mode",
+                    operand_bits=operand_bits,
+                    result_bits=output_bits,
+                )
+            if operand_bits <= 0:
+                raise UnsupportedSmtOperatorError(
+                    operator=expr.operator,
+                    reason="input integer width is unavailable",
+                    operand_bits=operand_bits,
+                    result_bits=output_bits,
+                )
+            fp_sort = _FLOAT_BV_WIDTH_TO_SORT.get(output_bits)
+            if fp_sort is None:
+                raise UnsupportedSmtOperatorError(
+                    operator=expr.operator,
+                    reason="output floating-point width is unsupported",
+                    operand_bits=operand_bits,
+                    result_bits=output_bits,
+                )
+            ebits, sbits = fp_sort
+            return f"((_ to_fp {ebits} {sbits}) RNE {operand_smt})"
 
         if expr.operator == "INT_ZEXT":
             output_bits = int(expr.size or 0) * 8
@@ -2161,6 +2299,13 @@ def _to_smt_internal(
         if fp_unary_smt is not None:
             return fp_unary_smt
 
+        if expr.operator not in _SUPPORTED_UNARY_OPERATORS:
+            raise UnsupportedSmtOperatorError(
+                operator=expr.operator,
+                reason="unsupported unary operator",
+                operand_bits=operand_bits,
+                result_bits=expression_smt_bit_width(expr),
+            )
         op = expr._get_smt_operator(expr.operator)
         return f"({op} {operand_smt})"
 

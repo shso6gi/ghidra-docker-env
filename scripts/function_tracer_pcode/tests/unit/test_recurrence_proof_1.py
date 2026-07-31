@@ -492,6 +492,25 @@ def test_summary_expression_equivalence_query_rejects_unsupported_intrinsic_with
 
     assert query is None
 
+
+def test_summary_expression_equivalence_query_rejects_unsupported_operator_without_error():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    unsupported = Expression.unary_op(
+        "FLOAT2INT",
+        Expression.parameter("value", index=0, data_type="double", size=8),
+    )
+    unsupported.size = 4
+
+    query = summarizer._build_expression_equivalence_query(
+        unsupported,
+        _const(1),
+        [],
+        [{"name": "value", "index": 0, "size": 8, "data_type": "double"}],
+    )
+
+    assert query is None
+
+
 def test_summary_expression_equivalence_query_does_not_alias_duplicate_variable_names():
     summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
     left = Expression.variable("tmp", size=4)

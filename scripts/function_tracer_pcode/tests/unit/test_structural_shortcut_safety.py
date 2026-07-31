@@ -175,10 +175,10 @@ class TestStructuralShortcutSafety:
             NormalizationContext
         )
         
-        # ★ 正規化が適用されるケース: SDIV(x, 1) -> x
+        # ★ 正規化が適用されるケース: INT_SDIV(x, 1) -> x
         expr_before = Expression(
             ExpressionType.BINARY_OP,
-            operator="SDIV",
+            operator="INT_SDIV",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_1"),
                 Expression(ExpressionType.CONSTANT, value=1)
@@ -342,7 +342,7 @@ class TestStructuralMatchSolverInvocation:
         # 元の式（正規化で変化する）
         expr_original = Expression(
             ExpressionType.BINARY_OP,
-            operator="ADD",
+            operator="INT_ADD",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_1"),
                 Expression(ExpressionType.CONSTANT, value=0)
@@ -390,7 +390,7 @@ class TestStructuralMatchSolverInvocation:
         
         expr_original = Expression(
             ExpressionType.BINARY_OP,
-            operator="ADD",
+            operator="INT_ADD",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_1"),
                 Expression(ExpressionType.CONSTANT, value=0)
@@ -438,7 +438,7 @@ class TestStructuralMatchSolverInvocation:
         
         expr_original = Expression(
             ExpressionType.BINARY_OP,
-            operator="ADD",
+            operator="INT_ADD",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_1"),
                 Expression(ExpressionType.CONSTANT, value=0)
@@ -508,14 +508,14 @@ class TestStructuralMatchSolverInvocation:
         strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
         
         expr1 = Expression(
-            ExpressionType.BINARY_OP, operator="ADD",
+            ExpressionType.BINARY_OP, operator="INT_ADD",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_1"),
                 Expression(ExpressionType.CONSTANT, value=0)
             ]
         )
         expr2 = Expression(
-            ExpressionType.BINARY_OP, operator="ADD",
+            ExpressionType.BINARY_OP, operator="INT_ADD",
             operands=[
                 Expression(ExpressionType.PARAMETER, name="param_2"),
                 Expression(ExpressionType.CONSTANT, value=0)

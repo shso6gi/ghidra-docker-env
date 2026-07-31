@@ -306,10 +306,10 @@ class Expression:
                 return max(left_bits, right_bits)
         
         elif self.expr_type == ExpressionType.UNARY_OP:
-            if self.operator in ["INT_ZEXT", "INT_SEXT"]:
+            if self.operator in ["INT2FLOAT", "INT_ZEXT", "INT_SEXT"]:
                 # The output Varnode owns an extension's width.  The operand
-                # width and the historical 64-bit default are not evidence for
-                # an unavailable output width.
+                # width and historical defaults are not evidence for an
+                # unavailable conversion output width.
                 return self.size * 8 if self.size and self.size > 0 else 0
             elif self.operator in ["BOOL_NEGATE"]:
                 return 1

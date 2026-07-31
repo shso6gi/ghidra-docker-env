@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "ff1ee3f613b1da89d75451ed47d08f04e509e96818d2729e6e74bc6848783ff0",
+  "artifact_digest": "6fe93423db4afe33a4ae1d237aa11ee6aa2c7d03555ea450ff56248d47ae2b84",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,9 +246,9 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "bff50f3b49c9b44a32bf6febb649cd9003a0b9dddc1a3e6d901f406bae78b84f",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "9bd4a23d9b0411eac73f8300e3777da4a928af9eda9209891ecbaf81e9d9e5ff",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py": "40c402cb07114bc134ca48ed95cf4115b5d7469e9aace6884af193497d3515a5",
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
@@ -314,25 +314,14 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 606,
-      "candidate_set_digest": "1fd297a3aa58cf49b8dda72615f70f0fa63cf5198b0cceff4bd54c47bae3c5e9"
+      "candidate_count": 607,
+      "candidate_set_digest": "964ed6644177d997943ec674d7c6217f872f782d99366374cfde2a7169f1a3c8"
     },
     "live_delta": {
       "added": 0,
       "removed": 0
     },
-    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json",
-    "slice4_exact_classification": {
-      "deferred_slice5_source_codes": 2,
-      "effect_tuple_reason_owners": 3,
-      "invalid_summary_source_codes": 7,
-      "loop_fallback_source_codes": 9,
-      "pairwise_disjoint_predicates": true,
-      "slice3_effect_owner_source_codes": 2,
-      "summary_blocker_source_codes": 18,
-      "typed_reason_count": 16,
-      "unknown_source_codes_fail_closed": true
-    }
+    "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json"
   },
   "status": "fixed_review_go",
   "stored_run_outputs": {

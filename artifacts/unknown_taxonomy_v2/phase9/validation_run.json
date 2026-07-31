@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "38afe6e36613261467002342f5a51f166dd9aff0c08c62c64f1f7e64deb4ae27",
+  "artifact_digest": "52ddec0cd4704cb9ba310b77ae8fa050ddab6de747e887d6f751bfa2518d98cc",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
@@ -19,8 +19,8 @@
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-      "sha256": "497dc0e053b15d679f6014a4dd370a30b3a0d95e27882c0617a8b5ec1a6ab8ed",
-      "test_count": 185
+      "sha256": "b9779a5552f30f0d64098e88c67636d644713d97080c6a333c271483e6b46e31",
+      "test_count": 477
     }
   ],
   "phase7_validator": "PASS",
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "935b1e705175b0a01a80a6368d3d541b6f56db9eeb5a0e6a78e5e293d94f02ad",
+    "current_contract_digest": "e1936370de49581318dc84bb498410b92c7e35c54e1ae9a437b40b520c02858c",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "9566cd6827211e50d05fb097742e6bfe973c8f5f56dc5984c0079cde87bf1cff",
+    "current_source_tree_hash": "6eff9f00bc7a4f52a2c1b5ccf72db916e4b47f19646e25e3634b318c62c0cb6f",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

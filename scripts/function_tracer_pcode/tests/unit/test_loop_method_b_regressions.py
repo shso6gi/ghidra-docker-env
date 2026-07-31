@@ -107,6 +107,59 @@ def _phi_circular_exit_guard(phi_expr: Expression) -> Condition:
     return Condition(Expression.binary_op("INT_EQUAL", minus_two, _const(0)))
 
 
+def test_pairwise_auxiliary_smt_accepts_exact_int2float_in_case_condition():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    converted = Expression.unary_op("INT2FLOAT", _count_param())
+    converted.size = 8
+    condition_expr = Expression.binary_op(
+        "FLOAT_LESS",
+        converted,
+        Expression.constant(0, size=8),
+    )
+    case = ReturnCase(
+        0,
+        [Condition(condition_expr)],
+        _const(1),
+        ReturnInfo("condition", _const(1)),
+    )
+
+    assert strategy._expression_node_is_unsupported_smt_op(converted) is False
+    assert strategy._case_conditions_have_unsupported_smt_op_excluding_unknowns(case) is False
+    rendered = strategy._render_auxiliary_smt(
+        case.conditions[0],
+        [{
+            "identity": ("parameter_index", 1),
+            "aux_name": "aux_count",
+            "aux_index": 1,
+            "size": 4,
+            "is_signed": True,
+        }],
+    )
+    assert rendered is not None
+    assert "((_ to_fp 11 53) RNE aux_count)" in rendered
+
+
+def test_pairwise_auxiliary_smt_accepts_exact_int2float_over_phi_circular_unknown():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    converted = Expression.unary_op(
+        "INT2FLOAT",
+        _phi_circular_unknown(seq_time=144),
+    )
+    converted.size = 8
+
+    assert strategy._expression_node_is_unsupported_smt_op(converted) is False
+    assert strategy._expression_has_unsupported_smt_op_excluding_unknowns(converted) is False
+
+
+def test_pairwise_auxiliary_smt_rejects_int2float_without_output_width():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    converted = Expression.unary_op("INT2FLOAT", _count_param())
+    converted.size = 0
+
+    assert strategy._expression_node_is_unsupported_smt_op(converted) is True
+    assert strategy._expression_has_unsupported_smt_op_excluding_unknowns(converted) is True
+
+
 def test_phi_circular_unknown_stable_key_includes_origin_ref():
     left = _phi_circular_unknown(seq_time=144)
     right = _phi_circular_unknown(seq_time=145)

@@ -22,6 +22,7 @@ from ._shared import (
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
     expression_contains_unsupported_smt_ops,
+    expression_node_has_unsupported_smt_ops,
     expression_uses_smt_float_theory,
     expression_uses_smt_uf,
     parameter_identity_key_from_descriptor,
@@ -343,7 +344,7 @@ def _impl__unsupported_smt_op_keys(self, expr: Any) -> Tuple[Any, ...]:
             )
         )
     elif expr_type in {expr_kind.BINARY_OP, expr_kind.UNARY_OP}:
-        if expression_contains_unsupported_smt_ops(expr.clone_with(operands=[])):
+        if expression_node_has_unsupported_smt_ops(expr):
             result.append(
                 (
                     "unsupported_smt_op",
@@ -353,7 +354,7 @@ def _impl__unsupported_smt_op_keys(self, expr: Any) -> Tuple[Any, ...]:
                 )
             )
     elif expr_type == expr_kind.INTRINSIC:
-        if expression_contains_unsupported_smt_ops(expr.clone_with(operands=[])):
+        if expression_node_has_unsupported_smt_ops(expr):
             result.append(
                 (
                     "unsupported_smt_op",
@@ -851,11 +852,7 @@ def _impl__expression_node_is_unsupported_smt_op(self, expr: Any) -> bool:
         return True
     if expr.expr_type == ExpressionType.UNKNOWN:
         return False
-    try:
-        node_only = expr.clone_with(operands=[])
-    except (AttributeError, TypeError, ValueError):
-        return False
-    return bool(expression_contains_unsupported_smt_ops(node_only))
+    return bool(expression_node_has_unsupported_smt_ops(expr))
 
 def _impl__build_normalized_inequality_query(
     self,

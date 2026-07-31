@@ -116,6 +116,30 @@ def test_combine_input_expansions_preserves_extension_output_width(
     assert smt.count(f"((_ {smt_operator} 32)") == 1
 
 
+def test_combine_input_expansions_preserves_int2float_output_width(monkeypatch):
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "is_contradiction",
+        classmethod(lambda cls, conds: False),
+    )
+    operand = Expression.parameter("n", size=4)
+
+    result = expander._combine_input_expansions_with_conditions(
+        "INT2FLOAT",
+        [[ExpandedValue(operand, [])]],
+        [],
+        depth=0,
+        output_size=8,
+    )
+
+    assert len(result) == 1
+    rebuilt = result[0].value
+    assert rebuilt.operator == "INT2FLOAT"
+    assert rebuilt.size == 8
+    assert rebuilt.to_smt(float_mode="fp") == "((_ to_fp 11 53) RNE n)"
+
+
 @pytest.mark.parametrize("mnemonic", ["INT_ZEXT", "INT_SEXT"])
 def test_unknown_extension_output_width_fails_closed(mnemonic):
     operand = Expression.unknown("phi_no_valid_branch")

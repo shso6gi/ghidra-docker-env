@@ -2,11 +2,14 @@
 
 from typing import Optional
 
+import pytest
+
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
 from scripts.function_tracer_pcode.equivalence.formula.returns import coerce_return_value_to_bitvec
 from scripts.function_tracer_pcode.model.intrinsics import COUNTED_STATE_TRANSITION_VALUE_OPCODE
 from scripts.function_tracer_pcode.model.render_smt import (
+    UnsupportedSmtOperatorError,
     collect_float_predicate_smt_declarations,
     expression_contains_unsupported_smt_ops,
     expression_uses_smt_float_theory,
@@ -203,6 +206,119 @@ def test_float_binary_arithmetic_is_supported_by_smt_gate():
     assert "(fp.add RNE" in smt
     assert "(fp.mul RNE" in smt
     assert "(fp.sub RNE" in smt
+
+
+def test_int2float_signed_i32_to_binary64_uses_exact_fp_theory_lowering():
+    import z3
+
+    operand = _param("n", size=4, data_type="int")
+    expr = Expression.unary_op("INT2FLOAT", operand)
+    expr.size = 8
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt == "((_ to_fp 11 53) RNE n)"
+    assert "to_fp_unsigned" not in smt
+    assert expression_smt_sort_kind(expr, float_mode="fp") == "FP"
+    assert expression_uses_smt_float_theory(expr)
+    assert not expression_contains_unsupported_smt_ops(expr)
+    z3.parse_smt2_string(
+        "\n".join(
+            [
+                "(set-logic QF_FPBV)",
+                "(declare-const n (_ BitVec 32))",
+                f"(assert (fp.eq {smt} {smt}))",
+                "(check-sat)",
+            ]
+        )
+    )
+
+
+def test_int2float_signed_i32_to_binary32_preserves_output_sort():
+    operand = _param("n", size=4, data_type="int")
+    expr = Expression.unary_op("INT2FLOAT", operand)
+    expr.size = 4
+
+    assert expression_to_smt(expr, float_mode="fp") == "((_ to_fp 8 24) RNE n)"
+    assert expression_smt_sort_kind(expr, float_mode="fp") == "FP"
+
+
+def test_int2float_float_div_uf_mode_refuses_before_emitting_mixed_sorts():
+    numerator = Expression.unary_op("INT2FLOAT", _param("a", size=4))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", _param("b", size=4))
+    denominator.size = 8
+    expr = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    expr.size = 8
+
+    assert expression_smt_sort_kind(numerator, float_mode="uf") == "BV"
+    with pytest.raises(UnsupportedSmtOperatorError) as exc:
+        expression_to_smt(expr, float_mode="uf")
+    assert exc.value.operator == "INT2FLOAT"
+    assert (
+        exc.value.reason
+        == "exact integer-to-float lowering requires FP theory mode"
+    )
+
+
+def test_int2float_negative_input_is_not_unsigned_conversion():
+    import z3
+
+    solver = z3.Solver()
+    n = z3.BitVec("n", 32)
+    signed = z3.fpToFP(z3.RNE(), n, z3.Float64())
+    unsigned = z3.fpUnsignedToFP(z3.RNE(), n, z3.Float64())
+    solver.add(n == z3.BitVecVal(0xFFFFFFFF, 32))
+    solver.add(signed == unsigned)
+
+    assert solver.check() == z3.unsat
+
+
+def test_int2float_unknown_output_width_fails_closed():
+    operand = _param("n", size=4, data_type="int")
+    expr = Expression.unary_op("INT2FLOAT", operand)
+    expr.size = 0
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError) as exc:
+        expression_to_smt(expr, float_mode="fp")
+    assert exc.value.reason == "output floating-point width is unsupported"
+
+
+def test_mixed_precision_int2float_division_fails_closed():
+    numerator = Expression.unary_op("INT2FLOAT", _param("value", size=4))
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", _param("count", size=4))
+    denominator.size = 4
+    expr = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    expr.size = 8
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError) as exc:
+        expression_to_smt(expr, float_mode="fp")
+    assert exc.value.operator == "FLOAT_DIV"
+    assert exc.value.reason == "floating-point operand/result precisions do not match"
+
+
+def test_generic_unsupported_unary_operator_never_becomes_smt_function():
+    expr = Expression.unary_op("FLOAT2INT", _param("x", size=8))
+    expr.size = 4
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError) as exc:
+        expression_to_smt(expr, float_mode="fp")
+    assert exc.value.operator == "FLOAT2INT"
+    assert exc.value.reason == "unsupported unary operator"
+
+
+def test_generic_unsupported_binary_operator_never_becomes_smt_function():
+    expr = Expression.binary_op("ADD", _param("x"), _const(1))
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError) as exc:
+        expression_to_smt(expr)
+    assert exc.value.operator == "ADD"
+    assert exc.value.reason == "unsupported binary operator"
 
 
 def test_float_binary_arithmetic_declares_uninterpreted_function_for_non_fp_width():

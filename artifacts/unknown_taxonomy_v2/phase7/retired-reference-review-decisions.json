@@ -1,11 +1,11 @@
 {
-  "candidate_set_digest": "14ef3539dc5d0d64711d3e12b016a252d3a891c952cff199b6281c681ec5ed03",
+  "candidate_set_digest": "a4a804719710a2478cb6575aad3be8e968ada5b2b9b8c0efa33cb2a6ed3834ff",
   "dynamic_site_decisions": [
     {
       "disposition": "ReturnWidthMismatchError is sealed to non-retired return_width_bridge_missing",
       "finite_reason_set": [],
       "in_scope": false,
-      "line": 1911,
+      "line": 1912,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "relation": null,
       "symbol": "check"

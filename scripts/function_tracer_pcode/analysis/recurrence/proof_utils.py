@@ -465,7 +465,7 @@ def _impl__render_summary_auxiliary_smt(
     node,
     symbol_specs: Sequence[dict],
 ) -> Optional[str]:
-    from ...model.render_smt import UnsupportedSmtIntrinsicError
+    from ...model.render_smt import UnsupportedSmtSemanticsError
 
     identity_to_spec = {
         spec.get("identity"): spec
@@ -481,9 +481,9 @@ def _impl__render_summary_auxiliary_smt(
         if isinstance(node, Expression):
             cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
             return cloned_expr.to_smt() if cloned_expr is not None else None
-    except UnsupportedSmtIntrinsicError:
+    except UnsupportedSmtSemanticsError:
         # Auxiliary recurrence proofs are optional promotion evidence.  An
-        # intrinsic without an exact SMT lowering must reject that proof
+        # expression without an exact SMT lowering must reject that proof
         # attempt conservatively instead of aborting the whole analysis.
         return None
     return None

@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "0b2564b2e8f7382347cbac4b021d1a0a4d732724cca707cb4875e0c3a15390e8",
+  "artifact_digest": "347420b55246293748768aabcd1ed2d61c53e39443db9cfed55226e6445599c6",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -208,7 +208,7 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "bff50f3b49c9b44a32bf6febb649cd9003a0b9dddc1a3e6d901f406bae78b84f",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "9bd4a23d9b0411eac73f8300e3777da4a928af9eda9209891ecbaf81e9d9e5ff",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "8408ca465fa47f548c983fb729148a1f3df2d174dd63e31284cc0daa292967de",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154",
@@ -402,8 +402,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 606,
-      "candidate_set_digest": "1fd297a3aa58cf49b8dda72615f70f0fa63cf5198b0cceff4bd54c47bae3c5e9"
+      "candidate_count": 607,
+      "candidate_set_digest": "964ed6644177d997943ec674d7c6217f872f782d99366374cfde2a7169f1a3c8"
     },
     "live_delta": {
       "added": 0,

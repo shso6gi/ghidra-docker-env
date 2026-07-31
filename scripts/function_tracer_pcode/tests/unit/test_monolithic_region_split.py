@@ -100,6 +100,102 @@ def test_monolithic_unknown_extension_width_is_inconclusive_not_error() -> None:
     )
 
 
+def test_monolithic_int2float_region_queries_are_z3_parseable() -> None:
+    import z3
+
+    operand = Expression.parameter("n", 0, data_type="int", size=4)
+    converted = Expression.unary_op("INT2FLOAT", operand)
+    converted.size = 8
+    analysis = FunctionReturnAnalysis(
+        function_name="signed_int_to_double",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "n", "index": 0, "size": 4, "data_type": "int"}
+        ],
+        returns=[ReturnInfo("0x1010", converted, [])],
+        return_type="double",
+    )
+
+    result = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is True
+    assert result.error_message is None
+    bundle = result._prepared_dispatch_frame.monolithic_terminal_receipt.proof_bundle
+    assert bundle is not None
+    rendered_int2float = False
+    for query in bundle.query_set.queries:
+        z3.parse_smt2_string(query.formula)
+        assert "int2float" not in query.formula
+        rendered_int2float |= "((_ to_fp 11 53) RNE" in query.formula
+    assert rendered_int2float
+
+
+def test_monolithic_unsupported_unary_is_inconclusive_not_strategy_error() -> None:
+    operand = Expression.parameter("x", 0, data_type="double", size=8)
+    unsupported = Expression.unary_op("FLOAT2INT", operand)
+    unsupported.size = 4
+    analysis = FunctionReturnAnalysis(
+        function_name="unsupported_float_to_int",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "x", "index": 0, "size": 8, "data_type": "double"}
+        ],
+        returns=[ReturnInfo("0x1010", unsupported, [])],
+        return_type="int",
+    )
+
+    result = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert any(
+        reason.reason_id in {
+            "expression_semantics_unsupported",
+            "expression_translation_incomplete",
+        }
+        for reason in result.unknown_reasons
+    )
+
+
+def test_monolithic_mixed_precision_int2float_is_unknown_not_error() -> None:
+    value = Expression.parameter("value", 0, data_type="int", size=4)
+    count = Expression.parameter("count", 1, data_type="int", size=4)
+    numerator = Expression.unary_op("INT2FLOAT", value)
+    numerator.size = 8
+    denominator = Expression.unary_op("INT2FLOAT", count)
+    denominator.size = 4
+    divided = Expression.binary_op("FLOAT_DIV", numerator, denominator)
+    divided.size = 8
+    analysis = FunctionReturnAnalysis(
+        function_name="mixed_precision_average",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "value", "index": 0, "size": 4, "data_type": "int"},
+            {"name": "count", "index": 1, "size": 4, "data_type": "int"},
+        ],
+        returns=[ReturnInfo("0x1010", divided, [])],
+        return_type="double",
+    )
+
+    result = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert any(
+        reason.reason_id in {
+            "expression_semantics_unsupported",
+            "expression_translation_incomplete",
+        }
+        for reason in result.unknown_reasons
+    )
+
+
 def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None:
     unknown = Expression.unknown("phi_no_valid_branch")
     unknown.size = 4
@@ -154,6 +250,37 @@ def test_checker_boundary_classifies_typed_unknown_extension_width(
     assert any(
         reason.reason_id == "expression_semantics_unsupported"
         and "unknown_smt_extension_width" in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
+def test_checker_boundary_classifies_unsupported_smt_operator(monkeypatch) -> None:
+    from scripts.function_tracer_pcode.model.render_smt import (
+        UnsupportedSmtOperatorError,
+    )
+
+    analysis = _analysis("unsupported_operator_boundary", 7)
+    checker = EquivalenceChecker(
+        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    )
+
+    def reject_unsupported_operator(*_args, **_kwargs):
+        raise UnsupportedSmtOperatorError(
+            operator="FLOAT2INT",
+            reason="unsupported unary operator",
+            operand_bits=64,
+            result_bits=32,
+        )
+
+    monkeypatch.setattr(checker, "_apply_rewrite", reject_unsupported_operator)
+    result = checker.check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert result.pairwise_debug_stats == {"unsupported_smt_operator": 1}
+    assert any(
+        reason.reason_id == "expression_semantics_unsupported"
+        and "unsupported_smt_operator" in tuple(reason.evidence_refs or ())
         for reason in result.unknown_reasons
     )
 

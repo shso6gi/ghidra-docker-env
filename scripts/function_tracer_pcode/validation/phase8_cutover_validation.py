@@ -32,6 +32,12 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/equivalence/result.py",
     "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
     "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/_shared.py",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/auxiliary_smt.py",
+    "scripts/function_tracer_pcode/analysis/recurrence/proof_utils.py",
+    "scripts/function_tracer_pcode/model/expression.py",
+    "scripts/function_tracer_pcode/model/render_smt.py",
+    "scripts/function_tracer_pcode/transform/expander.py",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
     "scripts/function_tracer_pcode/equivalence/v2/phase8_cutover.py",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
@@ -41,7 +47,15 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
     "scripts/function_tracer_pcode/validation/root_blocker_summary.py",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase8_cutover.py",
+    "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
+    "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
+    "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
+    "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
     "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
+    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
+    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
 )
 
 WORKFLOW_TEST_PATHS = (
@@ -55,6 +69,12 @@ WORKFLOW_TEST_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_debug_trace_integration_phase4.py",
     "scripts/function_tracer_pcode/tests/unit/test_yaml_golden_cases.py",
     "scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py",
+    "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
+    "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
+    "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
+    "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
 )
 
 
@@ -202,6 +222,10 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
             "test_operational_diagnostic_mode_still_verifies_signed_status",
             "test_runner_canonical_result_subprocess_persists_primary_classification_error",
             "test_eqbench_runner_reports_primary_diagnostic_before_signature_validation",
+            "test_summary_expression_equivalence_query_rejects_unsupported_operator_without_error",
+            "test_pairwise_auxiliary_smt_accepts_exact_int2float_in_case_condition",
+            "test_pairwise_auxiliary_smt_accepts_exact_int2float_over_phi_circular_unknown",
+            "test_pairwise_auxiliary_smt_rejects_int2float_without_output_width",
         ),
     )
     phase7_junit = root / (
@@ -349,12 +373,6 @@ def main() -> int:
                           encoding="utf-8")
     print(output)
     return 0
-
-
-SOURCE_PATHS += (
-    "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
-    "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
-)
 
 
 if __name__ == "__main__":

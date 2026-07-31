@@ -9,7 +9,10 @@ import time
 from uuid import uuid4
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
-from ..model.render_smt import UnknownSmtExtensionWidthError
+from ..model.render_smt import (
+    UnknownSmtExtensionWidthError,
+    UnsupportedSmtOperatorError,
+)
 from ..smt import ParallelSolverRunner, ParallelResult, SolverResult
 from .formula import FormulaBuilder
 from .formula.returns import ReturnWidthMismatchError
@@ -627,9 +630,14 @@ class EquivalenceChecker:
             )
             return equivalence_result
 
-        except UnknownSmtExtensionWidthError as e:
+        except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
+            diagnostic_kind = (
+                "unknown_smt_extension_width"
+                if isinstance(e, UnknownSmtExtensionWidthError)
+                else "unsupported_smt_operator"
+            )
             self._debug_print(
-                f"ABI retry blocked by unknown extension output width: {e}"
+                f"ABI retry blocked by unsupported SMT expression semantics: {e}"
             )
             blocked_analysis1 = locals().get("analysis1", ctx.analysis1)
             blocked_analysis2 = locals().get("analysis2", ctx.analysis2)
@@ -664,17 +672,18 @@ class EquivalenceChecker:
                 rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
                 pairwise_debug_stats={
-                    "unknown_smt_extension_width": 1,
+                    diagnostic_kind: 1,
                 },
                 unknown_reasons=[
                     make_internal_v2_reason_diagnostic(
                         "expression_semantics_unsupported",
                         stage="ABI_RETRY",
-                        evidence_refs=("unknown_smt_extension_width",),
+                        evidence_refs=(diagnostic_kind,),
                         object_target_key=(
-                            "unknown_smt_extension_width",
+                            diagnostic_kind,
                             e.operator,
                             e.operand_bits,
+                            getattr(e, "result_bits", 0),
                             tuple(blocked_analysis1.outcome_function_identity()),
                             tuple(blocked_analysis2.outcome_function_identity()),
                         ),
@@ -1615,9 +1624,14 @@ class EquivalenceChecker:
                 equivalence_result._inconclusive_comparison_authority = None
             return equivalence_result
         
-        except UnknownSmtExtensionWidthError as e:
+        except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
+            diagnostic_kind = (
+                "unknown_smt_extension_width"
+                if isinstance(e, UnknownSmtExtensionWidthError)
+                else "unsupported_smt_operator"
+            )
             self._debug_print(
-                f"Check blocked by unknown extension output width: {e}"
+                f"Check blocked by unsupported SMT expression semantics: {e}"
             )
             blocked_analysis1 = locals().get("analysis1", analysis1)
             blocked_analysis2 = locals().get("analysis2", analysis2)
@@ -1649,17 +1663,18 @@ class EquivalenceChecker:
                 ),
                 constrained_fragments=[],
                 pairwise_debug_stats={
-                    "unknown_smt_extension_width": 1,
+                    diagnostic_kind: 1,
                 },
                 unknown_reasons=[
                     make_internal_v2_reason_diagnostic(
                         "expression_semantics_unsupported",
                         stage="S_PAIRWISE",
-                        evidence_refs=("unknown_smt_extension_width",),
+                        evidence_refs=(diagnostic_kind,),
                         object_target_key=(
-                            "unknown_smt_extension_width",
+                            diagnostic_kind,
                             e.operator,
                             e.operand_bits,
+                            getattr(e, "result_bits", 0),
                             tuple(blocked_analysis1.outcome_function_identity()),
                             tuple(blocked_analysis2.outcome_function_identity()),
                         ),
