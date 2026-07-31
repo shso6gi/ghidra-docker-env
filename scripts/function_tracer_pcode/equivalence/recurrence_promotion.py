@@ -529,6 +529,109 @@ def _proposal_candidates(
     )
 
 
+def _proposal_return_semantic_identity(value: Any) -> Tuple[Any, ...]:
+    return (
+        "recurrence_proposal_return_semantic_v1",
+        tuple(item.stable_key() for item in value.guard),
+        value.value.stable_key(),
+        tuple(value.transition_evidence_key or ()),
+    )
+
+
+def _accepted_candidate_semantic_identity(
+    candidate: SummaryReturnCandidate,
+) -> Tuple[Any, ...]:
+    return (
+        "recurrence_proposal_return_semantic_v1",
+        tuple(
+            ImmutableRecurrenceCondition.from_condition(condition).stable_key()
+            for condition in tuple(candidate.return_info.conditions or ())
+        ),
+        ImmutableRecurrenceExpression.from_expression(
+            candidate.return_info.value
+        ).stable_key(),
+        tuple(candidate.transition_evidence_key or ()),
+    )
+
+
+def _bind_accepted_candidates_to_proposal(
+    accepted: Any,
+    proposal: QuarantinedRecurrenceProposal,
+) -> Any:
+    proposal_by_id = {
+        tuple(item.candidate_id): item for item in proposal.new_returns
+    }
+    proposal_by_semantic: dict[Tuple[Any, ...], list[Any]] = {}
+    for item in proposal.new_returns:
+        proposal_by_semantic.setdefault(
+            _proposal_return_semantic_identity(item), []
+        ).append(item)
+
+    used_ids: set[Tuple[Any, ...]] = set()
+    rebound = []
+    rebound_ids: dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+    for candidate in tuple(accepted.candidates or ()):
+        old_id = tuple(candidate.candidate_id)
+        semantic_identity = _accepted_candidate_semantic_identity(candidate)
+        proposal_return = proposal_by_id.get(old_id)
+        if (
+            proposal_return is not None
+            and _proposal_return_semantic_identity(proposal_return)
+            != semantic_identity
+        ):
+            raise ValueError(
+                "accepted recurrence candidate content differs from proposal identity"
+            )
+        if proposal_return is None:
+            matches = tuple(
+                item
+                for item in proposal_by_semantic.get(
+                    semantic_identity, ()
+                )
+                if tuple(item.candidate_id) not in used_ids
+            )
+            if len(matches) != 1:
+                raise ValueError(
+                    "accepted recurrence candidate has no unique proposal identity"
+                )
+            proposal_return = matches[0]
+        proposal_id = tuple(proposal_return.candidate_id)
+        if proposal_id in used_ids:
+            raise ValueError("accepted recurrence candidate identity is duplicated")
+        used_ids.add(proposal_id)
+        rebound_ids[old_id] = proposal_id
+        rebound_return = replace(
+            candidate.return_info,
+            summary_candidate_id=proposal_id,
+        )
+        rebound.append(replace(
+            candidate,
+            candidate_id=proposal_id,
+            return_info=rebound_return,
+        ))
+
+    if used_ids != set(proposal_by_id):
+        raise ValueError("accepted recurrence candidate set is incomplete")
+
+    accepted_returns = tuple(
+        replace(
+            item,
+            summary_candidate_id=rebound_ids[tuple(item.summary_candidate_id)],
+        )
+        if (
+            item.summary_candidate_id is not None
+            and tuple(item.summary_candidate_id) in rebound_ids
+        )
+        else item
+        for item in tuple(accepted.accepted_returns or ())
+    )
+    return replace(
+        accepted,
+        candidates=tuple(rebound),
+        accepted_returns=accepted_returns,
+    )
+
+
 def _seed_core(
     analysis: FunctionReturnAnalysis,
     proposal: QuarantinedRecurrenceProposal,
@@ -550,6 +653,8 @@ def _seed_core(
             ),
         ),
     ))
+    if not proposal_candidates:
+        raise ValueError("recurrence proposal has no accepted candidate binding")
     seed = RecurrenceSeedCore(
         analysis.outcome_function_identity(),
         proposal_candidates[0].active_precondition_key,
@@ -718,6 +823,7 @@ def _prepare_side_for_proposal(
         raise ValueError(
             "recurrence acceptance failed:" + ",".join(accepted.blockers)
         )
+    accepted = _bind_accepted_candidates_to_proposal(accepted, proposal)
     seed = _seed_core(analysis, proposal, tuple(accepted.candidates))
     successor = analysis.with_accepted_return_partition(
         list(accepted.accepted_returns),

@@ -53,6 +53,7 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
     "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
     "scripts/function_tracer_pcode/equivalence/checker.py",
+    "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
     "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/_shared.py",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/auxiliary_smt.py",
@@ -68,7 +69,9 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
     "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
     "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
     "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
     "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
 )
@@ -653,7 +656,7 @@ def build_phase9_evidence(repo_root: Path) -> Mapping[str, Mapping[str, Any]]:
     validation = {
         "artifact_kind": "phase9-validation-run-v1",
         "junit": (
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 523),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 576),
             _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml", 39),
             _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml", 26),
             _junit(

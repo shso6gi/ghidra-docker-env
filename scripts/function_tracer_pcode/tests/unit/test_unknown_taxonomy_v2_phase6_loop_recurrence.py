@@ -52,6 +52,8 @@ from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import EventType
 from scripts.function_tracer_pcode.model.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.model.analysis import ReturnInfo
+from scripts.function_tracer_pcode.model import Condition, Expression
 from scripts.function_tracer_pcode.model.recurrence_contracts import (
     QuarantinedRecurrenceProposal,
     RecurrenceSeedCore,
@@ -75,6 +77,42 @@ from scripts.function_tracer_pcode.equivalence.obligations.snapshot import (
 from scripts.function_tracer_pcode.equivalence.recurrence_promotion import (
     RecurrenceSidePromotion,
 )
+
+
+def test_phi_return_authority_serialization_is_recursive_and_canonical():
+    branch_condition = Condition(Expression.binary_op(
+        "INT_SLESS",
+        Expression.parameter("n", index=0, size=4),
+        Expression.constant(4, size=4),
+    ))
+    value = Expression.phi([
+        (branch_condition, Expression.constant(1, size=4)),
+        (None, Expression.constant(2, size=4)),
+    ])
+
+    payload = ReturnInfo("0x1000", value).to_dict()
+    branches = payload["value"]["value"]
+
+    assert branches[0]["condition"] == {
+        "expression": branch_condition.expression.to_dict(),
+        "negated": False,
+    }
+    assert branches[1]["condition"] is None
+    assert authority_digest(payload) == authority_digest(
+        ReturnInfo("0x1000", value).to_dict()
+    )
+
+
+def test_cyclic_phi_return_authority_serialization_uses_structural_reference():
+    value = Expression.phi([])
+    value.value.append((None, value))
+
+    payload = ReturnInfo("0x1000", value).to_dict()
+    cycle_payload = payload["value"]["value"][0]["value"]
+
+    assert cycle_payload["type"] == "PHI"
+    assert "cycle_ref" in cycle_payload
+    assert authority_digest(payload)
 
 
 def test_loop_registry_full_and_common_digests_are_generated_from_same_rows():

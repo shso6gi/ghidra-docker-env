@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "6fe93423db4afe33a4ae1d237aa11ee6aa2c7d03555ea450ff56248d47ae2b84",
+  "artifact_digest": "29d8cf42355b5da48c39c34cbd9d14cc266fe3d7dcfb1314ca4bc810e1396460",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,10 +246,10 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "9bd4a23d9b0411eac73f8300e3777da4a928af9eda9209891ecbaf81e9d9e5ff",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "93981ebd7577fac060db23b31dbd94cac56c9b39e965f33c215df662e65c9470",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/checker.py": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a",
-    "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
+    "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "731ba670697089e32852cbb7a097108e5830f61d082bc0efca4d37adc5483760",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py": "40c402cb07114bc134ca48ed95cf4115b5d7469e9aace6884af193497d3515a5",
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
     "scripts/function_tracer_pcode/equivalence/v2/census_contract.py": "faafa908413cbf23d24ba784f4f0c6f035866357538fd333f42511088affa62a",
@@ -258,8 +258,10 @@
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "d2bc9e1b64ac43679787aade53ba7ffc8d7cdeb78d2757e0a2fe2d432ac17670",
     "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b894685adbe0739d19bdf347f85225878a7f59b0e76e3c815ff18875092e09d2",
     "scripts/function_tracer_pcode/equivalence/v2/shadow_compare.py": "83f837ccdffdd70ad525c434527b6a6fa4587a85437e5c1abf17b62a644ed634",
+    "scripts/function_tracer_pcode/model/expression.py": "5115033d1db7d77180f7c935e752825272f04082f5ac61dca83e649bfadb92ea",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "c5b5f65cfdc85e7804c29b48ce6d487e64b1903e035cdd38f51eb46aeada1fa6"
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py": "490cad1eac0b1e5b8409c01d815ad803b1cda0ac8ce9acc39f6dc419ce1b966c",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
   "relation_evidence": {
@@ -315,7 +317,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 607,
-      "candidate_set_digest": "964ed6644177d997943ec674d7c6217f872f782d99366374cfde2a7169f1a3c8"
+      "candidate_set_digest": "4694ca6696aa7933c542fa802b28f8d122d1d6e6417ed1a20d0dedd40acab69e"
     },
     "live_delta": {
       "added": 0,

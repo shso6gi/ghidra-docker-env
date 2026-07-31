@@ -1,5 +1,6 @@
 import json
 import pytest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from scripts.function_tracer_pcode.equivalence.obligations.cache import (
@@ -27,6 +28,9 @@ from scripts.function_tracer_pcode.equivalence import recurrence_promotion
 from scripts.function_tracer_pcode.equivalence.recurrence_promotion import (
     PairRecurrencePromotionAuthority,
 )
+from scripts.function_tracer_pcode.analysis.summary_returns import (
+    SummaryReturnAcceptanceResult,
+)
 from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
@@ -35,6 +39,10 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     LoopSideEffectProfileRef,
     StateTransitionLoopSummaryRef,
+)
+from scripts.function_tracer_pcode.model.analysis import (
+    ReturnInfo,
+    SummaryReturnCandidate,
 )
 from scripts.function_tracer_pcode.model.recurrence_contracts import (
     ImmutableRecurrenceExpression,
@@ -678,3 +686,143 @@ def test_recurrence_promotion_authority_is_branch_local_and_post_inconclusive():
             "session", "S_PAIRWISE", (("blocker",),),
             counterexample_safety_pending=True,
         )
+
+
+def _recurrence_candidate_fixture(candidate_id, constant):
+    condition = Condition(Expression.binary_op(
+        "INT_SLESS",
+        Expression.constant(constant, size=4),
+        Expression.parameter("n", index=0, size=4),
+    ))
+    value = Expression.binary_op(
+        "INT_ADD",
+        Expression.parameter("n", index=0, size=4),
+        Expression.constant(constant, size=4),
+    )
+    transition = ("transition", constant)
+    quarantined = QuarantinedRecurrenceReturn(
+        (ImmutableRecurrenceCondition.from_condition(condition),),
+        ImmutableRecurrenceExpression.from_expression(value),
+        tuple(candidate_id),
+        transition,
+    )
+    return_info = ReturnInfo(
+        hex(constant),
+        value,
+        [condition],
+        return_kind="summary_derived",
+        acceptance_status="accepted",
+        summary_candidate_id=tuple(candidate_id),
+    )
+    candidate = SummaryReturnCandidate(
+        tuple(candidate_id),
+        return_info,
+        condition.structural_key(),
+        value.structural_key(),
+        transition_evidence_key=transition,
+        active_precondition_key=("active", constant),
+        acceptance_status="accepted",
+    )
+    return quarantined, candidate
+
+
+def test_recurrence_acceptance_rebinds_rebuilt_and_reordered_candidates():
+    proposal_first, accepted_first = _recurrence_candidate_fixture(
+        ("proposal", "first"), 1
+    )
+    proposal_second, accepted_second = _recurrence_candidate_fixture(
+        ("proposal", "second"), 2
+    )
+    accepted_first = replace(
+        accepted_first,
+        candidate_id=("rebuilt", "one"),
+        return_info=replace(
+            accepted_first.return_info,
+            summary_candidate_id=("rebuilt", "one"),
+        ),
+    )
+    accepted_second = replace(
+        accepted_second,
+        candidate_id=("rebuilt", "two"),
+        return_info=replace(
+            accepted_second.return_info,
+            summary_candidate_id=("rebuilt", "two"),
+        ),
+    )
+    proposal = QuarantinedRecurrenceProposal(
+        "seed", "unit-test", (proposal_first, proposal_second), ()
+    )
+    acceptance = SummaryReturnAcceptanceResult(
+        (accepted_second.return_info, accepted_first.return_info),
+        (accepted_second, accepted_first),
+        (),
+        True,
+    )
+
+    rebound = recurrence_promotion._bind_accepted_candidates_to_proposal(
+        acceptance, proposal
+    )
+
+    assert {item.candidate_id for item in rebound.candidates} == {
+        ("proposal", "first"),
+        ("proposal", "second"),
+    }
+    assert {item.summary_candidate_id for item in rebound.accepted_returns} == {
+        ("proposal", "first"),
+        ("proposal", "second"),
+    }
+
+
+def test_recurrence_acceptance_rejects_candidate_subset_without_index_error():
+    proposal_first, accepted_first = _recurrence_candidate_fixture(
+        ("proposal", "first"), 1
+    )
+    proposal_second, _ = _recurrence_candidate_fixture(
+        ("proposal", "second"), 2
+    )
+    proposal = QuarantinedRecurrenceProposal(
+        "seed", "unit-test", (proposal_first, proposal_second), ()
+    )
+    acceptance = SummaryReturnAcceptanceResult(
+        (accepted_first.return_info,), (accepted_first,), (), True
+    )
+
+    with pytest.raises(ValueError, match="candidate set is incomplete"):
+        recurrence_promotion._bind_accepted_candidates_to_proposal(
+            acceptance, proposal
+        )
+
+
+def test_recurrence_acceptance_rejects_matching_id_with_changed_content():
+    proposal_return, _ = _recurrence_candidate_fixture(
+        ("proposal", "only"), 1
+    )
+    _, changed_candidate = _recurrence_candidate_fixture(
+        ("proposal", "only"), 2
+    )
+    proposal = QuarantinedRecurrenceProposal(
+        "seed", "unit-test", (proposal_return,), ()
+    )
+    acceptance = SummaryReturnAcceptanceResult(
+        (changed_candidate.return_info,), (changed_candidate,), (), True
+    )
+
+    with pytest.raises(ValueError, match="content differs"):
+        recurrence_promotion._bind_accepted_candidates_to_proposal(
+            acceptance, proposal
+        )
+
+
+def test_recurrence_seed_rejects_empty_proposal_binding_as_typed_failure():
+    proposal_return, _ = _recurrence_candidate_fixture(
+        ("proposal", "only"), 1
+    )
+    proposal = QuarantinedRecurrenceProposal(
+        "seed", "unit-test", (proposal_return,), ()
+    )
+    analysis = SimpleNamespace(
+        outcome_function_identity=lambda: ("function", "f"),
+    )
+
+    with pytest.raises(ValueError, match="no accepted candidate binding"):
+        recurrence_promotion._seed_core(analysis, proposal, ())

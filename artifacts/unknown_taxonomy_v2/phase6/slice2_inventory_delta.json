@@ -2860,6 +2860,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "061c680f7a0c066c5b63cac977f0e709d527d7e9beda5c038dacfa72e6025925",
+      "line": 618,
+      "path": "scripts/function_tracer_pcode/validation/phase9_completion_validation.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "79d73892b2aca41a444e1a7dffb691a1205419bbe7c0c4fa557715cf66eec760"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "79d73892b2aca41a444e1a7dffb691a1205419bbe7c0c4fa557715cf66eec760",
+      "source": "\"representative_unknown_reason_ids\": tuple(",
+      "symbol": "build_phase9_evidence"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "28a1afc27df126f9959b8f81654a92289d3d56ebfd890101cc80c1c1e6256bca",
@@ -4085,27 +4106,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "final_primary",
-      "inventory_source_fingerprint": "81f2ccba93e7e9b1bae34cf9f17f64952ff9360511a351a92c7d21bc71eb783a",
-      "line": 47,
-      "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "bab260381750aa5b145bffbd9b32ad20585eced480cdf72585959f396e3ee36d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "bab260381750aa5b145bffbd9b32ad20585eced480cdf72585959f396e3ee36d",
-      "source": "\"scripts/function_tracer_pcode/validation/unknown_reason_summary.py\",",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
       "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
@@ -4359,27 +4359,6 @@
       "site_id": "c24b95e44fea2987577256d067e6ecdbc0ea22c96f04323cb5673ae467b7d1a2",
       "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
       "symbol": "_apply_phase2_relational_call_discharge"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "061c680f7a0c066c5b63cac977f0e709d527d7e9beda5c038dacfa72e6025925",
-      "line": 615,
-      "path": "scripts/function_tracer_pcode/validation/phase9_completion_validation.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "c27e65b1bd52f9e43a6f0410f56e39671add5f8247c4c70250d5fbae8b7dfdbc"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c27e65b1bd52f9e43a6f0410f56e39671add5f8247c4c70250d5fbae8b7dfdbc",
-      "source": "\"representative_unknown_reason_ids\": tuple(",
-      "symbol": "build_phase9_evidence"
     },
     {
       "authority_role": "derived_projection",
@@ -4658,6 +4637,27 @@
       "site_id": "cc5030644369008d29377abd50149971e8d1c7d664c8248695b124dc0863bfc2",
       "source": "echo \"TIMEOUT\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "final_primary",
+      "inventory_source_fingerprint": "81f2ccba93e7e9b1bae34cf9f17f64952ff9360511a351a92c7d21bc71eb783a",
+      "line": 48,
+      "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "cd244115666f75662aa69b57539e9ba3482005c61271bb95daa7829fce98d1ae"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "cd244115666f75662aa69b57539e9ba3482005c61271bb95daa7829fce98d1ae",
+      "source": "\"scripts/function_tracer_pcode/validation/unknown_reason_summary.py\",",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -5527,7 +5527,7 @@
   ],
   "current_source": {
     "candidate_count": 607,
-    "candidate_set_digest": "964ed6644177d997943ec674d7c6217f872f782d99366374cfde2a7169f1a3c8"
+    "candidate_set_digest": "4694ca6696aa7933c542fa802b28f8d122d1d6e6417ed1a20d0dedd40acab69e"
   },
   "previous_slice": {
     "candidate_count": 590,

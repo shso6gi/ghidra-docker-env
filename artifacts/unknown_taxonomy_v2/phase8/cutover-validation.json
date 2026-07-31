@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "17a325393a48fbff1784ad50d44bcd01ceb827f3b4762ebc371b66f56d9ba469",
+  "artifact_digest": "8530b6a0a2c21116d3765a81efc8b03a4536ba9557bb3bcc4f47fe6d5f20aa8f",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -27,7 +27,7 @@
     "canonical_census_uses_manifest_receipt_stream_join": {
       "junit": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
       "required_test_count": 3,
-      "test_count": 523
+      "test_count": 576
     },
     "decision_receipt_only_final_status": {
       "junit": "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml",
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "419911703fdd29b9e7b673ce915e8ce0a308a837e9d6b2a992091a5bf42b4e1d"
+    "sha256": "88c220d9d20d63ba58e31310d947aff6d374c4d5d92ca21987c84f8c75258f43"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "e49ff26f8ecb5ba79f331c1a3759ea5cb11620c65e637b2ef32e2ecd92a2f5a5",
+    "manifest_digest": "915fcf649b770d786953c199daaa2a6556ec181978c7812eb54624d5350497da",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "8b92c42f771e34b024bb216147f5efa24356381c7171864d90a2ebf030784b78",
+    "sha256": "5633148d0a7f981dcc18cd1283fd40ed3716521d617cec5f2497f5b504725609",
     "site_count": 28
   },
   "source_files": [
@@ -119,6 +119,10 @@
       "sha256": "cf9bdf11020a877bf7810c97b731d6f1b3f0af378280e2003135983fbc5fc005"
     },
     {
+      "path": "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
+      "sha256": "731ba670697089e32852cbb7a097108e5830f61d082bc0efca4d37adc5483760"
+    },
+    {
       "path": "scripts/function_tracer_pcode/equivalence/result.py",
       "sha256": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57"
     },
@@ -144,7 +148,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/model/expression.py",
-      "sha256": "bcab2b8e7682d5f9cfcfa67cbf65986570ae699d4a2cced4574817c517c6b18b"
+      "sha256": "5115033d1db7d77180f7c935e752825272f04082f5ac61dca83e649bfadb92ea"
     },
     {
       "path": "scripts/function_tracer_pcode/model/render_smt.py",
@@ -211,12 +215,20 @@
       "sha256": "430b0ed296f50d345fa799d566b0b4cc3b813b17b8815f712adcb48ceec87767"
     },
     {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
+      "sha256": "490cad1eac0b1e5b8409c01d815ad803b1cda0ac8ce9acc39f6dc419ce1b966c"
+    },
+    {
       "path": "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
       "sha256": "c958c8333f368e3517a9fcc9787df367b1993cc90e7a32f44691b7c13a80e0dd"
     },
     {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
+      "sha256": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
+    },
+    {
       "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
-      "sha256": "3c81731d23d0b8993151e0acee6a8fe8e884bbaad9dec780532ae344cd93bb2c"
+      "sha256": "10220abdfc262d0b63b7c066509058e515399d2e1cf267c0814bb7fa9591d48e"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
@@ -227,11 +239,11 @@
       "sha256": "fdec5f173c2094a7a15893c96efa8d03d52851bac59c61d75254c1c2f652e860"
     }
   ],
-  "source_tree_digest": "e5bb7c5d3d620d63b152ccd8b4053a8412e4cdcdd85f607856d2aa674c08cafc",
+  "source_tree_digest": "9a5f90cd65b2e41c02fa95c45a062088292f44fe1f08398947f613f84add6210",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-    "sha256": "b9779a5552f30f0d64098e88c67636d644713d97080c6a333c271483e6b46e31",
+    "sha256": "d43d5bdf1e7d764ec7ef7ff6c1315c134e46c304ae7f99bb8aa03dbabcbac17d",
     "source_files": [
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_recovery.py",
@@ -294,10 +306,18 @@
         "sha256": "430b0ed296f50d345fa799d566b0b4cc3b813b17b8815f712adcb48ceec87767"
       },
       {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
+        "sha256": "490cad1eac0b1e5b8409c01d815ad803b1cda0ac8ce9acc39f6dc419ce1b966c"
+      },
+      {
         "path": "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
         "sha256": "c958c8333f368e3517a9fcc9787df367b1993cc90e7a32f44691b7c13a80e0dd"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
+        "sha256": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
       }
     ],
-    "test_count": 477
+    "test_count": 623
   }
 }

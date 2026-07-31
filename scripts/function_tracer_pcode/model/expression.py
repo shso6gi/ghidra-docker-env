@@ -493,9 +493,51 @@ class Expression:
         return get_smt_operator(operator)
     
     def to_dict(self) -> Dict[str, Any]:
+        return self._to_dict(set())
+
+    def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
+        node_id = id(self)
+        if node_id in active:
+            return {
+                "type": self.expr_type.name,
+                "cycle_ref": self._serialize_runtime_ref(
+                    self.structural_key(budget=512)
+                ),
+            }
+        active.add(node_id)
+        try:
+            return self._to_dict_active(active)
+        finally:
+            active.remove(node_id)
+
+    def _to_dict_active(self, active: Set[int]) -> Dict[str, Any]:
         result: Dict[str, Any] = {"type": self.expr_type.name}
         if self.value is not None:
-            result["value"] = self.value
+            if self.expr_type == ExpressionType.PHI:
+                branches = []
+                for branch in self.value:
+                    if not isinstance(branch, (tuple, list)) or len(branch) != 2:
+                        raise TypeError("PHI branch must be a condition/value pair")
+                    condition, value = branch
+                    if not isinstance(value, Expression):
+                        raise TypeError("PHI branch value must be an Expression")
+                    condition_payload = None
+                    if condition is not None:
+                        from .condition import Condition
+
+                        if not isinstance(condition, Condition):
+                            raise TypeError("PHI branch condition must be a Condition")
+                        condition_payload = {
+                            "expression": condition.expression._to_dict(active),
+                            "negated": bool(condition.negated),
+                        }
+                    branches.append({
+                        "condition": condition_payload,
+                        "value": value._to_dict(active),
+                    })
+                result["value"] = branches
+            else:
+                result["value"] = self.value
         if self.operator:
             result["operator"] = self.operator
         if self.name:
@@ -505,7 +547,7 @@ class Expression:
         if self.size:
             result["size"] = self.size
         if self.operands:
-            result["operands"] = [op.to_dict() for op in self.operands]
+            result["operands"] = [op._to_dict(active) for op in self.operands]
         if self.storage_info:
             result["storage_info"] = self.storage_info.to_dict()
         if self.read_order_key is not None:

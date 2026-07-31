@@ -29,6 +29,7 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/cli/commands/equivalence.py",
     "scripts/function_tracer_pcode/equivalence/checker.py",
     "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
+    "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py",
     "scripts/function_tracer_pcode/equivalence/result.py",
     "scripts/function_tracer_pcode/equivalence/obligations/stage_runner.py",
     "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
@@ -52,7 +53,9 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
     "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
     "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
     "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
     "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
     "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
@@ -74,7 +77,9 @@ WORKFLOW_TEST_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
     "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
+    "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
     "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
 )
 
 
