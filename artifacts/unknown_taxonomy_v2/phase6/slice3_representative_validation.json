@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "1b6edd5677309da0d6fe9827be11534091c3e47d9765a7a0fd398c14184a8b2a",
+  "artifact_digest": "678d3defafffd108911ad926786b4cabf155faf33092defc03f0a714a67be4bd",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -16,9 +16,9 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "dd98f668851f9da21a0192d23c52008ada4c260eed16ea2674c56148f33134e6",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "bff50f3b49c9b44a32bf6febb649cd9003a0b9dddc1a3e6d901f406bae78b84f",
     "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "20c9a89aca2d1498515cb5c7df93bc3425d830aa276586bddb43033c21fceced",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "31a6beee81822c1166bb0dde28327d0478b1363299a9e15e48f7c31a524dbe88",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect_sites.py": "3a37dffb52029fdcefb8ee22dc9f8c0341aa0e1afe25b51d6a0311bfcd90afdd",
     "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "9066c901bcc18ff9a52aa2085b202d3df6643d4625f0c45586c41c1eddceb33c",
@@ -87,8 +87,8 @@
   "schema_version": 1,
   "source_inventory": {
     "current_source": {
-      "candidate_count": 603,
-      "candidate_set_digest": "248d860f212fdbd8fbdd85dbc8c7ac5c386d96d7a87cc501584e6cc46ea0ee80"
+      "candidate_count": 606,
+      "candidate_set_digest": "1fd297a3aa58cf49b8dda72615f70f0fa63cf5198b0cceff4bd54c47bae3c5e9"
     },
     "live_delta": {
       "added": 0,

@@ -69,6 +69,11 @@ def _semantic_cleanup_projection(source):
         "focused_test_source_sha256",
         "phase7_artifact_digest",
         "terminal_timeout_receipt_digest",
+        # Exact query-authority join identities added after the cleanup
+        # baseline.  They strengthen receipt binding without changing the
+        # preserved decision, cause, requirement, or aggregate semantics.
+        "region_receipt_digest",
+        "projection_binding_ids",
     }
 
     def project(value):

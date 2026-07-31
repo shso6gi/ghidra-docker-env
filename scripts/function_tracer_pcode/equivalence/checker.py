@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
+from ..model.render_smt import UnknownSmtExtensionWidthError
 from ..smt import ParallelSolverRunner, ParallelResult, SolverResult
 from .formula import FormulaBuilder
 from .formula.returns import ReturnWidthMismatchError
@@ -583,11 +584,16 @@ class EquivalenceChecker:
             
             # 反例取得
             counterexample = None
+            counterexample_raw = None
             if parallel_result.is_equivalent is False:
-                raw_model = parallel_result.get_counterexample()
-                if raw_model:
+                counterexample_raw = parallel_result.get_counterexample()
+                if counterexample_raw:
                     counterexample = self._format_counterexample(
-                        raw_model, analysis1, analysis2, return_var1, return_var2
+                        counterexample_raw,
+                        analysis1,
+                        analysis2,
+                        return_var1,
+                        return_var2,
                     )
             
             # ★ 修正: save_formula に関わらず smt_formula を保持（debug trace 用）
@@ -600,7 +606,7 @@ class EquivalenceChecker:
                 binary2_name=ctx.binary2_name,
                 solver_results=parallel_result,
                 counterexample=counterexample,
-                counterexample_raw=strategy_result.counterexample_raw,
+                counterexample_raw=counterexample_raw,
                 smt_formula=smt_formula,  # ★ 条件削除: 常に保存
                 total_time=total_time,
                 type_fix_result=ctx.type_fix_result,
@@ -620,6 +626,62 @@ class EquivalenceChecker:
                 unknown_reasons=[],
             )
             return equivalence_result
+
+        except UnknownSmtExtensionWidthError as e:
+            self._debug_print(
+                f"ABI retry blocked by unknown extension output width: {e}"
+            )
+            blocked_analysis1 = locals().get("analysis1", ctx.analysis1)
+            blocked_analysis2 = locals().get("analysis2", ctx.analysis2)
+            return EquivalenceResult(
+                is_equivalent=None,
+                function1_name=ctx.function_name1,
+                function2_name=ctx.function_name2,
+                binary1_name=ctx.binary1_name,
+                binary2_name=ctx.binary2_name,
+                solver_results=ParallelResult(results=[]),
+                counterexample=None,
+                counterexample_raw=None,
+                smt_formula=None,
+                total_time=time.time() - start_time,
+                type_fix_result=ctx.type_fix_result,
+                retry_count=retry_count,
+                function1_signature=ctx.original_signature1,
+                function2_signature=ctx.original_signature2,
+                effective_function1_signature=FunctionSignature.from_analysis(
+                    blocked_analysis1
+                ),
+                effective_function2_signature=FunctionSignature.from_analysis(
+                    blocked_analysis2
+                ),
+                function1_signature_hypotheses=list(
+                    blocked_analysis1.signature_hypotheses
+                ),
+                function2_signature_hypotheses=list(
+                    blocked_analysis2.signature_hypotheses
+                ),
+                constrained_fragments=[],
+                rewrite_info=rewrite_info,
+                mips64_abi_constraints=abi_constraints,
+                pairwise_debug_stats={
+                    "unknown_smt_extension_width": 1,
+                },
+                unknown_reasons=[
+                    make_internal_v2_reason_diagnostic(
+                        "expression_semantics_unsupported",
+                        stage="ABI_RETRY",
+                        evidence_refs=("unknown_smt_extension_width",),
+                        object_target_key=(
+                            "unknown_smt_extension_width",
+                            e.operator,
+                            e.operand_bits,
+                            tuple(blocked_analysis1.outcome_function_identity()),
+                            tuple(blocked_analysis2.outcome_function_identity()),
+                        ),
+                        detail=str(e),
+                    )
+                ],
+            )
 
         except ReturnWidthMismatchError as e:
             reason_id = getattr(e, "reason_id", "return_width_bridge_missing")
@@ -1553,6 +1615,59 @@ class EquivalenceChecker:
                 equivalence_result._inconclusive_comparison_authority = None
             return equivalence_result
         
+        except UnknownSmtExtensionWidthError as e:
+            self._debug_print(
+                f"Check blocked by unknown extension output width: {e}"
+            )
+            blocked_analysis1 = locals().get("analysis1", analysis1)
+            blocked_analysis2 = locals().get("analysis2", analysis2)
+            return EquivalenceResult(
+                is_equivalent=None,
+                function1_name=blocked_analysis1.function_name,
+                function2_name=blocked_analysis2.function_name,
+                binary1_name=binary1_name,
+                binary2_name=binary2_name,
+                solver_results=ParallelResult(results=[]),
+                counterexample=None,
+                smt_formula=None,
+                total_time=time.time() - start_time,
+                type_fix_result=type_fix_result,
+                retry_count=retry_count,
+                function1_signature=original_signature1,
+                function2_signature=original_signature2,
+                effective_function1_signature=FunctionSignature.from_analysis(
+                    blocked_analysis1
+                ),
+                effective_function2_signature=FunctionSignature.from_analysis(
+                    blocked_analysis2
+                ),
+                function1_signature_hypotheses=list(
+                    blocked_analysis1.signature_hypotheses
+                ),
+                function2_signature_hypotheses=list(
+                    blocked_analysis2.signature_hypotheses
+                ),
+                constrained_fragments=[],
+                pairwise_debug_stats={
+                    "unknown_smt_extension_width": 1,
+                },
+                unknown_reasons=[
+                    make_internal_v2_reason_diagnostic(
+                        "expression_semantics_unsupported",
+                        stage="S_PAIRWISE",
+                        evidence_refs=("unknown_smt_extension_width",),
+                        object_target_key=(
+                            "unknown_smt_extension_width",
+                            e.operator,
+                            e.operand_bits,
+                            tuple(blocked_analysis1.outcome_function_identity()),
+                            tuple(blocked_analysis2.outcome_function_identity()),
+                        ),
+                        detail=str(e),
+                    )
+                ],
+            )
+
         except Exception as e:
             self._debug_print(f"Exception in check: {e}")
             if self.debug:

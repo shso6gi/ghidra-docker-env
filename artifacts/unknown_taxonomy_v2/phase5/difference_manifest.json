@@ -3,7 +3,7 @@
   "case_13_canonical_census_status": "INVALID",
   "evidence_class": "deterministic_production_boundary_pilot",
   "files": {
-    "scripts/function_tracer_pcode/equivalence/checker.py": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f",
     "scripts/function_tracer_pcode/equivalence/obligations/outcome_partition.py": "6df97a9a7ba4143340470401ac68be430eb86e6d609f884741d86f6ec187c54b",
     "scripts/function_tracer_pcode/equivalence/result.py": "5b69db2ac5c3d2726ffe06d0d24160d432019dedb660cb7ba562c3e6a6f50d57",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "d2bc9e1b64ac43679787aade53ba7ffc8d7cdeb78d2757e0a2fe2d432ac17670",
@@ -137,7 +137,7 @@
     }
   ],
   "legacy_projection_authoritative_for_v2": false,
-  "manifest_digest": "b9cd594c818f39d20decb3651b043382cab56003d493e5a08ce49401be861d14",
+  "manifest_digest": "0dea31899785fe0aa5cfe82361ea7469abaf0f09c1836979dd277458ef83902c",
   "manifest_kind": "unknown_taxonomy_v2_phase5_production_dual_write_difference",
   "production_v1_final_outcome_changed": false,
   "schema_version": 2,

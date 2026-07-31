@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "d223abd22dff5780e227b60b121cf2ec96650f9f4c4de756bd7c7816ec97d56b",
+  "manifest_digest": "b226b5c48fcc1b585fb459ea6c1d4e15dc2d2f9609a336e2d75385ae6609064b",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -104,10 +104,10 @@
       "emitter": "emit_call_effect_signal",
       "enclosing_function": "_call_effect_shadow_manifest",
       "expected_cause_slots": [],
-      "line": 2063,
+      "line": 2178,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
+      "source_sha256": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f"
     },
     {
       "allowed_dispositions": [
@@ -133,10 +133,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1697,
+      "line": 1812,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-recurrence-proposal-blocker",
-      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
+      "source_sha256": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f"
     },
     {
       "allowed_dispositions": [
@@ -151,10 +151,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "check",
       "expected_cause_slots": [],
-      "line": 1350,
+      "line": 1412,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "producer_site_manifest_id": "checker-recurrence-validation-completed",
-      "source_sha256": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8"
+      "source_sha256": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f"
     },
     {
       "allowed_dispositions": [

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "b45e129bdf2d5cdcde7bb869c6d91c0e6ab6c9b669b8f7a66a6eb10bfeaf6625",
+  "artifact_digest": "ff1ee3f613b1da89d75451ed47d08f04e509e96818d2729e6e74bc6848783ff0",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,9 +246,9 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "dd98f668851f9da21a0192d23c52008ada4c260eed16ea2674c56148f33134e6",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "bff50f3b49c9b44a32bf6febb649cd9003a0b9dddc1a3e6d901f406bae78b84f",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "cb780b912ebf945281a0c319af1c01f320548213f0540ac0d036fb39b16ad1b8",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "7b46f945e432ee56753a84cc30766d641b95ae70a053173a31253ed158efb51f",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "23eadb7c7717dc41d7fe176d0fa81e2fc0d7bb4ae2aae6b86ff54c846d902804",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py": "40c402cb07114bc134ca48ed95cf4115b5d7469e9aace6884af193497d3515a5",
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
@@ -314,8 +314,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 603,
-      "candidate_set_digest": "248d860f212fdbd8fbdd85dbc8c7ac5c386d96d7a87cc501584e6cc46ea0ee80"
+      "candidate_count": 606,
+      "candidate_set_digest": "1fd297a3aa58cf49b8dda72615f70f0fa63cf5198b0cceff4bd54c47bae3c5e9"
     },
     "live_delta": {
       "added": 0,

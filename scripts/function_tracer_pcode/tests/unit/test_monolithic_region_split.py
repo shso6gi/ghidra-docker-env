@@ -41,6 +41,123 @@ def test_monolithic_local_sat_requires_global_violation_replay() -> None:
     assert result.sat_pairs == 1
 
 
+def test_rebuilt_unknown_extension_region_queries_are_z3_parseable() -> None:
+    import z3
+
+    unknown = Expression.unknown("phi_no_valid_branch")
+    unknown.size = 4
+    extended = Expression.unary_op("INT_ZEXT", unknown)
+    extended.size = 8
+    analysis = FunctionReturnAnalysis(
+        function_name="phi_extension",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo("0x1010", extended, [])],
+        return_type="long",
+    )
+
+    result = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is True
+    bundle = (
+        result._prepared_dispatch_frame
+        .monolithic_terminal_receipt
+        .proof_bundle
+    )
+    assert bundle is not None
+    assert bundle.query_set.queries
+    for query in bundle.query_set.queries:
+        z3.parse_smt2_string(query.formula)
+        assert "(_ BitVec 96)" not in query.formula
+
+
+def test_monolithic_unknown_extension_width_is_inconclusive_not_error() -> None:
+    unknown = Expression.unknown("phi_no_valid_branch")
+    unknown.size = 4
+    extended = Expression.unary_op("INT_ZEXT", unknown)
+    extended.size = 0
+    analysis = FunctionReturnAnalysis(
+        function_name="phi_extension_without_output_width",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo("0x1010", extended, [])],
+        return_type="long",
+    )
+
+    result = MonolithicStrategy(
+        FormulaBuilder(),
+        ParallelSolverRunner(timeout=5),
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_kind is None
+    assert any(
+        reason.reason_id == "expression_semantics_unsupported"
+        and "unknown_smt_extension_width" in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
+def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None:
+    unknown = Expression.unknown("phi_no_valid_branch")
+    unknown.size = 4
+    extended = Expression.unary_op("INT_ZEXT", unknown)
+    extended.size = 0
+    analysis = FunctionReturnAnalysis(
+        function_name="pairwise_phi_extension_without_output_width",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[ReturnInfo("0x1010", extended, [])],
+        return_type="long",
+    )
+
+    result = EquivalenceChecker(
+        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    ).check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert any(
+        reason.reason_id == "expression_translation_incomplete"
+        for reason in result.unknown_reasons
+    )
+
+
+def test_checker_boundary_classifies_typed_unknown_extension_width(
+    monkeypatch,
+) -> None:
+    from scripts.function_tracer_pcode.model.render_smt import (
+        UnknownSmtExtensionWidthError,
+    )
+
+    analysis = _analysis("unknown_extension_boundary", 7)
+    checker = EquivalenceChecker(
+        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+    )
+
+    def reject_unknown_width(*_args, **_kwargs):
+        raise UnknownSmtExtensionWidthError(
+            operator="INT_ZEXT",
+            operand_bits=32,
+        )
+
+    monkeypatch.setattr(checker, "_apply_rewrite", reject_unknown_width)
+    result = checker.check(analysis, analysis)
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert result.pairwise_debug_stats == {
+        "unknown_smt_extension_width": 1,
+    }
+    assert any(
+        reason.reason_id == "expression_semantics_unsupported"
+        and "unknown_smt_extension_width" in tuple(reason.evidence_refs or ())
+        for reason in result.unknown_reasons
+    )
+
+
 def test_relation_surface_is_not_split() -> None:
     parameter = Expression.parameter("x", 0, data_type="int", size=4)
     positive = Condition(

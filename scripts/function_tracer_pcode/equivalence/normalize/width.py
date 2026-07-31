@@ -38,7 +38,10 @@ def _normalize_extension(expr: Expression) -> Expression:
         return expr
 
     operand = expr.operands[0]
-    target_size = expr.size or operand.size
+    # The operand width cannot establish an extension's output width.  A
+    # missing P-code output width is an unresolved semantic fact, so leave the
+    # expression intact for the proof boundary to classify conservatively.
+    target_size = int(expr.size or 0)
     if target_size <= 0:
         return expr
 

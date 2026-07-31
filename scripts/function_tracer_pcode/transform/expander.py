@@ -2569,6 +2569,10 @@ class ExpressionExpander:
                 if not ConditionSimplifier.object_centric_is_contradiction(combined_conds):
                     if mnemonic in ("INT_NEGATE", "INT_2COMP", "BOOL_NEGATE", "INT_ZEXT", "INT_SEXT"):
                         new_value = Expression.unary_op(mnemonic, ev.value)
+                        if mnemonic in ("INT_ZEXT", "INT_SEXT") and output_size > 0:
+                            # Extension width is the P-code output Varnode width,
+                            # not the input width inherited by unary_op().
+                            new_value.size = output_size
                     else:
                         new_value = ev.value
                     result.append(ExpandedValue(new_value, combined_conds))

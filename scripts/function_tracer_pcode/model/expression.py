@@ -307,8 +307,10 @@ class Expression:
         
         elif self.expr_type == ExpressionType.UNARY_OP:
             if self.operator in ["INT_ZEXT", "INT_SEXT"]:
-                # 拡張演算: 出力サイズを使用（設定されているはず）
-                return (self.size if self.size else 8) * 8
+                # The output Varnode owns an extension's width.  The operand
+                # width and the historical 64-bit default are not evidence for
+                # an unavailable output width.
+                return self.size * 8 if self.size and self.size > 0 else 0
             elif self.operator in ["BOOL_NEGATE"]:
                 return 1
             else:

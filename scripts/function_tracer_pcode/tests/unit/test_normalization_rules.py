@@ -30,6 +30,21 @@ from normalization_helpers import (
 )
 
 
+def test_normalize_expression_preserves_extension_with_unknown_output_width() -> None:
+    operand = Expression.unknown("phi_no_valid_branch")
+    operand.size = 4
+    extension = Expression.unary_op("INT_ZEXT", operand)
+    extension.size = 0
+    context = NormalizationContext()
+
+    normalized = normalize_expression(extension, context)
+
+    assert normalized.operator == "INT_ZEXT"
+    assert normalized.size == 0
+    assert normalized.operands[0].size == 4
+    assert context.applied_rules == []
+
+
 def _make_exact_triangular_phi(base: Expression) -> Expression:
     one = make_const(1, size=base.size or 4)
     zero = make_const(0, size=base.size or 4)

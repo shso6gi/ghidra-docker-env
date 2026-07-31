@@ -40,6 +40,18 @@ class UnsupportedSmtIntrinsicError(ValueError):
         )
 
 
+class UnknownSmtExtensionWidthError(ValueError):
+    """Typed refusal to lower an extension without its P-code output width."""
+
+    def __init__(self, *, operator: str, operand_bits: int) -> None:
+        self.operator = operator
+        self.operand_bits = int(operand_bits)
+        super().__init__(
+            f"{operator} output width is unavailable "
+            f"(operand width: {self.operand_bits or 'unknown'} bits)"
+        )
+
+
 _BOOLEAN_BINARY_OPERATORS = {
     "INT_EQUAL",
     "INT_NOTEQUAL",
@@ -220,7 +232,7 @@ def expression_smt_bit_width(expr) -> int:
         operand_bits = expression_smt_bit_width(operand)
         if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
             explicit_bits = (expr.size or 0) * 8
-            return explicit_bits or operand_bits
+            return explicit_bits
         if expr.operator == "BOOL_NEGATE":
             return 1
         explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
@@ -315,8 +327,11 @@ def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -
     if expr_type == expr_kind.BINARY_OP and expr.operator not in _SUPPORTED_BINARY_OPERATORS:
         return True
 
-    if expr_type == expr_kind.UNARY_OP and expr.operator not in _SUPPORTED_UNARY_OPERATORS:
-        return True
+    if expr_type == expr_kind.UNARY_OP:
+        if expr.operator not in _SUPPORTED_UNARY_OPERATORS:
+            return True
+        if expr.operator in {"INT_ZEXT", "INT_SEXT"} and int(expr.size or 0) <= 0:
+            return True
 
     if expr_type == expr_kind.INTRINSIC:
         if not is_supported_pcode_intrinsic(
@@ -2070,7 +2085,12 @@ def _to_smt_internal(
         operand_bits = expression_smt_bit_width(operand)
 
         if expr.operator == "INT_ZEXT":
-            output_bits = (expr.size if expr.size else 8) * 8
+            output_bits = int(expr.size or 0) * 8
+            if output_bits <= 0:
+                raise UnknownSmtExtensionWidthError(
+                    operator=expr.operator,
+                    operand_bits=operand_bits,
+                )
             if expression_returns_bool(operand):
                 return _coerce_bool_to_bitvec(operand, operand_smt, output_bits)
             extend_bits = output_bits - operand_bits
@@ -2081,7 +2101,12 @@ def _to_smt_internal(
             return f"((_ extract {output_bits - 1} 0) {operand_smt})"
 
         if expr.operator == "INT_SEXT":
-            output_bits = (expr.size if expr.size else 8) * 8
+            output_bits = int(expr.size or 0) * 8
+            if output_bits <= 0:
+                raise UnknownSmtExtensionWidthError(
+                    operator=expr.operator,
+                    operand_bits=operand_bits,
+                )
             if expression_returns_bool(operand):
                 return _coerce_bool_to_bitvec(operand, operand_smt, output_bits)
             extend_bits = output_bits - operand_bits

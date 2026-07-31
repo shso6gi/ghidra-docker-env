@@ -3,8 +3,15 @@
 
 from unittest.mock import Mock
 
+import pytest
+
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.model import CanonicalLocation, Expression, LocationBaseRef, UnknownValueRef
+from scripts.function_tracer_pcode.model.render_smt import (
+    UnknownSmtExtensionWidthError,
+    expression_contains_unsupported_smt_ops,
+    expression_smt_bit_width,
+)
 from scripts.function_tracer_pcode.model.runtime_refs import PostStateReadRef
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
@@ -73,6 +80,54 @@ def test_combine_input_expansions_adds_unknown_when_budget_exceeded(monkeypatch)
         ev.value.expr_type.name == "UNKNOWN" and ev.value.name == "INT_ADD_budget_exceeded"
         for ev in result
     )
+
+
+@pytest.mark.parametrize(("mnemonic", "smt_operator"), [
+    ("INT_ZEXT", "zero_extend"),
+    ("INT_SEXT", "sign_extend"),
+])
+def test_combine_input_expansions_preserves_extension_output_width(
+    monkeypatch,
+    mnemonic,
+    smt_operator,
+):
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "is_contradiction",
+        classmethod(lambda cls, conds: False),
+    )
+
+    operand = Expression.unknown("phi_no_valid_branch")
+    operand.size = 4
+    result = expander._combine_input_expansions_with_conditions(
+        mnemonic,
+        [[ExpandedValue(operand, [])]],
+        [],
+        depth=0,
+        output_size=8,
+    )
+
+    assert len(result) == 1
+    rebuilt = result[0].value
+    assert rebuilt.size == 8
+    assert expression_smt_bit_width(rebuilt) == 64
+    smt = rebuilt.to_smt()
+    assert smt.count(f"((_ {smt_operator} 32)") == 1
+
+
+@pytest.mark.parametrize("mnemonic", ["INT_ZEXT", "INT_SEXT"])
+def test_unknown_extension_output_width_fails_closed(mnemonic):
+    operand = Expression.unknown("phi_no_valid_branch")
+    operand.size = 4
+    extension = Expression.unary_op(mnemonic, operand)
+    extension.size = 0
+
+    assert extension.get_bit_width() == 0
+    assert expression_smt_bit_width(extension) == 0
+    assert expression_contains_unsupported_smt_ops(extension)
+    with pytest.raises(UnknownSmtExtensionWidthError):
+        extension.to_smt()
 
 
 def test_combine_input_expansions_counts_unique_results_for_budget(monkeypatch):

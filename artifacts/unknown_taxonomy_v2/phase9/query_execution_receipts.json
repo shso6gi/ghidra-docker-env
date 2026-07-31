@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "97621febc968d20e323b665c905968cfb63fd79353d6ea0df7e608db8c514656",
+  "artifact_digest": "e29cde0d6082df6757222daea0cca4c6806ced677fc82e8a7bf3c651f86fab76",
   "artifact_kind": "phase9-query-execution-receipts-v1",
   "final_timeout_result_count": 1,
   "observed_nonterminal_timeout_event_count": 0,
@@ -17,9 +17,11 @@
       "disposition": "sat",
       "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
       "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-      "premise_digest": "8b59948f3579e25f0d30469ac5707ac7d8517564a1d8b284636ac67635cd94a1",
+      "premise_digest": "46653f9d42cf42386601e480032b4472ca14c9397a0d031e0cb7e1158e246ec7",
+      "projection_binding_ids": [],
       "proof_kind": "monolithic_region_guard",
       "query_label": "monolithic.region:0:0:guard",
+      "region_receipt_digest": "1f588d77f9ea4732a9d825ec07ef1742d702d9167ca58288880622d0b5b81c7c",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
@@ -29,9 +31,11 @@
       "disposition": "sat",
       "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
       "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-      "premise_digest": "8a65dd26ecaa15681fd77cb93cc04fd41a07b31da25913caef649c623c661123",
+      "premise_digest": "f4e4447304f32ac3b35f0c75fcda848a6f2c8327b7f5e989bd892e637dc4affc",
+      "projection_binding_ids": [],
       "proof_kind": "monolithic_region_value_inequality",
       "query_label": "monolithic.region:0:0:value",
+      "region_receipt_digest": "071a762e48717955b0e083e70d32565207c487534565b0cf9ef528be1f659b38",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
@@ -42,8 +46,10 @@
       "formula_digest": "06c3b78d941116d161622f67294e3d757bf3b55b9ae6e31f55588ddae4f43d40",
       "formula_text": "; ============================================================\n; Equivalence Check\n; Function 1: phase7_sat_witness\n; Function 2: phase7_sat_witness\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n; ----------------------------------------\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n; ----------------------------------------\n\n; ----------------------------------------\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n\n; ----------------------------------------\n; Return value for phase7_sat_witness\n; ----------------------------------------\n(define-fun return_1 () (_ BitVec 32)\n  (_ bv7 32))\n\n; ----------------------------------------\n; Return value for phase7_sat_witness\n; ----------------------------------------\n(define-fun return_2 () (_ BitVec 32)\n  (_ bv8 32))\n\n; ----------------------------------------\n; Equivalence assertion (negated)\n; If SAT: functions are NOT equivalent\n; If UNSAT: functions ARE equivalent\n; ----------------------------------------\n(assert (not (= return_1 return_2)))\n\n(check-sat)\n(get-model)",
       "premise_digest": "d413c8d3da0d8d5e81f8984c22c1c61e757cbd42d1b1dc69ee732a0c2ed1dae1",
+      "projection_binding_ids": [],
       "proof_kind": "monolithic_global_counterexample_replay",
       "query_label": "monolithic.region:0:0:global-replay",
+      "region_receipt_digest": "c27df6973d34ac21d67b8accaaa8c058b41599aaf67d3672f5728802d0195148",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
