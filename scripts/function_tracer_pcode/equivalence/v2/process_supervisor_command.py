@@ -134,11 +134,23 @@ class ProcessSupervisorCommand:
         if type(config) is not SupervisorCommandConfig:
             raise TypeError("process supervisor requires exact command config")
         self.config = config
+        worker_key = _read_key(config.worker_signing_key_file)
+        from .execution_authority import (
+            activate_process_worker_execution_authority_deployment,
+        )
+
+        self.execution_authority_startup_receipt = (
+            activate_process_worker_execution_authority_deployment(
+                key_id=config.worker_signing_key_id,
+                key=worker_key,
+                key_source_id=str(config.worker_signing_key_file.resolve()),
+            )
+        )
         self.factory = ProcessSupervisorAuthorityFactory(
             supervisor_signing_key_id=config.supervisor_signing_key_id,
             supervisor_signing_key=_read_key(config.supervisor_signing_key_file),
             worker_signing_key_id=config.worker_signing_key_id,
-            worker_signing_key=_read_key(config.worker_signing_key_file),
+            worker_signing_key=worker_key,
         )
         self.store = DurableCheckpointStore(
             config.checkpoint_root, self.factory, config.execution_nonce

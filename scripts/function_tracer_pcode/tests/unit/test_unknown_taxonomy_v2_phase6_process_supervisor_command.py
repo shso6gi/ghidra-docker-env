@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import subprocess
 import sys
 from enum import Enum
 
@@ -178,6 +179,129 @@ def _child_persist_active(*, sleep_seconds, ignore_sigterm=False):
         time.sleep(sleep_seconds)
 
 
+def _child_persist_canonical_production_loop_timeout():
+    """Emit deployment-signed loop TIMEOUT receipts through the child boundary."""
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+        build_canonical_result_finalization_bundle,
+        persist_canonical_result_envelope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+        activate_process_worker_execution_authority_deployment,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
+        LOOP_REASON_REGISTRY,
+        LOOP_RECOVERY_REGISTRY,
+        LoopBlockerProductionSignal,
+        LoopRecurrencePilotEncoder,
+        LoopSolverExecutionBatchSignal,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        active_loop_requirement_for_signal,
+        execute_loop_solver_rendered_query,
+        emit_loop_recurrence_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+        render_loop_v2_solver_query,
+    )
+    from scripts.function_tracer_pcode.smt.interface import (
+        SolverResult,
+        SolverStatus,
+    )
+    from scripts.function_tracer_pcode.smt.parallel import ParallelResult
+    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
+    import scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence as loop_fixture
+
+    worker_key_file = Path(os.environ[
+        "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
+    ])
+    activate_process_worker_execution_authority_deployment(
+        key_id=os.environ["UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID"],
+        key=worker_key_file.read_bytes(),
+        key_source_id=str(worker_key_file.resolve()),
+    )
+    execution_module._PINNED_PARALLEL_RUN_IMPL = (
+        lambda _runner, _query, timeout: ParallelResult(results=[
+            SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
+        ])
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    producer_manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    loop_encoder = LoopRecurrencePilotEncoder()
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=LOOP_REASON_REGISTRY,
+            recovery_registry=LOOP_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            LoopBlockerProductionSignal: loop_encoder,
+            LoopSolverExecutionBatchSignal: loop_encoder,
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            producer_manifest, identity
+        ),
+    )
+    raw_payload = {"case": "supervisor-retry-timeout"}
+    session = connector.begin(raw_payload)
+    blocker, _, _, _, exact_case, summary_case, left, right = (
+        loop_fixture._loop_exact_fixture()
+    )
+    with production_signal_scope(session):
+        assert emit_loop_recurrence_signal(
+            blocker,
+            producer_site_manifest_id="pairwise-pending-loop-blocker",
+        ) == 1
+        requirement = active_loop_requirement_for_signal(
+            blocker, "loop_exact_term_relation"
+        )
+        rendered = render_loop_v2_solver_query(
+            blocker=blocker,
+            requirement=requirement,
+            analysis1=left,
+            analysis2=right,
+            case1=exact_case,
+            case2=summary_case,
+            pair_id="(supervisor,left,right)",
+            execution_identity_digest=session.identity.execution_identity_digest,
+        )
+        assert execute_loop_solver_rendered_query(
+            blocker, rendered, configured_timeout_ms=1000
+        ) == 1
+    legacy = SimpleNamespace(
+        is_equivalent=None,
+        error_message=None,
+        failure_status=None,
+        failure_message=None,
+        is_timeout=lambda: True,
+    )
+    evidence = connector.finish(
+        session, legacy, case_id="supervisor-retry-timeout"
+    )
+    preimage = {"final_outcome": "TIMEOUT", "total_time": 0.0}
+    bundle = build_canonical_result_finalization_bundle(
+        result_payload_preimage=preimage,
+        evidence=evidence,
+        session=session,
+    )
+    persist_canonical_result_envelope({
+        **preimage,
+        "canonical_result_finalization_bundle": bundle,
+    })
+    raise SystemExit(3)
+
+
 def test_process_start_token_is_bound_to_current_linux_process():
     token = read_process_start_token(os.getpid())
     assert token.startswith("linux-proc-starttime-")
@@ -297,6 +421,128 @@ def test_whole_process_mode_rejects_bundleless_child_exit(tmp_path):
     config.authority_output.unlink()
     assert ProcessSupervisorCommand(config).run() == 2
     assert _projection(config.authority_output)["status"] == "INVALID"
+
+
+def test_whole_process_mode_accepts_deployment_signed_loop_timeout(
+    tmp_path, monkeypatch,
+):
+    nonce = "supervisor-retry-timeout-nonce"
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE", nonce
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionPilotExecutionIdentity,
+    )
+
+    identity = ProductionPilotExecutionIdentity.create({
+        "case": "supervisor-retry-timeout",
+        "result_entry_occurrence_nonce": nonce,
+    })
+    child_code = (
+        "from scripts.function_tracer_pcode.tests.unit."
+        "test_unknown_taxonomy_v2_phase6_process_supervisor_command "
+        "import _child_persist_canonical_production_loop_timeout;"
+        "_child_persist_canonical_production_loop_timeout()"
+    )
+    _authority, base = _config(
+        tmp_path, (sys.executable, "-c", child_code), timeout=30.0
+    )
+    config = replace(
+        base,
+        allow_child_exit_resolution=True,
+        result_occurrence_id=identity.result_occurrence_id,
+        source_snapshot_fingerprint=identity.source_snapshot_fingerprint,
+        stream_id=f"stream-{identity.result_occurrence_id}",
+    )
+    command = ProcessSupervisorCommand(config)
+    assert command.run() == 0
+    projection = _projection(config.authority_output)
+    assert projection["status"] == "RESOLVED"
+    assert projection["canonical_outcome"] == "TIMEOUT"
+    assert command.execution_authority_startup_receipt.active_key_id == (
+        config.worker_signing_key_id
+    )
+    envelope = json.loads((
+        config.checkpoint_root / config.execution_nonce
+        / "canonical-result-envelope.json"
+    ).read_text(encoding="utf-8"))
+    selection = envelope["canonical_result_payload"][
+        "canonical_result_finalization_bundle"
+    ]["terminal_timeout_candidate_selection_receipt"]
+    assert selection["producer_attempt_ordinal"] == 1
+    assert selection["resolver_candidate_bindings"]
+    stream = envelope["canonical_result_payload"][
+        "canonical_result_finalization_bundle"
+    ]["sealed_event_stream"]
+    encoded_receipts = [
+        event["authority_payload"]["execution_receipt_authority"]
+        for event in stream["payload"]["events"]
+        if event["header"]["event_type"] == "SOLVER_TIMEOUT"
+    ]
+    assert len(encoded_receipts) == 1
+    assert {
+        receipt["signing_key_id"] for receipt in encoded_receipts
+    } == {config.worker_signing_key_id}
+    log_path = tmp_path / "retry-timeout.log"
+    log_path.write_text("", encoding="utf-8")
+    from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+        generate_pair_status_keypair,
+        validate_signed_pair_status,
+    )
+
+    private_key = tmp_path / "pair-status.key"
+    public_key = tmp_path / "pair-status-verification-key.json"
+    generate_pair_status_keypair(private_key, public_key)
+    target_body = {
+        "schema": "eqbench-pair-execution-target-v1",
+        "authority_kind": "PairExecutionTargetReceipt",
+        "sample_identity": "production-loop-timeout",
+        "output_sample_relative_path": "production-loop-timeout",
+        "function_name": "f",
+        "left_binary_id": "B1",
+        "right_binary_id": "B2",
+        "source_path": "source.c",
+        "source_sha256": "a" * 64,
+        "left_binary_path": "left.bin",
+        "left_binary_sha256": "b" * 64,
+        "right_binary_path": "right.bin",
+        "right_binary_sha256": "c" * 64,
+        "analysis_source_digest": "d" * 64,
+        "analysis_config_digest": "e" * 64,
+    }
+    target = {**target_body, "target_digest": authority_digest(target_body)}
+    target_path = tmp_path / "pair-target.json"
+    target_path.write_text(json.dumps(target), encoding="utf-8")
+    classified_process = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.equivalence.v2.canonical_result",
+            "--classify-pair-log", str(log_path),
+            "--supervisor-projection", str(config.authority_output),
+            "--checkpoint-root", str(config.checkpoint_root),
+            "--execution-nonce", config.execution_nonce,
+            "--supervisor-signing-key-id", config.supervisor_signing_key_id,
+            "--supervisor-signing-key-file", str(config.supervisor_signing_key_file),
+            "--worker-signing-key-id", config.worker_signing_key_id,
+            "--worker-signing-key-file", str(config.worker_signing_key_file),
+            "--pair-status-signing-private-key-file", str(private_key),
+            "--pair-status-verification-key-file", str(public_key),
+            "--pair-execution-target-file", str(target_path),
+        ),
+        cwd=Path(__file__).resolve().parents[4],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert classified_process.returncode == 0, classified_process.stderr
+    sealed_status = json.loads(classified_process.stdout)
+    classified = validate_signed_pair_status(
+        sealed_status, public_key_path=public_key
+    )
+    assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["supervisor_status"] == "RESOLVED"
+    assert classified["classification_valid"] is True
 
 
 def test_deadline_without_worker_checkpoint_gets_durable_process_timeout(tmp_path):

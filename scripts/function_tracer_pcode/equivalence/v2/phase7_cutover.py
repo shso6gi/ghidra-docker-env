@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .contracts import CActiveBaseRow, QOpenBaseRow, authority_digest
 from .reducer import CauseLifecycleSnapshot, ShadowLifecycleReducer
@@ -1042,6 +1042,201 @@ def typed_cause_coverage(
 _PROJECTION_FACTORY_TOKEN = object()
 _TIMEOUT_SELECTION_TOKEN = object()
 _TIMEOUT_FACTORY_TOKEN = object()
+_TIMEOUT_CANDIDATE_SELECTION_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
+class TerminalTimeoutCandidateSelectionReceipt:
+    result_occurrence_id: str
+    source_snapshot_fingerprint: str
+    source_event_stream_digest: str
+    terminal_candidate_view_digest: str
+    lifecycle_projection_digest: str
+    event_sequence_number: int
+    event_digest: str
+    proof_requirement_id: str
+    solver_invocation_id: str
+    query_digest: str
+    producer_attempt_identity: str
+    producer_attempt_ordinal: int
+    execution_identity_digest: str
+    execution_receipt_digest: str
+    resolver_candidate_bindings: tuple[tuple[int, str], ...]
+    receipt_digest: str
+
+    def __init__(self, *values, _factory_token=None) -> None:
+        if _factory_token is not _TIMEOUT_CANDIDATE_SELECTION_TOKEN:
+            raise ValueError("terminal timeout candidate selections are factory-issued")
+        for name, value in zip(tuple(self.__dataclass_fields__), values):
+            object.__setattr__(self, name, value)
+
+    @staticmethod
+    def _validate_candidate_view(stream: SealedEventStream, candidate_view: Any) -> None:
+        required = (
+            "lifecycle_projection_digest", "timeout_candidates",
+            "counterexample_event_digests", "error_event_digests",
+            "competing_decisive_event_digests", "view_digest",
+        )
+        if any(not hasattr(candidate_view, name) for name in required):
+            raise TypeError("terminal timeout candidate view is incomplete")
+        payload = {
+            "result_occurrence_id": stream.envelope.result_occurrence_id,
+            "lifecycle_projection_digest": candidate_view.lifecycle_projection_digest,
+            "timeout_candidates": tuple(candidate_view.timeout_candidates),
+            "counterexample_event_digests": tuple(
+                candidate_view.counterexample_event_digests
+            ),
+            "error_event_digests": tuple(candidate_view.error_event_digests),
+            "competing_decisive_event_digests": tuple(
+                candidate_view.competing_decisive_event_digests
+            ),
+        }
+        if authority_digest(payload) != candidate_view.view_digest:
+            raise ValueError("terminal timeout candidate view digest differs")
+
+    @staticmethod
+    def _event_authority_fields(event: Any) -> Mapping[str, Any]:
+        payload = event.authority_payload
+        if type(payload) not in {
+            GenericReceiptBoundSolverExecutionEventAuthority,
+            ReceiptBoundSolverExecutionEventAuthority,
+        }:
+            raise TypeError("terminal timeout selection requires a receipt-bound solver event")
+        if (
+            event.header.event_type is not EventType.SOLVER_TIMEOUT
+            or payload.terminal_candidate is not True
+        ):
+            raise ValueError("terminal timeout selection does not reference a candidate")
+        authority = payload.execution_receipt_authority
+        attempt_identity = authority.get(
+            "producer_attempt_identity", authority.get("attempt_group_identity")
+        )
+        attempt_ordinal = authority.get(
+            "producer_attempt_ordinal", authority.get("attempt_ordinal")
+        )
+        fields = {
+            "solver_invocation_id": payload.solver_invocation_id,
+            "query_digest": payload.query_digest,
+            "producer_attempt_identity": attempt_identity,
+            "producer_attempt_ordinal": attempt_ordinal,
+            "execution_identity_digest": authority.get("execution_identity_digest"),
+            "execution_receipt_digest": payload.execution_receipt_digest,
+        }
+        if any(type(value) is not str or not value for key, value in fields.items()
+               if key != "producer_attempt_ordinal"):
+            raise TypeError("terminal timeout selection execution identity is incomplete")
+        if type(attempt_ordinal) is not int or attempt_ordinal < 1:
+            raise TypeError("terminal timeout selection attempt ordinal is invalid")
+        return fields
+
+    @classmethod
+    def issue(
+        cls, stream: SealedEventStream, candidate_view: Any,
+        *, event_sequence_number: int, proof_requirement_id: str,
+        resolver_candidate_bindings: tuple[tuple[int, str], ...] | None = None,
+    ) -> "TerminalTimeoutCandidateSelectionReceipt":
+        stream.validate()
+        cls._validate_candidate_view(stream, candidate_view)
+        if type(event_sequence_number) is not int or event_sequence_number < 1:
+            raise TypeError("terminal timeout selection sequence is invalid")
+        if type(proof_requirement_id) is not str or not proof_requirement_id:
+            raise TypeError("terminal timeout selection requirement is invalid")
+        matches = tuple(
+            event for event in stream.events
+            if event.header.sequence_number == event_sequence_number
+        )
+        if len(matches) != 1:
+            raise ValueError("terminal timeout selection lacks one source event")
+        event = matches[0]
+        if event.authority_payload.proof_requirement_id != proof_requirement_id:
+            raise ValueError("terminal timeout selection requirement differs from event")
+        if (
+            event_sequence_number,
+            proof_requirement_id,
+            event.authority_digest,
+        ) not in tuple(candidate_view.timeout_candidates):
+            raise ValueError("terminal timeout selection is outside the frozen candidate view")
+        resolver_bindings = (
+            ((event_sequence_number, proof_requirement_id),)
+            if resolver_candidate_bindings is None
+            else tuple(resolver_candidate_bindings)
+        )
+        if (
+            not resolver_bindings
+            or len(resolver_bindings) != len(set(resolver_bindings))
+            or any(
+                type(sequence) is not int
+                or sequence < 1
+                or type(requirement) is not str
+                or not requirement
+                for sequence, requirement in resolver_bindings
+            )
+        ):
+            raise ValueError("terminal timeout resolver candidate set is invalid")
+        events_by_sequence = {
+            item.header.sequence_number: item for item in stream.events
+        }
+        resolver_candidates = []
+        frozen_candidates = {
+            (sequence, requirement, digest)
+            for sequence, requirement, digest
+            in candidate_view.timeout_candidates
+        }
+        for sequence, requirement in resolver_bindings:
+            candidate = events_by_sequence.get(sequence)
+            if (
+                candidate is None
+                or candidate.authority_payload.proof_requirement_id != requirement
+                or (sequence, requirement, candidate.authority_digest)
+                not in frozen_candidates
+            ):
+                raise ValueError(
+                    "terminal timeout resolver candidate is outside the frozen view"
+                )
+            resolver_candidates.append((
+                sequence, candidate.authority_digest, requirement,
+            ))
+        deterministic_winner = max(resolver_candidates)
+        if (
+            deterministic_winner[0] != event_sequence_number
+            or deterministic_winner[2] != proof_requirement_id
+        ):
+            raise ValueError("terminal timeout selection is not the deterministic winner")
+        fields = cls._event_authority_fields(event)
+        payload = {
+            "result_occurrence_id": stream.envelope.result_occurrence_id,
+            "source_snapshot_fingerprint": stream.envelope.source_snapshot_fingerprint,
+            "source_event_stream_digest": stream.envelope.authority_chain_digest,
+            "terminal_candidate_view_digest": candidate_view.view_digest,
+            "lifecycle_projection_digest": candidate_view.lifecycle_projection_digest,
+            "event_sequence_number": event_sequence_number,
+            "event_digest": event.authority_digest,
+            "proof_requirement_id": proof_requirement_id,
+            **fields,
+            "resolver_candidate_bindings": resolver_bindings,
+        }
+        return cls(
+            *payload.values(), authority_digest(payload),
+            _factory_token=_TIMEOUT_CANDIDATE_SELECTION_TOKEN,
+        )
+
+    def validate_against(
+        self, stream: SealedEventStream, candidate_view: Any,
+    ) -> None:
+        expected = self.issue(
+            stream,
+            candidate_view,
+            event_sequence_number=self.event_sequence_number,
+            proof_requirement_id=self.proof_requirement_id,
+            resolver_candidate_bindings=self.resolver_candidate_bindings,
+        )
+        if self != expected:
+            raise ValueError("terminal timeout candidate selection authority differs")
+
+    def to_authority_dict(self) -> Mapping[str, Any]:
+        return {
+            name: getattr(self, name) for name in self.__dataclass_fields__
+        }
 
 
 @dataclass(frozen=True, init=False)
@@ -1056,6 +1251,7 @@ class TerminalTimeoutAssignmentReceipt:
     assignment_requirement_ids: tuple[str, ...]
     execution_event_digests: tuple[str, ...]
     execution_receipt_digests: tuple[str, ...]
+    terminal_candidate_selection_receipt_digest: str
     receipt_digest: str
 
     def __init__(self, *values, _factory_token=None) -> None:
@@ -1079,7 +1275,10 @@ class TerminalTimeoutAssignmentFactory:
         self._selected_bundles: dict[int, VerifiedFinalizationBundle] = {}
 
     def issue(
-        self, bundle: VerifiedFinalizationBundle,
+        self, bundle: VerifiedFinalizationBundle, *,
+        candidate_selection: TerminalTimeoutCandidateSelectionReceipt | None = None,
+        candidate_selection_stream: SealedEventStream | None = None,
+        terminal_candidate_view: Any = None,
     ) -> TerminalTimeoutAssignmentReceipt:
         if not self._finalization_factory.owns(bundle):
             raise ValueError("timeout selection bundle is not verifier-owned")
@@ -1098,13 +1297,37 @@ class TerminalTimeoutAssignmentFactory:
             event for event in solver_timeouts
             if event.authority_payload.terminal_candidate is True
         )
-        if any(
+        events = all_terminal_candidates
+        if candidate_selection is not None:
+            if candidate_selection_stream is None or terminal_candidate_view is None:
+                raise ValueError("terminal timeout assignment lacks selection authority inputs")
+            candidate_selection.validate_against(
+                candidate_selection_stream, terminal_candidate_view
+            )
+            if (
+                candidate_selection.result_occurrence_id
+                != bundle.lifecycle_projection.result_occurrence_id
+                or candidate_selection.source_snapshot_fingerprint
+                != bundle.sealed_event_stream.envelope.source_snapshot_fingerprint
+            ):
+                raise ValueError("terminal timeout selection belongs to another execution")
+            events = tuple(
+                event for event in all_terminal_candidates
+                if (
+                    event.authority_payload.proof_requirement_id
+                    == candidate_selection.proof_requirement_id
+                    and event.authority_payload.execution_receipt_digest
+                    == candidate_selection.execution_receipt_digest
+                )
+            )
+            if len(events) != 1:
+                raise ValueError("terminal timeout selection lacks one Phase 7 event")
+        elif any(
             type(event.authority_payload)
             is not GenericReceiptBoundSolverExecutionEventAuthority
             for event in all_terminal_candidates
         ):
             raise ValueError("terminal timeout candidate lacks result-bound generic receipt")
-        events = all_terminal_candidates
         if any(
             event.header.event_type == EventType.PROCESS_TIMEOUT
             for event in bundle.sealed_event_stream.events
@@ -1127,10 +1350,19 @@ class TerminalTimeoutAssignmentFactory:
             raise ValueError("terminal timeout assignment events are not one execution")
         for event in events:
             authority = event.authority_payload.execution_receipt_authority
-            if authority["result_occurrence_id"] != (
-                bundle.lifecycle_projection.result_occurrence_id
+            receipt_result_occurrence_id = authority.get("result_occurrence_id")
+            if (
+                receipt_result_occurrence_id is not None
+                and receipt_result_occurrence_id
+                != bundle.lifecycle_projection.result_occurrence_id
             ):
                 raise ValueError("timeout execution receipt belongs to another result")
+            if (
+                type(event.authority_payload)
+                is GenericReceiptBoundSolverExecutionEventAuthority
+                and receipt_result_occurrence_id is None
+            ):
+                raise ValueError("generic timeout execution receipt lacks result binding")
         assignments = tuple(sorted(
             event.authority_payload.proof_requirement_id for event in events
         ))
@@ -1165,6 +1397,10 @@ class TerminalTimeoutAssignmentFactory:
             "execution_event_digests": tuple(event.authority_digest for event in events),
             "execution_receipt_digests": tuple(
                 event.authority_payload.execution_receipt_digest for event in events
+            ),
+            "terminal_candidate_selection_receipt_digest": (
+                candidate_selection.receipt_digest
+                if candidate_selection is not None else ""
             ),
         }
         receipt = TerminalTimeoutAssignmentReceipt(

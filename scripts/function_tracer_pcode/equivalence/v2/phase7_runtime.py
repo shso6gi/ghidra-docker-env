@@ -216,10 +216,18 @@ class Phase7ProductionRuntime:
             raise ValueError("cause events require producer activation")
         self._buffered.append((None, intent))
 
-    def finalize(self, *, stream_id: str, result_occurrence_id: str,
-                 source_snapshot_fingerprint: str) -> Phase7RuntimeResult:
+    def finalize(
+        self, *, stream_id: str, result_occurrence_id: str,
+        source_snapshot_fingerprint: str,
+        terminal_timeout_candidate_selection: Any = None,
+        terminal_timeout_selection_stream: Any = None,
+        terminal_candidate_view: Any = None,
+        terminal_timeout_selection_resolved: bool = False,
+    ) -> Phase7RuntimeResult:
         if self._finalized:
             raise ValueError("Phase 7 runtime is already finalized")
+        if type(terminal_timeout_selection_resolved) is not bool:
+            raise TypeError("Phase 7 timeout selection state is not exact")
         self._finalized = True
         ledger = self._activation_factory.seal()
         activations = {row.activation_id: row for row in ledger.receipts}
@@ -298,9 +306,17 @@ class Phase7ProductionRuntime:
             }
             and getattr(event.authority_payload, "terminal_candidate", False) is True
         )
-        if terminal_candidates:
+        if terminal_candidates and not (
+            terminal_timeout_selection_resolved
+            and terminal_timeout_candidate_selection is None
+        ):
             terminal_assignment = (
-                finalization_factory.open_timeout_assignment_factory().issue(bundle)
+                finalization_factory.open_timeout_assignment_factory().issue(
+                    bundle,
+                    candidate_selection=terminal_timeout_candidate_selection,
+                    candidate_selection_stream=terminal_timeout_selection_stream,
+                    terminal_candidate_view=terminal_candidate_view,
+                )
             )
             terminal_receipts = (TerminalTimeoutReceipt.create(
                 result_occurrence_id=result_occurrence_id,
@@ -583,6 +599,10 @@ class AuditedManifestPhase7Runtime:
     def finalize(
         self, *, stream_id: str, result_occurrence_id: str,
         source_snapshot_fingerprint: str,
+        terminal_timeout_candidate_selection: Any = None,
+        terminal_timeout_selection_stream: Any = None,
+        terminal_candidate_view: Any = None,
+        terminal_timeout_selection_resolved: bool = False,
     ) -> Phase7RuntimeResult:
         if self._finalized:
             raise ValueError("Phase 7 discovered runtime is already finalized")
@@ -620,6 +640,12 @@ class AuditedManifestPhase7Runtime:
             stream_id=stream_id,
             result_occurrence_id=result_occurrence_id,
             source_snapshot_fingerprint=source_snapshot_fingerprint,
+            terminal_timeout_candidate_selection=(
+                terminal_timeout_candidate_selection
+            ),
+            terminal_timeout_selection_stream=terminal_timeout_selection_stream,
+            terminal_candidate_view=terminal_candidate_view,
+            terminal_timeout_selection_resolved=terminal_timeout_selection_resolved,
         )
         return replace(
             result,

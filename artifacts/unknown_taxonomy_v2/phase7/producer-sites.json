@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "915fcf649b770d786953c199daaa2a6556ec181978c7812eb54624d5350497da",
+  "manifest_digest": "4079c0b6b91314aded05173a6f942641a173496cbea0ff4473d1a4109115f8c4",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -183,7 +183,7 @@
       "line": 1083,
       "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "d2bc9e1b64ac43679787aade53ba7ffc8d7cdeb78d2757e0a2fe2d432ac17670"
+      "source_sha256": "df134d7659fb86f6b2a5ed95d27205459d91535aabb7a03468775c24cf7dee38"
     },
     {
       "allowed_dispositions": [
@@ -506,10 +506,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1450,
+      "line": 1475,
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "b894685adbe0739d19bdf347f85225878a7f59b0e76e3c815ff18875092e09d2"
+      "source_sha256": "b9a57bc70a3a99ecbca6ce5356bd6ddf541a94c322289c69dbc00c5fa4eb25ca"
     },
     {
       "allowed_dispositions": [

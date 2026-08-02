@@ -291,6 +291,14 @@ def build_canonical_result_finalization_bundle(
         "terminal_timeout_receipts": tuple(
             _encoded(codec, item) for item in pilot.terminal_timeout_receipts
         ),
+        "terminal_timeout_candidate_selection_receipt": (
+            session.domain_signal_state[
+                "terminal_timeout_candidate_selection"
+            ].to_authority_dict()
+            if session.domain_signal_state.get(
+                "terminal_timeout_candidate_selection"
+            ) is not None else None
+        ),
         "error_receipts": tuple(
             _encoded(codec, item) for item in pilot.error_receipts
         ),
@@ -435,6 +443,7 @@ def build_supervisor_canonical_result_finalization_bundle(
             _encoded(codec, item)
             for item in replayed.terminal_timeout_receipts
         ),
+        "terminal_timeout_candidate_selection_receipt": None,
         "error_receipts": tuple(
             _encoded(codec, item) for item in replayed.error_receipts
         ),
@@ -468,6 +477,8 @@ def validate_canonical_result_finalization_bundle(
     bundle_verification_key_id: str | None = None,
     bundle_verification_key: bytes | None = None,
 ) -> Mapping[str, Any]:
+    from .stream import EventStreamPrefixView, EventType
+
     expected_keys = {
         "schema", "authority_kind", "execution_identity",
         "execution_payload",
@@ -475,6 +486,7 @@ def validate_canonical_result_finalization_bundle(
         "result_entry_occurrence_receipt", "sealed_event_stream",
         "terminalizations", "final_lifecycle_projection",
         "decisive_proof_receipts", "terminal_timeout_receipts",
+        "terminal_timeout_candidate_selection_receipt",
         "error_receipts", "decision_receipt",
         "canonical_result_payload_preimage_digest",
         "canonical_semantic_result_projection", "bundle_seal_key_id",
@@ -548,6 +560,125 @@ def validate_canonical_result_finalization_bundle(
         stream=stream,
         terminalizations=terminalizations,
     )
+    selection_payload = bundle[
+        "terminal_timeout_candidate_selection_receipt"
+    ]
+    selected_timeout_events = tuple(
+        event for event in stream.events
+        if any(
+            event.header.sequence_number == item.event_sequence_number
+            for item in terminalizations
+        )
+    )
+    solver_timeout_is_terminal = any(
+        event.header.event_type is EventType.SOLVER_TIMEOUT
+        for event in selected_timeout_events
+    )
+    if solver_timeout_is_terminal:
+        if type(selection_payload) is not dict:
+            raise ValueError(
+                "canonical solver TIMEOUT lacks candidate selection authority"
+            )
+        from .phase7_cutover import TerminalTimeoutCandidateSelectionReceipt
+        from .pilot import TerminalCandidateView
+
+        prefix_projection = reducer.replay_prefix(
+            EventStreamPrefixView.from_sealed_stream(stream)
+        )
+        open_ids = {
+            row.proof_requirement_id
+            for row in prefix_projection.q_open_base
+        }
+        timeout_candidates = tuple(sorted(
+            (
+                event.header.sequence_number,
+                event.authority_payload.proof_requirement_id,
+                event.authority_digest,
+            )
+            for event in stream.events
+            if event.header.event_type in {
+                EventType.SOLVER_TIMEOUT, EventType.PROCESS_TIMEOUT,
+            }
+            and getattr(
+                event.authority_payload, "proof_requirement_id", None
+            ) in open_ids
+        ))
+        view_payload = {
+            "result_occurrence_id": stream.envelope.result_occurrence_id,
+            "lifecycle_projection_digest": (
+                prefix_projection.prefix_projection_digest
+            ),
+            "timeout_candidates": timeout_candidates,
+            "counterexample_event_digests": tuple(sorted(
+                event.authority_digest for event in stream.events
+                if event.header.event_type is EventType.COUNTEREXAMPLE
+            )),
+            "error_event_digests": tuple(sorted(
+                event.authority_digest for event in stream.events
+                if event.header.event_type is EventType.ERROR
+            )),
+            "competing_decisive_event_digests": tuple(sorted(
+                event.authority_digest for event in stream.events
+                if event.header.event_type is EventType.EQ_CLOSURE
+            )),
+        }
+        candidate_view = TerminalCandidateView(
+            view_payload["lifecycle_projection_digest"],
+            view_payload["timeout_candidates"],
+            view_payload["counterexample_event_digests"],
+            view_payload["error_event_digests"],
+            view_payload["competing_decisive_event_digests"],
+            authority_digest(view_payload),
+        )
+        expected_selection = TerminalTimeoutCandidateSelectionReceipt.issue(
+            stream,
+            candidate_view,
+            event_sequence_number=selection_payload[
+                "event_sequence_number"
+            ],
+            proof_requirement_id=selection_payload[
+                "proof_requirement_id"
+            ],
+            resolver_candidate_bindings=tuple(
+                tuple(item) for item in selection_payload[
+                    "resolver_candidate_bindings"
+                ]
+            ),
+        )
+        expected_selection_payload = json.loads(json.dumps(
+            expected_selection.to_authority_dict()
+        ))
+        actual_selection_payload = json.loads(json.dumps(selection_payload))
+        if expected_selection_payload != actual_selection_payload:
+            differing_fields = tuple(sorted(
+                key for key in expected_selection_payload
+                if expected_selection_payload[key]
+                != actual_selection_payload.get(key)
+            ))
+            raise ValueError(
+                "canonical solver TIMEOUT candidate selection receipt differs: "
+                + repr(differing_fields)
+            )
+        if (
+            len(selected_timeout_events) != 1
+            or selected_timeout_events[0].header.sequence_number
+            != expected_selection.event_sequence_number
+        ):
+            raise ValueError(
+                "canonical solver TIMEOUT terminalization differs from selection"
+            )
+        if (
+            len(timeouts) != 1
+            or timeouts[0].execution_event_digest
+            != expected_selection.event_digest
+        ):
+            raise ValueError(
+                "canonical solver TIMEOUT receipt differs from selection"
+            )
+    elif selection_payload is not None:
+        raise ValueError(
+            "canonical non-solver terminal carries timeout selection authority"
+        )
     if (
         replayed.reduction.projection != projection
         or replayed.decisive_proof_receipts != decisive
@@ -775,12 +906,21 @@ def classify_pair_status(
     from .process_supervisor import (
         DurableCheckpointStore, ProcessSupervisorAuthorityFactory,
     )
+    from .execution_authority import (
+        activate_process_worker_execution_authority_deployment,
+    )
 
+    worker_key = Path(worker_signing_key_file).read_bytes()
+    activate_process_worker_execution_authority_deployment(
+        key_id=worker_signing_key_id,
+        key=worker_key,
+        key_source_id=str(Path(worker_signing_key_file).resolve()),
+    )
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id=supervisor_signing_key_id,
         supervisor_signing_key=Path(supervisor_signing_key_file).read_bytes(),
         worker_signing_key_id=worker_signing_key_id,
-        worker_signing_key=Path(worker_signing_key_file).read_bytes(),
+        worker_signing_key=worker_key,
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
     launch = factory.decode(json.loads(

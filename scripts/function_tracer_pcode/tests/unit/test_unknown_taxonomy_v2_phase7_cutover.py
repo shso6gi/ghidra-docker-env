@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
     SealedProducerSiteRegistry,
     TypedResultProjectionFactory,
     TypedResultProjectionReceipt,
+    TerminalTimeoutCandidateSelectionReceipt,
     TerminalTimeoutAssignmentFactory,
     VerifiedFinalizationBundleFactory,
     typed_cause_coverage,
@@ -216,7 +217,7 @@ def finalization_authority(
 
 def timeout_finalization_authority(
     *, duplicate=False, status="timeout", include_nonterminal_timeout=False,
-    include_outcome_terminal=False,
+    include_outcome_terminal=False, distinct_queries=False,
 ):
     outcome_receipt = (
         _outcome_execution_receipt("same_kind_consistency", "timeout")
@@ -306,6 +307,10 @@ def timeout_finalization_authority(
         receipt = _execution_receipt(
             status=status,
             membership=_membership(status=status, requirement=requirement),
+            query=(
+                f"(assert (= query_{requirement} query_{requirement}))\n(check-sat)"
+                if distinct_queries else None
+            ),
         )
         recorder.append(EventIntent(
             event_type,
@@ -1095,6 +1100,83 @@ def test_multi_requirement_timeout_is_derived_from_exact_receipt_bound_events():
         factory.issue(bundle)
     with pytest.raises(ValueError, match="already has a timeout issuer"):
         finalization_factory.open_timeout_assignment_factory()
+
+
+def _terminal_candidate_view(bundle):
+    timeout_candidates = tuple(
+        (
+            event.header.sequence_number,
+            event.authority_payload.proof_requirement_id,
+            event.authority_digest,
+        )
+        for event in bundle.sealed_event_stream.events
+        if event.header.event_type is EventType.SOLVER_TIMEOUT
+        and event.authority_payload.terminal_candidate is True
+    )
+    payload = {
+        "result_occurrence_id": bundle.lifecycle_projection.result_occurrence_id,
+        "lifecycle_projection_digest": (
+            bundle.lifecycle_projection.lifecycle_projection_digest
+        ),
+        "timeout_candidates": timeout_candidates,
+        "counterexample_event_digests": (),
+        "error_event_digests": (),
+        "competing_decisive_event_digests": (),
+    }
+    return SimpleNamespace(**payload, view_digest=authority_digest(payload))
+
+
+def test_timeout_assignment_promotes_only_attempt_aware_selected_execution():
+    finalization_factory, bundle = timeout_finalization_authority(
+        distinct_queries=True
+    )
+    assignment_factory = finalization_factory.open_timeout_assignment_factory()
+    with pytest.raises(ValueError, match="events are not one execution"):
+        assignment_factory.issue(bundle)
+
+    view = _terminal_candidate_view(bundle)
+    selected_event = tuple(
+        event for event in bundle.sealed_event_stream.events
+        if event.header.event_type is EventType.SOLVER_TIMEOUT
+        and event.authority_payload.proof_requirement_id == "q-b"
+    )[0]
+    selection = TerminalTimeoutCandidateSelectionReceipt.issue(
+        bundle.sealed_event_stream,
+        view,
+        event_sequence_number=selected_event.header.sequence_number,
+        proof_requirement_id="q-b",
+    )
+    receipt = assignment_factory.issue(
+        bundle,
+        candidate_selection=selection,
+        candidate_selection_stream=bundle.sealed_event_stream,
+        terminal_candidate_view=view,
+    )
+    assert receipt.assignment_requirement_ids == ("q-b",)
+    assert receipt.execution_event_digests == (selected_event.authority_digest,)
+    assert (
+        receipt.terminal_candidate_selection_receipt_digest
+        == selection.receipt_digest
+    )
+
+
+def test_timeout_candidate_selection_rejects_execution_identity_tampering():
+    _, bundle = timeout_finalization_authority(distinct_queries=True)
+    view = _terminal_candidate_view(bundle)
+    selected_event = tuple(
+        event for event in bundle.sealed_event_stream.events
+        if event.header.event_type is EventType.SOLVER_TIMEOUT
+    )[-1]
+    selection = TerminalTimeoutCandidateSelectionReceipt.issue(
+        bundle.sealed_event_stream,
+        view,
+        event_sequence_number=selected_event.header.sequence_number,
+        proof_requirement_id=selected_event.authority_payload.proof_requirement_id,
+    )
+    forged = copy.deepcopy(selection)
+    object.__setattr__(forged, "execution_identity_digest", "forged-execution")
+    with pytest.raises(ValueError, match="selection authority differs"):
+        forged.validate_against(bundle.sealed_event_stream, view)
 
 
 def test_timeout_selection_rejects_non_timeout_duplicate_and_cross_factory_bundle():

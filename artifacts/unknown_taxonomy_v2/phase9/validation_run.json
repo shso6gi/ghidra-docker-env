@@ -1,11 +1,11 @@
 {
-  "artifact_digest": "2c627e831a2316d405e248c04fba5a5431b38bb624f42ebb2a2122ad4735cfc0",
+  "artifact_digest": "e647a3033813d587755625002b5092988e8856b583a5f6c9c86de81dad029fa1",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "0e3890d63b9d85b35e89767697ce9c9fb3b0ed7ec499586d6cb2d108ff4808cb",
-      "test_count": 576
+      "sha256": "16423f64f69691941ad8010d691c87610bd0a23f220dfb0217d743a70c602fd2",
+      "test_count": 584
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml",
@@ -19,8 +19,8 @@
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-      "sha256": "d43d5bdf1e7d764ec7ef7ff6c1315c134e46c304ae7f99bb8aa03dbabcbac17d",
-      "test_count": 623
+      "sha256": "d1efb98cfbf3ceb59a1a69bb9789a547048c1036c19fcd40e5817c3e15407fb1",
+      "test_count": 719
     }
   ],
   "phase7_validator": "PASS",
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "865aaa65db74a49ae479f22b7685736b8b0d7ff52fb3a6655fd24d8ea6ef2a59",
+    "current_contract_digest": "24eea55fde41865113a1463c6db798d417a53053a5e510fd98d52ede5b5ed555",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3020,7 +3020,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        1370
+        1395
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -3854,25 +3854,25 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_active_process_authority",
-        36
+        37
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor_command",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor",
         "_completed_continuation",
-        36
+        37
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
         "scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage",
         "_unary_solver_status",
-        215
+        223
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
         "scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage",
         "_unary_solver_status",
-        577
+        585
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_sat_safety",
@@ -3890,25 +3890,25 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase7_cutover",
         "scripts.function_tracer_pcode.equivalence.strategies.proof_gates.sat_safety",
         "_v2_observe_sat_unsafety_reason",
-        70
+        71
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase7_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_call_effect",
         "_execution_receipt",
-        101
+        102
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase7_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_call_effect",
         "_membership",
-        101
+        102
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase7_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
         "_execution_receipt",
-        105
+        106
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "1cca6b954ebff9a5b872c65748888a58a6b1822fb1064884d990e681ebcde578",
+    "current_source_tree_hash": "62213477694125169ec983acd31f1bb132c21f132be82dbe8accf999454514ff",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

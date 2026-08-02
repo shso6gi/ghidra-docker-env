@@ -18,8 +18,12 @@ from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
     reason_for_stage_status,
 )
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    CompositeProductionSignalEncoder,
     OutcomePartitionProductionSignal,
     production_signal_scope,
+)
+from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+    runtime_from_audited_manifest,
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import (
     EventRecorder,
@@ -33,8 +37,12 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome, auth
 from scripts.function_tracer_pcode.equivalence.v2.codecs import StrictV2JsonCodec
 from scripts.function_tracer_pcode.equivalence.v2.pilot import (
     ProductionDualWritePilotConnector,
+    TerminalCandidateView,
     TerminalizationIntent,
     run_dual_write_pilot,
+)
+from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
+    TerminalTimeoutCandidateSelectionReceipt,
 )
 from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
 from scripts.function_tracer_pcode.equivalence.obligations.outcome_partition import (
@@ -738,6 +746,185 @@ def test_latest_retry_supersedes_older_terminal_timeout_candidate(
     assert result.candidate.decision_receipt.outcome == expected_outcome
     if retry_status == "error":
         assert stream.events[-1].header.event_type == EventType.SOLVER_ERROR
+
+
+def test_production_finish_seals_latest_retry_timeout_selection_receipt():
+    root = Path(__file__).resolve().parents[4]
+    producer_manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=RETURN_OUTCOME_REASON_REGISTRY,
+            recovery_registry=RETURN_OUTCOME_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            OutcomePartitionProductionSignal: ReturnOutcomePilotEncoder(),
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            producer_manifest, identity
+        ),
+    )
+    session = connector.begin({"phase": "6.2", "case": "retry-timeout-selection"})
+    for ordinal in (1, 2):
+        receipt = _execution_receipt(
+            "residual_totality",
+            "timeout",
+            ordinal=ordinal,
+            producer_attempt_ordinal=ordinal,
+            execution_identity_digest=session.identity.execution_identity_digest,
+        )
+        signal = _signal("residual_totality", "timeout", receipt)
+        session.record_phase7_pre_emission_activation(
+            "outcome-partition-stage-result", signal
+        )
+        assert session.emit_domain_signal(signal) > 0
+    legacy = SimpleNamespace(
+        is_equivalent=None,
+        error_message=None,
+        failure_status=None,
+        failure_message=None,
+        is_timeout=lambda: True,
+    )
+    evidence = connector.finish(
+        session, legacy, case_id="phase6.2-retry-timeout-selection"
+    )
+    evidence.validate()
+    selection = session.domain_signal_state[
+        "terminal_timeout_candidate_selection"
+    ]
+    assert selection.producer_attempt_ordinal == 2
+    assert selection.execution_identity_digest == session.identity.execution_identity_digest
+    assignment = session.phase7_runtime_result.terminal_timeout_assignment_receipt
+    assert assignment.assignment_requirement_ids == (
+        selection.proof_requirement_id,
+    )
+    assert assignment.execution_receipt_digests == (
+        selection.execution_receipt_digest,
+    )
+    assert session.terminalizations == [
+        TerminalizationIntent(
+            selection.event_sequence_number, selection.proof_requirement_id
+        )
+    ]
+
+
+def test_latest_timeout_selection_is_deterministic_across_requirements():
+    reducer = ShadowLifecycleReducer(
+        reason_registry=RETURN_OUTCOME_REASON_REGISTRY,
+        recovery_registry=RETURN_OUTCOME_RECOVERY_REGISTRY,
+    )
+    encoder = ReturnOutcomePilotEncoder()
+    session = _session()
+    session.reducer = reducer
+    recorder = EventRecorder(
+        stream_id="different-requirement-timeouts",
+        result_occurrence_id=session.identity.result_occurrence_id,
+        source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
+    )
+    for stage in ("same_kind_consistency", "residual_totality"):
+        receipt = _execution_receipt(stage, "timeout", ordinal=1)
+        for intent in encoder(session, _signal(stage, "timeout", receipt)):
+            recorder.append(intent)
+    stream = recorder.seal()
+    bindings = encoder.finalize_terminal_timeout_bindings(session, stream)
+    assert len(bindings) == 1
+    selected = stream.events[bindings[0][0] - 1]
+    assert selected.authority_payload.proof_requirement_id == bindings[0][1]
+    assert selected == stream.events[-1]
+
+
+def test_composite_timeout_selection_arbitrates_multiple_proof_domains():
+    reducer = ShadowLifecycleReducer(
+        reason_registry=RETURN_OUTCOME_REASON_REGISTRY,
+        recovery_registry=RETURN_OUTCOME_RECOVERY_REGISTRY,
+    )
+    session = _session()
+    session.reducer = reducer
+    encoder = ReturnOutcomePilotEncoder()
+    recorder = EventRecorder(
+        stream_id="cross-domain-timeouts",
+        result_occurrence_id=session.identity.result_occurrence_id,
+        source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
+    )
+    session.recorder = recorder
+    for stage in ("same_kind_consistency", "residual_totality"):
+        receipt = _execution_receipt(stage, "timeout", ordinal=1)
+        for intent in encoder(session, _signal(stage, "timeout", receipt)):
+            recorder.append(intent)
+    stream = session.recorder.prefix_view().to_sealed_stream()
+    timeout_events = tuple(
+        event for event in stream.events
+        if event.header.event_type is EventType.SOLVER_TIMEOUT
+    )
+    assert len(timeout_events) == 2
+
+    class FirstDomain:
+        def __call__(self, _session, _signal):
+            return ()
+
+        def finalize_terminal_timeout_bindings(self, _session, _stream):
+            event = timeout_events[0]
+            return ((
+                event.header.sequence_number,
+                event.authority_payload.proof_requirement_id,
+            ),)
+
+    class SecondDomain:
+        def __call__(self, _session, _signal):
+            return ()
+
+        def finalize_terminal_timeout_bindings(self, _session, _stream):
+            event = timeout_events[1]
+            return ((
+                event.header.sequence_number,
+                event.authority_payload.proof_requirement_id,
+            ),)
+
+    class FirstSignal:
+        pass
+
+    class SecondSignal:
+        pass
+
+    composite = CompositeProductionSignalEncoder({
+        FirstSignal: FirstDomain(),
+        SecondSignal: SecondDomain(),
+    })
+    winner = composite.finalize_terminal_timeout_bindings(session, stream)
+    expected = timeout_events[-1]
+    assert winner == ((
+        expected.header.sequence_number,
+        expected.authority_payload.proof_requirement_id,
+    ),)
+    domain_candidates = session.domain_signal_state[
+        "terminal_timeout_domain_candidate_bindings"
+    ]
+    projection = reducer.replay_prefix(session.recorder.prefix_view())
+    view = TerminalCandidateView.freeze(session, projection)
+    selection = TerminalTimeoutCandidateSelectionReceipt.issue(
+        stream,
+        view,
+        event_sequence_number=winner[0][0],
+        proof_requirement_id=winner[0][1],
+        resolver_candidate_bindings=domain_candidates,
+    )
+    assert selection.resolver_candidate_bindings == domain_candidates
+    with pytest.raises(ValueError, match="deterministic winner"):
+        TerminalTimeoutCandidateSelectionReceipt.issue(
+            stream,
+            view,
+            event_sequence_number=timeout_events[0].header.sequence_number,
+            proof_requirement_id=(
+                timeout_events[0].authority_payload.proof_requirement_id
+            ),
+            resolver_candidate_bindings=domain_candidates,
+        )
+    assert len({
+        event.authority_payload.proof_requirement_id
+        for event in stream.events
+        if event.header.event_type is EventType.SOLVER_TIMEOUT
+    }) == 2
 
 
 @pytest.mark.parametrize("reverse_receipts", (False, True))

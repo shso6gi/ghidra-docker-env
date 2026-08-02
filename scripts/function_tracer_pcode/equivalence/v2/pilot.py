@@ -1112,11 +1112,74 @@ class ProductionDualWritePilotConnector:
         if live_pending:
             session.closed = True
             raise ValueError("production session cannot seal with live pending EQ")
+        timeout_selection_stream = (
+            session.recorder.prefix_view().to_sealed_stream()
+        )
+        terminal_resolver = getattr(
+            session.domain_signal_encoder,
+            "finalize_terminal_timeout_bindings",
+            None,
+        )
+        timeout_selection_was_resolved = callable(terminal_resolver)
+        terminal_bindings = (
+            tuple(terminal_resolver(session, timeout_selection_stream))
+            if callable(terminal_resolver) else ()
+        )
+        if len(terminal_bindings) > 1:
+            session.closed = True
+            raise ValueError("terminal timeout resolver selected multiple executions")
+        frozen_timeout_bindings = {
+            (sequence_number, requirement_id)
+            for sequence_number, requirement_id, _event_digest
+            in terminal_candidate_view.timeout_candidates
+        }
+        if any(
+            binding not in frozen_timeout_bindings
+            for binding in terminal_bindings
+        ):
+            session.closed = True
+            raise ValueError(
+                "timeout resolver selected an unfrozen candidate"
+            )
+        terminal_timeout_candidate_selection = None
+        if terminal_bindings:
+            from .phase7_cutover import (
+                TerminalTimeoutCandidateSelectionReceipt,
+            )
+
+            sequence_number, requirement_id = terminal_bindings[0]
+            resolver_candidate_bindings = tuple(
+                session.domain_signal_state.get(
+                    "terminal_timeout_domain_candidate_bindings",
+                    terminal_bindings,
+                )
+            )
+            terminal_timeout_candidate_selection = (
+                TerminalTimeoutCandidateSelectionReceipt.issue(
+                    timeout_selection_stream,
+                    terminal_candidate_view,
+                    event_sequence_number=sequence_number,
+                    proof_requirement_id=requirement_id,
+                    resolver_candidate_bindings=resolver_candidate_bindings,
+                )
+            )
+            session.domain_signal_state[
+                "terminal_timeout_candidate_selection"
+            ] = terminal_timeout_candidate_selection
+            session.terminalize(sequence_number, requirement_id)
         if session.phase7_runtime is not None:
             session.phase7_runtime_result = session.phase7_runtime.finalize(
                 stream_id=f"phase7-{session.identity.result_occurrence_id}",
                 result_occurrence_id=session.identity.result_occurrence_id,
                 source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
+                terminal_timeout_candidate_selection=(
+                    terminal_timeout_candidate_selection
+                ),
+                terminal_timeout_selection_stream=timeout_selection_stream,
+                terminal_candidate_view=terminal_candidate_view,
+                terminal_timeout_selection_resolved=(
+                    timeout_selection_was_resolved
+                ),
             )
             from ..unknown_reason import make_production_unknown_reason
 
@@ -1134,28 +1197,6 @@ class ProductionDualWritePilotConnector:
             ]
             result.unknown_reason_projection_mode = "V2_CANONICAL"
         stream = session.recorder.seal()
-        terminal_resolver = getattr(
-            session.domain_signal_encoder,
-            "finalize_terminal_timeout_bindings",
-            None,
-        )
-        if callable(terminal_resolver):
-            terminal_bindings = tuple(terminal_resolver(session, stream))
-            frozen_timeout_bindings = {
-                (sequence_number, requirement_id)
-                for sequence_number, requirement_id, _event_digest
-                in terminal_candidate_view.timeout_candidates
-            }
-            if any(
-                binding not in frozen_timeout_bindings
-                for binding in terminal_bindings
-            ):
-                session.closed = True
-                raise ValueError(
-                    "post-seal timeout resolver selected an unfrozen candidate"
-                )
-            for sequence_number, requirement_id in terminal_bindings:
-                session.terminalize(sequence_number, requirement_id)
         if session.domain_signal_error_kinds:
             session.closed = True
             raise ValueError(

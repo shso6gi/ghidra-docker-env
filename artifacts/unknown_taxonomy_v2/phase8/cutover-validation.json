@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "8530b6a0a2c21116d3765a81efc8b03a4536ba9557bb3bcc4f47fe6d5f20aa8f",
+  "artifact_digest": "a86baf78316fb88c8b974ce6ccde50cedf217c4f406c8ae25f34e0dac889157d",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -27,7 +27,7 @@
     "canonical_census_uses_manifest_receipt_stream_join": {
       "junit": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
       "required_test_count": 3,
-      "test_count": 576
+      "test_count": 584
     },
     "decision_receipt_only_final_status": {
       "junit": "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml",
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "88c220d9d20d63ba58e31310d947aff6d374c4d5d92ca21987c84f8c75258f43"
+    "sha256": "38fae280eb3259233d25d372af4ad65a89624dc20707b30173e88e500eebfccd"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "915fcf649b770d786953c199daaa2a6556ec181978c7812eb54624d5350497da",
+    "manifest_digest": "4079c0b6b91314aded05173a6f942641a173496cbea0ff4473d1a4109115f8c4",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "5633148d0a7f981dcc18cd1283fd40ed3716521d617cec5f2497f5b504725609",
+    "sha256": "3a9b19b611dd2e507ff73a905912e0bef92f2664266a521775e716d2d5a00c89",
     "site_count": 28
   },
   "source_files": [
@@ -164,7 +164,15 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/phase8_cutover.py",
-      "sha256": "1c745d3fa9c78736b0e6936bdc9a366c9fc5636afb6c2507bfd70217e7681eb6"
+      "sha256": "fc03d18f0fe8ec9289e50f5b171885d65b696d3234c1e8a645603e889689d9dc"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py",
+      "sha256": "2712dbf0409ae3d2d61bc7270e84ec0adb307cd10f8c7d57318b824bb8f9494a"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/process_supervisor_command.py",
+      "sha256": "3e3adfc2276e38f5336160481860b82b6e379431f6c86b484cd5edd56ddb3503"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
@@ -176,7 +184,23 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
-      "sha256": "b894685adbe0739d19bdf347f85225878a7f59b0e76e3c815ff18875092e09d2"
+      "sha256": "b9a57bc70a3a99ecbca6ce5356bd6ddf541a94c322289c69dbc00c5fa4eb25ca"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/phase7_cutover.py",
+      "sha256": "5710bf74f43be40104872d9951fa6b0da5a4539948008676ebbfb083dba93633"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/phase7_runtime.py",
+      "sha256": "8ce22e5f2c380cf5b84a9b95c38745b6428f0655c853cb89189877bb233f2083"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+      "sha256": "df134d7659fb86f6b2a5ed95d27205459d91535aabb7a03468775c24cf7dee38"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/equivalence/v2/return_outcome.py",
+      "sha256": "4e6a1d82f7dd8adc90592fe50fba803b5f07841391d7d5fa9624b64815a13d0b"
     },
     {
       "path": "scripts/function_tracer_pcode/validation/result_summary.py",
@@ -227,23 +251,35 @@
       "sha256": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
     },
     {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
+      "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
+      "sha256": "f3a7dd1d0f6278985308ef94f251e793f31c48b1eef82ad4d6e4433ec83eca48"
+    },
+    {
+      "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
+      "sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8"
+    },
+    {
       "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
-      "sha256": "10220abdfc262d0b63b7c066509058e515399d2e1cf267c0814bb7fa9591d48e"
+      "sha256": "dc47aaebe253e7c5cda2630bf8a2a76c56907bee9e9db7bc94e701d4fca246e8"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
-      "sha256": "fa6dab46eae7b7f1fc156626f3f8598501a301335ee9cc5ae783819735bd055c"
+      "sha256": "356f7604f54ce0de4d5df023a644661f1e249c2954acea5d957905b82c29973a"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
-      "sha256": "fdec5f173c2094a7a15893c96efa8d03d52851bac59c61d75254c1c2f652e860"
+      "sha256": "66204325b8f166c83a7099e59fa424bfc62f04e56e14e3164eb145db1893efe0"
     }
   ],
-  "source_tree_digest": "9a5f90cd65b2e41c02fa95c45a062088292f44fe1f08398947f613f84add6210",
+  "source_tree_digest": "bcba71bb2d8dc94b5703fcda3c13980761752344f45674964be1ec48c4258eda",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
-    "sha256": "d43d5bdf1e7d764ec7ef7ff6c1315c134e46c304ae7f99bb8aa03dbabcbac17d",
+    "sha256": "d1efb98cfbf3ceb59a1a69bb9789a547048c1036c19fcd40e5817c3e15407fb1",
     "source_files": [
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_recovery.py",
@@ -316,8 +352,20 @@
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
         "sha256": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
+        "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
+        "sha256": "f3a7dd1d0f6278985308ef94f251e793f31c48b1eef82ad4d6e4433ec83eca48"
+      },
+      {
+        "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
+        "sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8"
       }
     ],
-    "test_count": 623
+    "test_count": 719
   }
 }

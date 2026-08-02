@@ -315,6 +315,27 @@ def validate_execution_authority_deployment() -> ExecutionAuthorityStartupReceip
     return activate_execution_authority_deployment(policy)
 
 
+def activate_process_worker_execution_authority_deployment(
+    *, key_id: str, key: bytes, key_source_id: str,
+) -> ExecutionAuthorityStartupReceipt:
+    """Install the EqBench worker key under the shared process deployment policy."""
+
+    _exact_string(key_source_id, "process worker execution key source")
+    install_execution_authority_signing_key(key_id, key)
+    return activate_execution_authority_deployment(
+        ExecutionAuthorityDeploymentPolicy(
+            "phase8-process-worker-execution-authority",
+            1,
+            "eqbench-process-supervisor",
+            key_source_id,
+            key_id,
+            (),
+            86400,
+            "phase8-process-worker-revocation",
+        )
+    )
+
+
 def _initialize_factory_value(
     instance: Any,
     payload: Mapping[str, Any],

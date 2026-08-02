@@ -832,7 +832,32 @@ class CompositeProductionSignalEncoder:
                 bindings.extend(resolver(session, stream))
         if len({sequence for sequence, _ in bindings}) != len(bindings):
             raise ValueError("duplicate production terminal timeout selection")
-        return tuple(sorted(bindings))
+        ordered = tuple(sorted(bindings))
+        session.domain_signal_state[
+            "terminal_timeout_domain_candidate_bindings"
+        ] = ordered
+        if len(ordered) <= 1:
+            return ordered
+        events = {
+            event.header.sequence_number: event for event in stream.events
+        }
+        candidates = []
+        for sequence_number, requirement_id in ordered:
+            event = events.get(sequence_number)
+            if (
+                event is None
+                or event.authority_payload.proof_requirement_id != requirement_id
+            ):
+                raise ValueError(
+                    "production terminal timeout selection is outside the source stream"
+                )
+            candidates.append((
+                sequence_number,
+                event.authority_digest,
+                requirement_id,
+            ))
+        winner = max(candidates)
+        return ((winner[0], winner[2]),)
 
     def finalize_open_execution_history(self, session: Any) -> None:
         encoders = tuple({id(value): value for value in self._routes.values()}.values())

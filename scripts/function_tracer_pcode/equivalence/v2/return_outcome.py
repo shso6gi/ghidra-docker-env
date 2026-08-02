@@ -981,7 +981,11 @@ class ReturnOutcomePilotEncoder:
                 latest_marker_by_requirement[requirement_id] = event
         winning_marker = max(
             latest_marker_by_requirement.values(),
-            key=lambda event: event.authority_payload.producer_attempt_ordinal,
+            key=lambda event: (
+                event.authority_payload.producer_attempt_ordinal,
+                event.header.sequence_number,
+                event.authority_digest,
+            ),
         )
         marker = winning_marker.authority_payload
         if marker.producer_status != "timeout":

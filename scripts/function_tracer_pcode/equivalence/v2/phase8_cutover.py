@@ -280,24 +280,14 @@ def build_default_cutover_connector() -> Any:
     worker_key_file = os.environ.get("UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE")
     if worker_key_id and worker_key_file:
         from .execution_authority import (
-            ExecutionAuthorityDeploymentPolicy,
-            activate_execution_authority_deployment,
-            install_execution_authority_signing_key,
+            activate_process_worker_execution_authority_deployment,
         )
 
-        install_execution_authority_signing_key(
-            worker_key_id, Path(worker_key_file).read_bytes()
+        activate_process_worker_execution_authority_deployment(
+            key_id=worker_key_id,
+            key=Path(worker_key_file).read_bytes(),
+            key_source_id=str(Path(worker_key_file).resolve()),
         )
-        activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
-            "phase8-process-worker-execution-authority",
-            1,
-            "eqbench-process-supervisor",
-            str(Path(worker_key_file).resolve()),
-            worker_key_id,
-            (),
-            86400,
-            "phase8-process-worker-revocation",
-        ))
 
     repo_root = Path(__file__).resolve().parents[4]
     manifest_path = repo_root / (

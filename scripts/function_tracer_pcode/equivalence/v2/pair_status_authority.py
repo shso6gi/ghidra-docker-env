@@ -317,8 +317,6 @@ def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
     authority_kind = body.get("authority_kind")
     supervisor_kind = body.get("supervisor_authority_kind")
     if status == "RESOLVED":
-        if outcome == "TIMEOUT":
-            raise ValueError("pair-status RESOLVED/TIMEOUT join is invalid")
         if (
             authority_kind != "SupervisorCanonicalResultResolvedReceipt"
             or supervisor_kind != "SupervisorCanonicalResultResolvedReceipt"

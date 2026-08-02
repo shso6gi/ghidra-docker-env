@@ -41,9 +41,15 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/transform/expander.py",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
     "scripts/function_tracer_pcode/equivalence/v2/phase8_cutover.py",
+    "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py",
+    "scripts/function_tracer_pcode/equivalence/v2/process_supervisor_command.py",
     "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
     "scripts/function_tracer_pcode/equivalence/v2/production_context.py",
     "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
+    "scripts/function_tracer_pcode/equivalence/v2/phase7_cutover.py",
+    "scripts/function_tracer_pcode/equivalence/v2/phase7_runtime.py",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+    "scripts/function_tracer_pcode/equivalence/v2/return_outcome.py",
     "scripts/function_tracer_pcode/validation/result_summary.py",
     "scripts/function_tracer_pcode/validation/unknown_reason_summary.py",
     "scripts/function_tracer_pcode/validation/root_blocker_summary.py",
@@ -56,6 +62,9 @@ SOURCE_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
     "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
     "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
     "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py",
     "scripts/function_tracer_pcode/equivalence/v2/pair_status_authority.py",
@@ -80,6 +89,9 @@ WORKFLOW_TEST_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py",
     "scripts/function_tracer_pcode/tests/unit/test_smt_formula_builder.py",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
 )
 
 
@@ -227,10 +239,16 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
             "test_operational_diagnostic_mode_still_verifies_signed_status",
             "test_runner_canonical_result_subprocess_persists_primary_classification_error",
             "test_eqbench_runner_reports_primary_diagnostic_before_signature_validation",
+            "test_whole_process_mode_accepts_deployment_signed_loop_timeout",
             "test_summary_expression_equivalence_query_rejects_unsupported_operator_without_error",
             "test_pairwise_auxiliary_smt_accepts_exact_int2float_in_case_condition",
             "test_pairwise_auxiliary_smt_accepts_exact_int2float_over_phi_circular_unknown",
             "test_pairwise_auxiliary_smt_rejects_int2float_without_output_width",
+            "test_production_finish_seals_latest_retry_timeout_selection_receipt",
+            "test_latest_timeout_selection_is_deterministic_across_requirements",
+            "test_timeout_assignment_promotes_only_attempt_aware_selected_execution",
+            "test_composite_timeout_selection_arbitrates_multiple_proof_domains",
+            "test_timeout_candidate_selection_rejects_execution_identity_tampering",
         ),
     )
     phase7_junit = root / (
@@ -243,6 +261,9 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
             "test_canonical_census_is_all_or_nothing_and_never_returns_partial_metrics",
             "test_census_rejects_timeout_stream_mismatch_and_missing_required_materialization",
             "test_shadow_census_join_is_post_receipt_and_all_or_nothing",
+            "test_production_finish_seals_latest_retry_timeout_selection_receipt",
+            "test_timeout_assignment_promotes_only_attempt_aware_selected_execution",
+            "test_timeout_candidate_selection_rejects_execution_identity_tampering",
         ),
     )
     subprocess.run(
