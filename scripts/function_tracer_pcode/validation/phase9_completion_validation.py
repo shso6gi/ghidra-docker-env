@@ -665,9 +665,9 @@ def build_phase9_evidence(repo_root: Path) -> Mapping[str, Mapping[str, Any]]:
     validation = {
         "artifact_kind": "phase9-validation-run-v1",
         "junit": (
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 584),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml", 604),
             _junit(root, "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml", 39),
-            _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml", 26),
+            _junit(root, "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml", 27),
             _junit(
                 root,
                 "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",

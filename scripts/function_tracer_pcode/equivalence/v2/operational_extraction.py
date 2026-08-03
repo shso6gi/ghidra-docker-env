@@ -103,6 +103,12 @@ _REASON_ROWS = (
         "high_function_ir_materialization",
         "operational_extraction",
     ),
+    (
+        "subordinate_parent_authority_unproven",
+        "subordinate_parent_authority",
+        "subordinate_parent_authority",
+        "operational_extraction",
+    ),
 )
 
 OPERATIONAL_REASON_SPECS: Mapping[str, OperationalReasonSpec] = MappingProxyType({
@@ -189,6 +195,11 @@ OPERATIONAL_RECOVERY_REGISTRY_DIGEST = authority_digest(
 
 
 OPERATIONAL_REASON_PRODUCER_CONSERVATION = MappingProxyType({
+    "subordinate_parent_authority_unproven": (
+        "subordinate_parent_authority",
+        "subordinate-parent-authority-producer-v2",
+        "subordinate-parent-authority-validator-v1",
+    ),
     "function_decompilation_artifact_unavailable": (
         "function_decompilation_artifact",
         "function-decompilation-artifact-producer-v2",
@@ -252,6 +263,13 @@ class OperationalProducerStageSpec:
 
 OPERATIONAL_PRODUCER_STAGE_SPECS = (
     OperationalProducerStageSpec(
+        "subordinate-parent-authority-producer-v2", "1",
+        "subordinate_parent_authority", "subordinate_parent_authority",
+        "PARENT_AUTHORITY_PROOF_REQUIRED",
+        "subordinate-parent-authority-validator-v1",
+        ("authority_checked",), (), 210,
+    ),
+    OperationalProducerStageSpec(
         "function-decompilation-artifact-producer-v2", "2",
         "function_decompilation_artifact", "function_decompilation_artifact",
         "PROCESS_ARTIFACT_OR_TIMEOUT", "decompiler-process-runner-v1",
@@ -282,16 +300,16 @@ OPERATIONAL_COMMON_EXECUTION_STAGE_REGISTRY = ProducerStageRegistry(
     tuple(row.common_contract() for row in OPERATIONAL_PRODUCER_STAGE_SPECS),
 )
 EXPECTED_OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST = (
-    "581fbcc1e45076ab082856948e41bfeb0236b9b33a2624eb9d3da4dd834264b5"
+    "44a38c07f2330598e7e22ff897f2a7861a3bcfd26529f40ce067f03b0b89559d"
 )
 EXPECTED_OPERATIONAL_COMMON_REGISTRY_DIGEST = (
-    "a1505d67d3f430cb484d32b6763aa9f83b623437dc6269df4c83fba01c84b4a3"
+    "e336d84782dbfbcfd3c15bedb63b308408a1523286bc05ffc14af37c862f393b"
 )
 EXPECTED_OPERATIONAL_REASON_REGISTRY_DIGEST = (
-    "7edf2c910c16c7f872e988dfecf42437843dafcf2fe2b17c09ae3476edefa273"
+    "99a3ffe030c81819304876d1aad40f6a8b97c216c354812c81ced7c325735143"
 )
 EXPECTED_OPERATIONAL_RECOVERY_REGISTRY_DIGEST = (
-    "1ade2e1a08d59a354f0939ac0bc5bc668f812a46a63a6582c3072ad809f99afa"
+    "2c7083bbaf40a5a31d70c234ec2d9c1e09478a89d14020460152a691d986e815"
 )
 if OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST != (
     EXPECTED_OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST
@@ -314,6 +332,7 @@ def validate_operational_registry_conservation() -> None:
         raise ValueError("operational reason registry is not canonically ordered")
     stages = tuple(row.proof_stage for row in OPERATIONAL_PRODUCER_STAGE_SPECS)
     if stages != (
+        "subordinate_parent_authority",
         "function_decompilation_artifact",
         "high_function_ir_materialization",
     ):

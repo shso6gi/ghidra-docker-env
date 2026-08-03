@@ -128,6 +128,7 @@ _PRODUCER_IDS_BY_SITE = {
         "function-decompilation-artifact-producer-v2",
         "function-decompilation-operational-error-producer-v2",
         "high-function-ir-validator-v2",
+        "subordinate-parent-authority-producer-v2",
     ),
     "comparison-inconclusive-terminal": ("comparison-closure-producer-v1",),
 }
@@ -190,6 +191,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
     "decompilation-broker-operational-signal": (
         "function_decompilation_artifact_unavailable",
         "high_function_ir_unavailable",
+        "subordinate_parent_authority_unproven",
     ),
     "outcome-partition-stage-result": tuple(sorted({
         reason_id for reason_id in OUTCOME_STAGE_REASON_MATRIX.values()

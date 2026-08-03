@@ -82,6 +82,81 @@ class SubordinateDecompilationAdapterRow:
         return tuple(getattr(self, name) for name in self.__dataclass_fields__)
 
 
+@dataclass(frozen=True)
+class SubordinateParentBinding:
+    """Exact parent identity supplied by the producer owning the refresh."""
+
+    result_occurrence_id: str
+    occurrence_id: str
+    cause_id: str
+    proof_requirement_id: str
+    semantic_target_digest: str
+
+    def __post_init__(self) -> None:
+        if not all(type(value) is str and value for value in (
+            self.result_occurrence_id,
+            self.occurrence_id,
+            self.cause_id,
+            self.proof_requirement_id,
+            self.semantic_target_digest,
+        )):
+            raise TypeError("subordinate parent binding identity is incomplete")
+
+    def to_authority_dict(self) -> Mapping[str, str]:
+        return {
+            "result_occurrence_id": self.result_occurrence_id,
+            "occurrence_id": self.occurrence_id,
+            "cause_id": self.cause_id,
+            "proof_requirement_id": self.proof_requirement_id,
+            "semantic_target_digest": self.semantic_target_digest,
+        }
+
+
+@dataclass(frozen=True)
+class SubordinateParentBindingRequiredDiagnostic:
+    """Typed fail-closed diagnostic when refresh has multiple proposals."""
+
+    source_contract_id: str
+    proposal_digests: tuple[str, ...]
+    result_occurrence_id: str | None = None
+    diagnostic_kind: str = "PARENT_BINDING_REQUIRED"
+
+    def __post_init__(self) -> None:
+        if type(self.source_contract_id) is not str or not self.source_contract_id:
+            raise TypeError("subordinate binding diagnostic source is incomplete")
+        if type(self.proposal_digests) is not tuple or not self.proposal_digests:
+            raise TypeError("subordinate binding diagnostic proposals are incomplete")
+        if any(
+            type(value) is not str or not value for value in self.proposal_digests
+        ) or len(set(self.proposal_digests)) != len(self.proposal_digests):
+            raise TypeError("subordinate binding diagnostic proposals are invalid")
+        if self.result_occurrence_id is not None and (
+            type(self.result_occurrence_id) is not str
+            or not self.result_occurrence_id
+        ):
+            raise TypeError("subordinate binding diagnostic result is invalid")
+        if self.diagnostic_kind != "PARENT_BINDING_REQUIRED":
+            raise ValueError("subordinate binding diagnostic kind is not sealed")
+
+    def to_authority_dict(self) -> Mapping[str, Any]:
+        return {
+            "diagnostic_kind": self.diagnostic_kind,
+            "source_contract_id": self.source_contract_id,
+            "proposal_digests": self.proposal_digests,
+            "result_occurrence_id": self.result_occurrence_id,
+        }
+
+    @property
+    def diagnostic_digest(self) -> str:
+        return authority_digest(self.to_authority_dict())
+
+    def to_signed_authority_dict(self) -> Mapping[str, Any]:
+        return {
+            **self.to_authority_dict(),
+            "diagnostic_digest": self.diagnostic_digest,
+        }
+
+
 def _row(
     adapter_id: str, source: str, reason: str, proof_kind: str,
     registry_id: str, version: int, digest: str,
@@ -156,7 +231,114 @@ SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST = authority_digest({
 })
 
 
-class SubordinateParentNotLive(ValueError):
+@dataclass(frozen=True)
+class SubordinateParentAuthorityDiagnostic:
+    """Signed, lossless diagnostics for subordinate parent resolution."""
+
+    diagnostic_kind: str
+    source_contract_id: str
+    adapter_row_count: int
+    parent_proof_kind_match_q_count: int
+    binding_match_q_count: int
+    c_q_candidate_count: int
+    occurrence_ids: tuple[str, ...]
+    parent_reason_ids: tuple[str, ...]
+    parent_domains: tuple[str, ...]
+    parent_producers: tuple[str, ...]
+    prefix_chain_digest: str
+    projection_digest: str
+    q_open_base_digest: str
+    adapter_ids: tuple[str, ...]
+    parent_observations: tuple[Mapping[str, Any], ...]
+    mismatch_reasons: tuple[str, ...]
+    requested_parent_binding: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if not all(type(value) is str and value for value in (
+            self.diagnostic_kind,
+            self.source_contract_id,
+            self.prefix_chain_digest,
+            self.projection_digest,
+            self.q_open_base_digest,
+        )):
+            raise TypeError("subordinate authority diagnostic identity is incomplete")
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.adapter_row_count,
+                self.parent_proof_kind_match_q_count,
+                self.binding_match_q_count,
+                self.c_q_candidate_count,
+            )
+        ):
+            raise TypeError("subordinate authority diagnostic counts are invalid")
+        for values in (
+            self.occurrence_ids,
+            self.parent_reason_ids,
+            self.parent_domains,
+            self.parent_producers,
+            self.adapter_ids,
+            self.mismatch_reasons,
+        ):
+            if type(values) is not tuple or any(
+                type(value) is not str or not value for value in values
+            ):
+                raise TypeError("subordinate authority diagnostic rows are invalid")
+        if type(self.parent_observations) is not tuple or any(
+            not isinstance(value, Mapping) for value in self.parent_observations
+        ):
+            raise TypeError("subordinate authority diagnostic observations are invalid")
+        if self.requested_parent_binding is not None and not isinstance(
+            self.requested_parent_binding, Mapping
+        ):
+            raise TypeError("subordinate requested parent binding is invalid")
+
+    def to_authority_dict(self) -> Mapping[str, Any]:
+        return {
+            "diagnostic_kind": self.diagnostic_kind,
+            "source_contract_id": self.source_contract_id,
+            "adapter_row_count": self.adapter_row_count,
+            "parent_proof_kind_match_q_count": self.parent_proof_kind_match_q_count,
+            "binding_match_q_count": self.binding_match_q_count,
+            "c_q_candidate_count": self.c_q_candidate_count,
+            "occurrence_ids": self.occurrence_ids,
+            "parent_reason_ids": self.parent_reason_ids,
+            "parent_domains": self.parent_domains,
+            "parent_producers": self.parent_producers,
+            "prefix_chain_digest": self.prefix_chain_digest,
+            "projection_digest": self.projection_digest,
+            "q_open_base_digest": self.q_open_base_digest,
+            "adapter_ids": self.adapter_ids,
+            "parent_observations": self.parent_observations,
+            "mismatch_reasons": self.mismatch_reasons,
+            "requested_parent_binding": self.requested_parent_binding,
+        }
+
+    @property
+    def diagnostic_digest(self) -> str:
+        return authority_digest(self.to_authority_dict())
+
+    def to_signed_authority_dict(self) -> Mapping[str, Any]:
+        return {
+            **self.to_authority_dict(),
+            "diagnostic_digest": self.diagnostic_digest,
+        }
+
+
+class SubordinateParentAuthorityError(ValueError):
+    """A typed fail-closed parent-resolution authority failure."""
+
+    def __init__(self, diagnostic: SubordinateParentAuthorityDiagnostic, message: str):
+        if type(diagnostic) is not SubordinateParentAuthorityDiagnostic:
+            raise TypeError("subordinate authority failure lacks exact diagnostic")
+        self.diagnostic = diagnostic
+        super().__init__(
+            f"{message}; signed_diagnostic="
+            f"{diagnostic.to_signed_authority_dict()!r}"
+        )
+
+
+class SubordinateParentNotLive(SubordinateParentAuthorityError):
     """The source has no live recovery parent and needs standalone ownership."""
 EXPECTED_SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST = (
     "e1d8bb3c21a4985e84020afd7974a9f0342cd93b112c0e9f5fdaa76f5fae576c"
@@ -385,7 +567,8 @@ class SubordinateProcessAssignmentFactory:
 
     def issue_for_source(
         self, projection: VerifiedLifecyclePrefixProjection,
-        prefix: EventStreamPrefixView, source_contract_id: str,
+        prefix: EventStreamPrefixView, source_contract_id: str, *,
+        parent_binding: SubordinateParentBinding | None = None,
     ) -> SubordinateProcessAssignmentReceipt:
         projection.validate()
         prefix.validate()
@@ -393,42 +576,181 @@ class SubordinateProcessAssignmentFactory:
             raise ValueError("subordinate projection does not bind the supplied prefix")
         if projection.result_occurrence_id != self.result_occurrence_id:
             raise ValueError("subordinate projection belongs to another result")
+        if parent_binding is not None:
+            if type(parent_binding) is not SubordinateParentBinding:
+                raise TypeError("subordinate parent binding is not exact")
+            if parent_binding.result_occurrence_id != self.result_occurrence_id:
+                raise ValueError("subordinate parent binding belongs to another result")
         rows = tuple(
             row for row in SUBORDINATE_DECOMPILATION_ADAPTER_ROWS
             if row.source_contract_id == source_contract_id
         )
-        if not rows:
-            raise ValueError(
-                "subordinate source requires exactly one live parent C/Q"
-            )
         candidates = []
+        observations = []
+        mismatch_reasons = set()
+        occurrence_ids = set()
+        parent_reason_ids = {row.parent_reason_id for row in rows}
+        parent_domains = {
+            _PARENT_DOMAIN_BY_REGISTRY[row.parent_registry_id] for row in rows
+        }
+        parent_producers = set()
+        parent_proof_kind_match_q_count = 0
+        binding_match_q_count = 0
         for row in rows:
-            for q_row in projection.q_open_base:
-                if q_row.proof_kind != row.parent_proof_kind:
-                    continue
-                for c_row in projection.c_active_base:
-                    producer = _validate_parent_occurrence_authority(
-                        row, _authority_for_occurrence(prefix, q_row.occurrence_id)
+            proof_kind_q_rows = tuple(
+                q_row for q_row in projection.q_open_base
+                if q_row.proof_kind == row.parent_proof_kind
+            )
+            parent_proof_kind_match_q_count += len(proof_kind_q_rows)
+            q_rows = (
+                proof_kind_q_rows
+                if parent_binding is None
+                else tuple(
+                    q_row for q_row in proof_kind_q_rows
+                    if (
+                        q_row.occurrence_id == parent_binding.occurrence_id
+                        and q_row.cause_id == parent_binding.cause_id
+                        and q_row.proof_requirement_id
+                        == parent_binding.proof_requirement_id
+                        and q_row.semantic_target_digest
+                        == parent_binding.semantic_target_digest
                     )
+                )
+            )
+            binding_match_q_count += len(q_rows)
+            for q_row in q_rows:
+                occurrence_ids.add(q_row.occurrence_id)
+                observation = {
+                    "adapter_id": row.adapter_id,
+                    "parent_proof_kind": row.parent_proof_kind,
+                    "occurrence_id": q_row.occurrence_id,
+                    "cause_id": q_row.cause_id,
+                    "proof_requirement_id": q_row.proof_requirement_id,
+                    "semantic_target_digest": q_row.semantic_target_digest,
+                    "parent_reason_id": row.parent_reason_id,
+                    "parent_domain": _PARENT_DOMAIN_BY_REGISTRY[
+                        row.parent_registry_id
+                    ],
+                    "expected_parent_producer_contract_ids": (
+                        row.parent_producer_contract_ids
+                    ),
+                    "proof_kind_q_count_before_binding": len(proof_kind_q_rows),
+                    "binding_match_q_count": len(q_rows),
+                }
+                c_rows = tuple(
+                    c_row for c_row in projection.c_active_base
                     if (
                         c_row.occurrence_id == q_row.occurrence_id
                         and c_row.cause_id == q_row.cause_id
-                        and c_row.reason_id == row.parent_reason_id
-                        and c_row.domain == _PARENT_DOMAIN_BY_REGISTRY[row.parent_registry_id]
+                    )
+                )
+                observation["matching_occurrence_c_count"] = len(c_rows)
+                try:
+                    producer = _validate_parent_occurrence_authority(
+                        row, _authority_for_occurrence(prefix, q_row.occurrence_id)
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    mismatch_reasons.add(
+                        "parent_authority_invalid:" + type(exc).__name__
+                    )
+                    observation["parent_authority_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    observations.append(observation)
+                    continue
+                parent_producers.add(producer)
+                observation["parent_producer"] = producer
+                exact_c_rows = tuple(
+                    c_row for c_row in c_rows
+                    if (
+                        c_row.reason_id == row.parent_reason_id
+                        and c_row.domain == _PARENT_DOMAIN_BY_REGISTRY[
+                            row.parent_registry_id
+                        ]
                         and producer in row.parent_producer_contract_ids
+                    )
+                )
+                observation["c_rows"] = tuple({
+                    "reason_id": c_row.reason_id,
+                    "domain": c_row.domain,
+                } for c_row in c_rows)
+                observation["exact_c_row_count"] = len(exact_c_rows)
+                if not exact_c_rows:
+                    if not any(
+                        c_row.reason_id == row.parent_reason_id
+                        for c_row in c_rows
                     ):
-                        candidates.append((row, c_row, q_row, producer))
-        has_parent_shaped_requirement = any(
-            q_row.proof_kind == row.parent_proof_kind
-            for row in rows
-            for q_row in projection.q_open_base
+                        mismatch_reasons.add("parent_reason_mismatch")
+                    if not any(
+                        c_row.domain == _PARENT_DOMAIN_BY_REGISTRY[
+                            row.parent_registry_id
+                        ]
+                        for c_row in c_rows
+                    ):
+                        mismatch_reasons.add("parent_domain_mismatch")
+                    if producer not in row.parent_producer_contract_ids:
+                        mismatch_reasons.add("parent_producer_mismatch")
+                for c_row in exact_c_rows:
+                    candidates.append((row, c_row, q_row, producer))
+                observations.append(observation)
+        if parent_binding is not None and not candidates:
+            mismatch_reasons.add("requested_parent_binding_not_found")
+        diagnostic_kind = "SUBORDINATE_ADAPTER_ROW_MISSING"
+        diagnostic_message = (
+            "subordinate source has no adapter row for source_contract_id"
         )
-        if not candidates and not has_parent_shaped_requirement:
-            raise SubordinateParentNotLive(
-                "subordinate source has no live parent C/Q"
-            )
-        if len(candidates) != 1:
-            raise ValueError("subordinate source requires exactly one live parent C/Q")
+        if rows:
+            if not parent_proof_kind_match_q_count:
+                diagnostic_kind = "PARENT_C_Q_NOT_LIVE"
+                diagnostic_message = "subordinate source has no live parent C/Q"
+            elif parent_binding is not None and not binding_match_q_count:
+                diagnostic_kind = "PARENT_C_Q_BINDING_MISMATCH"
+                diagnostic_message = (
+                    "subordinate source parent binding does not match live parent Q"
+                )
+            elif not candidates:
+                diagnostic_kind = "PARENT_C_Q_CONTRACT_MISMATCH"
+                diagnostic_message = "subordinate source parent C/Q contract mismatch"
+            elif len(candidates) != 1:
+                diagnostic_kind = "PARENT_C_Q_AMBIGUOUS"
+                diagnostic_message = (
+                    "subordinate source requires exactly one live parent C/Q"
+                )
+            else:
+                diagnostic_kind = "PARENT_C_Q_RESOLVED"
+                diagnostic_message = "subordinate source parent C/Q resolved"
+        diagnostic = SubordinateParentAuthorityDiagnostic(
+            diagnostic_kind,
+            source_contract_id,
+            len(rows),
+            parent_proof_kind_match_q_count,
+            binding_match_q_count,
+            len(candidates),
+            tuple(sorted(occurrence_ids)),
+            tuple(sorted(parent_reason_ids)),
+            tuple(sorted(parent_domains)),
+            tuple(sorted(parent_producers)),
+            prefix.prefix_chain_digest,
+            projection.prefix_projection_digest,
+            projection.q_open_base_digest,
+            tuple(row.adapter_id for row in rows),
+            tuple(observations),
+            tuple(sorted(mismatch_reasons)),
+            (
+                parent_binding.to_authority_dict()
+                if parent_binding is not None else None
+            ),
+        )
+        if diagnostic_kind == "SUBORDINATE_ADAPTER_ROW_MISSING":
+            raise SubordinateParentAuthorityError(diagnostic, diagnostic_message)
+        if diagnostic_kind == "PARENT_C_Q_NOT_LIVE":
+            raise SubordinateParentNotLive(diagnostic, diagnostic_message)
+        if diagnostic_kind == "PARENT_C_Q_BINDING_MISMATCH":
+            raise SubordinateParentAuthorityError(diagnostic, diagnostic_message)
+        if diagnostic_kind == "PARENT_C_Q_CONTRACT_MISMATCH":
+            raise SubordinateParentAuthorityError(diagnostic, diagnostic_message)
+        if diagnostic_kind == "PARENT_C_Q_AMBIGUOUS":
+            raise SubordinateParentAuthorityError(diagnostic, diagnostic_message)
         row, c_row, q_row, producer = candidates[0]
         payload = {
             "result_occurrence_id": self.result_occurrence_id,

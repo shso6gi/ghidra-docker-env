@@ -423,6 +423,16 @@ class LoopProducerStageSpec:
     terminal_priority: int
 
     def __post_init__(self) -> None:
+        if type(self.capability) is not LoopStageCapability:
+            if type(self.capability) is not str:
+                raise TypeError(
+                    "loop producer capability must be an exact Enum or string"
+                )
+            try:
+                capability = LoopStageCapability(self.capability)
+            except ValueError as exc:
+                raise ValueError("loop producer capability is not sealed") from exc
+            object.__setattr__(self, "capability", capability)
         object.__setattr__(self, "allowed_statuses", tuple(sorted(self.allowed_statuses)))
         object.__setattr__(
             self,

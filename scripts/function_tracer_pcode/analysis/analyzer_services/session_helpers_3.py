@@ -432,10 +432,79 @@ def _impl_refresh_structural_recurrence_summary(
         RECURRENCE_REFRESH_SOURCE_CONTRACT,
         decompile_function,
     )
+    parent_binding = None
+    recurrence_proposals = tuple(
+        getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
+    )
+    if len(recurrence_proposals) > 1:
+        from ...equivalence.v2.production_context import (
+            active_production_pilot_session,
+        )
+        from ...equivalence.v2.subordinate_decompilation import (
+            SubordinateParentBindingRequiredDiagnostic,
+        )
+
+        active_session = active_production_pilot_session()
+        diagnostic = SubordinateParentBindingRequiredDiagnostic(
+            RECURRENCE_REFRESH_SOURCE_CONTRACT,
+            tuple(proposal.digest for proposal in recurrence_proposals),
+            (
+                active_session.identity.result_occurrence_id
+                if active_session is not None else None
+            ),
+        )
+        note = (
+            "diagnostic:subordinate_parent_binding_required:"
+            f"{diagnostic.diagnostic_digest}"
+        )
+        if note not in analysis.analysis_notes:
+            analysis.analysis_notes.append(note)
+        self._debug_print(
+            "Structural recurrence refresh refused unbound subordinate "
+            f"decompilation; signed_diagnostic={diagnostic.to_signed_authority_dict()!r}"
+        )
+        return analysis
+    if len(recurrence_proposals) == 1:
+        from ...equivalence.v2.production_context import (
+            active_production_pilot_session,
+        )
+        from ...equivalence.v2.contracts import authority_digest
+        from ...equivalence.v2.loop_recurrence import LoopBlockerProductionSignal
+        from ...equivalence.v2.subordinate_decompilation import (
+            SubordinateParentBinding,
+        )
+
+        active_session = active_production_pilot_session()
+        if active_session is not None:
+            blocker = LoopBlockerProductionSignal.from_recurrence_proposal(
+                analysis, recurrence_proposals[0]
+            )
+            resolver = getattr(
+                active_session.domain_signal_encoder, "authority_for_signal", None
+            )
+            if not callable(resolver):
+                raise TypeError(
+                    "recurrence refresh lacks parent occurrence authority resolver"
+                )
+            parent_authority = resolver(active_session, blocker)
+            slot_bindings = tuple(parent_authority.bound_contract.slot_bindings)
+            if len(slot_bindings) != 1:
+                raise ValueError(
+                    "recurrence refresh requires one exact parent proof requirement"
+                )
+            requirement = slot_bindings[0][1]
+            parent_binding = SubordinateParentBinding(
+                active_session.identity.result_occurrence_id,
+                parent_authority.occurrence.occurrence_id,
+                parent_authority.occurrence.cause_id.value,
+                requirement.requirement_id,
+                authority_digest(requirement.semantic_target_key),
+            )
     results = decompile_function(
         self, function, timeout, None,
         source_contract_id=RECURRENCE_REFRESH_SOURCE_CONTRACT,
         semantic_owner="subordinate",
+        parent_binding=parent_binding,
     )
     if not results.decompileCompleted():
         self._debug_print(

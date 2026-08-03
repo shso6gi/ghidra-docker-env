@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "4079c0b6b91314aded05173a6f942641a173496cbea0ff4473d1a4109115f8c4",
+  "manifest_digest": "773259307f3b72a13a5eb0539d94752630bc2b14ccfe66c8d83ad97f0f2d17b3",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -180,10 +180,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1083,
+      "line": 1116,
       "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "df134d7659fb86f6b2a5ed95d27205459d91535aabb7a03468775c24cf7dee38"
+      "source_sha256": "7b915eaba82c1d25f701c2e412f2e5488cbc8152ca00cf73f2df0c55ea789614"
     },
     {
       "allowed_dispositions": [
@@ -193,7 +193,8 @@
       "allowed_producer_ids": [
         "function-decompilation-artifact-producer-v2",
         "function-decompilation-operational-error-producer-v2",
-        "high-function-ir-validator-v2"
+        "high-function-ir-validator-v2",
+        "subordinate-parent-authority-producer-v2"
       ],
       "branch_or_attempt_contract_id": "decompilation-broker-operational-signal:invocation",
       "column": 11,
@@ -220,12 +221,22 @@
           "expected_target_kind": "function_decompilation_target",
           "slot_id": "decompilation-broker-operational-signal:high_function_ir_unavailable",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "subordinate_parent_authority_unproven"
+          ],
+          "expected_domain": "operational_extraction",
+          "expected_identity_scope": "UNARY",
+          "expected_target_kind": "subordinate_parent_authority",
+          "slot_id": "decompilation-broker-operational-signal:subordinate_parent_authority_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
       "line": 52,
       "path": "scripts/function_tracer_pcode/analysis/decompilation_broker.py",
       "producer_site_manifest_id": "decompilation-broker-operational-signal",
-      "source_sha256": "573f466591059b70f26ede7a639792f4c829cedbebb6e34f98c63c21d0adfc13"
+      "source_sha256": "225a67a20c0a8fc0edea530cdab94c0b629671a320a25730049ae4036e22f349"
     },
     {
       "allowed_dispositions": [
@@ -506,10 +517,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1475,
+      "line": 1493,
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "b9a57bc70a3a99ecbca6ce5356bd6ddf541a94c322289c69dbc00c5fa4eb25ca"
+      "source_sha256": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7"
     },
     {
       "allowed_dispositions": [

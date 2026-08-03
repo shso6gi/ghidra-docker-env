@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
     LoopSolverExecutionContext,
     LoopSolverExecutionBatchSignal,
     LoopRecurrencePilotEncoder,
+    LoopProducerStageSpec,
     RecurrenceRequirementBindingReceipt,
     RecurrenceValidationCompletionAuthority,
     RecurrenceValidationCompletionSignal,
@@ -144,13 +145,49 @@ def test_loop_registry_digest_rejects_row_capability_or_priority_drift():
     payload = dict(loop_producer_registry_authority_dict())
     payload["rows"] = tuple(item.to_authority_tuple() for item in mutated)
     assert authority_digest(payload) != EXPECTED_LOOP_PRODUCER_STAGE_REGISTRY_DIGEST
-
     mutated = LOOP_PRODUCER_STAGE_SPECS[:-1] + (
         replace(LOOP_PRODUCER_STAGE_SPECS[-1], terminal_priority=91),
     )
     payload["rows"] = tuple(item.to_authority_tuple() for item in mutated)
     assert authority_digest(payload) != EXPECTED_LOOP_PRODUCER_STAGE_REGISTRY_DIGEST
 
+
+def test_loop_producer_capability_normalizes_legacy_string_at_construction():
+    spec = replace(
+        LOOP_PRODUCER_STAGE_SPECS[0],
+        capability="STRUCTURAL_ONLY",
+    )
+    assert type(spec.capability) is LoopStageCapability
+    assert spec.capability is LoopStageCapability.STRUCTURAL_ONLY
+    assert spec.to_authority_tuple() == (
+        LoopProducerStageSpec(
+            spec.producer_contract_id,
+            spec.producer_version,
+            spec.proof_stage,
+            spec.proof_kind,
+            LoopStageCapability.STRUCTURAL_ONLY,
+            spec.execution_issuer_id,
+            spec.allowed_statuses,
+            spec.terminal_eligible_statuses,
+            spec.terminal_priority,
+        ).to_authority_tuple()
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "NOT_A_LOOP_CAPABILITY",
+        None,
+        1,
+        object(),
+        LoopSourceDisposition.TYPED_SLICE4_CAUSE,
+    ),
+)
+def test_loop_producer_capability_rejects_unsealed_values(value):
+    first = LOOP_PRODUCER_STAGE_SPECS[0]
+    with pytest.raises((TypeError, ValueError), match="loop producer capability"):
+        replace(first, capability=value)
 
 @pytest.mark.parametrize(
     ("source_code", "reason_id"),
@@ -2198,6 +2235,59 @@ def _session(result_occurrence_id="result-loop-a"):
         ),
         domain_signal_state={},
     )
+
+
+def test_multiple_recurrence_proposals_refuse_unbound_subordinate_refresh(
+    monkeypatch,
+):
+    from scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_3 import (
+        invoke,
+    )
+    from scripts.function_tracer_pcode.analysis import decompilation_broker
+    from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation import (
+        SubordinateParentBindingRequiredDiagnostic,
+    )
+
+    analysis = _analysis("multiple-refresh")
+    analysis.returns = [ReturnInfo("0x1000", Expression.constant(1, size=4))]
+    analysis.quarantined_recurrence_proposals = (
+        _proposal("multiple-seed-a"),
+        _proposal("multiple-seed-b"),
+    )
+    function = object()
+    debug_messages = []
+
+    class _Analyzer:
+        def _find_function_by_name(self, _name):
+            return function
+
+        def _debug_print(self, message):
+            debug_messages.append(message)
+
+    def fail_if_decompiled(*_args, **_kwargs):
+        raise AssertionError("multiple proposals entered unbound decompilation")
+
+    monkeypatch.setattr(
+        decompilation_broker, "decompile_function", fail_if_decompiled
+    )
+    session = _session("multiple-refresh-result")
+    with production_signal_scope(session):
+        observed = invoke(
+            "refresh_structural_recurrence_summary", _Analyzer(), analysis
+        )
+
+    assert observed is analysis
+    assert len(debug_messages) == 1
+    diagnostic = SubordinateParentBindingRequiredDiagnostic(
+        "structural-recurrence-refresh-decompile-v2",
+        tuple(proposal.digest for proposal in analysis.quarantined_recurrence_proposals),
+        "multiple-refresh-result",
+    )
+    assert (
+        "diagnostic:subordinate_parent_binding_required:"
+        f"{diagnostic.diagnostic_digest}"
+    ) in analysis.analysis_notes
+    assert "signed_diagnostic=" in debug_messages[0]
 
 
 def _duplicate_loop_signal_for_site(site_id):

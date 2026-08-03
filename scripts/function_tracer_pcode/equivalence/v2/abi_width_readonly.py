@@ -156,6 +156,18 @@ class AbiWidthReadonlyProducerStageSpec:
     terminal_priority: int
 
     def __post_init__(self) -> None:
+        if type(self.capability) is not AbiWidthReadonlyCapability:
+            if type(self.capability) is not str:
+                raise TypeError(
+                    "Phase 6.5 producer capability must be an exact Enum or string"
+                )
+            try:
+                capability = AbiWidthReadonlyCapability(self.capability)
+            except ValueError as exc:
+                raise ValueError(
+                    "Phase 6.5 producer capability is not sealed"
+                ) from exc
+            object.__setattr__(self, "capability", capability)
         object.__setattr__(self, "allowed_statuses", tuple(sorted(self.allowed_statuses)))
         object.__setattr__(
             self,
@@ -3007,6 +3019,29 @@ class AbiWidthReadonlyPilotEncoder:
             or assignment.proof_requirement_id != requirement.requirement_id
         ):
             raise ValueError("ABI/width solver assignment differs from blocker")
+        transaction_key = self._solver_batch_transaction_key(session, batch)
+        transaction_digest = self._solver_batch_transaction_digest(session, batch)
+        committed_entry = self._committed_solver_batch_entry(session, batch)
+        if committed_entry is not None:
+            committed_digest, _committed_intents_digest, committed_intents = (
+                committed_entry
+            )
+            if committed_digest != transaction_digest:
+                raise ValueError("ABI/width committed transaction identity conflicts")
+            return committed_intents
+        pending = session.domain_signal_state.get(
+            "abi_width_pending_emission_transactions", {}
+        )
+        if type(pending) is not dict:
+            raise TypeError("ABI/width pending emission ledger is not exact")
+        existing = pending.get(transaction_key)
+        if existing is not None:
+            expected_digest, expected_intents, _expected_payload = existing
+            if expected_digest != transaction_digest:
+                raise ValueError(
+                    "ABI/width emission transaction identity conflicts"
+                )
+            return expected_intents
         observations = []
         completions = []
         seen = session.domain_signal_state.setdefault(
@@ -3231,13 +3266,110 @@ class AbiWidthReadonlyPilotEncoder:
                     session, batch.blocker, artifact
                 ))
         intents = tuple((*observations, *completions))
+        return self._register_solver_batch_transaction(
+            session, batch, intents, commit_payload
+        )
+
+    @staticmethod
+    def _solver_batch_transaction_key(
+        session: Any, batch: AbiWidthReadonlySolverExecutionBatchSignal,
+    ) -> tuple[str, tuple[str, int], str]:
+        membership = batch.membership
+        return (
+            session.identity.result_occurrence_id,
+            (
+                membership.attempt_group_identity,
+                membership.attempt_ordinal,
+            ),
+            batch.query_authority.authority_digest,
+        )
+
+    @classmethod
+    def _solver_batch_transaction_digest(
+        cls, session: Any, batch: AbiWidthReadonlySolverExecutionBatchSignal,
+    ) -> str:
+        membership = batch.membership
+        return authority_digest({
+            "transaction_key": cls._solver_batch_transaction_key(session, batch),
+            "attempt_group_identity": membership.attempt_group_identity,
+            "attempt_ordinal": membership.attempt_ordinal,
+            "proof_requirement_id": membership.proof_requirement_id,
+            "receipt_digests": tuple(
+                receipt.receipt_digest for receipt in batch.execution_receipts
+            ),
+        })
+
+    @classmethod
+    def _register_solver_batch_transaction(
+        cls, session: Any,
+        batch: AbiWidthReadonlySolverExecutionBatchSignal,
+        intents: tuple[EventIntent, ...],
+        payload: Mapping[str, Any],
+    ) -> tuple[EventIntent, ...]:
+        """Register one semantic batch, returning the existing plan on replay."""
+
+        transaction_key = cls._solver_batch_transaction_key(session, batch)
+        transaction_digest = cls._solver_batch_transaction_digest(session, batch)
         pending = session.domain_signal_state.setdefault(
             "abi_width_pending_emission_transactions", {}
         )
-        if id(batch) in pending:
-            raise ValueError("ABI/width signal already owns an emission transaction")
-        pending[id(batch)] = (intents, commit_payload)
-        return intents
+        if type(pending) is not dict:
+            raise TypeError("ABI/width pending emission ledger is not exact")
+        existing = pending.get(transaction_key)
+        if existing is not None:
+            expected_digest, expected_intents, _expected_payload = existing
+            if expected_digest != transaction_digest:
+                raise ValueError(
+                    "ABI/width emission transaction identity conflicts"
+                )
+            if tuple(intents) != expected_intents:
+                raise ValueError(
+                    "ABI/width emission transaction intents changed"
+                )
+            return expected_intents
+        pending[transaction_key] = (
+            transaction_digest, tuple(intents), dict(payload)
+        )
+        return tuple(intents)
+
+    @classmethod
+    def _committed_solver_batch_entry(
+        cls, session: Any,
+        batch: AbiWidthReadonlySolverExecutionBatchSignal,
+    ) -> tuple[str, str, tuple[EventIntent, ...]] | None:
+        committed = session.domain_signal_state.get(
+            "abi_width_committed_emission_transactions", {}
+        )
+        if type(committed) is not dict:
+            raise TypeError("ABI/width committed emission ledger is not exact")
+        entry = committed.get(cls._solver_batch_transaction_key(session, batch))
+        if entry is None:
+            return None
+        if type(entry) is not tuple or len(entry) != 3:
+            raise TypeError("ABI/width committed emission transaction is not exact")
+        if type(entry[2]) is not tuple or any(
+            type(intent) is not EventIntent for intent in entry[2]
+        ):
+            raise TypeError("ABI/width committed transaction intents are not exact")
+        return entry
+
+    def is_committed_signal_replay(
+        self, session: Any, signal: Any,
+        intents: tuple[EventIntent, ...] = (),
+    ) -> bool:
+        """Return true only for the exact already-committed solver batch."""
+
+        if type(signal) is not AbiWidthReadonlySolverExecutionBatchSignal:
+            return False
+        committed_entry = self._committed_solver_batch_entry(session, signal)
+        if committed_entry is None:
+            return False
+        committed_digest, committed_intents_digest, _committed_intents = committed_entry
+        if committed_digest != self._solver_batch_transaction_digest(session, signal):
+            raise ValueError("ABI/width committed transaction identity conflicts")
+        if authority_digest(tuple(intents)) != committed_intents_digest:
+            raise ValueError("ABI/width committed transaction intents changed")
+        return True
 
     def commit_emitted_signal(
         self, session: Any, signal: Any, intents: tuple[EventIntent, ...]
@@ -3247,10 +3379,28 @@ class AbiWidthReadonlyPilotEncoder:
         pending = session.domain_signal_state.setdefault(
             "abi_width_pending_emission_transactions", {}
         )
+        transaction_key = self._solver_batch_transaction_key(session, signal)
+        transaction_digest = self._solver_batch_transaction_digest(session, signal)
         try:
-            expected_intents, payload = pending[id(signal)]
+            expected_digest, expected_intents, payload = pending[transaction_key]
         except KeyError as exc:
+            committed_entry = self._committed_solver_batch_entry(session, signal)
+            if committed_entry is not None:
+                committed_digest, committed_intents_digest, _committed_intents = (
+                    committed_entry
+                )
+                if committed_digest != transaction_digest:
+                    raise ValueError(
+                        "ABI/width committed transaction identity conflicts"
+                    )
+                if authority_digest(tuple(intents)) != committed_intents_digest:
+                    raise ValueError(
+                        "ABI/width committed transaction intents changed"
+                    )
+                return
             raise ValueError("ABI/width emission transaction is missing") from exc
+        if expected_digest != transaction_digest:
+            raise ValueError("ABI/width emission transaction identity changed")
         if tuple(intents) != expected_intents:
             raise ValueError("ABI/width emission transaction intents changed")
         state = session.domain_signal_state
@@ -3261,6 +3411,7 @@ class AbiWidthReadonlyPilotEncoder:
             "sat_safety_observed",
             "sat_safety_pending_emission_transactions",
             "abi_width_high_bit_sat_transformations",
+            "abi_width_committed_emission_transactions",
         )
         snapshots = {}
         for key in mutated_keys:
@@ -3302,6 +3453,16 @@ class AbiWidthReadonlyPilotEncoder:
                 state.setdefault(
                     "abi_width_high_bit_sat_transformations", []
                 ).append((transformation, proof, artifact, handoff))
+            committed = state.setdefault(
+                "abi_width_committed_emission_transactions", {}
+            )
+            if type(committed) is not dict:
+                raise TypeError("ABI/width committed emission ledger is not exact")
+            committed[transaction_key] = (
+                transaction_digest,
+                authority_digest(tuple(intents)),
+                tuple(intents),
+            )
         except Exception:
             for key, (existed, snapshot) in snapshots.items():
                 if existed:
@@ -3309,13 +3470,29 @@ class AbiWidthReadonlyPilotEncoder:
                 else:
                     state.pop(key, None)
             raise
-        pending.pop(id(signal))
+        pending.pop(transaction_key)
 
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
         if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
-            session.domain_signal_state.setdefault(
+            pending = session.domain_signal_state.setdefault(
                 "abi_width_pending_emission_transactions", {}
-            ).pop(id(signal), None)
+            )
+            transaction_key = self._solver_batch_transaction_key(session, signal)
+            pending.pop(transaction_key, None)
+            committed = session.domain_signal_state.get(
+                "abi_width_committed_emission_transactions", {}
+            )
+            if type(committed) is not dict:
+                raise TypeError("ABI/width committed emission ledger is not exact")
+            committed_entry = committed.get(transaction_key)
+            if committed_entry is not None:
+                if committed_entry[0] != self._solver_batch_transaction_digest(
+                    session, signal
+                ):
+                    raise ValueError(
+                        "ABI/width committed transaction identity conflicts during rollback"
+                    )
+                committed.pop(transaction_key, None)
 
     def _completion_intent(
         self,
@@ -3702,6 +3879,7 @@ class AbiWidthReadonlyPilotEncoder:
                 session.emit_many(
                     intents,
                     lambda: self.commit_emitted_signal(session, batch, intents),
+                    transaction_signal=batch,
                 )
             except Exception:
                 self.rollback_emitted_signal(session, batch)

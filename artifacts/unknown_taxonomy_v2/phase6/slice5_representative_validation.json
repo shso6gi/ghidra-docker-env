@@ -68,7 +68,6 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "496432570dc2c115e325a48120488a486462c22687b642e8c014b009425dc196",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -208,19 +207,19 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "ccdd8cafb114651ade260720934973c6e2bda6fe48e208874a2c8f4ab875ddf7",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "4cf55c402e62698cb01ecbece8f851bd3c0efaef4b86e8f59046dcdf6d7f7cd7",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "8408ca465fa47f548c983fb729148a1f3df2d174dd63e31284cc0daa292967de",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "a5fe7dac5b1d63b1ebe637c6a2cd54c6e99d43399dbc42679e6ecfe27eef01ca",
-    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "73b23a7e502b9dbac022154790dc46b21c24a710dfc24399a28467f44545ec4e",
+    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "f243648a1cfa654c7f9a26d7cacb736ed92486dc52088852f5a44a1125ca3ce2",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "2712dbf0409ae3d2d61bc7270e84ec0adb307cd10f8c7d57318b824bb8f9494a",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "df134d7659fb86f6b2a5ed95d27205459d91535aabb7a03468775c24cf7dee38",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "b9a57bc70a3a99ecbca6ce5356bd6ddf541a94c322289c69dbc00c5fa4eb25ca",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7b915eaba82c1d25f701c2e412f2e5488cbc8152ca00cf73f2df0c55ea789614",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "1cfdb551fea45fafab8312b98c0b3aa1faaeb50a335423448915ed78d368945f",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "b5c735dc3a56ca99b739c142a1f86741ddcb3fd0f4568e9bd549e9e7876eac12",
     "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
@@ -402,8 +401,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 607,
-      "candidate_set_digest": "f4d71be411d7cc56260a618b2b7228b281b91c683b7ba4630cf0101322a6e891"
+      "candidate_set_digest": "24e49dab52baf5a5080b9acdb0c6c32065cddd7e1a7ef208c9e809b86f029710",
+      "candidate_count": 607
     },
     "live_delta": {
       "added": 0,
@@ -487,5 +486,6 @@
     "real_binary_matrix": "2 passed",
     "real_z3_readonly_matrix": "UNSAT positive / SAT near miss",
     "width_summary_readonly_regression_suite": "165 passed"
-  }
+  },
+  "artifact_digest": "b422c23f9b208a7b2d8853052584526b92acb15ef3c8ec085b9396589263eff5"
 }

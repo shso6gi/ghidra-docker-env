@@ -19,8 +19,10 @@ from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
     EXPECTED_ABI_WIDTH_READONLY_COMMON_REGISTRY_DIGEST,
     EXPECTED_ABI_WIDTH_READONLY_PRODUCER_STAGE_REGISTRY_DIGEST,
     AbiWidthReadonlyBlockerSignal,
+    AbiWidthReadonlyCapability,
     AbiWidthReadonlyDisposition,
     AbiWidthReadonlyPilotEncoder,
+    AbiWidthReadonlyProducerStageSpec,
     AbiWidthReadonlySolverExecutionBatchSignal,
     AbiWidthReadonlySolverQueryAuthority,
     ReturnAbiProvenanceArtifact,
@@ -801,6 +803,405 @@ def test_slice5_registry_is_exact_and_digest_bound():
     )
 
 
+def test_slice5_producer_capability_normalizes_legacy_string_at_construction():
+    spec = replace(
+        ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[0],
+        capability="STRUCTURAL_ONLY",
+    )
+    assert type(spec.capability) is AbiWidthReadonlyCapability
+    assert spec.capability is AbiWidthReadonlyCapability.STRUCTURAL_ONLY
+    assert spec.to_authority_tuple() == (
+        AbiWidthReadonlyProducerStageSpec(
+            spec.producer_contract_id,
+            spec.producer_version,
+            spec.proof_stage,
+            spec.proof_kind,
+            AbiWidthReadonlyCapability.STRUCTURAL_ONLY,
+            spec.execution_issuer_id,
+            spec.allowed_statuses,
+            spec.terminal_eligible_statuses,
+            spec.terminal_priority,
+        ).to_authority_tuple()
+    )
+
+
+@pytest.mark.parametrize("value", ("not-a-sealed-capability",))
+def test_slice5_producer_capability_rejects_invalid_string(value):
+    with pytest.raises(ValueError, match="capability is not sealed"):
+        replace(ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[0], capability=value)
+
+
+@pytest.mark.parametrize("value", (None, 1, object()))
+def test_slice5_producer_capability_rejects_non_string_non_enum(value):
+    with pytest.raises(TypeError, match="exact Enum or string"):
+        replace(ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[0], capability=value)
+
+
+def test_slice5_producer_capability_rejects_another_enum():
+    from enum import Enum
+
+    class OtherCapability(Enum):
+        STRUCTURAL_ONLY = "STRUCTURAL_ONLY"
+
+    with pytest.raises(TypeError, match="exact Enum or string"):
+        replace(
+            ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[0],
+            capability=OtherCapability.STRUCTURAL_ONLY,
+        )
+
+
+def test_slice5_normalized_capability_registry_digest_mismatch_is_not_accepted():
+    tampered = replace(
+        ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[0],
+        capability="STRUCTURAL_OR_SOLVER_UNSAT",
+    )
+    assert type(tampered.capability) is AbiWidthReadonlyCapability
+    authority = abi_width_readonly_registry_authority_dict()
+    tampered_digest = authority_digest({
+        **authority,
+        "rows": (tampered.to_authority_tuple(),) + tuple(
+            row.to_authority_tuple()
+            for row in ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS[1:]
+        ),
+    })
+    assert tampered_digest != EXPECTED_ABI_WIDTH_READONLY_PRODUCER_STAGE_REGISTRY_DIGEST
+
+
+def test_slice5_solver_batch_transaction_is_semantic_and_idempotent():
+    encoder = AbiWidthReadonlyPilotEncoder()
+    session = SimpleNamespace(
+        identity=SimpleNamespace(result_occurrence_id="result-transaction"),
+        domain_signal_state={},
+    )
+
+    def batch(attempt_id, receipt_digest, attempt_ordinal=1):
+        return SimpleNamespace(
+            membership=SimpleNamespace(
+                execution_identity_digest=attempt_id,
+                attempt_group_identity="attempt-group",
+                attempt_ordinal=attempt_ordinal,
+                proof_requirement_id="proof-q",
+            ),
+            query_authority=SimpleNamespace(authority_digest="query-digest"),
+            execution_receipts=(
+                SimpleNamespace(receipt_digest=receipt_digest),
+            ),
+        )
+
+    first = batch("attempt-1", "receipt-1")
+    replay = batch("attempt-1", "receipt-1")
+    assert encoder._register_solver_batch_transaction(
+        session, first, ("intent",), {"fresh_receipt_digests": ()}
+    ) == ("intent",)
+    assert encoder._register_solver_batch_transaction(
+        session, replay, ("intent",), {"fresh_receipt_digests": ()}
+    ) == ("intent",)
+    assert len(session.domain_signal_state[
+        "abi_width_pending_emission_transactions"
+    ]) == 1
+    assert encoder._register_solver_batch_transaction(
+        session,
+        batch("attempt-1", "receipt-retry", attempt_ordinal=2),
+        ("retry-intent",),
+        {"fresh_receipt_digests": ()},
+    ) == ("retry-intent",)
+    assert len(session.domain_signal_state[
+        "abi_width_pending_emission_transactions"
+    ]) == 2
+
+    with pytest.raises(ValueError, match="identity conflicts"):
+        encoder._register_solver_batch_transaction(
+            session,
+            batch("attempt-1", "receipt-2"),
+            ("intent",),
+            {"fresh_receipt_digests": ()},
+        )
+
+
+def test_slice5_pilot_suppresses_post_commit_and_concurrent_resends():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    bootstrap_encoder = AbiWidthReadonlyPilotEncoder()
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=bootstrap_encoder,
+    )
+    session = connector.begin({"case": "slice5-resend-authority"})
+    blocker = AbiWidthReadonlyBlockerSignal.from_width_seed(
+        _width_seed("resend", missing=("return_storage_fact",)),
+        "return_storage_fact",
+    )
+    intent = bootstrap_encoder(session, blocker)[0]
+
+    class ReplayEncoder:
+        def __init__(self, event_intent):
+            self.event_intent = event_intent
+            self.committed = False
+            self.encode_calls = 0
+
+        def __call__(self, _session, _signal):
+            self.encode_calls += 1
+            return (self.event_intent,)
+
+        def is_committed_signal_replay(self, _session, _signal, _intents=()):
+            return self.committed
+
+        def commit_emitted_signal(self, _session, _signal, _intents):
+            self.committed = True
+
+    replay_encoder = ReplayEncoder(intent)
+    session.domain_signal_encoder = replay_encoder
+    signal = SimpleNamespace(transaction_id="semantic-resend-1")
+
+    assert session.emit_domain_signal(signal) == 1
+    prefix = session.recorder.prefix_view()
+    baseline = (
+        session.recorder.event_count,
+        prefix.prefix_chain_digest,
+        len(session.preview_lifecycle_projection().c_active_base),
+        len(session.preview_lifecycle_projection().q_open_base),
+    )
+    assert session.emit_domain_signal(signal) == 0
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(
+            session.emit_domain_signal,
+            (signal,) * 8,
+        ))
+    assert results == (0,) * 8
+    assert replay_encoder.encode_calls == 10
+    prefix_after = session.recorder.prefix_view()
+    assert (
+        session.recorder.event_count,
+        prefix_after.prefix_chain_digest,
+        len(session.preview_lifecycle_projection().c_active_base),
+        len(session.preview_lifecycle_projection().q_open_base),
+    ) == baseline
+
+
+def test_slice5_actual_solver_batch_resends_are_stream_idempotent(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from scripts.function_tracer_pcode.smt.interface import SolverStatus
+
+    captured = []
+    captured_intents = []
+    original_commit = AbiWidthReadonlyPilotEncoder.commit_emitted_signal
+
+    def capture_batch_commit(encoder, session, signal, intents):
+        if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
+            captured.append(signal)
+            captured_intents.append(tuple(intents))
+        return original_commit(encoder, session, signal, intents)
+
+    monkeypatch.setattr(
+        AbiWidthReadonlyPilotEncoder,
+        "commit_emitted_signal",
+        capture_batch_commit,
+    )
+    _connector, session, encoder, emitted = _run_readonly_solver_fixture(
+        monkeypatch,
+        "actual-solver-batch-resend",
+        (SolverStatus.UNSAT,),
+    )
+    assert emitted == 1
+    assert len(captured) == 1
+    assert len(captured_intents) == 1
+    batch = captured[0]
+    initial_intents = captured_intents[0]
+    assert initial_intents
+    assert encoder.is_committed_signal_replay(
+        session, batch, initial_intents
+    )
+
+    prefix = session.recorder.prefix_view()
+    baseline = (
+        session.recorder.event_count,
+        prefix.prefix_chain_digest,
+        len(session.preview_lifecycle_projection().c_active_base),
+        len(session.preview_lifecycle_projection().q_open_base),
+    )
+
+    def must_not_commit():
+        raise AssertionError("committed solver batch was republished")
+
+    assert session.emit_many(
+        initial_intents, must_not_commit, transaction_signal=batch
+    ) == ()
+    changed_intents = (
+        replace(initial_intents[0], diagnostic_payload={"replay": "tampered"}),
+        *initial_intents[1:],
+    )
+    with pytest.raises(
+        ValueError, match="committed transaction intents changed"
+    ):
+        session.emit_many(
+            changed_intents, must_not_commit, transaction_signal=batch
+        )
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(
+            lambda _index: session.emit_many(
+                initial_intents, must_not_commit, transaction_signal=batch
+            ),
+            range(8),
+        ))
+    assert results == ((),) * 8
+    prefix_after = session.recorder.prefix_view()
+    assert (
+        session.recorder.event_count,
+        prefix_after.prefix_chain_digest,
+        len(session.preview_lifecycle_projection().c_active_base),
+        len(session.preview_lifecycle_projection().q_open_base),
+    ) == baseline
+
+
+def test_slice5_phase7_runtime_replay_rolls_back_activation_and_finalizes():
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import dataclass
+
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.stream import (
+        ErrorEventAuthority,
+        EventIntent,
+    )
+
+    @dataclass(frozen=True)
+    class ReplaySignal:
+        value: str
+        producer_id: str = "phase7-replay-producer"
+
+        def _phase7_signal_authority(self):
+            return {"value": self.value, "producer_id": self.producer_id}
+
+    class ReplayEncoder:
+        def __init__(self):
+            self.committed = False
+            self.commit_count = 0
+            self.rollback_count = 0
+
+        def __call__(self, _session, _signal):
+            return (EventIntent(
+                EventType.ERROR,
+                ErrorEventAuthority("phase7-replay-error", "phase7-replay-artifact"),
+            ),)
+
+        def is_committed_signal_replay(self, _session, _signal, _intents=()):
+            return self.committed
+
+        def commit_emitted_signal(self, _session, _signal, _intents):
+            self.commit_count += 1
+            self.committed = True
+
+        def rollback_emitted_signal(self, _session, _signal):
+            self.rollback_count += 1
+
+    signal = ReplaySignal("same-semantic-signal")
+    site = {
+        "producer_site_manifest_id": "phase7-replay-site",
+        "source_sha256": "phase7-replay-source",
+        "domain": "phase7_replay_test",
+        "allowed_dispositions": ["OPERATIONAL_ERROR_NO_SEMANTIC_CAUSE"],
+        "allowed_producer_ids": ["phase7-replay-producer"],
+        "expected_cause_slots": [],
+    }
+    manifest_body = {
+        "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
+        "site_count": 1,
+        "sites": [site],
+    }
+    manifest = {
+        **manifest_body,
+        "manifest_digest": authority_digest(manifest_body),
+    }
+    encoder = ReplayEncoder()
+
+    def runtime_factory(identity):
+        return runtime_from_audited_manifest(manifest, identity)
+
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+            recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=encoder,
+        phase7_runtime_factory=runtime_factory,
+    )
+    session = connector.begin({"case": "phase7-runtime-replay"})
+
+    def emit_with_activation():
+        # This mirrors the production wrapper boundary: activation is opened
+        # before the shared domain publication path is entered.
+        with session.domain_signal_transaction():
+            session.record_phase7_pre_emission_activation(
+                "phase7-replay-site", signal
+            )
+            return session.emit_domain_signal(signal)
+
+    assert emit_with_activation() == 1
+    assert encoder.commit_count == 1
+    baseline = (
+        session.recorder.event_count,
+        session.recorder.prefix_view().prefix_chain_digest,
+    )
+
+    assert emit_with_activation() == 0
+    assert encoder.commit_count == 1
+    assert encoder.rollback_count == 0
+    assert session._phase7_signal_transactions == {}
+    assert session.phase7_runtime._pending == {}
+    assert len(session.phase7_runtime._materialized) == 1
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(
+            lambda _index: emit_with_activation(), range(8)
+        ))
+    assert results == (0,) * 8
+    assert encoder.commit_count == 1
+    assert encoder.rollback_count == 0
+    assert session._phase7_signal_transactions == {}
+    assert session.phase7_runtime._pending == {}
+    assert len(session.phase7_runtime._materialized) == 1
+    assert (
+        session.recorder.event_count,
+        session.recorder.prefix_view().prefix_chain_digest,
+    ) == baseline
+
+    result = SimpleNamespace(
+        is_equivalent=None,
+        error_message="phase7-replay-error",
+        failure_status=None,
+        failure_message=None,
+        unknown_reasons=[],
+        unknown_recovery_actions=[],
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        session, result, case_id="phase7-runtime-replay"
+    )
+    assert session.phase7_runtime_result.decision_receipt.outcome is Outcome.ERROR
+    assert session.phase7_runtime._signal_transactions == {}
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.ERROR
+
+
 def test_slice5_validation_artifact_is_source_result_and_relation_bound(monkeypatch):
     from scripts.function_tracer_pcode.validation.unknown_taxonomy_audit import (
         build_inventory_review_template,
@@ -1495,6 +1896,125 @@ def test_exact_abi_width_blocker_retransmission_is_producer_idempotent():
     assert len(projection.c_active_base) == 1
     assert len(projection.q_open_base) == 1
     assert session.domain_signal_error_details == []
+
+
+def test_actual_abi_width_wrapper_replay_and_concurrent_replay_are_phase7_safe():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+        runtime_from_audited_manifest,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        CompositeProductionSignalEncoder,
+        emit_abi_width_readonly_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+        ShadowLifecycleReducer,
+    )
+
+    root = Path(__file__).resolve().parents[4]
+    complete_manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    site_id = "return-width-unary-provenance-blocker"
+    site = next(
+        row for row in complete_manifest["sites"]
+        if row["producer_site_manifest_id"] == site_id
+    )
+    manifest_body = {
+        "manifest_kind": complete_manifest["manifest_kind"],
+        "site_count": 1,
+        "sites": [site],
+    }
+    manifest = {
+        **manifest_body,
+        "manifest_digest": authority_digest(manifest_body),
+    }
+    signal = AbiWidthReadonlyBlockerSignal.from_width_seed(
+        _width_seed("actual-wrapper", missing=("return_storage_fact",)),
+        "return_storage_fact",
+    )
+
+    def make_session(case_id):
+        encoder = CompositeProductionSignalEncoder({
+            AbiWidthReadonlyBlockerSignal: AbiWidthReadonlyPilotEncoder(),
+        })
+        connector = ProductionDualWritePilotConnector(
+            ShadowLifecycleReducer(
+                reason_registry=ABI_WIDTH_READONLY_REASON_REGISTRY,
+                recovery_registry=ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
+            ),
+            domain_signal_encoder=encoder,
+            phase7_runtime_factory=lambda identity: (
+                runtime_from_audited_manifest(manifest, identity)
+            ),
+        )
+        return connector, connector.begin({"case": case_id})
+
+    def emit_actual(session):
+        with production_signal_scope(session):
+            return emit_abi_width_readonly_signal(
+                signal, producer_site_manifest_id=site_id
+            )
+
+    _, sequential = make_session(
+        "abi-width-actual-wrapper-sequential"
+    )
+    assert emit_actual(sequential) == 1
+    baseline = (
+        sequential.recorder.event_count,
+        sequential.recorder.prefix_view().prefix_chain_digest,
+        len(sequential.preview_lifecycle_projection().c_active_base),
+        len(sequential.preview_lifecycle_projection().q_open_base),
+    )
+    assert emit_actual(sequential) == 0
+    assert (
+        sequential.recorder.event_count,
+        sequential.recorder.prefix_view().prefix_chain_digest,
+        len(sequential.preview_lifecycle_projection().c_active_base),
+        len(sequential.preview_lifecycle_projection().q_open_base),
+    ) == baseline
+    assert sequential._phase7_signal_transactions == {}
+    assert sequential.phase7_runtime._pending == {}
+    assert len(sequential.phase7_runtime._materialized) == 1
+    assert sequential.domain_signal_error_details == []
+
+    connector, concurrent = make_session(
+        "abi-width-actual-wrapper-concurrent"
+    )
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(
+            lambda _index: emit_actual(concurrent), range(8)
+        ))
+    assert sorted(results) == [0] * 7 + [1]
+    concurrent_projection = concurrent.preview_lifecycle_projection()
+    assert (
+        concurrent.recorder.event_count,
+        len(concurrent_projection.c_active_base),
+        len(concurrent_projection.q_open_base),
+    ) == (1, 1, 1)
+    assert concurrent._phase7_signal_transactions == {}
+    assert concurrent.phase7_runtime._pending == {}
+    assert len(concurrent.phase7_runtime._materialized) == 1
+    assert concurrent.domain_signal_error_details == []
+
+    legacy = SimpleNamespace(
+        is_equivalent=None,
+        error_message=None,
+        failure_status=None,
+        failure_message=None,
+        is_timeout=lambda: False,
+    )
+    evidence = connector.finish(
+        concurrent, legacy, case_id="abi-width-actual-wrapper-concurrent"
+    )
+    assert concurrent.phase7_runtime_result.decision_receipt.outcome is Outcome.UNKNOWN
+    assert concurrent.phase7_runtime._signal_transactions == {}
+    evidence.validate()
 
 
 def test_conflicting_abi_width_blocker_retransmission_is_rejected(monkeypatch):

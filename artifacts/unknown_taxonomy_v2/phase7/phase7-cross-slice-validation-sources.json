@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "36970599644570c3e72c0af3e96b21b04ceb716f7d8239f501888c642834ff96",
+  "artifact_digest": "aaa2c7ce4522977b515ed3ea5c43f1dd505b62fdae764763a748413541d5691d",
   "declared_external_fixture_skips": [
     {
       "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -18,7 +18,7 @@
     }
   ],
   "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
-  "junit_sha256": "df38df84eb0b65e5a334a11d54b04f2fed28f74e686da97d7243efb2860ddc1e",
+  "junit_sha256": "49c398492f5df7ef6b10b0f123e4972fa0a3e4b866afabcefd105b2c10103bed",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
   "pytest_selection": [
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -65,7 +65,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py",
-      "sha256": "1cfdb551fea45fafab8312b98c0b3aa1faaeb50a335423448915ed78d368945f"
+      "sha256": "b5c735dc3a56ca99b739c142a1f86741ddcb3fd0f4568e9bd549e9e7876eac12"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py",
@@ -73,7 +73,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py",
-      "sha256": "dbe4e41e314fdf169e7eb49ec70a5c691098d09d7472efd67a0f4d1479d7c268"
+      "sha256": "4a677925251785a4b173585b5a0b3ad7c624507586a4ea5471fabee015771a1f"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_operational_extraction.py",
@@ -105,7 +105,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_subordinate_decompilation.py",
-      "sha256": "4a77c024e72902ae2945f0384164b39fbcbb82639cfaa7f004d90336f15f7e22"
+      "sha256": "3c2e288caa2ea03b82709e548bb980afdeaf51eecf30cb2837216b0486fc6aef"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
@@ -124,5 +124,5 @@
       "sha256": "16cf0928beef06150e5f773eecdc95dc64bbf10384c1861ac2fd6fe8b840e0da"
     }
   ],
-  "test_count": 585
+  "test_count": 584
 }

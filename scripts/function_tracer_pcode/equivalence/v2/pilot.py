@@ -53,6 +53,7 @@ PILOT_TYPED_CAUSE_KINDS = frozenset({
 ) | frozenset({
     "function_decompilation_artifact_unavailable",
     "high_function_ir_unavailable",
+    "subordinate_parent_authority_unproven",
 })
 
 PILOT_EVENT_TYPES = frozenset({
@@ -543,6 +544,7 @@ class ProductionDualWritePilotSession:
     def emit_many(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
         phase7_execution_intents_prebuffered: bool = False,
+        transaction_signal: Any = None,
     ) -> tuple[int, ...]:
         with self._domain_signal_transaction_lock:
             return self._emit_many_locked(
@@ -551,17 +553,36 @@ class ProductionDualWritePilotSession:
                 phase7_execution_intents_prebuffered=(
                     phase7_execution_intents_prebuffered
                 ),
+                transaction_signal=transaction_signal,
             )
 
     def _emit_many_locked(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
         phase7_execution_intents_prebuffered: bool = False,
+        transaction_signal: Any = None,
     ) -> tuple[int, ...]:
         if self.closed:
             raise ValueError("production dual-write pilot session is closed")
         if type(phase7_execution_intents_prebuffered) is not bool:
             raise TypeError("Phase 7 execution prebuffer flag is not exact")
         batch = tuple(intents)
+        if transaction_signal is not None:
+            replay_probe = getattr(
+                self.domain_signal_encoder, "is_committed_signal_replay", None
+            )
+            if callable(replay_probe) and replay_probe(
+                self, transaction_signal, batch
+            ):
+                # The source-side wrapper may already have opened and
+                # materialized a Phase 7 activation before this shared
+                # publication gate sees the semantic replay.  A committed
+                # replay is a no-op for the producer ledger and event stream,
+                # but it must still close that wrapper transaction by
+                # restoring the pre-activation runtime snapshot.  Do not
+                # invoke the encoder rollback here: for a committed replay
+                # that would discard the already-committed producer state.
+                self._rollback_phase7_signal_transaction(transaction_signal)
+                return ()
         transaction = None
         if (
             self.phase7_runtime is not None
@@ -716,14 +737,26 @@ class ProductionDualWritePilotSession:
                     external_committed = True
                 self._commit_phase7_signal_transaction(signal)
 
-            self.emit_many(
-                intents,
-                commit_all,
-                phase7_execution_intents_prebuffered=(
+            emit_kwargs = {
+                "phase7_execution_intents_prebuffered": (
                     self.phase7_runtime is not None
                 ),
+            }
+            replay_support = getattr(
+                self.domain_signal_encoder, "supports_signal_replay", None
             )
-            return len(intents)
+            if callable(replay_support):
+                supports_replay = bool(replay_support(self, signal))
+            else:
+                supports_replay = callable(getattr(
+                    self.domain_signal_encoder, "is_committed_signal_replay", None
+                ))
+            if supports_replay:
+                emit_kwargs["transaction_signal"] = signal
+            recorded_sequences = self.emit_many(
+                intents, commit_all, **emit_kwargs
+            )
+            return len(recorded_sequences)
         except Exception as exc:
             rollback_failures = []
             if external_committed:

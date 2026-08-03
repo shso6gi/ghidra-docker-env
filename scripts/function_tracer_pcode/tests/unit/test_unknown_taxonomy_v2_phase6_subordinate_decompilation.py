@@ -34,6 +34,10 @@ from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation impo
     SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY,
     SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST,
     SUBORDINATE_DECOMPILATION_ADAPTER_ROWS,
+    SubordinateParentAuthorityError,
+    SubordinateParentBinding,
+    SubordinateParentBindingRequiredDiagnostic,
+    SubordinateParentNotLive,
     SubordinateProcessAssignmentFactory,
     validate_subordinate_adapter_registry,
 )
@@ -173,8 +177,16 @@ def test_adapter_rejects_missing_wrong_source_and_cross_result():
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
     projection, prefix = _prefix_for(row)
     factory = SubordinateProcessAssignmentFactory("result-1")
-    with pytest.raises(ValueError, match="exactly one live parent"):
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
         factory.issue_for_source(projection, prefix, "unknown-source")
+    diagnostic = exc_info.value.diagnostic
+    assert diagnostic.diagnostic_kind == "SUBORDINATE_ADAPTER_ROW_MISSING"
+    assert diagnostic.adapter_row_count == 0
+    assert diagnostic.parent_proof_kind_match_q_count == 0
+    assert diagnostic.c_q_candidate_count == 0
+    assert diagnostic.prefix_chain_digest == prefix.prefix_chain_digest
+    assert diagnostic.projection_digest == projection.prefix_projection_digest
+    assert diagnostic.diagnostic_digest in str(exc_info.value)
     with pytest.raises(ValueError, match="another result"):
         SubordinateProcessAssignmentFactory("result-2").issue_for_source(
             projection, prefix, row.source_contract_id
@@ -184,10 +196,58 @@ def test_adapter_rejects_missing_wrong_source_and_cross_result():
 def test_adapter_rejects_ambiguous_live_parent_requirements():
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
     projection, prefix = _prefix_for(row, duplicate=True)
-    with pytest.raises(ValueError, match="exactly one live parent"):
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
         SubordinateProcessAssignmentFactory("result-1").issue_for_source(
             projection, prefix, row.source_contract_id
         )
+    diagnostic = exc_info.value.diagnostic
+    assert diagnostic.diagnostic_kind == "PARENT_C_Q_AMBIGUOUS"
+    assert diagnostic.parent_proof_kind_match_q_count == 2
+    assert diagnostic.binding_match_q_count == 2
+    assert diagnostic.c_q_candidate_count == 2
+    assert len(diagnostic.occurrence_ids) == 2
+    assert diagnostic.parent_producers == row.parent_producer_contract_ids
+
+
+def test_adapter_requires_and_honors_exact_parent_binding_when_candidates_are_valid():
+    row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
+    projection, prefix = _prefix_for(row, duplicate=True)
+    q_rows = tuple(
+        item for item in projection.q_open_base
+        if item.proof_kind == row.parent_proof_kind
+    )
+    assert len(q_rows) == 2
+    q_row = q_rows[0]
+    binding = SubordinateParentBinding(
+        "result-1",
+        q_row.occurrence_id,
+        q_row.cause_id,
+        q_row.proof_requirement_id,
+        q_row.semantic_target_digest,
+    )
+    factory = SubordinateProcessAssignmentFactory("result-1")
+    receipt = factory.issue_for_source(
+        projection, prefix, row.source_contract_id,
+        parent_binding=binding,
+    )
+    assert receipt.occurrence_id == q_row.occurrence_id
+    assert receipt.proof_requirement_id == q_row.proof_requirement_id
+    wrong_binding = replace(
+        binding, proof_requirement_id="proof-requirement-not-live"
+    )
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
+        factory.issue_for_source(
+            projection, prefix, row.source_contract_id,
+            parent_binding=wrong_binding,
+        )
+    assert exc_info.value.diagnostic.diagnostic_kind == (
+        "PARENT_C_Q_BINDING_MISMATCH"
+    )
+    assert exc_info.value.diagnostic.parent_proof_kind_match_q_count == 2
+    assert exc_info.value.diagnostic.binding_match_q_count == 0
+    assert "requested_parent_binding_not_found" in (
+        exc_info.value.diagnostic.mismatch_reasons
+    )
 
 
 def test_assignment_tampering_and_stale_prefix_are_rejected():
@@ -211,20 +271,60 @@ def test_assignment_tampering_and_stale_prefix_are_rejected():
 def test_adapter_rejects_wrong_domain_and_unregistered_parent_producer():
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
     factory = SubordinateProcessAssignmentFactory("result-1")
-    with pytest.raises(ValueError, match="exactly one live parent"):
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
         wrong_projection, wrong_prefix = _prefix_for(
             row, domain="wrong_parent_domain"
         )
         factory.issue_for_source(
             wrong_projection, wrong_prefix, row.source_contract_id
         )
-    with pytest.raises(ValueError, match="exactly one live parent"):
+    assert exc_info.value.diagnostic.diagnostic_kind == (
+        "PARENT_C_Q_CONTRACT_MISMATCH"
+    )
+    assert "parent_domain_mismatch" in exc_info.value.diagnostic.mismatch_reasons
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
         wrong_projection, wrong_prefix = _prefix_for(
             row, producer_id="caller-invented-producer"
         )
         factory.issue_for_source(
             wrong_projection, wrong_prefix, row.source_contract_id
         )
+    assert exc_info.value.diagnostic.diagnostic_kind == (
+        "PARENT_C_Q_CONTRACT_MISMATCH"
+    )
+    assert "parent_producer_mismatch" in exc_info.value.diagnostic.mismatch_reasons
+
+
+def test_adapter_reports_typed_not_live_parent_diagnostic():
+    row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
+    projection, prefix = _prefix_for(row)
+    projection = replace(projection, q_open_base=())
+    q_open_base_digest = authority_digest(())
+    projection = replace(
+        projection,
+        q_open_base_digest=q_open_base_digest,
+        prefix_projection_digest=authority_digest({
+            "finality": "PREFIX",
+            "event_stream_prefix_digest": projection.event_stream_prefix_digest,
+            "result_occurrence_id": projection.result_occurrence_id,
+            "snapshot_digest": projection.snapshot_digest,
+            "c_active_base_digest": authority_digest(projection.c_active_base),
+            "q_open_base_digest": q_open_base_digest,
+            "blocker_eligibility_base_digest": authority_digest(
+                projection.blocker_eligibility_base
+            ),
+            "satisfaction_projection_digest": authority_digest(
+                projection.satisfaction_projection
+            ),
+        }),
+    )
+    with pytest.raises(SubordinateParentNotLive) as exc_info:
+        SubordinateProcessAssignmentFactory("result-1").issue_for_source(
+            projection, prefix, row.source_contract_id
+        )
+    assert exc_info.value.diagnostic.diagnostic_kind == "PARENT_C_Q_NOT_LIVE"
+    assert exc_info.value.diagnostic.parent_proof_kind_match_q_count == 0
+    assert exc_info.value.diagnostic.c_q_candidate_count == 0
 
 
 def _broker_session_with_parent(row):
@@ -341,6 +441,122 @@ def test_subordinate_broker_binds_live_parent_without_completing_it(row):
     )
     assert len(session.recorder.prefix_view().events) == 1
     assert session.domain_signal_error_kinds == []
+
+
+def test_subordinate_broker_parent_authority_failure_blocks_raw_decompile_and_projects_unknown():
+    from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import run_dual_write_pilot
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+    )
+
+    row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
+    session, parent_projection = _broker_session_with_parent(row)
+    q_row = parent_projection.q_open_base[0]
+    tampered_binding = SubordinateParentBinding(
+        session.identity.result_occurrence_id,
+        q_row.occurrence_id,
+        q_row.cause_id,
+        q_row.proof_requirement_id + "-tampered",
+        q_row.semantic_target_digest,
+    )
+    manager = type("Manager", (), {"getFunctions": lambda self, forward: iter(())})()
+    program = Program(manager)
+    function = Function(program=program)
+    raw = Result(completed=True, function=function)
+    decompiler = BrokerDecompiler(raw)
+    analyzer = BrokerAnalyzer(program, decompiler)
+    session.domain_signal_state["operational_program_binary_identities"] = {
+        id(program): "sha256:binary",
+    }
+    with production_signal_scope(session):
+        observed = decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=row.source_contract_id,
+            semantic_owner="subordinate",
+            parent_binding=tampered_binding,
+        )
+
+    assert observed is not raw
+    assert not observed.decompileCompleted()
+    assert observed.getHighFunction() is None
+    assert decompiler.calls == 0
+    assert "subordinate_decompilation_executions" not in session.domain_signal_state
+    diagnostics = session.domain_signal_state[
+        "subordinate_parent_authority_diagnostics"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["diagnostic_kind"] == "PARENT_C_Q_BINDING_MISMATCH"
+    assert session.domain_signal_error_details == []
+
+    projection = session.reducer.replay_prefix(session.recorder.prefix_view())
+    assert any(
+        row.reason_id == "subordinate_parent_authority_unproven"
+        for row in projection.c_active_base
+    )
+    pilot = run_dual_write_pilot(
+        legacy_outcome=Outcome.UNKNOWN,
+        reducer=session.reducer,
+        stream=session.recorder.prefix_view().to_sealed_stream(),
+    )
+    assert pilot.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_subordinate_broker_contract_authority_failure_projects_error_without_raw_decompile(
+    monkeypatch,
+):
+    from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import run_dual_write_pilot
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+    )
+
+    row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
+    wrong_projection, wrong_prefix = _prefix_for(
+        row, domain="wrong_parent_domain"
+    )
+    with pytest.raises(SubordinateParentAuthorityError) as exc_info:
+        SubordinateProcessAssignmentFactory("result-1").issue_for_source(
+            wrong_projection, wrong_prefix, row.source_contract_id
+        )
+    authority_error = exc_info.value
+
+    def reject_authority(self, *args, **kwargs):
+        raise authority_error
+
+    monkeypatch.setattr(
+        SubordinateProcessAssignmentFactory,
+        "issue_for_source",
+        reject_authority,
+    )
+    session, _ = _broker_session_with_parent(row)
+    manager = type("Manager", (), {"getFunctions": lambda self, forward: iter(())})()
+    program = Program(manager)
+    function = Function(program=program)
+    raw = Result(completed=True, function=function)
+    decompiler = BrokerDecompiler(raw)
+    analyzer = BrokerAnalyzer(program, decompiler)
+    session.domain_signal_state["operational_program_binary_identities"] = {
+        id(program): "sha256:binary",
+    }
+    with production_signal_scope(session):
+        observed = decompile_function(
+            analyzer, function, 60, None,
+            source_contract_id=row.source_contract_id,
+            semantic_owner="subordinate",
+        )
+
+    assert observed.authority_error_kind == "operational_authority_invalid"
+    assert not observed.decompileCompleted()
+    assert decompiler.calls == 0
+    assert session.domain_signal_error_details == []
+    assert session.recorder.prefix_view().events[-1].header.event_type is EventType.ERROR
+    pilot = run_dual_write_pilot(
+        legacy_outcome=Outcome.UNKNOWN,
+        reducer=session.reducer,
+        stream=session.recorder.prefix_view().to_sealed_stream(),
+    )
+    assert pilot.candidate.decision_receipt.outcome is Outcome.ERROR
 
 
 def test_subordinate_broker_without_live_parent_uses_standalone_operational_owner():

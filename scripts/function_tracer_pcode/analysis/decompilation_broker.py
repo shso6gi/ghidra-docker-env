@@ -187,15 +187,43 @@ class _BrokeredDecompileResults:
         return self._high_function
 
 
+class _AuthorityBlockedDecompileResults:
+    """A non-decompiled result used after subordinate authority refusal."""
+
+    def __init__(self, *, diagnostic: Any, error_kind: str | None = None) -> None:
+        self.authority_diagnostic = diagnostic
+        self.authority_error_kind = error_kind
+
+    def decompileCompleted(self) -> bool:
+        return False
+
+    def getHighFunction(self) -> Any:
+        return None
+
+    def getErrorMessage(self) -> str:
+        return (
+            "subordinate decompilation was blocked by parent authority: "
+            f"{self.authority_diagnostic.diagnostic_kind}"
+        )
+
+
+_SUBORDINATE_PARENT_PROOF_DIAGNOSTIC_KINDS = frozenset({
+    "PARENT_C_Q_AMBIGUOUS",
+    "PARENT_C_Q_BINDING_MISMATCH",
+})
+
+
 def _subordinate_decompile(
     decompiler: Any, analyzer: Any, function: Any, timeout: int, monitor: Any,
     *, session: Any, factory: Any, source_contract_id: str,
+    parent_binding: Any = None,
 ) -> Any:
     assignment_factory = assignment = invocation_binding = None
     target = input_surface = invocation = projection = prefix = None
     prepared_checkpoint = active_checkpoint = None
     try:
         from ..equivalence.v2.subordinate_decompilation import (
+            SubordinateParentAuthorityError,
             SubordinateParentNotLive,
             SubordinateProcessAssignmentFactory,
         )
@@ -211,8 +239,12 @@ def _subordinate_decompile(
                 session.identity.result_occurrence_id
             )
             factories[session.identity.result_occurrence_id] = assignment_factory
+        program_seed = _program_seed(session, factory, analyzer.program)
+        target = factory.target_from_ghidra(program_seed, function)
+        input_surface = factory.input_surface_from_ghidra(function)
         assignment = assignment_factory.issue_for_source(
-            projection, prefix, source_contract_id
+            projection, prefix, source_contract_id,
+            parent_binding=parent_binding,
         )
         from ..equivalence.v2.process_worker_runtime import runtime_for_session
 
@@ -223,9 +255,6 @@ def _subordinate_decompile(
                 assignment=assignment, assignment_factory=assignment_factory,
                 projection=projection, prefix=prefix,
             )
-        program_seed = _program_seed(session, factory, analyzer.program)
-        target = factory.target_from_ghidra(program_seed, function)
-        input_surface = factory.input_surface_from_ghidra(function)
         attempt_identity = factory.issue_attempt_identity(
             target=target,
             input_surface=input_surface,
@@ -252,6 +281,56 @@ def _subordinate_decompile(
             monitor,
             source_contract_id=source_contract_id,
             semantic_owner="slice6",
+        )
+    except SubordinateParentAuthorityError as exc:
+        diagnostics = session.domain_signal_state.setdefault(
+            "subordinate_parent_authority_diagnostics", []
+        )
+        signed = exc.diagnostic.to_signed_authority_dict()
+        if signed not in diagnostics:
+            diagnostics.append(signed)
+        assignment_factory = assignment = invocation_binding = None
+        if target is None:
+            raise ValueError(
+                "subordinate parent authority failure lacks a typed target"
+            )
+        if exc.diagnostic.diagnostic_kind in _SUBORDINATE_PARENT_PROOF_DIAGNOSTIC_KINDS:
+            from ..equivalence.v2.operational_extraction import (
+                OperationalBlockerSignal,
+            )
+
+            blocker = OperationalBlockerSignal(
+                "subordinate_parent_authority_unproven",
+                target,
+                (
+                    "source_contract_id:" + source_contract_id,
+                    "diagnostic_kind:" + exc.diagnostic.diagnostic_kind,
+                    "diagnostic_digest:" + exc.diagnostic.diagnostic_digest,
+                    "projection_digest:" + exc.diagnostic.projection_digest,
+                ),
+                "subordinate-parent-authority-producer-v2",
+                "subordinate-authority-" + exc.diagnostic.diagnostic_digest[:32],
+            )
+            emitted = _emit(session, blocker)
+            if emitted != 1:
+                raise ValueError(
+                    "subordinate parent authority UNKNOWN blocker was not canonicalized"
+                )
+            return _AuthorityBlockedDecompileResults(
+                diagnostic=exc.diagnostic,
+            )
+        error = factory.issue_error(
+            error_kind="operational_authority_invalid",
+            catch_site_contract_id=source_contract_id,
+            target=target,
+            exception_class_identity=(
+                type(exc).__module__ + "." + type(exc).__qualname__
+            ),
+        )
+        session.emit(factory.error_event_intent(error))
+        return _AuthorityBlockedDecompileResults(
+            diagnostic=exc.diagnostic,
+            error_kind="operational_authority_invalid",
         )
     except Exception as exc:
         _record_shadow_error(exc)
@@ -363,6 +442,7 @@ def decompile_function(
     *,
     source_contract_id: str,
     semantic_owner: str = "slice6",
+    parent_binding: Any = None,
 ) -> Any:
     """Invoke Ghidra exactly once and optionally dual-write Phase 6.6 authority."""
 
@@ -370,6 +450,8 @@ def decompile_function(
         raise ValueError("decompilation source contract is not sealed")
     if semantic_owner not in {"slice6", "subordinate", "diagnostic"}:
         raise ValueError("decompilation semantic owner is not sealed")
+    if semantic_owner != "subordinate" and parent_binding is not None:
+        raise ValueError("parent binding is only valid for subordinate decompilation")
     decompiler = analyzer._get_decompiler()
     session, factory = _active_context()
     if session is None or factory is None:
@@ -379,6 +461,7 @@ def decompile_function(
             decompiler, analyzer, function, timeout, monitor,
             session=session, factory=factory,
             source_contract_id=source_contract_id,
+            parent_binding=parent_binding,
         )
     if semantic_owner != "slice6":
         return decompiler.decompileFunction(function, timeout, monitor)

@@ -786,6 +786,24 @@ class CompositeProductionSignalEncoder:
         if callable(rollback):
             rollback(session, signal)
 
+    def is_committed_signal_replay(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...] = ()
+    ) -> bool:
+        """Delegate transaction replay probes to the exact signal owner."""
+
+        encoder = self._routes.get(type(signal))
+        if encoder is None:
+            raise TypeError("production signal type has no registered encoder")
+        probe = getattr(encoder, "is_committed_signal_replay", None)
+        return bool(probe(session, signal, intents)) if callable(probe) else False
+
+    def supports_signal_replay(self, session: Any, signal: Any) -> bool:
+        """Report whether the exact routed producer validates replay intents."""
+
+        del session
+        encoder = self._routes.get(type(signal))
+        return callable(getattr(encoder, "is_committed_signal_replay", None))
+
     def accepts_signal_type(self, signal_type: type) -> bool:
         return type(signal_type) is type and signal_type in self._routes
 
