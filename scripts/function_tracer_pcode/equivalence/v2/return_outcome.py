@@ -403,6 +403,33 @@ class UnaryOutcomeWitnessArtifact:
         artifact.validate_against(receipt)
         return artifact
 
+    def _authority_payload(self) -> Mapping[str, Any]:
+        """Return only the semantic witness fields covered by its digest."""
+
+        return {
+            "reason_id": self.reason_id,
+            "stage": self.stage,
+            "proof_requirement_identity": self.proof_requirement_identity,
+            "premise_digest": self.premise_digest,
+            "function_snapshot_fingerprint": self.function_snapshot_fingerprint,
+            "outcome_seed_digest": self.outcome_seed_digest,
+            "outcome_seed_revision": self.outcome_seed_revision,
+            "query_digest": self.query_digest,
+            "model_digest": self.model_digest,
+            "solver_invocation_receipt_digest": self.solver_invocation_receipt_digest,
+            "witnessed_proposition": self.witnessed_proposition,
+            "producer_version": self.producer_version,
+            "encoding_version": self.encoding_version,
+        }
+
+    def to_authority_dict(self) -> Mapping[str, Any]:
+        """Project the factory-issued witness without its private token."""
+
+        payload = self._authority_payload()
+        if authority_digest(payload) != self.artifact_digest:
+            raise ValueError("unary witness artifact digest mismatch")
+        return {**payload, "artifact_digest": self.artifact_digest}
+
     def validate_against(self, receipt: OutcomeStageExecutionReceipt) -> None:
         receipt.validate()
         expected = WITNESSED_REASON_PROPOSITIONS.get(self.reason_id)
@@ -438,22 +465,7 @@ class UnaryOutcomeWitnessArtifact:
         for value in (self.model_digest, self.producer_version, self.encoding_version):
             if type(value) is not str or not value:
                 raise TypeError("unary witness artifact authority is incomplete")
-        payload = {
-            "reason_id": self.reason_id,
-            "stage": self.stage,
-            "proof_requirement_identity": self.proof_requirement_identity,
-            "premise_digest": self.premise_digest,
-            "function_snapshot_fingerprint": self.function_snapshot_fingerprint,
-            "outcome_seed_digest": self.outcome_seed_digest,
-            "outcome_seed_revision": self.outcome_seed_revision,
-            "query_digest": self.query_digest,
-            "model_digest": self.model_digest,
-            "solver_invocation_receipt_digest": self.solver_invocation_receipt_digest,
-            "witnessed_proposition": self.witnessed_proposition,
-            "producer_version": self.producer_version,
-            "encoding_version": self.encoding_version,
-        }
-        if authority_digest(payload) != self.artifact_digest:
+        if authority_digest(self._authority_payload()) != self.artifact_digest:
             raise ValueError("unary witness artifact digest mismatch")
 
 
@@ -683,6 +695,9 @@ class ReturnOutcomePilotEncoder:
 
         if type(signal) is not OutcomePartitionProductionSignal:
             raise TypeError("return/outcome encoder requires exact production signal")
+        # Use the same semantic projection as Phase 7 activation identity.  This
+        # validates receipt/witness authority before any event is produced.
+        authority_digest(signal._phase7_signal_authority())
         if (
             signal.outcome_seed_revision is None
             or signal.function_snapshot_fingerprint is None

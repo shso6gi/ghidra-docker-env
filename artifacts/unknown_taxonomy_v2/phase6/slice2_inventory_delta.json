@@ -1497,6 +1497,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
+      "line": 221,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "426cb0b86771ae2cd29cb0371f98d40e949dd30c17c206e49906135e68050553"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "426cb0b86771ae2cd29cb0371f98d40e949dd30c17c206e49906135e68050553",
+      "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
+      "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
@@ -1796,7 +1817,7 @@
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "other_consumer",
       "site_id": "4e64cb24b6b8b85cf88f85de0f8c01c5d9b6ecd0755fb1855d8d5657c3c5ffd3",
-      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
+      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -2817,7 +2838,7 @@
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "other_consumer",
       "site_id": "7dd86ec8098874b9cb4c23c66fd340fc66f226b86fef1eedbc52c246c3009801",
-      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
+      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -4107,27 +4128,6 @@
       "site_id": "b946b21aff07d007e9c40a9a962ff7c54135b5dd23099bcbc65206b789f4ee56",
       "source": "self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))",
       "symbol": "__post_init__"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "5ca4a171f483418450f4965b2bdec75a6b697524b3a08f9e6993f24f877b8877",
-      "line": 178,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "bad802b8759612c19f815bafb89ac2d6a11d34b30036d99927f8adfeb6639e26"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "bad802b8759612c19f815bafb89ac2d6a11d34b30036d99927f8adfeb6639e26",
-      "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
-      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -5527,7 +5527,7 @@
   ],
   "current_source": {
     "candidate_count": 608,
-    "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
+    "candidate_set_digest": "0a5fa72c9ac7d87a1016e15e50c1f5ad7d82574ee92cfbefa49b89db8880a800"
   },
   "delta_kind": "phase6_slice_local_inventory_delta",
   "frozen_phase0": {
@@ -8660,7 +8660,7 @@
       "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "89edc7c12301011827c16c5364acec5c5142270d90f0ed80b552791113701513",
-      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
+      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -9294,7 +9294,7 @@
       "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "b01f33a710858f57d4263f0d3e4e3c95041b5daa05d22f77920da78124937dc7",
-      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
+      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
       "symbol": "<shell>"
     },
     {

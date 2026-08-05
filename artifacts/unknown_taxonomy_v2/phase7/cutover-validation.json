@@ -1,6 +1,6 @@
 {
   "active_cause_count": 6,
-  "artifact_digest": "3a678198493dc972d5111a4c1565c38685e07ba6a4e2f9f807bbb6f35acc9eb2",
+  "artifact_digest": "612768986689e50dd3604fa9fbf3ca2d9e44485991d4eb0de665ef9876f8ee43",
   "contract_fixture_coverage": {
     "covered_cause_slot_count": 6,
     "eligible_cause_slot_count": 6,
@@ -8,7 +8,7 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "cross_slice_validation": {
-    "artifact_digest": "40a01d3f636339b4844c930719b77067e3be27de0c33958c6759596be1cd4b0d",
+    "artifact_digest": "62628b3bc4aa1602e1c21704ed88c8a6190291034a7113a025dc6f3a9ced83e6",
     "declared_external_fixture_skips": [
       {
         "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -27,7 +27,7 @@
       }
     ],
     "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
-    "junit_sha256": "daffeac9c8ba15f53ce15ddd573c81f76049c9e80832076b128e132b02151dd5",
+    "junit_sha256": "08d5c0e107bcdb71ebfb0a8d45b273f15b316394181754ac60e03b51c7962a9c",
     "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
     "pytest_selection": [
       "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -106,7 +106,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
-        "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+        "sha256": "1ce9e7820a639e6478d16eb6a72eb0064ac707316224a44d8662e70a4e12c44a"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py",
@@ -133,7 +133,7 @@
         "sha256": "16cf0928beef06150e5f773eecdc95dc64bbf10384c1861ac2fd6fe8b840e0da"
       }
     ],
-    "test_count": 586
+    "test_count": 590
   },
   "event_stream_digest": "8bf6c2af50668a6adeff48bc0c6b05013efc7ac9d8a3d4ba125e713d86f437a4",
   "expected_activation_ledger_digest": "be0e114cab6fd4d3fb22dbcbf6b9e170d5bf1e057edd04a07db79765d5161f03",
@@ -151,7 +151,7 @@
   "lifecycle_projection_digest": "197fedff66339bbacee683d371a10e143f92d7350a83f3d9055ff511a8b13e91",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cutover-contract-fixture-v2",
   "open_requirement_count": 5,
-  "producer_site_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
+  "producer_site_manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
   "production_runtime_coverage": {
     "activated_domains": {
       "operational_extraction": {
@@ -311,7 +311,7 @@
   },
   "production_runtime_unknown": {
     "active_cause_count": 1,
-    "artifact_digest": "d87cd3df267b792e0580677f39ea996d4f11d31bd80017769dc9f1246670b92f",
+    "artifact_digest": "d51d8b75ecdfdd64c0c4669046ff9dbda7e8da08d2b173af2668633ff4860bbf",
     "binary_content_identities": [
       "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
       "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -361,7 +361,7 @@
     "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
     "not_reached_activation_count": 0,
     "open_requirement_count": 1,
-    "producer_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
+    "producer_manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
     "producer_site_count": 28,
     "q_open_rows": [
       {

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "28b43ae98f9dfaff01dad594a67ceb2a2fe98faa5964cf424eff7943a214f6f0",
+  "artifact_digest": "0e7f81c28339079e0f35f1cbe7fa13ae61596c1c5d6899ace29f125f4d6c2b7a",
   "artifact_kind": "phase9-source-tree-manifest-v3",
   "closeout_bindings": [
     {
@@ -8,14 +8,14 @@
       "sha256": "f669755785476aec433ca3d9e4220f80c3451682859e06c75fdd71923b6d7e87"
     },
     {
-      "artifact_digest": "1ac74f89525d5c2ce9dd801bf928ba5bde39f0a2b063c00ed424a7b94a0f1597",
+      "artifact_digest": "e12cf998a29f61e7d31260f422babca20a63f32ee80ce033176aceb3f4f25387",
       "path": "decision_receipt.json",
-      "sha256": "7edc3863e03f71c1484a3f450896a56427c2d35a668683b493bd533eeb104613"
+      "sha256": "c2a54b7573d2148300d4c8057775f3412cc365a1ce70e077c8ec87fec0555118"
     },
     {
-      "artifact_digest": "e305138d43f15bf8a2325e2a7b3f267e493e49a24e5d8aec09ae3c5b9b5dc524",
+      "artifact_digest": "5171c34e7994f9e5e5c9d1221e049720091101aa085c354824cbc22c1778d5d7",
       "path": "decision_transition_matrix.json",
-      "sha256": "ec6794c2c5e763bd60c4baac9cdbba3e3a862ca8d63fae1a57586128821a073d"
+      "sha256": "6dfd05f27f75adba3ee1ef171d31f13b76ea47ac1c0f2d0d7bfbd615aa6cbd9e"
     },
     {
       "artifact_digest": "fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087",
@@ -28,24 +28,24 @@
       "sha256": "56536108da5be0fdae827d17bbcdb2467002a4fa21cf8c014cf27b8cd4c01f01"
     },
     {
-      "artifact_digest": "02dec3d5198a372e15a9d53d474609cad84e48471ef180a4d838fd1de23d33aa",
+      "artifact_digest": "070e5773a0767385a243cbede1def5a1e73205d6a41209e520254dcef2053324",
       "path": "reason_before_after.json",
-      "sha256": "5618d274db719419afe82576430e8012a3a51a5ca6f261a464c4c7433d196b77"
+      "sha256": "10e46f64c497f30fa54b4a6ed33eee3c4ca98d4867cf16cdb5a22fec85f47660"
     },
     {
-      "artifact_digest": "e125b9517eee47afe69ea2d09e0fd1a164506bcc4b7d0f59dfaa18f7eca6748b",
+      "artifact_digest": "e2978a90b726b8fc0fa7cf7a609f45ccb8cb3c7415b206bac7efc4b8b250b13d",
       "path": "validation_run.json",
-      "sha256": "c52e888aee93e9e67f7ce7f211cff1d29294f6d712466fd9470918848ad4b8f2"
+      "sha256": "0d2a1273c600d4726268c9bc2a91efdd2aa28e1aa369cc566cd9d547ff076b40"
     }
   ],
-  "phase7_artifact_sha256": "fde120a887fc23a2e2861a23f8f511eadcf563b73709fd4b3833301bfa2077f6",
-  "phase8_artifact_sha256": "f25d390f4309fc1e4dc2b0df69ca7f8c2d28bce27c782bcffade2fd341f4686a",
+  "phase7_artifact_sha256": "8088b8add552b20ce6ed94e82aebd286bd0bca29478f109f08d0fb11e683b74f",
+  "phase8_artifact_sha256": "b3186e39c3af8260e6792bd8e0bb5a0994ac9d3ae271dd2fda5e65b8d16b7229",
   "phase9_focused_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase9/phase9-focused-validation.xml",
     "sha256": "ee63703c1c8dd6eec81823cafc62f50f84d869f3c46883743dd62913e52954ef",
     "test_count": 6
   },
-  "producer_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
+  "producer_manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
   "source_files": [
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/contracts.py",
@@ -65,7 +65,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
-      "sha256": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7"
+      "sha256": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py",
@@ -89,7 +89,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/return_outcome.py",
-      "sha256": "4e6a1d82f7dd8adc90592fe50fba803b5f07841391d7d5fa9624b64815a13d0b"
+      "sha256": "4c8313d7387f3590384aa50987400890c2da2faf148e2e73cb224730bcffca76"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
@@ -177,7 +177,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
-      "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+      "sha256": "1ce9e7820a639e6478d16eb6a72eb0064ac707316224a44d8662e70a4e12c44a"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
@@ -196,6 +196,6 @@
       "sha256": "66204325b8f166c83a7099e59fa424bfc62f04e56e14e3164eb145db1893efe0"
     }
   ],
-  "source_tree_digest": "b63d3b5398c949fd7acdafd24401c3fd925de36d44b9ad72a13d596f70c38e74",
-  "validation_run_log_sha256": "8b374093610c5fb3f7db31e577494bf29f0e783a892c5875f0f69b0e5a7fcfe2"
+  "source_tree_digest": "a0a6db739312d1f818b63ff1f6f7e3073630a07fb4fa15c513cfcc892570920b",
+  "validation_run_log_sha256": "dd98f33c96915a8700f56a6c7f7f89f9fb812cada5cdbd18d9751ce6012422a4"
 }

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "fb3fec7c8c882f603c2d6615a06c13305744997c2d4d004a57af6599b837f165",
+  "artifact_digest": "5554ae1f43cfdf4db8061304e4f12e1864c4db97d5ce50d07c063d586603a878",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -27,7 +27,7 @@
     "canonical_census_uses_manifest_receipt_stream_join": {
       "junit": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
       "required_test_count": 3,
-      "test_count": 609
+      "test_count": 613
     },
     "decision_receipt_only_final_status": {
       "junit": "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml",
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "fde120a887fc23a2e2861a23f8f511eadcf563b73709fd4b3833301bfa2077f6"
+    "sha256": "8088b8add552b20ce6ed94e82aebd286bd0bca29478f109f08d0fb11e683b74f"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
+    "manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "ab662b5b3db8e0232f6e1c97b1d0543f10f374f421c8e03366ea7866d3a63ab4",
+    "sha256": "83cb308d2d368b669a4bd73248940dc245a9fe30665fbdff0db1cba84c876ec7",
     "site_count": 28
   },
   "source_files": [
@@ -184,7 +184,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
-      "sha256": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7"
+      "sha256": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/phase7_cutover.py",
@@ -200,7 +200,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/return_outcome.py",
-      "sha256": "4e6a1d82f7dd8adc90592fe50fba803b5f07841391d7d5fa9624b64815a13d0b"
+      "sha256": "4c8313d7387f3590384aa50987400890c2da2faf148e2e73cb224730bcffca76"
     },
     {
       "path": "scripts/function_tracer_pcode/validation/result_summary.py",
@@ -252,7 +252,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
-      "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+      "sha256": "1ce9e7820a639e6478d16eb6a72eb0064ac707316224a44d8662e70a4e12c44a"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",
@@ -275,7 +275,7 @@
       "sha256": "66204325b8f166c83a7099e59fa424bfc62f04e56e14e3164eb145db1893efe0"
     }
   ],
-  "source_tree_digest": "9c4b99d8c1e96614404c05840945b7cdf710583f8a80cac7a02208498e5b8866",
+  "source_tree_digest": "a784a3e6d6cd90233e5154c9e98e1dfb00689e6423cf979221a5315e6c87d9a6",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
@@ -355,7 +355,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
-        "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+        "sha256": "1ce9e7820a639e6478d16eb6a72eb0064ac707316224a44d8662e70a4e12c44a"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase7_cutover.py",

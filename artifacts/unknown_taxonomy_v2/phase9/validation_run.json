@@ -1,11 +1,11 @@
 {
-  "artifact_digest": "e125b9517eee47afe69ea2d09e0fd1a164506bcc4b7d0f59dfaa18f7eca6748b",
+  "artifact_digest": "e2978a90b726b8fc0fa7cf7a609f45ccb8cb3c7415b206bac7efc4b8b250b13d",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "dcedda0cf1b390d935ecab74b86aba0c8cd1ecdaa05224a4726a01314706b5fd",
-      "test_count": 609
+      "sha256": "62def7d373bf46366a0983f9e5f85bd5b7a5279ad2cdece72e4154543f220a24",
+      "test_count": 613
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml",
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "5b63b7740aafcd64d8f8b35ed6cf4d2e93268adf902a8565dbf31566347f03ea",
+    "current_contract_digest": "b5057714a75faba96c90929ad2625765d1dbe246bee1a8278383d3cb42291bc4",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3020,7 +3020,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        1413
+        1457
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -3866,13 +3866,13 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
         "scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage",
         "_unary_solver_status",
-        223
+        224
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome",
         "scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage",
         "_unary_solver_status",
-        585
+        652
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_sat_safety",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "6fa545abeb5691ba0399247d7b9c766403b3c9a2ce2998e5f6e629cb005cd090",
+    "current_source_tree_hash": "96c5b82a0edf8b658ffc0bb5b6b1ea94ebda539a3a9b3a4c15a9dcdfb81f2c7e",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

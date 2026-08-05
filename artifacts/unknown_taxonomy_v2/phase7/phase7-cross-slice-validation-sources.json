@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "40a01d3f636339b4844c930719b77067e3be27de0c33958c6759596be1cd4b0d",
+  "artifact_digest": "62628b3bc4aa1602e1c21704ed88c8a6190291034a7113a025dc6f3a9ced83e6",
   "declared_external_fixture_skips": [
     {
       "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -18,7 +18,7 @@
     }
   ],
   "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
-  "junit_sha256": "daffeac9c8ba15f53ce15ddd573c81f76049c9e80832076b128e132b02151dd5",
+  "junit_sha256": "08d5c0e107bcdb71ebfb0a8d45b273f15b316394181754ac60e03b51c7962a9c",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
   "pytest_selection": [
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -97,7 +97,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_return_outcome.py",
-      "sha256": "58b883211c64aabdac5828f3e4b8dc3ebf50da664f88be416ba033a131a0062c"
+      "sha256": "1ce9e7820a639e6478d16eb6a72eb0064ac707316224a44d8662e70a4e12c44a"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_sat_safety.py",
@@ -124,5 +124,5 @@
       "sha256": "16cf0928beef06150e5f773eecdc95dc64bbf10384c1861ac2fd6fe8b840e0da"
     }
   ],
-  "test_count": 586
+  "test_count": 590
 }

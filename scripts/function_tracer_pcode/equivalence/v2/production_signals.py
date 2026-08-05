@@ -137,6 +137,46 @@ class OutcomePartitionProductionSignal:
     witness_artifact: Optional[Any] = None
     validated_artifact_authority: Optional[Mapping[str, Any]] = None
 
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        """Project only semantic signal data into Phase 7 authority."""
+
+        from .return_outcome import (
+            OutcomeStageExecutionReceipt,
+            UnaryOutcomeWitnessArtifact,
+        )
+
+        receipt_authority = []
+        for receipt in self.execution_receipts:
+            if type(receipt) is not OutcomeStageExecutionReceipt:
+                raise TypeError(
+                    "outcome partition signal contains a non-receipt authority"
+                )
+            receipt_authority.append(receipt.to_authority_dict())
+        witness_authority = None
+        if self.witness_artifact is not None:
+            if type(self.witness_artifact) is not UnaryOutcomeWitnessArtifact:
+                raise TypeError(
+                    "outcome partition signal contains a non-witness authority"
+                )
+            witness_authority = self.witness_artifact.to_authority_dict()
+        return {
+            "stage": self.stage,
+            "producer_status": self.producer_status,
+            "proof_requirement_identity": self.proof_requirement_identity,
+            "function_identity": self.function_identity,
+            "outcome_seed_digest": self.outcome_seed_digest,
+            "producer_evidence": self.producer_evidence,
+            "outcome_seed_revision": self.outcome_seed_revision,
+            "function_snapshot_fingerprint": self.function_snapshot_fingerprint,
+            "premise_digest": self.premise_digest,
+            "producer_attempt_identity": self.producer_attempt_identity,
+            "producer_attempt_ordinal": self.producer_attempt_ordinal,
+            "execution_identity_digest": self.execution_identity_digest,
+            "execution_receipts": tuple(receipt_authority),
+            "witness_artifact": witness_authority,
+            "validated_artifact_authority": self.validated_artifact_authority,
+        }
+
     def __post_init__(self) -> None:
         if type(self.stage) is not str or not self.stage:
             raise TypeError("outcome partition signal stage must be a non-empty string")
@@ -173,6 +213,9 @@ class OutcomePartitionProductionSignal:
             raise TypeError("outcome producer attempt ordinal is invalid")
         if type(self.outcome_seed_digest) is not str or not self.outcome_seed_digest:
             raise TypeError("outcome partition signal seed digest must be non-empty")
+        # Validate the complete public projection at construction time.  Private
+        # factory tokens never enter this projection or its digest.
+        authority_digest(self._phase7_signal_authority())
 
 
 SAT_SAFETY_TYPED_REASON_IDS = frozenset({
@@ -743,6 +786,7 @@ class OutcomePartitionPilotEncoder:
     ) -> tuple[EventIntent, ...]:
         if type(signal) is not OutcomePartitionProductionSignal:
             raise TypeError("outcome partition encoder requires an exact typed signal")
+        authority_digest(signal._phase7_signal_authority())
         if signal.producer_status == "proved":
             return ()
         authority = self._blocker_authority_factory(session, signal)

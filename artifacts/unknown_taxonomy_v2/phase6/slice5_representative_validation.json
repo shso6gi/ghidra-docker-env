@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "165c2b8235c864621b1b67f02aab03641ae4947e717d868f82123b8d9c0873bb",
+  "artifact_digest": "3c66cebf449dc38a9aa175710ae09bd4c7946a7d552684e6fccae8a75b1097da",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -208,7 +208,7 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "d462b7e32cb234ba826d8ff93ac6f1e1dde92c5a35d3c0b88f364145402f7dbe",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "237c2fa2e4b0f54780da226fbaafbc9613702b85bf850c5d943ac0136a2234f9",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "763eb03944830423c6993f863b4de492c2b6f61d5a9c52c1042ad4cb17eba47f",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154",
@@ -216,7 +216,7 @@
     "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "b987d061eacde7a0230e1d84ce344ffc880dc06bde962d0c80fad6d25869eadb",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "2712dbf0409ae3d2d61bc7270e84ec0adb307cd10f8c7d57318b824bb8f9494a",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7b915eaba82c1d25f701c2e412f2e5488cbc8152ca00cf73f2df0c55ea789614",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
@@ -403,7 +403,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 608,
-      "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
+      "candidate_set_digest": "0a5fa72c9ac7d87a1016e15e50c1f5ad7d82574ee92cfbefa49b89db8880a800"
     },
     "live_delta": {
       "added": 0,

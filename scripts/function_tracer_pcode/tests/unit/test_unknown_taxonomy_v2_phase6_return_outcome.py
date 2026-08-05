@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     production_signal_scope,
 )
 from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+    Phase7ProductionRuntime,
     runtime_from_audited_manifest,
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import (
@@ -474,6 +475,72 @@ def test_unary_witness_requires_factory_issuance():
     payload["_factory_token"] = None
     with pytest.raises(TypeError, match="factory-issued"):
         UnaryOutcomeWitnessArtifact(**payload)
+
+
+def test_phase7_outcome_projection_excludes_private_factory_tokens_and_is_stable():
+    receipt = _execution_receipt("cross_kind_disjointness", "sat")
+    witness = UnaryOutcomeWitnessArtifact.create(
+        receipt,
+        reason_id="outcome_cross_kind_overlap_witnessed",
+        witnessed_proposition="reachable_outcome_kinds_overlap",
+        producer_version="reachable-outcome-producer-v1",
+        encoding_version="reachable-outcome-smt-v1",
+    )
+    signal = _signal(
+        "cross_kind_disjointness", "overlap", receipt, witness=witness
+    )
+
+    projection = signal._phase7_signal_authority()
+    assert "_factory_token" not in projection
+    assert "_factory_token" not in projection["execution_receipts"][0]
+    assert "_factory_token" not in projection["witness_artifact"]
+    assert authority_digest(projection) == authority_digest(
+        signal._phase7_signal_authority()
+    )
+    assert Phase7ProductionRuntime.signal_digest(
+        "outcome-partition-stage-result", signal
+    ) == Phase7ProductionRuntime.signal_digest(
+        "outcome-partition-stage-result", signal
+    )
+
+
+def test_phase7_outcome_projection_rejects_unknown_receipt_object_fail_closed():
+    with pytest.raises(TypeError, match="non-receipt authority"):
+        replace(
+            _signal("same_kind_consistency", "unknown"),
+            execution_receipts=(object(),),
+        )
+
+
+def test_phase7_outcome_projection_rejects_unknown_witness_object_fail_closed():
+    with pytest.raises(TypeError, match="non-witness authority"):
+        _signal(
+            "same_kind_consistency",
+            "unknown",
+            witness=object(),
+        )
+
+
+def test_phase7_outcome_projection_rejects_tampered_factory_authority():
+    receipt = _execution_receipt("cross_kind_disjointness", "sat")
+    witness = UnaryOutcomeWitnessArtifact.create(
+        receipt,
+        reason_id="outcome_cross_kind_overlap_witnessed",
+        witnessed_proposition="reachable_outcome_kinds_overlap",
+        producer_version="reachable-outcome-producer-v1",
+        encoding_version="reachable-outcome-smt-v1",
+    )
+    signal = _signal(
+        "cross_kind_disjointness", "overlap", receipt, witness=witness
+    )
+
+    with pytest.raises(ValueError, match="outcome execution receipt digest mismatch"):
+        replace(
+            signal,
+            execution_receipts=(replace(receipt, receipt_digest="tampered"),),
+        )
+    with pytest.raises(ValueError, match="unary witness artifact digest mismatch"):
+        replace(signal, witness_artifact=replace(witness, artifact_digest="tampered"))
 
 
 def test_return_outcome_encoder_preserves_unknown_receipt_and_deduplicates_retry():

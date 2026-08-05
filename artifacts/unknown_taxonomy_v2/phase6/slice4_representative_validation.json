@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "d1fd049e2356de004de9113953c13c0d4e927ce536d6167cb6be1323c4bcb9db",
+  "artifact_digest": "fd94c9de1ec8bc473ccda4282b86100a4b2a4013364caa63367adb42e4a44d80",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,7 +246,7 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "d462b7e32cb234ba826d8ff93ac6f1e1dde92c5a35d3c0b88f364145402f7dbe",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "237c2fa2e4b0f54780da226fbaafbc9613702b85bf850c5d943ac0136a2234f9",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/checker.py": "5106f8235bac1629fc461861a5b1274c826e28b49f748c643978d60f1f71c9d7",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "731ba670697089e32852cbb7a097108e5830f61d082bc0efca4d37adc5483760",
@@ -256,7 +256,7 @@
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "2712dbf0409ae3d2d61bc7270e84ec0adb307cd10f8c7d57318b824bb8f9494a",
     "scripts/function_tracer_pcode/equivalence/v2/loop_recurrence.py": "989bb4388fd92a35c2ce6dc639131edd648d58f9ae013418033b359d382ed15c",
     "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7b915eaba82c1d25f701c2e412f2e5488cbc8152ca00cf73f2df0c55ea789614",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "20acdb62fc54ef86a2a25a4b43580f0e6559a032c186b7e487d0352d0cd65ea7",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170",
     "scripts/function_tracer_pcode/equivalence/v2/shadow_compare.py": "83f837ccdffdd70ad525c434527b6a6fa4587a85437e5c1abf17b62a644ed634",
     "scripts/function_tracer_pcode/model/expression.py": "5115033d1db7d77180f7c935e752825272f04082f5ac61dca83e649bfadb92ea",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_frequent_patterns_pyghidra.py": "752b0d87dc048f34e6962c04ef92022dba9fdd31272c787c42ae0c453fa796d0",
@@ -317,7 +317,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 608,
-      "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
+      "candidate_set_digest": "0a5fa72c9ac7d87a1016e15e50c1f5ad7d82574ee92cfbefa49b89db8880a800"
     },
     "live_delta": {
       "added": 0,
