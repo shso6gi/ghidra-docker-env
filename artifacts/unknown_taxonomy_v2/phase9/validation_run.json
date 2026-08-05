@@ -1,11 +1,11 @@
 {
-  "artifact_digest": "bf80a0884158ee1b70398c1904ef3e1843af80a470888d714ff49f47238b8ddc",
+  "artifact_digest": "e125b9517eee47afe69ea2d09e0fd1a164506bcc4b7d0f59dfaa18f7eca6748b",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "82c4ae2bef229ae65f250534ec20b15d64b1d934c2914a00aa872ced68e5a555",
-      "test_count": 604
+      "sha256": "dcedda0cf1b390d935ecab74b86aba0c8cd1ecdaa05224a4726a01314706b5fd",
+      "test_count": 609
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml",
@@ -27,7 +27,7 @@
   "phase8_validator": "PASS",
   "refactor_contract": "GREEN",
   "refactor_replacement_contract": {
-    "abi_width_readonly_line_count": 4081,
+    "abi_width_readonly_line_count": 4120,
     "added_private_imports": [],
     "baseline_contract_digest": "24058991106c71a4deca6fbae60c54ef9b91233bade390e8db997a18c4645c30",
     "baseline_dependency_cycles": [
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "728dd0b85512a2b75382424342f30de616aa6dcac0e5424faca7058010246f1c",
+    "current_contract_digest": "5b63b7740aafcd64d8f8b35ed6cf4d2e93268adf902a8565dbf31566347f03ea",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3698,37 +3698,37 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_1",
         "_sealed_return_abi_facts",
-        2461
+        2477
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.analysis.summary_returns",
         "_summary_blocker_occurrence",
-        2202
+        2203
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_analysis_with_exact_returns",
-        2207
+        2208
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_empty_effect_summary",
-        2207
+        2208
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_summary_const",
-        2207
+        2208
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly",
         "scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates",
         "_with_summary_proof",
-        2207
+        2208
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "7b739d88eeb7768a8eabbb796fd02aef1730edf8a3a13886562d8c3aa2d3e1cc",
+    "current_source_tree_hash": "6fa545abeb5691ba0399247d7b9c766403b3c9a2ce2998e5f6e629cb005cd090",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

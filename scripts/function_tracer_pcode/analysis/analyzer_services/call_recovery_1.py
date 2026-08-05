@@ -1061,18 +1061,8 @@ def _impl__switch_recovery_targets_problematic_region(
     if not affected_returns:
         return False
 
-    affected_analysis = FunctionReturnAnalysis(
-        function_name=analysis.function_name,
-        entry_point=analysis.entry_point,
-        parameters=list(analysis.parameters or []),
+    affected_analysis = analysis.semantic_successor(
         returns=list(affected_returns),
-        function_ref=analysis.function_ref,
-        return_type=analysis.return_type,
-        return_type_obj=analysis.return_type_obj,
-        unknown_event_count=analysis.unknown_event_count,
-        unknown_event_reasons=list(analysis.unknown_event_reasons),
-        program_is_big_endian=analysis.program_is_big_endian,
-        binary_id=analysis.binary_id,
     )
     if affected_analysis.has_unknown_return():
         return True
@@ -2137,42 +2127,10 @@ def _impl__specialize_call_analysis(
             )
         )
 
-    return FunctionReturnAnalysis(
-        function_name=analysis.function_name,
-        entry_point=analysis.entry_point,
+    return analysis.semantic_successor(
         parameters=[dict(param) for param in (analysis.parameters or [])],
         returns=specialized_returns,
-        function_ref=analysis.function_ref,
-        return_type=analysis.return_type,
-        return_type_obj=analysis.return_type_obj,
-        signedness_result=analysis.signedness_result,
-        unknown_event_count=analysis.unknown_event_count,
-        unknown_event_reasons=list(analysis.unknown_event_reasons),
-        analysis_notes=list(analysis.analysis_notes),
-        recovered_from_decompiler=analysis.recovered_from_decompiler,
-        incomplete_control_flow=analysis.incomplete_control_flow,
         deferred_calls=specialized_deferred_calls,
-        effect_summary=analysis.effect_summary,
-        signature_hypotheses=list(getattr(analysis, "signature_hypotheses", []) or []),
-        return_type_provenance=dict(getattr(analysis, "return_type_provenance", {}) or {}),
-        comparison_surface=analysis.comparison_surface,
-        analysis_scope_key=analysis.analysis_scope_key,
-        program_is_big_endian=analysis.program_is_big_endian,
-        completed_recovery_proof_ids=tuple(
-            getattr(analysis, "completed_recovery_proof_ids", ()) or ()
-        ),
-        completed_recovery_proof_evidence=tuple(
-            getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-        ),
-        binary_id=analysis.binary_id,
-        summary_return_candidates=tuple(
-            getattr(analysis, "summary_return_candidates", ()) or ()
-        ),
-        return_outcomes=tuple(getattr(analysis, "return_outcomes", ()) or ()),
-        divergence_outcomes=tuple(getattr(analysis, "divergence_outcomes", ()) or ()),
-        unknown_outcomes=tuple(getattr(analysis, "unknown_outcomes", ()) or ()),
-        analysis_view_identity=getattr(analysis, "analysis_view_identity", None),
-        partition_revision=int(getattr(analysis, "partition_revision", 0) or 0),
     )
 
 def _impl__merge_deferred_calls_into_current_analysis(

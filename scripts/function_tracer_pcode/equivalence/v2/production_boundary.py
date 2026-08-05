@@ -21,6 +21,7 @@ class LegacyBoundaryErrorKind(str, Enum):
     STRATEGY_EXCEPTION = "strategy_exception"
     UNEXPECTED_PAIRWISE_STATE = "unexpected_pairwise_state"
     COMPATIBILITY_ERROR = "legacy_compatibility_error"
+    RETURN_ABI_AUTHORITY_INVALID = "return_abi_authority_invalid"
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,9 @@ def _issue_legacy_boundary_error(
         "strategy_exception": LegacyBoundaryErrorKind.STRATEGY_EXCEPTION,
         "unexpected_pairwise_state": (
             LegacyBoundaryErrorKind.UNEXPECTED_PAIRWISE_STATE
+        ),
+        "return_abi_authority_invalid": (
+            LegacyBoundaryErrorKind.RETURN_ABI_AUTHORITY_INVALID
         ),
     }.get(raw_status, LegacyBoundaryErrorKind.COMPATIBILITY_ERROR)
     diagnostic_digest = authority_digest({

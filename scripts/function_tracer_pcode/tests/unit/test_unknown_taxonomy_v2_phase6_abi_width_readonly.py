@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
     AbiWidthReadonlyDisposition,
     AbiWidthReadonlyPilotEncoder,
     AbiWidthReadonlyProducerStageSpec,
+    ReturnAbiAuthorityInvalid,
     AbiWidthReadonlySolverExecutionBatchSignal,
     AbiWidthReadonlySolverQueryAuthority,
     ReturnAbiProvenanceArtifact,
@@ -2338,12 +2339,13 @@ def test_typed_abi_assessment_distinguishes_missing_malformed_proved_and_unprove
         ("MISSING", "same", ("return_abi_provenance_unavailable",), ()),
         ("PRESENT", "different", ("return_abi_relation_unproven",), ()),
         ("PRESENT", "same", ("return_abi_relation_unproven",), ()),
-        ("MALFORMED", "same", (), ("ValueError",)),
+        ("MALFORMED", "same", (), ()),
     ),
 )
 def test_prepare_pair_return_observation_routes_typed_abi_authority(
     right_calling_status, right_storage, expected_reasons, expected_errors
 ):
+    malformed = right_calling_status == "MALFORMED"
     from scripts.function_tracer_pcode.equivalence.v2.pilot import (
         ProductionDualWritePilotConnector,
     )
@@ -2409,15 +2411,28 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
         }),
     ).begin({"case": "typed-abi-production-route"})
     with production_signal_scope(session):
-        result = prepare_pair_return_observation(
-            left_analysis,
-            right_analysis,
-            left_case,
-            right_case,
-            left_prepared,
-            right_prepared,
-            return_coverage_ids=(),
-        )
+        if malformed:
+            with pytest.raises(ReturnAbiAuthorityInvalid):
+                prepare_pair_return_observation(
+                    left_analysis,
+                    right_analysis,
+                    left_case,
+                    right_case,
+                    left_prepared,
+                    right_prepared,
+                    return_coverage_ids=(),
+                )
+            result = None
+        else:
+            result = prepare_pair_return_observation(
+                left_analysis,
+                right_analysis,
+                left_case,
+                right_case,
+                left_prepared,
+                right_prepared,
+                return_coverage_ids=(),
+            )
         first_event_count = session.recorder.event_count
         if expected_reasons:
             repeated = prepare_pair_return_observation(
@@ -2431,14 +2446,15 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
             )
             assert repeated.status == "blocked"
             assert session.recorder.event_count == first_event_count
-    assert result.status == "blocked"
+    if result is not None:
+        assert result.status == "blocked"
     if expected_reasons:
         projection = session.preview_lifecycle_projection()
         assert tuple(row.reason_id for row in projection.c_active_base) == expected_reasons
         assert len(projection.q_open_base) == len(expected_reasons)
     else:
         assert session.recorder.event_count == 0
-    assert tuple(session.domain_signal_error_kinds) == expected_errors
+    assert tuple(session.domain_signal_error_kinds) == (() if malformed else expected_errors)
 
 
 def test_return_abi_facts_survive_views_and_serialization():
@@ -2461,6 +2477,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
     from scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_1 import (
         _sealed_return_abi_facts,
     )
+    sealed_return_abi_facts = _sealed_return_abi_facts
 
     class Space:
         def getName(self):
@@ -2498,34 +2515,34 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
         def getLength(self):
             return 4
 
-    present = _sealed_return_abi_facts(Prototype(), ReturnType(), "int")
+    present = sealed_return_abi_facts(Prototype(), ReturnType(), "int")
     assert {present[name]["status"] for name in (
         "calling_convention",
         "declared_or_effective_return_type",
         "return_storage_descriptor",
     )} == {"PRESENT"}
 
-    missing = _sealed_return_abi_facts(object(), None, None)
+    missing = sealed_return_abi_facts(object(), None, None)
     assert {missing[name]["status"] for name in (
         "calling_convention",
         "declared_or_effective_return_type",
         "return_storage_descriptor",
     )} == {"MISSING"}
-    legacy_only = _sealed_return_abi_facts(object(), None, "legacy int display")
+    legacy_only = sealed_return_abi_facts(object(), None, "legacy int display")
     assert legacy_only["declared_or_effective_return_type"]["status"] == "MISSING"
 
     class NoneCallingPrototype:
         def getModelName(self):
             return None
 
-    none_calling = _sealed_return_abi_facts(NoneCallingPrototype(), None, None)
+    none_calling = sealed_return_abi_facts(NoneCallingPrototype(), None, None)
     assert none_calling["calling_convention"]["status"] == "MISSING"
 
     class MissingStoragePrototype:
         def getReturnStorage(self):
             return None
 
-    none_storage = _sealed_return_abi_facts(
+    none_storage = sealed_return_abi_facts(
         MissingStoragePrototype(), None, None
     )
     assert none_storage["return_storage_descriptor"]["status"] == "MISSING"
@@ -2538,7 +2555,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
         def getReturnStorage(self):
             return EmptyStorage()
 
-    empty_storage = _sealed_return_abi_facts(
+    empty_storage = sealed_return_abi_facts(
         EmptyStoragePrototype(), None, None
     )
     assert empty_storage["return_storage_descriptor"]["status"] == "MISSING"
@@ -2550,7 +2567,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
         def getReturnStorage(self):
             raise RuntimeError("bad storage")
 
-    malformed = _sealed_return_abi_facts(BrokenPrototype(), None, None)
+    malformed = sealed_return_abi_facts(BrokenPrototype(), None, None)
     assert malformed["calling_convention"]["status"] == "MALFORMED"
     assert malformed["return_storage_descriptor"]["status"] == "MALFORMED"
 
@@ -2577,10 +2594,42 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
         def getReturnStorage(self):
             return InvalidStorage()
 
-    invalid_storage = _sealed_return_abi_facts(
+    invalid_storage = sealed_return_abi_facts(
         InvalidStoragePrototype(), ReturnType(), "int"
     )
     assert invalid_storage["return_storage_descriptor"]["status"] == "MALFORMED"
+
+
+def test_empty_abi_facts_are_invalid_but_explicit_missing_envelope_is_unknown():
+    from scripts.function_tracer_pcode.analysis.analyzer_services import session_helpers_1
+    sealed_return_abi_facts = getattr(session_helpers_1, "_sealed_return_abi_facts")
+
+    analysis = FunctionReturnAnalysis("fn", "0x1000", [], [], binary_id="bin")
+    width_seed = _width_seed(
+        "left", function_identity=analysis.outcome_function_identity()
+    )
+
+    raw_empty = FunctionReturnAbiSeed.from_analysis_and_width_seed(
+        analysis, width_seed
+    )
+    assert raw_empty.malformed_slots == (
+        "calling_convention",
+        "declared_or_effective_return_type",
+        "return_storage_descriptor",
+    )
+    assert raw_empty.missing_slots == ()
+
+    analysis.return_abi_facts = sealed_return_abi_facts(object(), None, None)
+    explicit_missing = FunctionReturnAbiSeed.from_analysis_and_width_seed(
+        analysis, width_seed
+    )
+    assert explicit_missing.malformed_slots == ()
+    assert explicit_missing.missing_slots == (
+        "calling_convention",
+        "declared_or_effective_return_type",
+        "return_storage_descriptor",
+    )
+    assert not explicit_missing.complete
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "9c664a3f31bcc74195fefe56f0b3ba3d165db46d61a5d4aa535c5e44ced5653b",
+  "artifact_digest": "fb3fec7c8c882f603c2d6615a06c13305744997c2d4d004a57af6599b837f165",
   "durable_process_timeout": {
     "active_cause_count": 1,
     "open_requirement_count": 1,
@@ -27,7 +27,7 @@
     "canonical_census_uses_manifest_receipt_stream_join": {
       "junit": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
       "required_test_count": 3,
-      "test_count": 604
+      "test_count": 609
     },
     "decision_receipt_only_final_status": {
       "junit": "artifacts/unknown_taxonomy_v2/phase8/phase8-focused-validation.xml",
@@ -48,7 +48,7 @@
   },
   "phase7_cutover": {
     "path": "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json",
-    "sha256": "84b1411a5f9a89201a48a9dc5a4f335db364491b868a288f89d769cdeccdf37e"
+    "sha256": "fde120a887fc23a2e2861a23f8f511eadcf563b73709fd4b3833301bfa2077f6"
   },
   "policy": {
     "batch_resume": {
@@ -88,9 +88,9 @@
     }
   },
   "producer_manifest": {
-    "manifest_digest": "773259307f3b72a13a5eb0539d94752630bc2b14ccfe66c8d83ad97f0f2d17b3",
+    "manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
     "path": "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json",
-    "sha256": "42ac280f8cf496389a23dc34cf7d5c023e7990a555f61ad62982de4d67a1591a",
+    "sha256": "ab662b5b3db8e0232f6e1c97b1d0543f10f374f421c8e03366ea7866d3a63ab4",
     "site_count": 28
   },
   "source_files": [
@@ -100,7 +100,7 @@
     },
     {
       "path": "eqbench_run_all_32jobs.sh",
-      "sha256": "fc7f0d7ae3fd1352a85deabdbae48a49f2200ecf5326e6cdf8904f5b27938726"
+      "sha256": "6f3e792e27c75f5fcbc3ca82daca8820b2210b43afd880366cdbaf57dcc3979b"
     },
     {
       "path": "scripts/validation_matrix_common.sh",
@@ -112,7 +112,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "sha256": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a"
+      "sha256": "5106f8235bac1629fc461861a5b1274c826e28b49f748c643978d60f1f71c9d7"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py",
@@ -132,7 +132,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "sha256": "8d8295bdf079d5b6bffad2b32361953bd66bf9b979bc22aa89bb673a74f4b80c"
+      "sha256": "9be4b9dd2a4553d1eb3e5b7623762cca03c01e4f62ef41a16092c2cc71bc34e8"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/_shared.py",
@@ -176,7 +176,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
-      "sha256": "dd8db70cc0900986a0ad028a314f06de1ad9a5ddf476af8ba290e496872f74a7"
+      "sha256": "c56cfc76be284d8a920a06e9fb25e6ddb5d1b4bec8fec9a01f1a65ebbc5cc04f"
     },
     {
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_context.py",
@@ -260,7 +260,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
-      "sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8"
+      "sha256": "833d9a9f9fd6ac8d1911dde72a6a2bc89e36d4cf0dc3b51dab55705a42199228"
     },
     {
       "path": "scripts/function_tracer_pcode/validation/phase8_cutover_validation.py",
@@ -275,7 +275,7 @@
       "sha256": "66204325b8f166c83a7099e59fa424bfc62f04e56e14e3164eb145db1893efe0"
     }
   ],
-  "source_tree_digest": "4c7fd82a6151bc9c99d1ee8506059408f5c0a5134109e84cd71b558f146887a7",
+  "source_tree_digest": "9c4b99d8c1e96614404c05840945b7cdf710583f8a80cac7a02208498e5b8866",
   "validation_kind": "unknown-taxonomy-v2-phase8-five-value-cutover-v2",
   "workflow_regression_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase8/phase8-workflow-regression.xml",
@@ -319,7 +319,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py",
-        "sha256": "064d09b737d1e2c3b8e45416757e9e11e78ef652f21b96464d98befdd29ba673"
+        "sha256": "78371f79d68594d4214e79aca2d3fd4cae50e48e513aeb9db16ad8488aae64fb"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_expander_combination_guards.py",
@@ -363,7 +363,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
-        "sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8"
+        "sha256": "833d9a9f9fd6ac8d1911dde72a6a2bc89e36d4cf0dc3b51dab55705a42199228"
       }
     ],
     "test_count": 726

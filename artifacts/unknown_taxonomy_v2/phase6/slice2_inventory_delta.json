@@ -2,44 +2,23 @@
   "added": [
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "ccdf272d479fc24c414f3e0a8d70386d183780a4ff4f6294db591a1d7f404210",
-      "line": 269,
-      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "2b8b1ed1717d6a014cdcff837b96fd2ab140cc6c2a65c5234c1d1f34629682f8"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "2b8b1ed1717d6a014cdcff837b96fd2ab140cc6c2a65c5234c1d1f34629682f8",
-      "source": "_REASON_IDENTITY_SCOPES = {",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "18ef4691a55e5f2eaedb46de19469ea4b00c3be4488a586a73cc192a629a206f",
-      "line": 629,
+      "inventory_source_fingerprint": "7810f5dedced84dc37a88475ef9d2ffb02518d95548470b4e663495474299b80",
+      "line": 818,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "00c237d7132b921117f7df7c8229f45ff06d5b38cd22b9fbf42acd17968dbb77"
+          "001b88ca4d959f8a1f07601b2c734ff4ff94026ac32d05f1d62780db4cf76c74"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "00c237d7132b921117f7df7c8229f45ff06d5b38cd22b9fbf42acd17968dbb77",
-      "source": "\"phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}\" \\",
+      "shell_role": "reporting_only",
+      "site_id": "001b88ca4d959f8a1f07601b2c734ff4ff94026ac32d05f1d62780db4cf76c74",
+      "source": "echo \"Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)\"",
       "symbol": "<shell>"
     },
     {
@@ -125,6 +104,48 @@
       "site_id": "0299687f17253631f4970c2b70b8eb0654353d9ad0a491f9e09c41d5138f9244",
       "source": "\"reason\", \"reason_id\", \"unknown_reason\", \"unknown_reasons\",",
       "symbol": "discover_retired_reference_candidates"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "cea928534c795b261a155e4471671609590a3341d19421934ee23301b8ba1131",
+      "line": 2054,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "02a1b86b7dc6f6577e8fc352fbb4b6e58ee5ccfd45f33cfc314c31d1b7e6a0a9"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "02a1b86b7dc6f6577e8fc352fbb4b6e58ee5ccfd45f33cfc314c31d1b7e6a0a9",
+      "source": "unknown_reasons=[],",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "2aabca2eebf862641ec891289140c36d71be20e6ebe2b9889d80c775ebd6c7d5",
+      "line": 90,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "02addd6ce52a21445a5f8cde289b1e808f476fcd1f495000a268c7c49c0b325e"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "02addd6ce52a21445a5f8cde289b1e808f476fcd1f495000a268c7c49c0b325e",
+      "source": "echo \"Error: pair process timeout values must be seconds, for example 300s\" >&2",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -297,27 +318,6 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "c25cc6ce959f84477de67228658c887c6c1e3a584a5ff5039b3fbacb7a425aa1",
-      "line": 1734,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "0a666846596bb8d75b5b7e16120975e2ffb4a5da50c2597181bb318ba35a7788"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "0a666846596bb8d75b5b7e16120975e2ffb4a5da50c2597181bb318ba35a7788",
-      "source": "reasons = tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_recurrence_promotion_authority"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
       "line": 1248,
@@ -335,6 +335,27 @@
       "site_id": "0a9078acc5777f76bbcd1c595069884a58ddc08c7f85beaa6275d9b2c1c55ce7",
       "source": "unknown_reasons.append(",
       "symbol": "_impl_check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "2dc0cd1e2de8f41149242be688017e3e0ccca3b8c9c8f1620e419c24dd6f3575",
+      "line": 1222,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "0b38413e283903a37916281ecffb7f9f7b7663faa025cc0a1d771927d45f65a8"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "0b38413e283903a37916281ecffb7f9f7b7663faa025cc0a1d771927d45f65a8",
+      "source": "result.unknown_reasons = [",
+      "symbol": "finish"
     },
     {
       "authority_role": "derived_projection",
@@ -403,45 +424,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "dff51234a56e0bea2f37759982b0b3c29f4331d9f8a8c07a3ffb606dab686345",
-      "line": 349,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "1b5259a34f29691eba8ae9c80d2f8930fb87ff9702236a3e8e7264c03fa0302e",
+      "line": 36,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "0ce15fbfce2dd7eda3c66b098f1a965d56130422751b073fe5eda47950b9cf14"
+          "0d8f833fc4867a4ff35f2b7c289ef5390b32111446bafbe7e399cf04cf4d1bd7"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "0ce15fbfce2dd7eda3c66b098f1a965d56130422751b073fe5eda47950b9cf14",
-      "source": "--timeout-seconds \"$PAIR_PROCESS_TIMEOUT_SECONDS\" \\",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "6e8620a5f039c8c0b89e90a4b2f9f5818a58699e4bd0b74ceb9262cb6dda29d0",
-      "line": 32,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "0d49720115deeaba32a7546dd0f32abcfd289bafd0ae4581b7469eeb7d83b175"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "0d49720115deeaba32a7546dd0f32abcfd289bafd0ae4581b7469eeb7d83b175",
-      "source": "PAIR_PROCESS_TIMEOUT=\"${PAIR_PROCESS_TIMEOUT:-600s}\"",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "0d8f833fc4867a4ff35f2b7c289ef5390b32111446bafbe7e399cf04cf4d1bd7",
+      "source": "make_unknown_reason,",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -466,27 +466,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
-      "line": 1745,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "0fa10ca5d05dbc0bd4194fabf0e7e1eb497001ea7ec721bf8af1d02c0ed3c34a"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "0fa10ca5d05dbc0bd4194fabf0e7e1eb497001ea7ec721bf8af1d02c0ed3c34a",
-      "source": "strategy_result.unknown_reasons = unknown_reasons",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "f3f4a9d5e6acbd1d34237b9cdcb76838de1efe8566643058ef3ad1aeac87751b",
@@ -508,24 +487,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "5adf5cbfb1d69e612a9f48b6753f43aaffe001e6081a9ae7709b14e87ed51311",
-      "line": 197,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
+      "inventory_source_fingerprint": "fbe5cacf87d5f5a1f87e5885f294ee204457af80415769e3d2e737cf79db762c",
+      "line": 1389,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "30f7480bd535ec4f180967a2d4578da7b702c80700e4f4a78347862286d775ae"
+          "110060b2a3e1f0ac9f3326c1ad3415d8bd2fea1214d22ded7fc602fced38f3b6"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "30f7480bd535ec4f180967a2d4578da7b702c80700e4f4a78347862286d775ae",
-      "source": "OPERATIONAL_REASON_PRODUCER_CONSERVATION = MappingProxyType({",
-      "symbol": "<module>"
+      "site_id": "110060b2a3e1f0ac9f3326c1ad3415d8bd2fea1214d22ded7fc602fced38f3b6",
+      "source": "unknown_reasons.extend(unresolved_blocking_reasons)",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -550,23 +529,48 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "b5d2bdfee4a9dacccbecabfa0b90eb60092d903276181abc465e2223a0902d09",
-      "line": 1511,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "dff51234a56e0bea2f37759982b0b3c29f4331d9f8a8c07a3ffb606dab686345",
+      "line": 455,
+      "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "1711e70376d9650b2ac3e7ac855abdd24ae5cf3bfc634e5831ee9b0cd34ba421"
+          "166a6e1b048c36a5386af103bdfb3ee446873624487af0be6c5ade59425244bf"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "166a6e1b048c36a5386af103bdfb3ee446873624487af0be6c5ade59425244bf",
+      "source": "--timeout-seconds \"$PAIR_PROCESS_TIMEOUT_SECONDS\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "production",
+      "construct_kind": "reason_constructor",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "ceb076658b1800ad03514d596ab7eb5e2c266d60c0a64f07370214acaf25cdd3",
+      "line": 1913,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "static_set",
+      "resolution_basis": {
+        "kind": "symbol_or_file_flow_proposal",
+        "refs": [
+          "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py:check"
+        ]
+      },
+      "resolved_reason_ids": [
+        "return_width_bridge_missing",
+        "strategy_exception",
+        "unknown"
+      ],
+      "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "1711e70376d9650b2ac3e7ac855abdd24ae5cf3bfc634e5831ee9b0cd34ba421",
-      "source": "sat_replay_reason = self._make_sat_unsafety_unknown_reason(",
+      "site_id": "16f9be4d37d00458560493ef3fc7d5b5d689f105638308bac928c41b3134477b",
+      "source": "make_unknown_reason(",
       "symbol": "check"
     },
     {
@@ -591,48 +595,6 @@
       "symbol": "_impl__make_blocking_unsafety_unknown_reason"
     },
     {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "cea928534c795b261a155e4471671609590a3341d19421934ee23301b8ba1131",
-      "line": 2057,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "188c9bebbcf07c20d94319f6f1ad8097007f8c324bd940ba11cec2aacaa9227d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "188c9bebbcf07c20d94319f6f1ad8097007f8c324bd940ba11cec2aacaa9227d",
-      "source": "unknown_reasons=[],",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "6d07c73c47a496925f4ae5e3d3ccb62c9db4dbc26456772dfde9a08f48997375",
-      "line": 1342,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "18fab2a9a98452f6a713bebc039617ca35cdec7ae5afff614e0672f0720d37b2"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "18fab2a9a98452f6a713bebc039617ca35cdec7ae5afff614e0672f0720d37b2",
-      "source": "unknown_reasons = []",
-      "symbol": "check"
-    },
-    {
       "authority_role": "legacy_reader",
       "construct_kind": "legacy_deserialization",
       "consumer_class": "proof_backlog",
@@ -652,6 +614,27 @@
       "site_id": "1ba2eed9e81dd3b52ac1609f920df45f64a73eea95d83e167566404ef03be6f0",
       "source": "from ...unknown_reason import UnknownRecoveryActionStatus, UnknownRecoveryProofKind, UnknownRecoveryProofObligation, UnknownReasonId, UnknownReasonRecord, build_proof_obligation_id, build_unknown_recovery_actions, coerce_unknown_reason_records, make_internal_v2_reason_diagnostic, make_unknown_reason",
       "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "7f674e4a481e3851959fb6f5ed08477f7185916fcc7343bbb7c85a9f35f6ae52",
+      "line": 776,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "1bb793d376395f0e0c5f0ca844bb51f22ef3f8abe809b4163b65e304cfc57aac"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "1bb793d376395f0e0c5f0ca844bb51f22ef3f8abe809b4163b65e304cfc57aac",
+      "source": "pair_process_timeout=$PAIR_PROCESS_TIMEOUT",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -828,43 +811,85 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "7810f5dedced84dc37a88475ef9d2ffb02518d95548470b4e663495474299b80",
-      "line": 685,
+      "inventory_source_fingerprint": "8e893e2fb1fabbcba38370583caf93df6b91715aa79ca1230c9cac044181d3da",
+      "line": 1195,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "21f9828f5e8b7758e775c8876a346c80acafc59d84d81a1350490bda7513a898"
+          "21aba218e7b811147176ba99a3e699f06104c66db547583e7ec9cc02d6d56ae9"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "21f9828f5e8b7758e775c8876a346c80acafc59d84d81a1350490bda7513a898",
-      "source": "echo \"Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)\"",
+      "shell_role": "execution_config",
+      "site_id": "21aba218e7b811147176ba99a3e699f06104c66db547583e7ec9cc02d6d56ae9",
+      "source": "\"EQUIV_TIMEOUT=$EQUIV_TIMEOUT\" \\",
       "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "edcbc5a04d098951b566143c9ce58ac260e0a462cf23c78c46ed88f520410e1a",
-      "line": 1373,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "10bff4ce48424aea909f55e61f99529770ec11338010e02918eca02ae498f45b",
+      "line": 2400,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "2503ef8700b2ce98bd382a147f41f5641a3e198096c1705d4aa604eac5a5c9ed"
+          "220419946a79c5822355e9ff1387a03416cf11ca46790c0e573145ea4b034d7d"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "2503ef8700b2ce98bd382a147f41f5641a3e198096c1705d4aa604eac5a5c9ed",
-      "source": "if coverage_unknown_reasons:",
-      "symbol": "check"
+      "site_id": "220419946a79c5822355e9ff1387a03416cf11ca46790c0e573145ea4b034d7d",
+      "source": "raw_reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_apply_phase2_relational_call_discharge"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "66d82bee5c12f401bc029d1a71ed955449328d91eaa40dea2adf9f169c05eded",
+      "line": 214,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "225dec02908af5a22cbee319834897491dcacbf2cc3aeac3358c740dc48cc2fd"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "225dec02908af5a22cbee319834897491dcacbf2cc3aeac3358c740dc48cc2fd",
+      "source": "echo \"UNKNOWN\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "0124fa40ae0be0c6fd78a912f205f27b9d397d996fd4387769afa9f0321024e6",
+      "line": 210,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "24ed0947be560a47c2f565d525472be52ad62731d1771085b84dcb1f849f6279"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "24ed0947be560a47c2f565d525472be52ad62731d1771085b84dcb1f849f6279",
+      "source": "TIMEOUT)",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "production",
@@ -933,27 +958,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "42dec6e796044eabcab7cf45f4191aac286a785abaec972ac8b4158fe37edc7e",
-      "line": 1061,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "2882ce5e07a27f55bb76930e8bc29490c129b5c28b639e05c5efddda3ed36766"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "2882ce5e07a27f55bb76930e8bc29490c129b5c28b639e05c5efddda3ed36766",
-      "source": "\"PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\" \\",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "1b5259a34f29691eba8ae9c80d2f8930fb87ff9702236a3e8e7264c03fa0302e",
@@ -1017,24 +1021,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "46a39f8893262298125e8ebbe6743a58ef48fb05e07c752038042bf3e7fda7b9",
-      "line": 362,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "ccdf272d479fc24c414f3e0a8d70386d183780a4ff4f6294db591a1d7f404210",
+      "line": 269,
+      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "field_initialization_or_nonproducing_transfer",
         "refs": [
-          "2caf1897d761e2c80de09b47102e173bcfe508798b74b84a0a7a03c41f361f63"
+          "2b8b1ed1717d6a014cdcff837b96fd2ab140cc6c2a65c5234c1d1f34629682f8"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "2caf1897d761e2c80de09b47102e173bcfe508798b74b84a0a7a03c41f361f63",
-      "source": "echo \"Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\"",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "2b8b1ed1717d6a014cdcff837b96fd2ab140cc6c2a65c5234c1d1f34629682f8",
+      "source": "_REASON_IDENTITY_SCOPES = {",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -1082,22 +1086,43 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "2dc0cd1e2de8f41149242be688017e3e0ccca3b8c9c8f1620e419c24dd6f3575",
-      "line": 1222,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+      "inventory_source_fingerprint": "d19ecb55b1ee27caf1f76c85acd2d7bf086d9ea3dfea13ba627097cc66287718",
+      "line": 1527,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "0b38413e283903a37916281ecffb7f9f7b7663faa025cc0a1d771927d45f65a8"
+          "2f736e2a25ea1b6a03e1ee2ee80db15a07ad8b1c1e0440c5828c7c1e27b29934"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "0b38413e283903a37916281ecffb7f9f7b7663faa025cc0a1d771927d45f65a8",
-      "source": "result.unknown_reasons = [",
-      "symbol": "finish"
+      "site_id": "2f736e2a25ea1b6a03e1ee2ee80db15a07ad8b1c1e0440c5828c7c1e27b29934",
+      "source": "unknown_reasons.append(sat_replay_reason)",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "5adf5cbfb1d69e612a9f48b6753f43aaffe001e6081a9ae7709b14e87ed51311",
+      "line": 197,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "30f7480bd535ec4f180967a2d4578da7b702c80700e4f4a78347862286d775ae"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "30f7480bd535ec4f180967a2d4578da7b702c80700e4f4a78347862286d775ae",
+      "source": "OPERATIONAL_REASON_PRODUCER_CONSERVATION = MappingProxyType({",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -1124,27 +1149,6 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "599238a0038a376dfb600fd80c74cfc65ae3999691fda932dcf9997607bef90e",
-      "line": 1223,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "382c013876c6dc4ae132a5bd73f999a87595714c9abe72ee3be033eff576a575"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "382c013876c6dc4ae132a5bd73f999a87595714c9abe72ee3be033eff576a575",
-      "source": "make_production_unknown_reason(",
-      "symbol": "finish"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
       "inventory_source_fingerprint": "c5a447610be1f2c7195948068c083902ee5d20e04bc8057240b65b3973e1a484",
       "line": 1517,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -1161,6 +1165,27 @@
       "site_id": "31679661b0d99ebeaa223287957e72ba21bd8236daab7894869490c3c9a5088a",
       "source": "unknown_reasons,",
       "symbol": "_impl_check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "9116ce09b127b747fe7540e5465adc225444b5aaeadb06e6cd123f8cdbca1b74",
+      "line": 424,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "31deb99e2464e724352a9f3950d28783ce40f6405ce0339b27e6c976242b8e95"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "31deb99e2464e724352a9f3950d28783ce40f6405ce0339b27e6c976242b8e95",
+      "source": "\"UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "production",
@@ -1194,6 +1219,27 @@
       "site_id": "321aef6495334e14c0bf561049a6459a780f9a0b0abe9c0617f8e5e213f73f26",
       "source": "return make_unknown_reason(",
       "symbol": "_impl__make_return_coverage_unknown_reason"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "50d24ab9759045ea6600433aab7bd595f3876a925fa6bcff765dae7a377b1179",
+      "line": 320,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "324d5438c803a79e62ca60e137a1c6999c85db2fccbed9ca78171988d6aa03f5"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "324d5438c803a79e62ca60e137a1c6999c85db2fccbed9ca78171988d6aa03f5",
+      "source": "ABI_WIDTH_READONLY_PRODUCTION_SOURCE_REASON_IDS = {",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -1238,27 +1284,6 @@
       "symbol": "<shell>"
     },
     {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "c65877c585bfb5afcdcb567cecbf3b0c27baa4446b613d863b0d8eaa076dc667",
-      "line": 650,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "32bc944bbf99f060220435af50955c00550f97d74ddf6b4dc5cb62d3666dea03"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "32bc944bbf99f060220435af50955c00550f97d74ddf6b4dc5cb62d3666dea03",
-      "source": "equiv_timeout=$EQUIV_TIMEOUT",
-      "symbol": "<shell>"
-    },
-    {
       "authority_role": "legacy_reader",
       "construct_kind": "legacy_deserialization",
       "consumer_class": "final_primary",
@@ -1281,24 +1306,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "f4b210c9d4863309832191dd77a3f3042bc4ca10dc37a23001c742dbfcf56af4",
-      "line": 39,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "599238a0038a376dfb600fd80c74cfc65ae3999691fda932dcf9997607bef90e",
+      "line": 1223,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "37d805a3ee254a2872671561a5a6523967f96b61b1f4822f840b0d38cad93399"
+          "382c013876c6dc4ae132a5bd73f999a87595714c9abe72ee3be033eff576a575"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "37d805a3ee254a2872671561a5a6523967f96b61b1f4822f840b0d38cad93399",
-      "source": "PAIRWISE_TIMEOUT_HARD=\"${PAIRWISE_TIMEOUT_HARD:-30}\"",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "382c013876c6dc4ae132a5bd73f999a87595714c9abe72ee3be033eff576a575",
+      "source": "make_production_unknown_reason(",
+      "symbol": "finish"
     },
     {
       "authority_role": "derived_projection",
@@ -1323,6 +1348,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "42dec6e796044eabcab7cf45f4191aac286a785abaec972ac8b4158fe37edc7e",
+      "line": 1199,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "39040b5297c39dcd53fdff6ec87fc69ec6aef1d6d9f965af89f3c0c984e98d7f"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "39040b5297c39dcd53fdff6ec87fc69ec6aef1d6d9f965af89f3c0c984e98d7f",
+      "source": "\"PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
@@ -1341,27 +1387,6 @@
       "site_id": "396735f4a7f337c9fc775c151bf4b143a50b73ee474cf78c60295ce8a107840b",
       "source": "unknown_reasons.append(",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d19ecb55b1ee27caf1f76c85acd2d7bf086d9ea3dfea13ba627097cc66287718",
-      "line": 1526,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "396992d1feeffb4facd34bc458585a816e3f9abef2e389713ec5ab97dce489af"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "396992d1feeffb4facd34bc458585a816e3f9abef2e389713ec5ab97dce489af",
-      "source": "unknown_reasons.append(sat_replay_reason)",
-      "symbol": "check"
     },
     {
       "authority_role": "production",
@@ -1385,48 +1410,6 @@
       "site_id": "39f1537c30d1f60c4c791b7386fbbe98c44ec9b0ad7b17108c506ff240479969",
       "source": "reason_id = _LOOP_FALLBACK_REASONS.get(source_code)",
       "symbol": "classify_loop_fallback"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
-      "line": 1811,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "3afec7bad4484b63e38b81de1403178d96ef6b5c2837e9475a4c73354f15dfb2"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "3afec7bad4484b63e38b81de1403178d96ef6b5c2837e9475a4c73354f15dfb2",
-      "source": "strategy_result.unknown_reasons = unknown_reasons",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "82e83200de58949ac46e82bf8476d663ed9f94f72ac0ff53819dc2bffa0b10b3",
-      "line": 327,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "3b58a3d9eb5bde4c399b7685861a5f6dcca32e557c15a1064260dec28e7a743e"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "3b58a3d9eb5bde4c399b7685861a5f6dcca32e557c15a1064260dec28e7a743e",
-      "source": "--pairwise-timeout \"$PAIRWISE_TIMEOUT\"",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -1473,22 +1456,22 @@
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "12d256cb29a178e6854b6cc46c74dcb15396ee769fe62e571dc7859d6d5f97b4",
-      "line": 1572,
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
+      "line": 1812,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "3e1acbcec69557bf2ed8fb4c2125f621690c437209a5f8bcec394ca7425e4c6d"
+          "3cd524d21b6254e13dbf7549f4a1b76784d7be7a6da0a55d55c8022995a4762c"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "3e1acbcec69557bf2ed8fb4c2125f621690c437209a5f8bcec394ca7425e4c6d",
-      "source": "unknown_reasons=unknown_reasons,",
+      "site_id": "3cd524d21b6254e13dbf7549f4a1b76784d7be7a6da0a55d55c8022995a4762c",
+      "source": "strategy_result.unknown_reasons = unknown_reasons",
       "symbol": "check"
     },
     {
@@ -1511,48 +1494,6 @@
       "site_id": "40f1ca40e1b546301a02c65a5bc87a22c8c924d242608af9efbda994026a4941",
       "source": "unknown_reasons = blocking_unknown_reasons",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "b18ca05b0dd0727d3a9609d97b0691c249be5b13eb3b56edc4929f3036a6e392",
-      "line": 114,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "b8c7c61257a4f02de7c76a38595a0bfe73358a65855cbfa1444deefdaf534461"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "b8c7c61257a4f02de7c76a38595a0bfe73358a65855cbfa1444deefdaf534461",
-      "source": "OPERATIONAL_REASON_SPECS: Mapping[str, OperationalReasonSpec] = MappingProxyType({",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "9e72096b2f66d3d6cf6b66b734d7ad7ea089a9f47e6d6dce8454b87920efc092",
-      "line": 1220,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "58f0ed9eb36b38c140176440b6bc0f9cf4454b49dbddf0aa7a7dda894909949b"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "58f0ed9eb36b38c140176440b6bc0f9cf4454b49dbddf0aa7a7dda894909949b",
-      "source": "getattr(result, \"unknown_reasons\", ()) or ()",
-      "symbol": "finish"
     },
     {
       "authority_role": "derived_projection",
@@ -1623,48 +1564,6 @@
       "symbol": "<shell>"
     },
     {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "2938e101079b06429ff7e0dcd8db358457554d4344499f3b6fb285738ae6747c",
-      "line": 648,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "4485ac1c8c9f64d1991e6117376ccdfbb935165735387fb6e4c83be9cd2c07bb"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "4485ac1c8c9f64d1991e6117376ccdfbb935165735387fb6e4c83be9cd2c07bb",
-      "source": "pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
-      "line": 1796,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "44a35206c2266e350e384126f900b51df23ab3bac151670a2638c7ee861a2b2b"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "44a35206c2266e350e384126f900b51df23ab3bac151670a2638c7ee861a2b2b",
-      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
-      "symbol": "check"
-    },
-    {
       "authority_role": "production",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "fallback_retry",
@@ -1713,23 +1612,65 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "095a3abb51383d0641f2a949590a48389f3a02a06d95663d28feb64bcbdcde0e",
+      "line": 2407,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "45d6b4aed2b653bfd35e98fe5f148308a23b045e1d657717488ecf4d10e94f32"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "45d6b4aed2b653bfd35e98fe5f148308a23b045e1d657717488ecf4d10e94f32",
+      "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
+      "symbol": "_apply_phase2_relational_call_discharge"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "2f0171a7d17e499fb90a4b3eab5df4f6d57bc381cd6fea869085d89ecdc655a6",
+      "line": 1825,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "45ec14e04fef49c56b6391a66b27b37f84f0f1beb65e8b150dac860814486d2f"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "45ec14e04fef49c56b6391a66b27b37f84f0f1beb65e8b150dac860814486d2f",
+      "source": "reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_attach_recurrence_proposal_blockers"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "66d82bee5c12f401bc029d1a71ed955449328d91eaa40dea2adf9f169c05eded",
-      "line": 191,
+      "inventory_source_fingerprint": "9a868a9597da79d6f1d0c6c337400b4a2f5590f82d247c775bc09305ee4806f5",
+      "line": 88,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "4702e14b7da6b4db2b3c8d80505363ff68149a8fbfcab15ffbbbbb703ebb5d43"
+          "45f2ac30a887cf87a82fd13e307b0963944863ac6d3268f2c267e535cb78c063"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "4702e14b7da6b4db2b3c8d80505363ff68149a8fbfcab15ffbbbbb703ebb5d43",
-      "source": "echo \"UNKNOWN\"",
+      "shell_role": "other_consumer",
+      "site_id": "45f2ac30a887cf87a82fd13e307b0963944863ac6d3268f2c267e535cb78c063",
+      "source": "if [[ ! \"$PAIR_PROCESS_TIMEOUT_SECONDS\" =~ ^[0-9]+([.][0-9]+)?$ ]] \\",
       "symbol": "<shell>"
     },
     {
@@ -1797,24 +1738,45 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "28901d282b399a3b7da37b902ff2c4c572aef33573c616522de8777fcc8d9c44",
-      "line": 2438,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "883763d3bd971e59b53722073add8f8e47fa316b19da5a1cd1c276a94992a104",
+      "line": 1354,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "field_initialization_or_nonproducing_transfer",
         "refs": [
-          "49719fc3831a4d4df9b45be6e752b77eeb1fae58738fbc542f384e7f8b88d599"
+          "4c9e49f91f16506f5c70dba5e108736d3825e5f2f8c94ddfe6d23324589ae097"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "49719fc3831a4d4df9b45be6e752b77eeb1fae58738fbc542f384e7f8b88d599",
-      "source": "strategy_result.unknown_reasons = []",
-      "symbol": "_apply_phase2_relational_call_discharge"
+      "site_id": "4c9e49f91f16506f5c70dba5e108736d3825e5f2f8c94ddfe6d23324589ae097",
+      "source": "equivalence_blocking_reasons = [",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "9661dcd109174084bc098c38e85c0384162aba3b3e3bc0ea3e321984196f1169",
+      "line": 38,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "4db546a5d493a7f825fb53b21adbef729116989077d4d8a3771c8b9716b7b541"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "4db546a5d493a7f825fb53b21adbef729116989077d4d8a3771c8b9716b7b541",
+      "source": "DECOMPILE_TIMEOUT=\"${DECOMPILE_TIMEOUT:-60}\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -1834,7 +1796,7 @@
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "other_consumer",
       "site_id": "4e64cb24b6b8b85cf88f85de0f8c01c5d9b6ecd0755fb1855d8d5657c3c5ffd3",
-      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
+      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -1881,86 +1843,65 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "883763d3bd971e59b53722073add8f8e47fa316b19da5a1cd1c276a94992a104",
-      "line": 1353,
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "bd39227b42145167bea517cc2a9d16d29f428ef9ab1bf858168c56532719eae0",
+      "line": 1196,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "50b58c80232473e9047f4fa97e9bd80cfc93bff5bf589c904e1e1a3da9da2be8"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "50b58c80232473e9047f4fa97e9bd80cfc93bff5bf589c904e1e1a3da9da2be8",
+      "source": "\"DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
+      "line": 1746,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "504d47e930014cec7187a7d4676ebf8283477b3eaf6930e7e7c43d7c27398013"
+          "50da114068319155e5bad9c562050032346569a3e38b787f7da3feee7ef631dd"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "504d47e930014cec7187a7d4676ebf8283477b3eaf6930e7e7c43d7c27398013",
-      "source": "equivalence_blocking_reasons = [",
+      "site_id": "50da114068319155e5bad9c562050032346569a3e38b787f7da3feee7ef631dd",
+      "source": "strategy_result.unknown_reasons = unknown_reasons",
       "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "9a868a9597da79d6f1d0c6c337400b4a2f5590f82d247c775bc09305ee4806f5",
-      "line": 83,
+      "inventory_source_fingerprint": "7f5b412c8fc3bc276654544f29c6a584f27a0ff644e33191693a79752c0774dc",
+      "line": 35,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "51a60acd4911d36f08477f8287c5a916408821ae2d6af756cd5351128628e47d"
+          "525da3e839e885f0552f66eadbdb793b30ed17aab0d09448ac79f790420ef6f7"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "other_consumer",
-      "site_id": "51a60acd4911d36f08477f8287c5a916408821ae2d6af756cd5351128628e47d",
-      "source": "if [[ ! \"$PAIR_PROCESS_TIMEOUT_SECONDS\" =~ ^[0-9]+([.][0-9]+)?$ ]] \\",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "9116ce09b127b747fe7540e5465adc225444b5aaeadb06e6cd123f8cdbca1b74",
-      "line": 320,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "52292f62f0cdced94b2d91e67523d1344b33202d61cf66bb387601ae5ddcb798"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "52292f62f0cdced94b2d91e67523d1344b33202d61cf66bb387601ae5ddcb798",
-      "source": "\"UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "7f674e4a481e3851959fb6f5ed08477f7185916fcc7343bbb7c85a9f35f6ae52",
-      "line": 646,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "52b0ebe2076e4c9d5cf68b305b31e7b6cf2fcd94f428766f608381e07072f9ec"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "52b0ebe2076e4c9d5cf68b305b31e7b6cf2fcd94f428766f608381e07072f9ec",
-      "source": "pair_process_timeout=$PAIR_PROCESS_TIMEOUT",
+      "site_id": "525da3e839e885f0552f66eadbdb793b30ed17aab0d09448ac79f790420ef6f7",
+      "source": "PAIR_PROCESS_TIMEOUT_SECONDS=\"${PAIR_PROCESS_TIMEOUT%s}\"",
       "symbol": "<shell>"
     },
     {
@@ -1988,27 +1929,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "9e72096b2f66d3d6cf6b66b734d7ad7ea089a9f47e6d6dce8454b87920efc092",
-      "line": 293,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "52cbfc36a5901eebb532ce65f6f92c8b8a21ecb272c39cde44152c580a8606c7"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "52cbfc36a5901eebb532ce65f6f92c8b8a21ecb272c39cde44152c580a8606c7",
-      "source": "getattr(result, \"unknown_reasons\", ()) or ()",
-      "symbol": "run_check_from_binaries_with_v2_pilot"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "0124fa40ae0be0c6fd78a912f205f27b9d397d996fd4387769afa9f0321024e6",
@@ -2027,6 +1947,27 @@
       "site_id": "53ac2ac47e1ea1de30eefb2b11d4a18e7de7a56b2cba65d324a56aa6a7361873",
       "source": "TIMEOUT)",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "b5d2bdfee4a9dacccbecabfa0b90eb60092d903276181abc465e2223a0902d09",
+      "line": 1512,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "53dbfd187cf082f374142832c82903efaae954496afaba696b8a1fe25c9e55e0"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "53dbfd187cf082f374142832c82903efaae954496afaba696b8a1fe25c9e55e0",
+      "source": "sat_replay_reason = self._make_sat_unsafety_unknown_reason(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -2095,6 +2036,27 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
+      "inventory_source_fingerprint": "9e72096b2f66d3d6cf6b66b734d7ad7ea089a9f47e6d6dce8454b87920efc092",
+      "line": 1220,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "58f0ed9eb36b38c140176440b6bc0f9cf4454b49dbddf0aa7a7dda894909949b"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "58f0ed9eb36b38c140176440b6bc0f9cf4454b49dbddf0aa7a7dda894909949b",
+      "source": "getattr(result, \"unknown_reasons\", ()) or ()",
+      "symbol": "finish"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
       "inventory_source_fingerprint": "4efef5d4456e872edf58c2640c8c6836db2281b9286df2034d8a4b4fa71c7f7e",
       "line": 1519,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -2153,48 +2115,6 @@
       "site_id": "59b9d983bed6e14bc4e26ac6433a775e4d87fa782343654d0fa0dfa4326ec016",
       "source": "equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 1154,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "59c3626cae1c8b62527637eedb9d8375cd3062009b47c616f6485443be9591d2"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "59c3626cae1c8b62527637eedb9d8375cd3062009b47c616f6485443be9591d2",
-      "source": "unknown_reasons=[",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d8d3ad86812cf719c30b6a414db0b6e96f8d93875314ba22fff01db56fd6d166",
-      "line": 1842,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "5aee452d598b07ba0352296fa1bb6be089ba5cd423f8b7e474abfbb1471b1a8c"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5aee452d598b07ba0352296fa1bb6be089ba5cd423f8b7e474abfbb1471b1a8c",
-      "source": "for reason in (unknown_reasons or (\"solver_inconclusive\",))",
-      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -2263,24 +2183,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
-      "line": 1474,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "82e83200de58949ac46e82bf8476d663ed9f94f72ac0ff53819dc2bffa0b10b3",
+      "line": 431,
+      "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "5e582a48fc65c31c5e61c73078330e4745fee1d2b5ece46c62545b84053a8380"
+          "5dcdf0ed0cffef4406f1a1bbbf878cf07b385e61f5dae7f968f652892cc4b2dc"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "5e582a48fc65c31c5e61c73078330e4745fee1d2b5ece46c62545b84053a8380",
-      "source": "unknown_reasons.append(",
-      "symbol": "check"
+      "shell_role": "execution_config",
+      "site_id": "5dcdf0ed0cffef4406f1a1bbbf878cf07b385e61f5dae7f968f652892cc4b2dc",
+      "source": "--pairwise-timeout \"$PAIRWISE_TIMEOUT\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -2305,6 +2225,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "2b47eefb44cd04d5c3aa65f7d143851d41517ceb14df05aa438f523dfcf600db",
+      "line": 1401,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "609414351e559a82bd90cc3354bafce204c4a3d37cf6785dd1e5187aee431275"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "609414351e559a82bd90cc3354bafce204c4a3d37cf6785dd1e5187aee431275",
+      "source": "sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "0124fa40ae0be0c6fd78a912f205f27b9d397d996fd4387769afa9f0321024e6",
@@ -2323,48 +2264,6 @@
       "site_id": "627ffa86dd4af725e6996292408ebeff3cf5d870f4262fe4698491ab435aeb9b",
       "source": "TIMEOUT)",
       "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "50d24ab9759045ea6600433aab7bd595f3876a925fa6bcff765dae7a377b1179",
-      "line": 303,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "632467352009ed61247ede5bbef048bc296a099a68dee3fbbb50796736f2354f"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "632467352009ed61247ede5bbef048bc296a099a68dee3fbbb50796736f2354f",
-      "source": "ABI_WIDTH_READONLY_PRODUCTION_SOURCE_REASON_IDS = {",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "fbe5cacf87d5f5a1f87e5885f294ee204457af80415769e3d2e737cf79db762c",
-      "line": 1388,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "63fa9a6f9ab6eb737a4af438dbd85b46a697f40754336df5a431cfe7ddafd3c1"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "63fa9a6f9ab6eb737a4af438dbd85b46a697f40754336df5a431cfe7ddafd3c1",
-      "source": "unknown_reasons.extend(unresolved_blocking_reasons)",
-      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -2409,6 +2308,48 @@
       "site_id": "6487e951afdcbc0120d95cb47ee0293fe195e770a8b7bdaa69d8c2d5bac54215",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
       "symbol": "_impl__check_return_case_coverage_gap"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "74f6c86ce7194c5730c4eb1fefde6964691974bc6938e2d7062ab898c8c51fcd",
+      "line": 782,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "654562f0f22601039ddf9f52dba2c4b6febbf8951e59de5771a82edab8557c7f"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "654562f0f22601039ddf9f52dba2c4b6febbf8951e59de5771a82edab8557c7f",
+      "source": "pairwise_timeout=$PAIRWISE_TIMEOUT",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "e04b360c6d24587e11fd7fd062da13749509d2c8c2b816fb934cca4685a74781",
+      "line": 781,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "65f711ddacf5eded4bd7c1c752afa1bb1d682f410010cda18f9377d047833e71"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "65f711ddacf5eded4bd7c1c752afa1bb1d682f410010cda18f9377d047833e71",
+      "source": "decompile_timeout=$DECOMPILE_TIMEOUT",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -2474,27 +2415,6 @@
       "site_id": "6986cb2137c182daffd09cdd4c8d91ae503eab8410dafcdc317026f65e296f98",
       "source": "\"unknown_reasons\": [reason.to_dict() for reason in self.unknown_reasons],",
       "symbol": "to_dict"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "8f35a4aa10f04461935c30abc41493de7ff6c13b74bc9a3ae8c40d6120c37387",
-      "line": 682,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "69d0e768deb1990a85b87562959b051f3c1360b4a12e743cd6cf89fa3f44b9c3"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "69d0e768deb1990a85b87562959b051f3c1360b4a12e743cd6cf89fa3f44b9c3",
-      "source": "echo \"Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)\"",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -2626,85 +2546,64 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "2f0171a7d17e499fb90a4b3eab5df4f6d57bc381cd6fea869085d89ecdc655a6",
-      "line": 1808,
+      "inventory_source_fingerprint": "c25cc6ce959f84477de67228658c887c6c1e3a584a5ff5039b3fbacb7a425aa1",
+      "line": 1751,
       "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "6c5b04b1326d87fd087c164c407939b4868d79cf35ef2c425f4455aa64727214"
+          "6e5632c4fccbe38a5fd02db231049e6265895657460700352540f3aae5335795"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "6c5b04b1326d87fd087c164c407939b4868d79cf35ef2c425f4455aa64727214",
-      "source": "reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_attach_recurrence_proposal_blockers"
+      "site_id": "6e5632c4fccbe38a5fd02db231049e6265895657460700352540f3aae5335795",
+      "source": "reasons = tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_recurrence_promotion_authority"
     },
     {
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "47a0e99bbe1b63e6f58a9ae989c097644aaf8faa6a2c783821c7fa15a76d0fb4",
-      "line": 363,
+      "inventory_source_fingerprint": "e104f637ca4ac3d432c4b77a579600164b249eb399e6e5c5d06072112a1def14",
+      "line": 37,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "6c6b44f0f3e95fd3e83d14a9b1729d1dfd792b0bfd64d09f642c4a241b249c33"
+          "6f1cc1f74308479d9846e1120ca39040ce48d30fbf182f3fb4b7bbfd9178e1ea"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "6f1cc1f74308479d9846e1120ca39040ce48d30fbf182f3fb4b7bbfd9178e1ea",
+      "source": "EQUIV_TIMEOUT=\"${EQUIV_TIMEOUT:-10}\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "8f35a4aa10f04461935c30abc41493de7ff6c13b74bc9a3ae8c40d6120c37387",
+      "line": 815,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "7046a5be82c5152af7ef18ad1d940fb55738bbadb8a4c8dc827cd847f54a3222"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "reporting_only",
-      "site_id": "6c6b44f0f3e95fd3e83d14a9b1729d1dfd792b0bfd64d09f642c4a241b249c33",
-      "source": "echo \"Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER\"",
+      "site_id": "7046a5be82c5152af7ef18ad1d940fb55738bbadb8a4c8dc827cd847f54a3222",
+      "source": "echo \"Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)\"",
       "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 2016,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "6c70696cbce8f558c7fd048df47c6e0fde2e44732942879ff8af7e38feeea6f7"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "6c70696cbce8f558c7fd048df47c6e0fde2e44732942879ff8af7e38feeea6f7",
-      "source": "unknown_reasons=[",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "15386b089a67f7ee3cb45e978e2d76ebb466d0095dab9d2d63d8c8a2d6a878fa",
-      "line": 2455,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "6f8c359b289ea5495de0460bcf0a0d8414898a7a7b4bfd52a9d9dc22f5d17811"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "6f8c359b289ea5495de0460bcf0a0d8414898a7a7b4bfd52a9d9dc22f5d17811",
-      "source": "def _specialize_call_effect_unknown_reasons(",
-      "symbol": "_specialize_call_effect_unknown_reasons"
     },
     {
       "authority_role": "derived_projection",
@@ -2729,66 +2628,45 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "4b1cde51e48ee15ebb0d057953d1d62479513bc5865e3543a12533bf28e6490a",
-      "line": 2102,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "7085ff6b181bb3ab77c82fc6dda5fae9814738029ba0cc9b28f0e7bb1bd67326"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "7085ff6b181bb3ab77c82fc6dda5fae9814738029ba0cc9b28f0e7bb1bd67326",
-      "source": "for reason in tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_apply_preflight_final_gate"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "bfd0225de30c08423d3b4371801ad02422bc6568d3cd48cae7410cd9d9c12cff",
-      "line": 1374,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "70bfc6ad316f712e2e233d7bad0f97a0ae79625b59374ef6d298e34e9f562ddc"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "70bfc6ad316f712e2e233d7bad0f97a0ae79625b59374ef6d298e34e9f562ddc",
-      "source": "unknown_reasons.extend(coverage_unknown_reasons)",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "e104f637ca4ac3d432c4b77a579600164b249eb399e6e5c5d06072112a1def14",
-      "line": 36,
+      "inventory_source_fingerprint": "13fcceb5626307bb714cfa8209c81454ed88b08129fa1cdc3f9ddb39b89916ce",
+      "line": 432,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "76d1d4b1fc45ea4a773a79acffb45350da505d00cb211a86bee044e9143564c8"
+          "74800a98fa177d81c0def2fe13aad964d2338c90881a47f6e81df9ecc181430d"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "76d1d4b1fc45ea4a773a79acffb45350da505d00cb211a86bee044e9143564c8",
-      "source": "EQUIV_TIMEOUT=\"${EQUIV_TIMEOUT:-10}\"",
+      "shell_role": "other_consumer",
+      "site_id": "74800a98fa177d81c0def2fe13aad964d2338c90881a47f6e81df9ecc181430d",
+      "source": "--pairwise-timeout-hard \"$PAIRWISE_TIMEOUT_HARD\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d7c0c802a721018e86d86562c7569788a15161e89f12a00351e37a2478b77051",
+      "line": 1476,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "74c71b8a1135bcc89a59636ea94c3c6899137d33713b2744d7fd07df7c3d69ba"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "74c71b8a1135bcc89a59636ea94c3c6899137d33713b2744d7fd07df7c3d69ba",
+      "source": "self._make_sat_counterexample_ambiguous_unknown_reason(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -2810,48 +2688,6 @@
       "site_id": "77a235b36f5303e5084c39279afa28dfd0f2c0a817c8c0f64ae68baf0ddb348b",
       "source": "if self.unknown_reasons:",
       "symbol": "to_string"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "04d5491ac607c6f15db91415c95397b92e88c92ca5f5a0ff72d5b7f3fb146829",
-      "line": 177,
-      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "d2d154576e20123f8443ca684010ec9144c8579c68417ac56322979206ee5cdd"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "d2d154576e20123f8443ca684010ec9144c8579c68417ac56322979206ee5cdd",
-      "source": "_CAUSE_REASON_IDS_BY_SITE = {",
-      "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 1981,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "783093643469391989c576b282dea218675a811b5d85ee15bad8f4624fe6def3"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "783093643469391989c576b282dea218675a811b5d85ee15bad8f4624fe6def3",
-      "source": "unknown_reasons=[",
-      "symbol": "check"
     },
     {
       "authority_role": "production",
@@ -2881,44 +2717,23 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "37ed3b458cbe5d80b1058dfac48335d60c804e04b6a68dc57a86c54fbb8afc72",
-      "line": 1415,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "7947f7881e9a668fe4f3aaeaa478869e3ef3340d4b2996770ff38d76c5500809"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "7947f7881e9a668fe4f3aaeaa478869e3ef3340d4b2996770ff38d76c5500809",
-      "source": "unknown_reasons.append(sat_unsafety_reason)",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "28a1afc27df126f9959b8f81654a92289d3d56ebfd890101cc80c1c1e6256bca",
-      "line": 683,
+      "inventory_source_fingerprint": "916b9ad4da9bf2a4090f04fe0c5b34e0c3bd487b6cd5f4d4bcfc14bf845c86ef",
+      "line": 817,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "7b33c5d82457353f2e3e72f7cdb9a19a8274bcc2a8434fbff033ac85b1d66d2c"
+          "7a2b30249bbf0651363438d438bb7702497db0e7440c57251f4a5f564970273f"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "reporting_only",
-      "site_id": "7b33c5d82457353f2e3e72f7cdb9a19a8274bcc2a8434fbff033ac85b1d66d2c",
-      "source": "echo \"Equiv timeout: $EQUIV_TIMEOUT\"",
+      "site_id": "7a2b30249bbf0651363438d438bb7702497db0e7440c57251f4a5f564970273f",
+      "source": "echo \"Decompile timeout: $DECOMPILE_TIMEOUT\"",
       "symbol": "<shell>"
     },
     {
@@ -2941,6 +2756,27 @@
       "site_id": "7bd777efcc25140765491beb8f0ad973784db064cb7738e9505dca081418a520",
       "source": "UNKNOWN)",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 1912,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "7bddfaaeb7e688587393f84ab4ca798722a3d6a017bf2393d3be918fc4849897"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "7bddfaaeb7e688587393f84ab4ca798722a3d6a017bf2393d3be918fc4849897",
+      "source": "unknown_reasons=[",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -2981,28 +2817,28 @@
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "other_consumer",
       "site_id": "7dd86ec8098874b9cb4c23c66fd340fc66f226b86fef1eedbc52c246c3009801",
-      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
+      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
       "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "abf2e3f1f24a206bd220ac83083f6b47c3c30b3c1c01ef54773db8ef99c44734",
-      "line": 364,
+      "inventory_source_fingerprint": "dd3d90bac4302637c72d486c777e1acb396fdf4414cd4624fe5ea71d7010eb58",
+      "line": 430,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "7ffe86b975dc73840d5d41a742f8eb8f3db5e3e3aba2e90030f19c288a999c75"
+          "7e86fd2f4b563c9f579d296d2a4e45d5062c5617e0fa67384812952de51f01f5"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "7ffe86b975dc73840d5d41a742f8eb8f3db5e3e3aba2e90030f19c288a999c75",
-      "source": "echo \"Result: TIMEOUT (pair process exceeded wall-clock time limit)\"",
+      "shell_role": "execution_config",
+      "site_id": "7e86fd2f4b563c9f579d296d2a4e45d5062c5617e0fa67384812952de51f01f5",
+      "source": "--timeout \"$DECOMPILE_TIMEOUT\"",
       "symbol": "<shell>"
     },
     {
@@ -3051,27 +2887,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "22cee14550b0a4b9eaa5189945b23a067cf42094dd2a9c2d3b07c70ffadbd33e",
-      "line": 2108,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "81024b6af899450e910712803bc3112d83794211dedc05c5d041759a07652e6f"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "81024b6af899450e910712803bc3112d83794211dedc05c5d041759a07652e6f",
-      "source": "strategy_result.unknown_reasons.append(",
-      "symbol": "_apply_preflight_final_gate"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "507226034e2dacf2d1bdd2116ad7986241f15458990a3394663db5b31722b260",
@@ -3093,23 +2908,44 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "f4ba0aa706ba935b5c11cd1d3f36ff99b57035c7d6074bd9c7458af3bd82743e",
+      "line": 1382,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "825a66e7447aeca5de068f15288f3e234d511f6d72997da0fd32e1fdaed0812f"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "825a66e7447aeca5de068f15288f3e234d511f6d72997da0fd32e1fdaed0812f",
+      "source": "unresolved_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "74f6c86ce7194c5730c4eb1fefde6964691974bc6938e2d7062ab898c8c51fcd",
-      "line": 652,
+      "inventory_source_fingerprint": "2938e101079b06429ff7e0dcd8db358457554d4344499f3b6fb285738ae6747c",
+      "line": 778,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "82b21faa790f9c7ae2270f4e21e1c2f5e84fa1d92b64cc1712a92adc60abdf6a"
+          "83dd0a5612193581f8f60559b46367df60487704256645f1608d6e361cc6614f"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "82b21faa790f9c7ae2270f4e21e1c2f5e84fa1d92b64cc1712a92adc60abdf6a",
-      "source": "pairwise_timeout=$PAIRWISE_TIMEOUT",
+      "shell_role": "other_consumer",
+      "site_id": "83dd0a5612193581f8f60559b46367df60487704256645f1608d6e361cc6614f",
+      "source": "pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS",
       "symbol": "<shell>"
     },
     {
@@ -3158,21 +2994,21 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "d7c0c802a721018e86d86562c7569788a15161e89f12a00351e37a2478b77051",
-      "line": 1475,
+      "inventory_source_fingerprint": "d8d3ad86812cf719c30b6a414db0b6e96f8d93875314ba22fff01db56fd6d166",
+      "line": 1843,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "8636947aa891f551dd4ecf85a220f1c4e57e7c4451f05d65cf7277a0acc6986c"
+          "84623bbccee21fc30c83a829141bef6d2401e909f59f8094147448282fa6c75c"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "8636947aa891f551dd4ecf85a220f1c4e57e7c4451f05d65cf7277a0acc6986c",
-      "source": "self._make_sat_counterexample_ambiguous_unknown_reason(",
+      "site_id": "84623bbccee21fc30c83a829141bef6d2401e909f59f8094147448282fa6c75c",
+      "source": "for reason in (unknown_reasons or (\"solver_inconclusive\",))",
       "symbol": "check"
     },
     {
@@ -3195,6 +3031,27 @@
       "site_id": "87e61df4e70813a61001a5971f7470b2a11f72e92fc38d4808be0745f098a85f",
       "source": "def _impl__append_blocking_unknown_reasons(",
       "symbol": "_impl__append_blocking_unknown_reasons"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "18ef4691a55e5f2eaedb46de19469ea4b00c3be4488a586a73cc192a629a206f",
+      "line": 753,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "89584498302053ecf7ded8962de98d661c317d962ec095adf21054facd39b4eb"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "89584498302053ecf7ded8962de98d661c317d962ec095adf21054facd39b4eb",
+      "source": "\"phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}\" \\",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -3475,22 +3332,43 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "916b9ad4da9bf2a4090f04fe0c5b34e0c3bd487b6cd5f4d4bcfc14bf845c86ef",
-      "line": 684,
+      "inventory_source_fingerprint": "303a7250848fea96450f28d9b6a3e3622de95fe5b12476f733d57118d5a7b2b4",
+      "line": 1197,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "9414387b40c311bef384395b25a7ab351f4b41606edd07aa5010f26f3a17527f"
+          "922f648a62d381277ce2b0432bdaf781661629a0a549fb3ed1c14ab351faecfc"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "9414387b40c311bef384395b25a7ab351f4b41606edd07aa5010f26f3a17527f",
-      "source": "echo \"Decompile timeout: $DECOMPILE_TIMEOUT\"",
+      "shell_role": "execution_config",
+      "site_id": "922f648a62d381277ce2b0432bdaf781661629a0a549fb3ed1c14ab351faecfc",
+      "source": "\"PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT\" \\",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "bfd0225de30c08423d3b4371801ad02422bc6568d3cd48cae7410cd9d9c12cff",
+      "line": 1375,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "92f5f5b310a1b367884420d838e6ae29b5f1c5b29b9f1840f94484c74fd2334b"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "92f5f5b310a1b367884420d838e6ae29b5f1c5b29b9f1840f94484c74fd2334b",
+      "source": "unknown_reasons.extend(coverage_unknown_reasons)",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -3609,6 +3487,48 @@
       "symbol": "_impl_check"
     },
     {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "6e8620a5f039c8c0b89e90a4b2f9f5818a58699e4bd0b74ceb9262cb6dda29d0",
+      "line": 33,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "97a9a4da7146a0f4e480af071ab37298b1da8a38f19c8e402b2f0aa42b0386ca"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "97a9a4da7146a0f4e480af071ab37298b1da8a38f19c8e402b2f0aa42b0386ca",
+      "source": "PAIR_PROCESS_TIMEOUT=\"${PAIR_PROCESS_TIMEOUT:-600s}\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "edcbc5a04d098951b566143c9ce58ac260e0a462cf23c78c46ed88f520410e1a",
+      "line": 1374,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "97c4a535a7caf726fccf76af08e4c6c79c168856970629f9c6eb19057fca703e"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "97c4a535a7caf726fccf76af08e4c6c79c168856970629f9c6eb19057fca703e",
+      "source": "if coverage_unknown_reasons:",
+      "symbol": "check"
+    },
+    {
       "authority_role": "production",
       "construct_kind": "reason_constructor",
       "consumer_class": "general",
@@ -3663,27 +3583,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
-      "line": 1772,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "9a647652c6ed234baba28a68296d99bf1ee0f84cd8072ebdc97dac6d17456761"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "9a647652c6ed234baba28a68296d99bf1ee0f84cd8072ebdc97dac6d17456761",
-      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "proof_backlog",
       "inventory_source_fingerprint": "631b11f681587828580f02394eba2c17dca81dd68ec4f7b6c0d9d4512c934797",
@@ -3702,6 +3601,48 @@
       "site_id": "9af078d848d5e71295b6dea5dc8dc0bb9deb6e2b6078041d50073e5cbb302d09",
       "source": "build_unknown_recovery_actions(self.unknown_reasons)",
       "symbol": "__post_init__"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "c65877c585bfb5afcdcb567cecbf3b0c27baa4446b613d863b0d8eaa076dc667",
+      "line": 780,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "9b95bd225dbf2c3816daeb9bdda58ce5f5d069a0e98f98b24589a7e2a4c01b4c"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "9b95bd225dbf2c3816daeb9bdda58ce5f5d069a0e98f98b24589a7e2a4c01b4c",
+      "source": "equiv_timeout=$EQUIV_TIMEOUT",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "a1fbaac16aef779acdf539ece3ba9a7e40d0c98d37994535e9ec5a046c8cbce2",
+      "line": 84,
+      "path": "scripts/function_tracer_pcode/validation/phase7_retired_inventory.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "9cd5a780b171fed44a35a504aed9973431fd486c179820c70b2384d558e60634"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "9cd5a780b171fed44a35a504aed9973431fd486c179820c70b2384d558e60634",
+      "source": "isinstance(func, ast.Attribute) and func.attr == \"make_unknown_reason\"",
+      "symbol": "_is_make_unknown_reason_call"
     },
     {
       "authority_role": "derived_projection",
@@ -3726,24 +3667,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
+      "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "a1fbaac16aef779acdf539ece3ba9a7e40d0c98d37994535e9ec5a046c8cbce2",
-      "line": 84,
-      "path": "scripts/function_tracer_pcode/validation/phase7_retired_inventory.py",
+      "inventory_source_fingerprint": "18ca3f6046d481a8c873cb12be7bf31e4a6e33e33fdf3c459ecbdefe260d6be4",
+      "line": 299,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "9cd5a780b171fed44a35a504aed9973431fd486c179820c70b2384d558e60634"
+          "a59a07f888c0644eb2c122133ebfa23d8e6b438fee8fde173c24538f1d0100cb"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "9cd5a780b171fed44a35a504aed9973431fd486c179820c70b2384d558e60634",
-      "source": "isinstance(func, ast.Attribute) and func.attr == \"make_unknown_reason\"",
-      "symbol": "_is_make_unknown_reason_call"
+      "site_id": "a59a07f888c0644eb2c122133ebfa23d8e6b438fee8fde173c24538f1d0100cb",
+      "source": "result.unknown_reasons = []",
+      "symbol": "run_check_from_binaries_with_v2_pilot"
     },
     {
       "authority_role": "derived_projection",
@@ -3812,22 +3753,43 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "36f63aa8d2f733a20e3a33fe25f9cb59cbd132ac8e290022bc17e6a09e5afde2",
-      "line": 1219,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
+      "inventory_source_fingerprint": "37ed3b458cbe5d80b1058dfac48335d60c804e04b6a68dc57a86c54fbb8afc72",
+      "line": 1416,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "ac74f2528a14759c3ad1a00a622855c7493e1da333d1edc0280650b74c0eb054"
+          "a8a0fb194e723aa5dc8fdcdf9e139bed0e29b8e0d668782e785329ca4d288dcd"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "ac74f2528a14759c3ad1a00a622855c7493e1da333d1edc0280650b74c0eb054",
-      "source": "result.legacy_unknown_reasons = list(",
-      "symbol": "finish"
+      "site_id": "a8a0fb194e723aa5dc8fdcdf9e139bed0e29b8e0d668782e785329ca4d288dcd",
+      "source": "unknown_reasons.append(sat_unsafety_reason)",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "7f91a2d860ffd8316039f86a44c2137ec6b7970305a72d24e245d6682d659f82",
+      "line": 211,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "aa1a9e84ebb2c321b11bd4126be9c97d9914232fc4063cb1db503722d4392412"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "aa1a9e84ebb2c321b11bd4126be9c97d9914232fc4063cb1db503722d4392412",
+      "source": "echo \"TIMEOUT\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -3873,24 +3835,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "0c9b0eb0d6308f5152542848e8cf3e578fee38b76782479e464beccbe5cede61",
-      "line": 653,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "36f63aa8d2f733a20e3a33fe25f9cb59cbd132ac8e290022bc17e6a09e5afde2",
+      "line": 1219,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "adccb808449382f1fc56eb140d07d9cc9b255868c760921fc54f21929a3012d8"
+          "ac74f2528a14759c3ad1a00a622855c7493e1da333d1edc0280650b74c0eb054"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "adccb808449382f1fc56eb140d07d9cc9b255868c760921fc54f21929a3012d8",
-      "source": "pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "ac74f2528a14759c3ad1a00a622855c7493e1da333d1edc0280650b74c0eb054",
+      "source": "result.legacy_unknown_reasons = list(",
+      "symbol": "finish"
     },
     {
       "authority_role": "derived_projection",
@@ -3938,21 +3900,21 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "303a7250848fea96450f28d9b6a3e3622de95fe5b12476f733d57118d5a7b2b4",
-      "line": 1059,
+      "inventory_source_fingerprint": "0c9b0eb0d6308f5152542848e8cf3e578fee38b76782479e464beccbe5cede61",
+      "line": 783,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "b32d2981fcabab11d4b9ceaa4713d3eb86833d57555828da3de9c5d7652c50fb"
+          "b3304c8ae2bb07d774aae88b62438bd136e4874a98de333d8606810ff1c283a1"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "b32d2981fcabab11d4b9ceaa4713d3eb86833d57555828da3de9c5d7652c50fb",
-      "source": "\"PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT\" \\",
+      "shell_role": "other_consumer",
+      "site_id": "b3304c8ae2bb07d774aae88b62438bd136e4874a98de333d8606810ff1c283a1",
+      "source": "pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD",
       "symbol": "<shell>"
     },
     {
@@ -3980,21 +3942,21 @@
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 1911,
+      "inventory_source_fingerprint": "93dae9fa4251d98c9bfcb4a9c0559d2aa497f63665b3d5cb926c84ee802d27b5",
+      "line": 1368,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "b4280295cda5adf9c8668ed270254b9754a5eeeec89395cdc009d24acb0ad77b"
+          "b47cd13e0ce183359bf6de500ba033756dbcebabbd58d775da5ff59f22776d95"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "b4280295cda5adf9c8668ed270254b9754a5eeeec89395cdc009d24acb0ad77b",
-      "source": "unknown_reasons=[",
+      "site_id": "b47cd13e0ce183359bf6de500ba033756dbcebabbd58d775da5ff59f22776d95",
+      "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
       "symbol": "check"
     },
     {
@@ -4019,6 +3981,27 @@
       "site_id": "b488e9859b1de4d25584e6d51b22e26979e4a4e8b2d0b2779d672654333a776b",
       "source": "result.blocking_reason = getattr(exc, \"reason_id\", \"return_width_bridge_missing\")",
       "symbol": "solve_query_after_guard"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "15386b089a67f7ee3cb45e978e2d76ebb466d0095dab9d2d63d8c8a2d6a878fa",
+      "line": 2472,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "b595ca578e8295414417be415d30a47bbf2ccc9a55570a77d6fb8ea177fd041e"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "b595ca578e8295414417be415d30a47bbf2ccc9a55570a77d6fb8ea177fd041e",
+      "source": "def _specialize_call_effect_unknown_reasons(",
+      "symbol": "_specialize_call_effect_unknown_reasons"
     },
     {
       "authority_role": "derived_projection",
@@ -4085,45 +4068,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
+      "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "18ca3f6046d481a8c873cb12be7bf31e4a6e33e33fdf3c459ecbdefe260d6be4",
-      "line": 295,
-      "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
+      "inventory_source_fingerprint": "b18ca05b0dd0727d3a9609d97b0691c249be5b13eb3b56edc4929f3036a6e392",
+      "line": 114,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "field_initialization_or_nonproducing_transfer",
         "refs": [
-          "b88453654a352ed74cccfd5b2f56c4c94c25c975e45de67b476b864368d7faba"
+          "b8c7c61257a4f02de7c76a38595a0bfe73358a65855cbfa1444deefdaf534461"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "b88453654a352ed74cccfd5b2f56c4c94c25c975e45de67b476b864368d7faba",
-      "source": "result.unknown_reasons = []",
-      "symbol": "run_check_from_binaries_with_v2_pilot"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
-      "line": 1733,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "b934d1a9b3e5b400ce64defe7e14d4d0a25a061ba4c3df653a77e93d82166c78"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "b934d1a9b3e5b400ce64defe7e14d4d0a25a061ba4c3df653a77e93d82166c78",
-      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
-      "symbol": "check"
+      "site_id": "b8c7c61257a4f02de7c76a38595a0bfe73358a65855cbfa1444deefdaf534461",
+      "source": "OPERATIONAL_REASON_SPECS: Mapping[str, OperationalReasonSpec] = MappingProxyType({",
+      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -4166,27 +4128,6 @@
       "site_id": "bad802b8759612c19f815bafb89ac2d6a11d34b30036d99927f8adfeb6639e26",
       "source": "SAT_SAFETY_TYPED_REASON_IDS = frozenset({",
       "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "9661dcd109174084bc098c38e85c0384162aba3b3e3bc0ea3e321984196f1169",
-      "line": 37,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "bbb16eec0784cb646adfaefc46e0049842420b47d870e9eb36d2a8b2c2e9638c"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "bbb16eec0784cb646adfaefc46e0049842420b47d870e9eb36d2a8b2c2e9638c",
-      "source": "DECOMPILE_TIMEOUT=\"${DECOMPILE_TIMEOUT:-60}\"",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -4253,52 +4194,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "e04b360c6d24587e11fd7fd062da13749509d2c8c2b816fb934cca4685a74781",
-      "line": 651,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "bfaa06afd742e94fc05f0a6ba5155a086e538753067bd8424f2cc8feb35ca5f4"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "bfaa06afd742e94fc05f0a6ba5155a086e538753067bd8424f2cc8feb35ca5f4",
-      "source": "decompile_timeout=$DECOMPILE_TIMEOUT",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "production",
-      "construct_kind": "reason_constructor",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "ceb076658b1800ad03514d596ab7eb5e2c266d60c0a64f07370214acaf25cdd3",
-      "line": 1912,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "static_set",
-      "resolution_basis": {
-        "kind": "symbol_or_file_flow_proposal",
-        "refs": [
-          "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py:check"
-        ]
-      },
-      "resolved_reason_ids": [
-        "return_width_bridge_missing",
-        "strategy_exception",
-        "unknown"
-      ],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c0c6f6ead20bca2cbf064383fe7dfa0ca3772a1ebf31060ae071732afa6e0533",
-      "source": "make_unknown_reason(",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "c7689cb8a942f295c99828c68cf8e757ecf9fec4780fccde52f505f36cf149fb",
@@ -4317,27 +4212,6 @@
       "site_id": "c0e69fa732662f256ea100500b858cde549d2ec7fa35d687497c0c95e879e846",
       "source": "replay_reason = self._make_sat_unsafety_unknown_reason(",
       "symbol": "produce_counterexample_safety"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "13fcceb5626307bb714cfa8209c81454ed88b08129fa1cdc3f9ddb39b89916ce",
-      "line": 328,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "c11cfb0635c04f72ba3020b3e6f723ff4cb27309136e83efc4673e8399e998ce"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "c11cfb0635c04f72ba3020b3e6f723ff4cb27309136e83efc4673e8399e998ce",
-      "source": "--pairwise-timeout-hard \"$PAIRWISE_TIMEOUT_HARD\"",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -4362,45 +4236,45 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "095a3abb51383d0641f2a949590a48389f3a02a06d95663d28feb64bcbdcde0e",
-      "line": 2390,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "abf2e3f1f24a206bd220ac83083f6b47c3c30b3c1c01ef54773db8ef99c44734",
+      "line": 483,
+      "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "c24b95e44fea2987577256d067e6ecdbc0ea22c96f04323cb5673ae467b7d1a2"
+          "c2b49a043abe00f8cab64d6e920003328d54907ff206f6ce6ea08a03fee36faa"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c24b95e44fea2987577256d067e6ecdbc0ea22c96f04323cb5673ae467b7d1a2",
-      "source": "gate[\"failure_cause\"] = \"non_call_unknown_reason_present\"",
-      "symbol": "_apply_phase2_relational_call_discharge"
+      "shell_role": "reporting_only",
+      "site_id": "c2b49a043abe00f8cab64d6e920003328d54907ff206f6ce6ea08a03fee36faa",
+      "source": "echo \"Result: TIMEOUT (pair process exceeded wall-clock time limit)\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "2b47eefb44cd04d5c3aa65f7d143851d41517ceb14df05aa438f523dfcf600db",
-      "line": 1400,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "83ea123fc28274c12360b4f55515954383c825706cd6d7075ec42ca93f38ca50",
+      "line": 213,
+      "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "consumer_or_transfer",
+        "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "c3a4995702e23ecc15b391a5c219880d0635dbaefd42512ee4b33f80a5451776"
+          "c35237d0cf9adcda432cc4f338d4918058739caa9586d25e6d472d790503b3c4"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c3a4995702e23ecc15b391a5c219880d0635dbaefd42512ee4b33f80a5451776",
-      "source": "sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(",
-      "symbol": "check"
+      "shell_role": "other_consumer",
+      "site_id": "c35237d0cf9adcda432cc4f338d4918058739caa9586d25e6d472d790503b3c4",
+      "source": "UNKNOWN)",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "production",
@@ -4424,27 +4298,6 @@
       "site_id": "c3b95d5764679b156a98b421309aa19dd677ab8deb273b49984a90beb2f57cc1",
       "source": "reason_id=UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,",
       "symbol": "_impl__check_return_case_coverage_gap"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_read",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "1b5259a34f29691eba8ae9c80d2f8930fb87ff9702236a3e8e7264c03fa0302e",
-      "line": 35,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "c3bcfcd6db5d0e4b5356e0b3167a1cae4ae8917d413a53dd9d022dd87bf8a15d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "c3bcfcd6db5d0e4b5356e0b3167a1cae4ae8917d413a53dd9d022dd87bf8a15d",
-      "source": "make_unknown_reason,",
-      "symbol": "<module>"
     },
     {
       "authority_role": "derived_projection",
@@ -4490,24 +4343,45 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "d638bc08b64c92018ac6f830795e04e5f65a928b774237af0fe3525f40226477",
-      "line": 325,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
+      "line": 1797,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "c4a223ef52a714bc9281a01a118269b0d3a7c4120a89a8719c8025dd5cbab597"
+          "c43065f31fc952af45b57b9ea51381df1338e1b658a242c2fda53eeb64d65043"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "c4a223ef52a714bc9281a01a118269b0d3a7c4120a89a8719c8025dd5cbab597",
-      "source": "--equiv-timeout \"$EQUIV_TIMEOUT\"",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "c43065f31fc952af45b57b9ea51381df1338e1b658a242c2fda53eeb64d65043",
+      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "36f63aa8d2f733a20e3a33fe25f9cb59cbd132ac8e290022bc17e6a09e5afde2",
+      "line": 296,
+      "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "c5de512e7755b5b6003d4bb9cc7fb365180af093622b7e85c24acaa4a5e9b609"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "c5de512e7755b5b6003d4bb9cc7fb365180af093622b7e85c24acaa4a5e9b609",
+      "source": "result.legacy_unknown_reasons = list(",
+      "symbol": "run_check_from_binaries_with_v2_pilot"
     },
     {
       "authority_role": "derived_projection",
@@ -4532,6 +4406,69 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "22cee14550b0a4b9eaa5189945b23a067cf42094dd2a9c2d3b07c70ffadbd33e",
+      "line": 2125,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "c665478df723163536ebd206b755407288f25a0a2dfedff303d22f8b6e2ccd2c"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "c665478df723163536ebd206b755407288f25a0a2dfedff303d22f8b6e2ccd2c",
+      "source": "strategy_result.unknown_reasons.append(",
+      "symbol": "_apply_preflight_final_gate"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 1982,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "c69c9f269ffba7e97291e177e441ee159b0dd2a12fd168841ed5a3d9a0a88014"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "c69c9f269ffba7e97291e177e441ee159b0dd2a12fd168841ed5a3d9a0a88014",
+      "source": "unknown_reasons=[",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "231d115638554f1de045faf85a7ae77d8ca589fa8319c2a614ac381b3d2cd4a0",
+      "line": 39,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "c70fc36e3b9f1ba56903d8afd0d3302d967ce4c0def581dca9bd1290a315ab4d"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "c70fc36e3b9f1ba56903d8afd0d3302d967ce4c0def581dca9bd1290a315ab4d",
+      "source": "PAIRWISE_TIMEOUT=\"${PAIRWISE_TIMEOUT:-5}\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "72119cc9cde8d89762a60eba1a88d80c133f63acfe3c4c5903cbaed11ac04152",
@@ -4550,6 +4487,27 @@
       "site_id": "c74f7f9d29670cc5aaa4ffec8f0764864b70e1ccca088e602299db8b9a703300",
       "source": "blocking_unknown_reasons,",
       "symbol": "_impl_check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "f4b210c9d4863309832191dd77a3f3042bc4ca10dc37a23001c742dbfcf56af4",
+      "line": 40,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "c7bcdc3e8a4935134f5454651443e85a501e9c19f88d92d950542d190cb5ac16"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "c7bcdc3e8a4935134f5454651443e85a501e9c19f88d92d950542d190cb5ac16",
+      "source": "PAIRWISE_TIMEOUT_HARD=\"${PAIRWISE_TIMEOUT_HARD:-30}\"",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "production",
@@ -4574,6 +4532,27 @@
       "site_id": "c8d0f9c6374d408a83048896023f168e84d9f668e6638f6228d916b70ef33967",
       "source": "stage2_result.blocking_reason = rewrite_result.blocking_reason",
       "symbol": "solve_query_after_guard"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
+      "line": 1773,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "c9cf0c51d9d0899bfdac252c2b3330d12bb37c5ef6ee07b748f6c7e1f968925d"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "c9cf0c51d9d0899bfdac252c2b3330d12bb37c5ef6ee07b748f6c7e1f968925d",
+      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -4642,42 +4621,42 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "7f91a2d860ffd8316039f86a44c2137ec6b7970305a72d24e245d6682d659f82",
-      "line": 188,
+      "inventory_source_fingerprint": "d638bc08b64c92018ac6f830795e04e5f65a928b774237af0fe3525f40226477",
+      "line": 429,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "cc5030644369008d29377abd50149971e8d1c7d664c8248695b124dc0863bfc2"
+          "ccdf85e87cf8023d65a7dd8e0afd8d7bab18e5fb75684d60990b63cf1a4a9e76"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "cc5030644369008d29377abd50149971e8d1c7d664c8248695b124dc0863bfc2",
-      "source": "echo \"TIMEOUT\"",
+      "shell_role": "execution_config",
+      "site_id": "ccdf85e87cf8023d65a7dd8e0afd8d7bab18e5fb75684d60990b63cf1a4a9e76",
+      "source": "--equiv-timeout \"$EQUIV_TIMEOUT\"",
       "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "93dae9fa4251d98c9bfcb4a9c0559d2aa497f63665b3d5cb926c84ee802d27b5",
-      "line": 1367,
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 1948,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "cf4683e7a52a256b45847197f359f5cf2615bc47a759d4180c5ceefc2d18ebb3"
+          "d14aeba4cf7cf70324feb4b1656c03109998a7659c06a851f3172c0a6e7ca146"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "cf4683e7a52a256b45847197f359f5cf2615bc47a759d4180c5ceefc2d18ebb3",
-      "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
+      "site_id": "d14aeba4cf7cf70324feb4b1656c03109998a7659c06a851f3172c0a6e7ca146",
+      "source": "unknown_reasons=[",
       "symbol": "check"
     },
     {
@@ -4724,6 +4703,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "04d5491ac607c6f15db91415c95397b92e88c92ca5f5a0ff72d5b7f3fb146829",
+      "line": 177,
+      "path": "scripts/function_tracer_pcode/validation/phase7_producer_manifest.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "d2d154576e20123f8443ca684010ec9144c8579c68417ac56322979206ee5cdd"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "d2d154576e20123f8443ca684010ec9144c8579c68417ac56322979206ee5cdd",
+      "source": "_CAUSE_REASON_IDS_BY_SITE = {",
+      "symbol": "<module>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "d7c0c802a721018e86d86562c7569788a15161e89f12a00351e37a2478b77051",
@@ -4742,6 +4742,48 @@
       "site_id": "d306b7c0c35f63091b9841828e1936c35d4944b4ec26b913f95b449526a52fa1",
       "source": "self._make_sat_counterexample_ambiguous_unknown_reason(",
       "symbol": "_impl_check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_read",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "4b1cde51e48ee15ebb0d057953d1d62479513bc5865e3543a12533bf28e6490a",
+      "line": 2119,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "d51542b4925a994936e0b44dbdfb63403c44b79db1919b62c1f9ef1b6fba8243"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "d51542b4925a994936e0b44dbdfb63403c44b79db1919b62c1f9ef1b6fba8243",
+      "source": "for reason in tuple(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
+      "symbol": "_apply_preflight_final_gate"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "249c47e6a02afc80f18c1dbe66da72f1e4597bc7e7336e43eed6bc99eeb31f58",
+      "line": 1734,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "d5f1cb0ddc5730d3e6f62a9636d4ab1dc8de6d37fb887954adac650bb8d0df7b"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "d5f1cb0ddc5730d3e6f62a9636d4ab1dc8de6d37fb887954adac650bb8d0df7b",
+      "source": "unknown_reasons.append(make_internal_v2_reason_diagnostic(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -4808,24 +4850,24 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "0124fa40ae0be0c6fd78a912f205f27b9d397d996fd4387769afa9f0321024e6",
-      "line": 187,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 2017,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "da44042bc003dec8b5d6b29211688f451d98315d1d4f3e957aa2335baec2a667"
+          "dae5af89f5d314f1c61b28feed785a79003e855072310db3966329bc1dcdf60d"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "da44042bc003dec8b5d6b29211688f451d98315d1d4f3e957aa2335baec2a667",
-      "source": "TIMEOUT)",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "dae5af89f5d314f1c61b28feed785a79003e855072310db3966329bc1dcdf60d",
+      "source": "unknown_reasons=[",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -4889,69 +4931,6 @@
       "site_id": "dcb209a6b65cc60d700833e9c123559448fa2aab18a34670434764edb90326ca",
       "source": "self._unknown_reason_id_for_loop_fallback(pending.reason),",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "10bff4ce48424aea909f55e61f99529770ec11338010e02918eca02ae498f45b",
-      "line": 2383,
-      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "ddae323f9190eef62ac6ec1224ab9af39f93519153b37b7823d5c3da4862bd36"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "ddae323f9190eef62ac6ec1224ab9af39f93519153b37b7823d5c3da4862bd36",
-      "source": "raw_reasons = list(getattr(strategy_result, \"unknown_reasons\", ()) or ())",
-      "symbol": "_apply_phase2_relational_call_discharge"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
-      "line": 1785,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "consumer_or_transfer",
-        "refs": [
-          "df866ea572b12580cb6d0dac16a434fbbfcec27954e9967b2cfc7c6715c8db86"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "df866ea572b12580cb6d0dac16a434fbbfcec27954e9967b2cfc7c6715c8db86",
-      "source": "strategy_result.unknown_reasons = unknown_reasons",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "77e5f87a127044cdd9a96e2b5b23d36161e3b2c31770cd0cb00de1ada7737e1f",
-      "line": 1060,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "e25f71112a957d5498dee4b992ead60877331023f124cc12ded86391531e3919"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "e25f71112a957d5498dee4b992ead60877331023f124cc12ded86391531e3919",
-      "source": "\"PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD\" \\",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -5020,22 +4999,43 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "2aabca2eebf862641ec891289140c36d71be20e6ebe2b9889d80c775ebd6c7d5",
-      "line": 85,
+      "inventory_source_fingerprint": "28a1afc27df126f9959b8f81654a92289d3d56ebfd890101cc80c1c1e6256bca",
+      "line": 816,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "e622bbf53d7bcb9492b218f8156a910b84b7f5390191f1b1bb69be818c017b38"
+          "e502896a15386740406939fdef985327393e809e41f0b117c1608bd00acfa634"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "reporting_only",
-      "site_id": "e622bbf53d7bcb9492b218f8156a910b84b7f5390191f1b1bb69be818c017b38",
-      "source": "echo \"Error: pair process timeout values must be seconds, for example 300s\" >&2",
+      "site_id": "e502896a15386740406939fdef985327393e809e41f0b117c1608bd00acfa634",
+      "source": "echo \"Equiv timeout: $EQUIV_TIMEOUT\"",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_selection_assignment",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "1220a33f966a36adabedd7bd08f844329c76543c69ef41a30fa0815ec370f1fb",
+      "line": 1348,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "field_initialization_or_nonproducing_transfer",
+        "refs": [
+          "e65c010db2000b2b5e5525504102cc401317619443be92f9af15a50542e892f6"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "e65c010db2000b2b5e5525504102cc401317619443be92f9af15a50542e892f6",
+      "source": "equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -5081,108 +5081,108 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "7f5b412c8fc3bc276654544f29c6a584f27a0ff644e33191693a79752c0774dc",
-      "line": 34,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "e845e79321a866ea20d86eebe6679ddb632a191b93397094c4f8eafeeee5bbde"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "e845e79321a866ea20d86eebe6679ddb632a191b93397094c4f8eafeeee5bbde",
-      "source": "PAIR_PROCESS_TIMEOUT_SECONDS=\"${PAIR_PROCESS_TIMEOUT%s}\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "bd39227b42145167bea517cc2a9d16d29f428ef9ab1bf858168c56532719eae0",
-      "line": 1058,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "e884ac4a213184ba15f4f7dc77ed8feacf4498e00a0b09ebb2b1ab116e78dbdb"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "e884ac4a213184ba15f4f7dc77ed8feacf4498e00a0b09ebb2b1ab116e78dbdb",
-      "source": "\"DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT\" \\",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
-      "line": 1947,
+      "inventory_source_fingerprint": "12d256cb29a178e6854b6cc46c74dcb15396ee769fe62e571dc7859d6d5f97b4",
+      "line": 1573,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "e97cfce6a15eaaebab366e2cd17b338ae77f58b261583b43c8a79154db1d0b68"
+          "e98eba1f87b24611d3a10137e924ba0b651e6362e5b51998b27c433b4ea31cde"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "e97cfce6a15eaaebab366e2cd17b338ae77f58b261583b43c8a79154db1d0b68",
-      "source": "unknown_reasons=[",
+      "site_id": "e98eba1f87b24611d3a10137e924ba0b651e6362e5b51998b27c433b4ea31cde",
+      "source": "unknown_reasons=unknown_reasons,",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
+      "line": 1475,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "eab3d6bf1fef485940f188c87d393afd7beb217bd96dabd4569d2d5d9e70b0cd"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "eab3d6bf1fef485940f188c87d393afd7beb217bd96dabd4569d2d5d9e70b0cd",
+      "source": "unknown_reasons.append(",
       "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "8e893e2fb1fabbcba38370583caf93df6b91715aa79ca1230c9cac044181d3da",
-      "line": 1057,
+      "inventory_source_fingerprint": "46a39f8893262298125e8ebbe6743a58ef48fb05e07c752038042bf3e7fda7b9",
+      "line": 481,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "ea07ef63aeae21bc503506da9f37fd3257b5635000974350104e950fe43bd525"
+          "ecc2882d10d87f4230a001f1b011ea835fa8e7937b1119b0bcebd14f462c94eb"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "ea07ef63aeae21bc503506da9f37fd3257b5635000974350104e950fe43bd525",
-      "source": "\"EQUIV_TIMEOUT=$EQUIV_TIMEOUT\" \\",
+      "shell_role": "reporting_only",
+      "site_id": "ecc2882d10d87f4230a001f1b011ea835fa8e7937b1119b0bcebd14f462c94eb",
+      "source": "echo \"Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\"",
       "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "83ea123fc28274c12360b4f55515954383c825706cd6d7075ec42ca93f38ca50",
-      "line": 190,
-      "path": "eqbench_run_all_32jobs.sh",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "fallback_retry",
+      "inventory_source_fingerprint": "28901d282b399a3b7da37b902ff2c4c572aef33573c616522de8777fcc8d9c44",
+      "line": 2455,
+      "path": "scripts/function_tracer_pcode/equivalence/checker.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
+        "kind": "consumer_or_transfer",
         "refs": [
-          "f01f5d4321e2a6ecf80acb7c0982adb46ebd5e2d68669e27ccd54dbabbf05752"
+          "ed2ad3746599304917b69ccd9c79c38173ff8040aa0910f042686831f48d25b5"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "f01f5d4321e2a6ecf80acb7c0982adb46ebd5e2d68669e27ccd54dbabbf05752",
-      "source": "UNKNOWN)",
-      "symbol": "<shell>"
+      "shell_role": null,
+      "site_id": "ed2ad3746599304917b69ccd9c79c38173ff8040aa0910f042686831f48d25b5",
+      "source": "strategy_result.unknown_reasons = []",
+      "symbol": "_apply_phase2_relational_call_discharge"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "6d07c73c47a496925f4ae5e3d3ccb62c9db4dbc26456772dfde9a08f48997375",
+      "line": 1343,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "efe4345444f1b6301e39f65cc09b3cd4e703d424f96cd09211d446c00427b3d2"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "efe4345444f1b6301e39f65cc09b3cd4e703d424f96cd09211d446c00427b3d2",
+      "source": "unknown_reasons = []",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -5207,6 +5207,48 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "cea928534c795b261a155e4471671609590a3341d19421934ee23301b8ba1131",
+      "line": 2081,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "f2f7fbcb0b8a34233b00faf00c235e03845a13a1f18698cd3df0a83b312dd0ca"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "f2f7fbcb0b8a34233b00faf00c235e03845a13a1f18698cd3df0a83b312dd0ca",
+      "source": "unknown_reasons=[],",
+      "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "77e5f87a127044cdd9a96e2b5b23d36161e3b2c31770cd0cb00de1ada7737e1f",
+      "line": 1198,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "f3d890196f89784e0e69ca05a827ed7a3e890d0c3a20e30e6280aa15555196ed"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "f3d890196f89784e0e69ca05a827ed7a3e890d0c3a20e30e6280aa15555196ed",
+      "source": "\"PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
       "inventory_source_fingerprint": "21dbb335437c5be2e79df3c8a4242ba6ef908693891e664e85568c6687bc5cc7",
@@ -5225,27 +5267,6 @@
       "site_id": "f440ec1ead324801b270ab6d40354289b2f8effbf0426554b1873bdf5286bf1a",
       "source": "CALL_EFFECT_REASON_SPECS: Mapping[str, CallEffectReasonSpec] = MappingProxyType({",
       "symbol": "<module>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "f4ba0aa706ba935b5c11cd1d3f36ff99b57035c7d6074bd9c7458af3bd82743e",
-      "line": 1381,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "f4ce1525eca7ff921bd0d100a4f56563b21761805593cf94978882a4f42e2a90"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "f4ce1525eca7ff921bd0d100a4f56563b21761805593cf94978882a4f42e2a90",
-      "source": "unresolved_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(",
-      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -5270,27 +5291,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_selection_assignment",
-      "consumer_class": "general",
-      "inventory_source_fingerprint": "1220a33f966a36adabedd7bd08f844329c76543c69ef41a30fa0815ec370f1fb",
-      "line": 1347,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "field_initialization_or_nonproducing_transfer",
-        "refs": [
-          "f83491aa135203de788bd0190c44fe075306ba00ac1aebf20edfbb35c1b384f8"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": null,
-      "site_id": "f83491aa135203de788bd0190c44fe075306ba00ac1aebf20edfbb35c1b384f8",
-      "source": "equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(",
-      "symbol": "check"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "da56ecdb0f92ee7a8ecab2c0ee90822bf41473a8611b75666bbf14a31b1f4aae",
@@ -5312,27 +5312,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "dd3d90bac4302637c72d486c777e1acb396fdf4414cd4624fe5ea71d7010eb58",
-      "line": 326,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "f987433a97568f51297240e6a23d6e7e26186b085748ba6468aa4a5366e3f068"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "f987433a97568f51297240e6a23d6e7e26186b085748ba6468aa4a5366e3f068",
-      "source": "--timeout \"$DECOMPILE_TIMEOUT\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "d8eedc291c9370877c7e0c9d6d389e16351f73a3622abe8956194afd0c5139d6",
@@ -5351,6 +5330,27 @@
       "site_id": "f9877cba70fe22cf2d6f74db755a6685281c3db2fd215d644910f40554e5a94a",
       "source": "self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))",
       "symbol": "__post_init__"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "reason_collection_mutation",
+      "consumer_class": "general",
+      "inventory_source_fingerprint": "d354f480775cc6bd7fe2864a64d84ed8ff6d7f338831174e15da33aa225b892d",
+      "line": 1155,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "consumer_or_transfer",
+        "refs": [
+          "fa0d514eae0b76dd5681dbe5f61e34c413dcf5808f64be0c91d2042b27862642"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": null,
+      "site_id": "fa0d514eae0b76dd5681dbe5f61e34c413dcf5808f64be0c91d2042b27862642",
+      "source": "unknown_reasons=[",
+      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",
@@ -5396,23 +5396,23 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
+      "construct_kind": "reason_collection_read",
       "consumer_class": "general",
-      "inventory_source_fingerprint": "36f63aa8d2f733a20e3a33fe25f9cb59cbd132ac8e290022bc17e6a09e5afde2",
-      "line": 292,
+      "inventory_source_fingerprint": "9e72096b2f66d3d6cf6b66b734d7ad7ea089a9f47e6d6dce8454b87920efc092",
+      "line": 297,
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_boundary.py",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "consumer_or_transfer",
         "refs": [
-          "fcdd625ee1db0f8b483a73e44d6a6793e42fdeee0dc868679ce4b501bf78af10"
+          "fc3848863165c31e9c27d01b2e81a18f33bca40967e97022aa0e07ed317a9d26"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": null,
-      "site_id": "fcdd625ee1db0f8b483a73e44d6a6793e42fdeee0dc868679ce4b501bf78af10",
-      "source": "result.legacy_unknown_reasons = list(",
+      "site_id": "fc3848863165c31e9c27d01b2e81a18f33bca40967e97022aa0e07ed317a9d26",
+      "source": "getattr(result, \"unknown_reasons\", ()) or ()",
       "symbol": "run_check_from_binaries_with_v2_pilot"
     },
     {
@@ -5461,27 +5461,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "231d115638554f1de045faf85a7ae77d8ca589fa8319c2a614ac381b3d2cd4a0",
-      "line": 38,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "fef9d5c0031a20a6c985a38f6e42f4b48da5bca99c5bc857081549282bd6e9ca"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "fef9d5c0031a20a6c985a38f6e42f4b48da5bca99c5bc857081549282bd6e9ca",
-      "source": "PAIRWISE_TIMEOUT=\"${PAIRWISE_TIMEOUT:-5}\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "final_primary",
       "inventory_source_fingerprint": "8cbe67a27a4a8ca5277db46bde9e5d21c1daab005b099c62a5ecdcb1982da0a8",
@@ -5523,11 +5502,37 @@
       "site_id": "ff27fc1b4f36c04958eda81de54b468ae94b504a223aa4a196017f74dd30dfd8",
       "source": "totals[\"unknown\"] + 0",
       "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "47a0e99bbe1b63e6f58a9ae989c097644aaf8faa6a2c783821c7fa15a76d0fb4",
+      "line": 482,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "ff967ff12f676ce150bc5eb11779cb3c8e010e78d1f3d281702178d5b02c2124"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "ff967ff12f676ce150bc5eb11779cb3c8e010e78d1f3d281702178d5b02c2124",
+      "source": "echo \"Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER\"",
+      "symbol": "<shell>"
     }
   ],
   "current_source": {
-    "candidate_count": 607,
-    "candidate_set_digest": "24e49dab52baf5a5080b9acdb0c6c32065cddd7e1a7ef208c9e809b86f029710"
+    "candidate_count": 608,
+    "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
+  },
+  "delta_kind": "phase6_slice_local_inventory_delta",
+  "frozen_phase0": {
+    "candidate_count": 589,
+    "candidate_set_digest": "82fe1f812ca10cb245d79ca720d7c1ea850b260f46c4737b1e7c26395d7eef0d"
   },
   "previous_slice": {
     "candidate_count": 590,
@@ -8655,7 +8660,7 @@
       "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "89edc7c12301011827c16c5364acec5c5142270d90f0ed80b552791113701513",
-      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
+      "source": "TIMEOUT_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -9289,7 +9294,7 @@
       "review_status": "reviewed",
       "shell_role": "other_consumer",
       "site_id": "b01f33a710858f57d4263f0d3e4e3c95041b5daa05d22f77920da78124937dc7",
-      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID \u2194 $COL_ID\")",
+      "source": "UNKNOWN_PAIRS+=(\"$ROW_ID ↔ $COL_ID\")",
       "symbol": "<shell>"
     },
     {
@@ -9572,27 +9577,6 @@
       "site_id": "bf39fca0e13b3d0b20b4d466662aab7daf5e3658cb3541f651afd7a01b3c7104",
       "source": "echo \"Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\"",
       "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "reason_collection_mutation",
-      "consumer_class": "fallback_retry",
-      "inventory_source_fingerprint": "ad8a558d95a2236943766b894f607951e3c2cba16ec9183fb413b5260d6ff1be",
-      "line": 1786,
-      "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "reviewed_non_reason_consumer_or_transfer",
-        "refs": [
-          "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py:1786"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed",
-      "shell_role": null,
-      "site_id": "bf4cf461b4046176c32737ffdf6a191adab1f09b8c5014d460bf1b24307ed63e",
-      "source": "strategy_result.unknown_reasons = unknown_reasons",
-      "symbol": "check"
     },
     {
       "authority_role": "derived_projection",

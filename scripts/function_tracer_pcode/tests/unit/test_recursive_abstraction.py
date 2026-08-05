@@ -6,7 +6,18 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker, StageID
 from scripts.function_tracer_pcode.equivalence.recursive_abstraction import abstract_recursive_calls
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
+from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+    ExtensionKind,
+    ExtensionEvidenceSource,
+    FunctionReturnWidthSeed,
+    FunctionReturnWidthTargetId,
+    GuardRegionFact,
+    GuardRegionTargetId,
+    build_pair_return_observation_seed,
+)
+from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import assess_return_abi_pair
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+from scripts.function_tracer_pcode.analysis.analyzer_services import session_helpers_1
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     Condition,
@@ -18,6 +29,78 @@ from scripts.function_tracer_pcode.model import (
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis, create_mock_result
+
+
+class _AbiTestSpace:
+    def getName(self):
+        return "register"
+
+
+class _AbiTestAddress:
+    def getAddressSpace(self):
+        return _AbiTestSpace()
+
+    def getOffset(self):
+        return 0
+
+
+class _AbiTestVarnode:
+    def getAddress(self):
+        return _AbiTestAddress()
+
+    def getSize(self):
+        return 8
+
+
+class _AbiTestStorage:
+    def getVarnodes(self):
+        return [_AbiTestVarnode()]
+
+
+class _AbiTestPrototype:
+    def getModelName(self):
+        return "default"
+
+    def getReturnStorage(self):
+        return _AbiTestStorage()
+
+
+class _AbiTestReturnType:
+    def getPathName(self):
+        return "/int"
+
+    def getLength(self):
+        return 8
+
+
+def _production_return_abi_facts():
+    return session_helpers_1._sealed_return_abi_facts(
+        _AbiTestPrototype(), _AbiTestReturnType(), "int"
+    )
+
+
+def _production_width_seed(analysis, side):
+    member = ("return-member", side)
+    guard_target = GuardRegionTargetId(member, (("guard-slot", side),))
+    target = FunctionReturnWidthTargetId(
+        analysis.outcome_function_identity(), member, guard_target
+    )
+    return FunctionReturnWidthSeed(
+        target,
+        GuardRegionFact("complete", (("guard", side),)),
+        64,
+        64,
+        ("storage", side, 64),
+        ("payload", side, 64),
+        ("return_type_provenance", ("declared_return_type_width", 64)),
+        ExtensionEvidenceSource(
+            ExtensionKind.SAME_WIDTH.value,
+            ("storage-value", side),
+            ("payload-value", side),
+            (("producer", side),),
+            "certified_flow",
+        ),
+    )
 
 
 def _param(name: str = "n", index: int = 0, size: int = 4):
@@ -410,6 +493,8 @@ def test_deferred_call_abstraction_rewrites_matching_sqrt_returns_to_summary_cal
     )
     analysis1 = _analysis_with_deferred_value("left", info1)
     analysis2 = _analysis_with_deferred_value("right", info2)
+    analysis1.return_abi_facts = _production_return_abi_facts()
+    analysis2.return_abi_facts = _production_return_abi_facts()
     analysis1.deferred_calls = {info1.deferred_call_ref.stable_key(): info1}
     analysis2.deferred_calls = {info2.deferred_call_ref.stable_key(): info2}
 
@@ -429,6 +514,21 @@ def test_deferred_call_abstraction_rewrites_matching_sqrt_returns_to_summary_cal
     assert right_value.expr_type == ExpressionType.PARAMETER
     assert left_value.name == right_value.name
     assert any(param.get("synthetic_pure_call_summary") for param in result.analysis1.parameters)
+    assert result.analysis1.return_abi_facts == analysis1.return_abi_facts
+    assert result.analysis2.return_abi_facts == analysis2.return_abi_facts
+    assert result.analysis1.return_abi_facts is not analysis1.return_abi_facts
+    assert result.analysis2.return_abi_facts is not analysis2.return_abi_facts
+    left_width = _production_width_seed(result.analysis1, "left")
+    right_width = _production_width_seed(result.analysis2, "right")
+    abi_assessment = assess_return_abi_pair(
+        result.analysis1,
+        result.analysis2,
+        left_width,
+        right_width,
+        build_pair_return_observation_seed(left_width, right_width),
+    )
+    assert not abi_assessment.left_seed.malformed_slots
+    assert not abi_assessment.right_seed.malformed_slots
     evidence = result.matches[0].match_evidence["left"]
     assert evidence["effect_class"] == "pure_return"
     assert evidence["domain_policy"]["fp_non_nan"] is True

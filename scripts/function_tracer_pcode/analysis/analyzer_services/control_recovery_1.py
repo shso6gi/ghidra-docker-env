@@ -2313,18 +2313,8 @@ def _impl__switch_recovery_improves_returns(
     if recovered_unresolved < original_unresolved:
         return True
 
-    affected_analysis = FunctionReturnAnalysis(
-        function_name=analysis.function_name,
-        entry_point=analysis.entry_point,
-        parameters=list(analysis.parameters or []),
+    affected_analysis = analysis.semantic_successor(
         returns=list(affected_returns),
-        function_ref=analysis.function_ref,
-        return_type=analysis.return_type,
-        return_type_obj=analysis.return_type_obj,
-        unknown_event_count=analysis.unknown_event_count,
-        unknown_event_reasons=list(analysis.unknown_event_reasons),
-        program_is_big_endian=analysis.program_is_big_endian,
-        binary_id=analysis.binary_id,
     )
     if affected_analysis.has_overlapping_unconditional_returns():
         return True

@@ -177,6 +177,7 @@ def prepare_pair_return_observation(
     try:
         from .v2.abi_width_readonly import (
             ProjectionNotFormable,
+            ReturnAbiAuthorityInvalid,
             ReturnObservationProjectionSeed,
             assess_return_abi_pair,
         )
@@ -207,6 +208,11 @@ def prepare_pair_return_observation(
             register_return_observation_proof_plan(
                 projection_seed, abi_assessment
             )
+    except ReturnAbiAuthorityInvalid:
+        # Preserve the typed authority failure for the canonical boundary.
+        # Converting it into a generic shadow diagnostic would hide MALFORMED
+        # ABI provenance behind V2_PROJECTION_AUTHORITY_INVALID.
+        raise
     except Exception as exc:
         from .v2.production_signals import record_production_pilot_shadow_error
 

@@ -1,6 +1,6 @@
 {
   "active_cause_count": 6,
-  "artifact_digest": "aa949f0dcdfcebf58bb5a9916feeffd8d6af0cf6d405d0174d43f9b62396f417",
+  "artifact_digest": "3a678198493dc972d5111a4c1565c38685e07ba6a4e2f9f807bbb6f35acc9eb2",
   "contract_fixture_coverage": {
     "covered_cause_slot_count": 6,
     "eligible_cause_slot_count": 6,
@@ -8,7 +8,7 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "cross_slice_validation": {
-    "artifact_digest": "aaa2c7ce4522977b515ed3ea5c43f1dd505b62fdae764763a748413541d5691d",
+    "artifact_digest": "40a01d3f636339b4844c930719b77067e3be27de0c33958c6759596be1cd4b0d",
     "declared_external_fixture_skips": [
       {
         "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -27,7 +27,7 @@
       }
     ],
     "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation-bootstrap.xml",
-    "junit_sha256": "49c398492f5df7ef6b10b0f123e4972fa0a3e4b866afabcefd105b2c10103bed",
+    "junit_sha256": "daffeac9c8ba15f53ce15ddd573c81f76049c9e80832076b128e132b02151dd5",
     "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
     "pytest_selection": [
       "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -74,7 +74,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py",
-        "sha256": "b5c735dc3a56ca99b739c142a1f86741ddcb3fd0f4568e9bd549e9e7876eac12"
+        "sha256": "4ab724525ea661bc705a403e17366e125309eaaf863ef88f599c0fc0929fee6a"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_call_effect.py",
@@ -98,7 +98,7 @@
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
-        "sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8"
+        "sha256": "833d9a9f9fd6ac8d1911dde72a6a2bc89e36d4cf0dc3b51dab55705a42199228"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_worker_runtime.py",
@@ -133,10 +133,10 @@
         "sha256": "16cf0928beef06150e5f773eecdc95dc64bbf10384c1861ac2fd6fe8b840e0da"
       }
     ],
-    "test_count": 584
+    "test_count": 586
   },
-  "event_stream_digest": "502f3a242c20f90281c406c73655b3f2175bded6f8886754265b404bafdd0d81",
-  "expected_activation_ledger_digest": "18ca99e38fb0e65e1d9d95bffa7b09e571d4c250442ddbd4c41db9790553835a",
+  "event_stream_digest": "8bf6c2af50668a6adeff48bc0c6b05013efc7ac9d8a3d4ba125e713d86f437a4",
+  "expected_activation_ledger_digest": "be0e114cab6fd4d3fb22dbcbf6b9e170d5bf1e057edd04a07db79765d5161f03",
   "fixture_domains": [
     "operational_extraction",
     "expression_call_effect_memory",
@@ -148,10 +148,10 @@
   "inventory_manifest_digest": "962d015f43322ff6738ff0f918a0a8257205026f8027778ab739d5d7ed62b2e4",
   "legacy_entry_count": 411,
   "legacy_manifest_digest": "6eb7031c243fd360aa6b271d9269be419848b59041c2f926f92052e5636dcb06",
-  "lifecycle_projection_digest": "3dbdcd21331d474348d5bd149763a7b73328e57f724bb66e47108e5006a2a4cf",
+  "lifecycle_projection_digest": "197fedff66339bbacee683d371a10e143f92d7350a83f3d9055ff511a8b13e91",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cutover-contract-fixture-v2",
   "open_requirement_count": 5,
-  "producer_site_manifest_digest": "773259307f3b72a13a5eb0539d94752630bc2b14ccfe66c8d83ad97f0f2d17b3",
+  "producer_site_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
   "production_runtime_coverage": {
     "activated_domains": {
       "operational_extraction": {
@@ -250,7 +250,7 @@
     "not_reached_activation_count": 0,
     "open_requirement_count": 1,
     "process_supervisor_source_sha256": "3e3adfc2276e38f5336160481860b82b6e379431f6c86b484cd5edd56ddb3503",
-    "process_supervisor_test_source_sha256": "02ff2f53489cfc78d6b7dcc79853ecb333b2011aeceed2415c54aaeeb5029ba8",
+    "process_supervisor_test_source_sha256": "833d9a9f9fd6ac8d1911dde72a6a2bc89e36d4cf0dc3b51dab55705a42199228",
     "proof_requirement_id": "operational-q-7e4f05925290cb948b02c84190db7931",
     "q_open_rows": [
       {
@@ -311,7 +311,7 @@
   },
   "production_runtime_unknown": {
     "active_cause_count": 1,
-    "artifact_digest": "d6e5fb5a577ee5c4a01534ead43c40c03a516d91a9f41325051bd0196e091999",
+    "artifact_digest": "d87cd3df267b792e0580677f39ea996d4f11d31bd80017769dc9f1246670b92f",
     "binary_content_identities": [
       "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
       "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -361,7 +361,7 @@
     "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
     "not_reached_activation_count": 0,
     "open_requirement_count": 1,
-    "producer_manifest_digest": "773259307f3b72a13a5eb0539d94752630bc2b14ccfe66c8d83ad97f0f2d17b3",
+    "producer_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
     "producer_site_count": 28,
     "q_open_rows": [
       {
@@ -698,16 +698,16 @@
   "production_umbrella_generation": 0,
   "production_umbrella_routing": 0,
   "projection_receipt_digests": [
-    "6b839e6e57bad3fad08a5b582d78602060aea471ef066b395f6c471853cb2006",
-    "c189ad963e008d19b0b0d61e394b69a0ed06b7c62f624191befb639617b17f50",
-    "6a252929191b053ecb1c2b6382d038dd874c9692b97ccd984892624bcb183741",
-    "a8007fc51fd2fb73daaae27c9721f0687127a5284c60933439f24ec33975003c",
-    "ff5837e9948b898313c373f77900e793bf303c6f9924cad3aa1872dd85be8bcd",
-    "1540d16c60b1b2cc71b7be659227bd806947fb72e8dae81ee97367e5503d0675"
+    "31dc9d80bfbfc80414c8029b0feb4865e2c33102ade019c03adf005254707e5c",
+    "374fb352434cfb0a20255f947519d069f3a8d7c666e61401c12e56c8589dc13d",
+    "6a3af85e65dc8ecd1ebf565e367a74861d52e6613655ad3a5851d64851c98ae8",
+    "d13a51a8d18ae67a7b432217df307fca954f7fdf06a1b5a39b48498a8c0cf346",
+    "2b336c252aa9d438f54597b5efb949489150b90e9982827bf8ae6fb02a6ee0ab",
+    "0fff887e7649d471cacc8662ee3442ec328731255759daaedca15f660c2f6b9f"
   ],
-  "runtime_activation_ledger_digest": "4ef0d6ac8fa24103b402d63c1780c973878bd3ea5d698f310f62a672a747e698",
+  "runtime_activation_ledger_digest": "7875b04bae63027bf2a64d3aad41f63dd65a2ad6b394fd2daa8f4524b5d70282",
   "semantic_projection_digest": "f2b7e8eadd1f2ade099b6913bbd274276f8124dc62fd2ecaedaad2be6c7ac791",
-  "site_registry_digest": "5a51110179cd5ead30ed90033e6620a9d43dc71c42a4e1c02d8c96da0484a11a",
+  "site_registry_digest": "c91fdc40b74bfe7e642099a6905f031d4b811602424894f666719ac158d67c7c",
   "source_rows": [
     [
       "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
@@ -715,7 +715,7 @@
     ],
     [
       "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "8d8295bdf079d5b6bffad2b32361953bd66bf9b979bc22aa89bb673a74f4b80c"
+      "9be4b9dd2a4553d1eb3e5b7623762cca03c01e4f62ef41a16092c2cc71bc34e8"
     ],
     [
       "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -731,10 +731,10 @@
     ],
     [
       "scripts/function_tracer_pcode/equivalence/checker.py",
-      "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a"
+      "5106f8235bac1629fc461861a5b1274c826e28b49f748c643978d60f1f71c9d7"
     ]
   ],
-  "source_snapshot_fingerprint": "24e524051e78745fe2c4f4b1f852844e556849a32a2dd7f334ba9e552a0a759c",
+  "source_snapshot_fingerprint": "ff534021afb5605a44201ee1fe0a55ec13487bc1ef2a61f816662d6262676a0d",
   "status": "phase7_integration_validation_pending_fixed_review",
   "validator_source_sha256": "11fe688cc44828f2b2a267030cd370f8bc33722d9a44bad54b6af80efd87615f"
 }

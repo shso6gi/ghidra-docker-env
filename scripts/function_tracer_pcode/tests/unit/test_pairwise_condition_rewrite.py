@@ -101,6 +101,28 @@ def _signed_negative_condition(expr: Expression, negated: bool = False) -> Condi
     return Condition(_binary("INT_SLESS", expr, _const(0)), negated=negated)
 
 
+def _missing_return_abi_facts():
+    """Return the producer-issued schema-v1 envelope for unavailable ABI facts."""
+    return {
+        "schema_version": 1,
+        "calling_convention": {
+            "status": "MISSING",
+            "value": None,
+            "source": "pairwise_fixture",
+        },
+        "declared_or_effective_return_type": {
+            "status": "MISSING",
+            "value": None,
+            "source": "pairwise_fixture",
+        },
+        "return_storage_descriptor": {
+            "status": "MISSING",
+            "value": None,
+            "source": "pairwise_fixture",
+        },
+    }
+
+
 def _analysis(conditions) -> FunctionReturnAnalysis:
     return FunctionReturnAnalysis(
         function_name="ternary_modulo",
@@ -114,6 +136,7 @@ def _analysis(conditions) -> FunctionReturnAnalysis:
             )
         ],
         return_type="long",
+        return_abi_facts=_missing_return_abi_facts(),
     )
 
 
@@ -189,6 +212,27 @@ def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
         incomplete_control_flow=True,
         deferred_calls={"placeholder": Mock()},
         effect_summary=effect_summary,
+        return_abi_facts={
+            "schema_version": 1,
+            "calling_convention": {
+                "status": "PRESENT",
+                "value": ("ghidra_calling_convention_v1", "default"),
+                "source": "getModelName",
+            },
+            "declared_or_effective_return_type": {
+                "status": "PRESENT",
+                "value": ("ghidra_return_type_v1", "/int", 8),
+                "source": "getReturnType",
+            },
+            "return_storage_descriptor": {
+                "status": "PRESENT",
+                "value": (
+                    "ghidra_return_storage_v1",
+                    (("ghidra_return_storage_member_v1", "register", 0, 8),),
+                ),
+                "source": "getReturnStorage",
+            },
+        },
     )
 
     rewritten, _ = rewrite_analysis_returns(analysis, rewriter)
@@ -200,6 +244,9 @@ def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
     assert rewritten.recovered_from_decompiler is True
     assert rewritten.incomplete_control_flow is True
     assert "placeholder" in rewritten.deferred_calls
+    assert rewritten.return_abi_facts == analysis.return_abi_facts
+    assert rewritten.return_abi_facts is not analysis.return_abi_facts
+    assert rewritten.return_abi_facts["return_storage_descriptor"] is not analysis.return_abi_facts["return_storage_descriptor"]
 
 
 def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions():
@@ -290,6 +337,7 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
             )
         ],
         return_type="long",
+        return_abi_facts=_missing_return_abi_facts(),
     )
     analysis2 = _analysis([])
 
@@ -328,6 +376,7 @@ def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
             )
         ],
         return_type="long",
+        return_abi_facts=_missing_return_abi_facts(),
     )
     analysis2 = _analysis([])
 
@@ -374,6 +423,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
             )
         ],
         return_type="long",
+        return_abi_facts=_missing_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="f2",
@@ -387,6 +437,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
             )
         ],
         return_type="long",
+        return_abi_facts=_missing_return_abi_facts(),
     )
 
     formula_builder = Mock()
@@ -443,6 +494,7 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
             )
         ],
         return_type="int",
+        return_abi_facts=_missing_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="branch_sign_bucket_right",
@@ -460,6 +512,7 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
             )
         ],
         return_type="int",
+        return_abi_facts=_missing_return_abi_facts(),
     )
 
     formula_builder = FormulaBuilder()
@@ -523,6 +576,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
             ),
         ],
         return_type="int",
+        return_abi_facts=_missing_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="branch_sign_bucket_right",
@@ -545,6 +599,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
             ),
         ],
         return_type="int",
+        return_abi_facts=_missing_return_abi_facts(),
     )
 
     solver_runner = _solver_runner()

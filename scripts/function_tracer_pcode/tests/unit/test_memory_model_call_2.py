@@ -1,5 +1,140 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
 
+
+def _sealed_return_abi_facts_for_test():
+    return {
+        "schema_version": 1,
+        "calling_convention": {
+            "status": "PRESENT",
+            "value": ("ghidra_calling_convention_v1", "default"),
+            "source": "getModelName",
+        },
+        "declared_or_effective_return_type": {
+            "status": "PRESENT",
+            "value": ("ghidra_return_type_v1", "/int", 4),
+            "source": "getReturnType",
+        },
+        "return_storage_descriptor": {
+            "status": "PRESENT",
+            "value": (
+                "ghidra_return_storage_v1",
+                (("ghidra_return_storage_member_v1", "register", 0, 4),),
+            ),
+            "source": "getReturnStorage",
+        },
+    }
+
+
+def test_function_return_analysis_semantic_successor_preserves_authority_fields():
+    class OpaqueRuntimeRef:
+        def __deepcopy__(self, memo):
+            raise TypeError("runtime proxy is not deepcopyable")
+
+    opaque_runtime_ref = OpaqueRuntimeRef()
+    analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x2000",
+        parameters=[
+            {
+                "name": "param_1",
+                "index": 0,
+                "size": 4,
+                "data_type_obj": opaque_runtime_ref,
+            }
+        ],
+        returns=[],
+        signature_hypotheses=[{"source": "decompiler", "confidence": 0.8}],
+        return_type_provenance={"source": "declared", "width_bits": 32},
+        return_abi_facts=_sealed_return_abi_facts_for_test(),
+    )
+
+    successor = analysis.semantic_successor(returns=[])
+
+    assert successor.return_abi_facts == analysis.return_abi_facts
+    assert successor.return_abi_facts is not analysis.return_abi_facts
+    assert successor.return_abi_facts["return_storage_descriptor"] is not analysis.return_abi_facts["return_storage_descriptor"]
+    assert successor.parameters is not analysis.parameters
+    assert successor.parameters[0] is not analysis.parameters[0]
+    assert successor.parameters[0]["data_type_obj"] is opaque_runtime_ref
+    assert successor.return_type_provenance == analysis.return_type_provenance
+    assert successor.return_type_provenance is not analysis.return_type_provenance
+    assert successor.signature_hypotheses == analysis.signature_hypotheses
+    assert successor.signature_hypotheses is not analysis.signature_hypotheses
+
+
+def test_semantic_successor_invalidates_stale_outcome_authority_on_return_rewrite():
+    analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[ReturnInfo(address="0x2000", value=Expression.constant(1), conditions=[])],
+        outcome_seed=object(),
+        return_outcomes=(object(),),
+        divergence_outcomes=(object(),),
+        unknown_outcomes=(object(),),
+        analysis_view_identity=("old-view",),
+        partition_revision=7,
+        comparison_surface=object(),
+        completed_recovery_proof_ids=(("proof",),),
+        completed_recovery_proof_evidence=({"proof": "complete"},),
+        summary_return_candidates=(object(),),
+        termination_path_effect_evidence=(object(),),
+        quarantined_recurrence_proposals=(object(),),
+    )
+
+    successor = analysis.semantic_successor(
+        returns=[ReturnInfo(address="0x2000", value=Expression.constant(2), conditions=[])],
+    )
+
+    assert successor.returns[0].value.value == 2
+    assert successor.outcome_seed is None
+    assert successor.return_outcomes == ()
+    assert successor.divergence_outcomes == ()
+    assert successor.unknown_outcomes == ()
+    assert successor.analysis_view_identity is None
+    assert successor.partition_revision == 0
+    assert successor.comparison_surface is None
+    assert successor.completed_recovery_proof_ids == ()
+    assert successor.completed_recovery_proof_evidence == ()
+    assert successor.summary_return_candidates == ()
+    assert successor.termination_path_effect_evidence == ()
+    assert successor.quarantined_recurrence_proposals == ()
+
+
+def test_semantic_successor_clones_deferred_call_info_without_sharing_mutable_state():
+    deferred = DeferredCallInfo(
+        "call_out_of_scope:callee#0",
+        CallTargetRef.from_name("callee", entry_offset=0x2000),
+        [Expression.parameter("x", 0, size=4)],
+        sequence=0,
+        domain_policy={"mode": "bounded"},
+        match_evidence={"nested": {"status": "complete"}},
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[],
+        deferred_calls={deferred.deferred_call_ref.stable_key(): deferred},
+    )
+
+    successor = analysis.semantic_successor(
+        deferred_calls=dict(analysis.deferred_calls),
+    )
+    cloned = next(iter(successor.deferred_calls.values()))
+
+    assert cloned is not deferred
+    assert cloned.deferred_call_ref is deferred.deferred_call_ref
+    assert cloned.target_ref is deferred.target_ref
+    assert cloned.arguments is not deferred.arguments
+    assert cloned.arguments[0] is not deferred.arguments[0]
+    assert cloned.domain_policy is not deferred.domain_policy
+    assert cloned.match_evidence is not deferred.match_evidence
+    cloned.domain_policy["mode"] = "changed"
+    cloned.match_evidence["nested"]["status"] = "changed"
+    assert deferred.domain_policy["mode"] == "bounded"
+    assert deferred.match_evidence["nested"]["status"] == "complete"
+
 def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_blocker():
     pcode_ref = PcodeOpRef(address_offset=0x1008, seq_time=1, seq_order=0, mnemonic="CALL")
     deferred = DeferredCallInfo(
@@ -314,6 +449,7 @@ def test_specialize_call_analysis_preserves_summary_proof_metadata():
         ),
         analysis_view_identity=("accepted_return_partition_view", ("partition", 1)),
         partition_revision=1,
+        return_abi_facts=_sealed_return_abi_facts_for_test(),
     )
 
     specialized = analyzer._specialize_call_analysis(
@@ -326,9 +462,12 @@ def test_specialize_call_analysis_preserves_summary_proof_metadata():
     assert specialized_return.summary_candidate_id == ("candidate", 1)
     assert specialized_return.summary_candidate_source_key == ("source", "recurrence")
     assert specialized_return.summary_transition_evidence_key == proof_ref
-    assert specialized.completed_recovery_proof_evidence == analysis.completed_recovery_proof_evidence
-    assert specialized.analysis_view_identity == analysis.analysis_view_identity
-    assert specialized.partition_revision == 1
+    assert specialized.completed_recovery_proof_evidence == ()
+    assert specialized.analysis_view_identity is None
+    assert specialized.partition_revision == 0
+    assert specialized.return_abi_facts == analysis.return_abi_facts
+    assert specialized.return_abi_facts is not analysis.return_abi_facts
+    assert specialized.return_abi_facts["return_storage_descriptor"] is not analysis.return_abi_facts["return_storage_descriptor"]
 
 def test_merge_deferred_calls_into_current_analysis_preserves_most_conservative_state():
     analyzer = ReturnAnalyzer(program=None, debug=False)

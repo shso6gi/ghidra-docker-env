@@ -1,6 +1,6 @@
 {
   "active_cause_count": 1,
-  "artifact_digest": "d6e5fb5a577ee5c4a01534ead43c40c03a516d91a9f41325051bd0196e091999",
+  "artifact_digest": "d87cd3df267b792e0580677f39ea996d4f11d31bd80017769dc9f1246670b92f",
   "binary_content_identities": [
     "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
     "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -49,7 +49,7 @@
   "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
   "not_reached_activation_count": 0,
   "open_requirement_count": 1,
-  "producer_manifest_digest": "773259307f3b72a13a5eb0539d94752630bc2b14ccfe66c8d83ad97f0f2d17b3",
+  "producer_manifest_digest": "2a088d7a2a9bd7bd344a4287fb527bb533a9fda4291a4f04ba6b00e7bd775af4",
   "producer_site_count": 28,
   "q_open_rows": [
     {

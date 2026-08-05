@@ -1,4 +1,5 @@
 {
+  "artifact_digest": "d1fd049e2356de004de9113953c13c0d4e927ce536d6167cb6be1323c4bcb9db",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -245,9 +246,9 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "4cf55c402e62698cb01ecbece8f851bd3c0efaef4b86e8f59046dcdf6d7f7cd7",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "d462b7e32cb234ba826d8ff93ac6f1e1dde92c5a35d3c0b88f364145402f7dbe",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "5106f8235bac1629fc461861a5b1274c826e28b49f748c643978d60f1f71c9d7",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "731ba670697089e32852cbb7a097108e5830f61d082bc0efca4d37adc5483760",
     "scripts/function_tracer_pcode/equivalence/strategies/pairwise_query_executor.py": "40c402cb07114bc134ca48ed95cf4115b5d7469e9aace6884af193497d3515a5",
     "scripts/function_tracer_pcode/equivalence/v2/candidate.py": "01f67bb32de2b310fff26a738f99ed2d82f3eed7aa3c2505060c9ea75c87908d",
@@ -315,8 +316,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_set_digest": "24e49dab52baf5a5080b9acdb0c6c32065cddd7e1a7ef208c9e809b86f029710",
-      "candidate_count": 607
+      "candidate_count": 608,
+      "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
     },
     "live_delta": {
       "added": 0,
@@ -441,6 +442,5 @@
     "real_binary_matrix": "4 passed",
     "related_contract_suite": "440 passed",
     "solver_combined_suite": "122 passed"
-  },
-  "artifact_digest": "7b010e630bd246770cae45fbf513a1fd74a8fce327d4c24f5ec209a02230ed58"
+  }
 }

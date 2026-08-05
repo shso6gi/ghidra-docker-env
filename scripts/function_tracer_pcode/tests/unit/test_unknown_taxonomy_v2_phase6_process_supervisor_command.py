@@ -302,6 +302,134 @@ def _child_persist_canonical_production_loop_timeout():
     raise SystemExit(3)
 
 
+def _child_persist_canonical_return_abi_authority_error():
+    """Cross the real child/supervisor boundary with a typed ABI ERROR."""
+    import time
+
+    from scripts.function_tracer_pcode.equivalence.result_factory import (
+        create_error_result,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
+        ReturnAbiAuthorityInvalid,
+        assess_return_abi_pair,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+        attach_durable_error_finalization,
+        build_canonical_result_finalization_bundle,
+        persist_canonical_result_envelope,
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+        authority_digest,
+    )
+    from scripts.function_tracer_pcode.model import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+        ExtensionEvidenceSource,
+        FunctionReturnWidthSeed,
+        FunctionReturnWidthTargetId,
+        GuardRegionFact,
+        GuardRegionTargetId,
+    )
+    from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+        PairReturnObservationSeed,
+        PairReturnObservationTargetId,
+    )
+
+    def malformed_fixture_width_seed(side, function_identity):
+        guard_target = GuardRegionTargetId(
+            ("return-member", side), (("guard-slot", side),)
+        )
+        target = FunctionReturnWidthTargetId(
+            function_identity, ("return-member", side), guard_target
+        )
+        return FunctionReturnWidthSeed(
+            target,
+            GuardRegionFact("complete", (("guard", side),)),
+            64,
+            32,
+            ("storage", side, 64),
+            ("payload", side, 32),
+            ("return_type_provenance", ("declared_return_type_width", 32)),
+            ExtensionEvidenceSource(
+                "zero_extend",
+                ("storage-value", side),
+                ("payload-value", side),
+                (("producer", side),),
+                "certified_flow",
+            ),
+        )
+
+    left_analysis = FunctionReturnAnalysis(
+        "f", "0x1000", [], [], binary_id="bin-left"
+    )
+    right_analysis = FunctionReturnAnalysis(
+        "f", "0x2000", [], [], binary_id="bin-right"
+    )
+    # This is deliberately the producer-contract violation under test.  A
+    # normal unavailable producer emits the sealed schema-v1 MISSING envelope.
+    left_analysis.return_abi_facts = {}
+    right_analysis.return_abi_facts = {}
+    left_seed = malformed_fixture_width_seed(
+        "left", function_identity=left_analysis.outcome_function_identity()
+    )
+    right_seed = malformed_fixture_width_seed(
+        "right", function_identity=right_analysis.outcome_function_identity()
+    )
+    pair_target = PairReturnObservationTargetId(
+        "top_level_return", left_seed.target_id, right_seed.target_id,
+        (
+            left_seed.target_id.function_identity,
+            right_seed.target_id.function_identity,
+        ),
+    )
+    pair_seed = PairReturnObservationSeed(
+        pair_target, left_seed.digest, right_seed.digest,
+        "top_level_return", pair_target.semantic_anchors,
+    )
+    try:
+        assess_return_abi_pair(
+            left_analysis, right_analysis, left_seed, right_seed, pair_seed
+        )
+    except ReturnAbiAuthorityInvalid as exc:
+        execution_payload = {"case": "return-abi-authority-invalid"}
+        result = create_error_result(
+            analysis1=left_analysis,
+            analysis2=right_analysis,
+            binary1_name="bin-left",
+            binary2_name="bin-right",
+            error_message=exc.canonical_error_kind,
+            start_time=time.time(),
+            type_fix_result=None,
+            retry_count=0,
+            original_signature1=None,
+            original_signature2=None,
+            failure_status=exc.canonical_error_kind,
+            failure_message=str(exc),
+        )
+        artifact_digest = authority_digest({
+            "error_kind": exc.canonical_error_kind,
+            "failure_message": str(exc),
+        })
+        attach_durable_error_finalization(
+            result,
+            execution_payload=execution_payload,
+            error_kind=exc.canonical_error_kind,
+            error_artifact_digest=artifact_digest,
+        )
+        result_payload = result.to_dict()
+        evidence, session = result._canonical_finalization_context
+        bundle = build_canonical_result_finalization_bundle(
+            result_payload_preimage=result_payload,
+            evidence=evidence,
+            session=session,
+        )
+        persist_canonical_result_envelope({
+            **result_payload,
+            "canonical_result_finalization_bundle": bundle,
+        })
+        raise SystemExit(4)
+    raise AssertionError("malformed ABI fixture did not fail closed")
+
+
 def test_process_start_token_is_bound_to_current_linux_process():
     token = read_process_start_token(os.getpid())
     assert token.startswith("linux-proc-starttime-")
@@ -541,6 +669,108 @@ def test_whole_process_mode_accepts_deployment_signed_loop_timeout(
         sealed_status, public_key_path=public_key
     )
     assert classified["canonical_outcome"] == "TIMEOUT"
+    assert classified["supervisor_status"] == "RESOLVED"
+    assert classified["classification_valid"] is True
+
+
+def test_whole_process_mode_preserves_typed_return_abi_error_to_signed_status(
+    tmp_path, monkeypatch,
+):
+    nonce = "supervisor-return-abi-invalid-nonce"
+    monkeypatch.setenv(
+        "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE", nonce
+    )
+    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+        ProductionPilotExecutionIdentity,
+    )
+
+    identity = ProductionPilotExecutionIdentity.create({
+        "case": "return-abi-authority-invalid",
+        "result_entry_occurrence_nonce": nonce,
+    })
+    child_code = (
+        "from scripts.function_tracer_pcode.tests.unit."
+        "test_unknown_taxonomy_v2_phase6_process_supervisor_command "
+        "import _child_persist_canonical_return_abi_authority_error;"
+        "_child_persist_canonical_return_abi_authority_error()"
+    )
+    _authority, base = _config(
+        tmp_path, (sys.executable, "-c", child_code), timeout=30.0
+    )
+    config = replace(
+        base,
+        allow_child_exit_resolution=True,
+        result_occurrence_id=identity.result_occurrence_id,
+        source_snapshot_fingerprint=identity.source_snapshot_fingerprint,
+        stream_id=f"stream-{identity.result_occurrence_id}",
+    )
+    command = ProcessSupervisorCommand(config)
+    assert command.run() == 0
+    projection = _projection(config.authority_output)
+    assert projection["status"] == "RESOLVED"
+    assert projection["canonical_outcome"] == "ERROR"
+    assert projection["error_kind"] == "return_abi_authority_invalid"
+    assert projection["child_returncode"] == 4
+
+    log_path = tmp_path / "return-abi-authority-invalid.log"
+    log_path.write_text("", encoding="utf-8")
+    from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+        generate_pair_status_keypair,
+        validate_signed_pair_status,
+    )
+
+    private_key = tmp_path / "pair-status.key"
+    public_key = tmp_path / "pair-status-verification-key.json"
+    generate_pair_status_keypair(private_key, public_key)
+    target_body = {
+        "schema": "eqbench-pair-execution-target-v1",
+        "authority_kind": "PairExecutionTargetReceipt",
+        "sample_identity": "return-abi-authority-invalid",
+        "output_sample_relative_path": "return-abi-authority-invalid",
+        "function_name": "f",
+        "left_binary_id": "B1",
+        "right_binary_id": "B2",
+        "source_path": "source.c",
+        "source_sha256": "a" * 64,
+        "left_binary_path": "left.bin",
+        "left_binary_sha256": "b" * 64,
+        "right_binary_path": "right.bin",
+        "right_binary_sha256": "c" * 64,
+        "analysis_source_digest": "d" * 64,
+        "analysis_config_digest": "e" * 64,
+    }
+    target = {**target_body, "target_digest": authority_digest(target_body)}
+    target_path = tmp_path / "pair-target.json"
+    target_path.write_text(json.dumps(target), encoding="utf-8")
+    classified_process = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.equivalence.v2.canonical_result",
+            "--classify-pair-log", str(log_path),
+            "--supervisor-projection", str(config.authority_output),
+            "--checkpoint-root", str(config.checkpoint_root),
+            "--execution-nonce", config.execution_nonce,
+            "--supervisor-signing-key-id", config.supervisor_signing_key_id,
+            "--supervisor-signing-key-file", str(config.supervisor_signing_key_file),
+            "--worker-signing-key-id", config.worker_signing_key_id,
+            "--worker-signing-key-file", str(config.worker_signing_key_file),
+            "--pair-status-signing-private-key-file", str(private_key),
+            "--pair-status-verification-key-file", str(public_key),
+            "--pair-execution-target-file", str(target_path),
+        ),
+        cwd=Path(__file__).resolve().parents[4],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert classified_process.returncode == 1, classified_process.stderr
+    sealed_status = json.loads(classified_process.stdout)
+    classified = validate_signed_pair_status(
+        sealed_status, public_key_path=public_key
+    )
+    assert classified["canonical_outcome"] == "ERROR"
+    assert classified["error_kind"] == "return_abi_authority_invalid"
     assert classified["supervisor_status"] == "RESOLVED"
     assert classified["classification_valid"] is True
 

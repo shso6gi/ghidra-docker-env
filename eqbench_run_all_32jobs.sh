@@ -22,6 +22,7 @@ EQBENCH_ROOT="${EQBENCH_ROOT:-$SCRIPT_DIR/targets/EqBench/benchmarks}"
 OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/EqBench/all_eq_matrix_current}"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-32}"
+PARALLEL_JOBS_REQUESTED="$PARALLEL_JOBS"
 VALIDATION_SUMMARY_LEVEL="${VALIDATION_SUMMARY_LEVEL:-compact}"
 EQBENCH_MAX_SAMPLES="${EQBENCH_MAX_SAMPLES:-0}"
 EQBENCH_SAMPLE_FILTER="${EQBENCH_SAMPLE_FILTER:-}"
@@ -37,6 +38,10 @@ EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-10}"
 DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
 PAIRWISE_TIMEOUT_HARD="${PAIRWISE_TIMEOUT_HARD:-30}"
+EQBENCH_RESOURCE_ADMISSION="${EQBENCH_RESOURCE_ADMISSION:-1}"
+EQBENCH_CPU_TOKENS="${EQBENCH_CPU_TOKENS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1')}"
+EQBENCH_PAIR_CPU_TOKENS="${EQBENCH_PAIR_CPU_TOKENS:-8}"
+EQBENCH_PROGRESS_INTERVAL_SECONDS="${EQBENCH_PROGRESS_INTERVAL_SECONDS:-5}"
 SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
 EQBENCH_DEBUG="${EQBENCH_DEBUG:-0}"
 DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
@@ -84,6 +89,24 @@ if [[ ! "$PAIR_PROCESS_TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || [[ ! "$PAIR_PROCESS_KILL_AFTER_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Error: pair process timeout values must be seconds, for example 300s" >&2
     exit 1
+fi
+if [[ ! "$PARALLEL_JOBS_REQUESTED" =~ ^[1-9][0-9]*$ \
+    || ! "$EQBENCH_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
+    || ! "$EQBENCH_PAIR_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
+    || ! "$EQBENCH_PROGRESS_INTERVAL_SECONDS" =~ ^[1-9][0-9]*([.][0-9]+)?$ \
+    || ! "$EQBENCH_RESOURCE_ADMISSION" =~ ^[01]$ ]]; then
+    echo "Error: resource admission settings are invalid" >&2
+    exit 1
+fi
+RESOURCE_ADMISSION_JOBS="$EQBENCH_CPU_TOKENS"
+if (( EQBENCH_RESOURCE_ADMISSION == 1 )); then
+    RESOURCE_ADMISSION_JOBS=$((EQBENCH_CPU_TOKENS / EQBENCH_PAIR_CPU_TOKENS))
+    if (( RESOURCE_ADMISSION_JOBS < 1 )); then
+        RESOURCE_ADMISSION_JOBS=1
+    fi
+    if (( PARALLEL_JOBS > RESOURCE_ADMISSION_JOBS )); then
+        PARALLEL_JOBS="$RESOURCE_ADMISSION_JOBS"
+    fi
 fi
 
 mkdir -p "$EQBENCH_TMPDIR"
@@ -282,6 +305,77 @@ required_binary_ids() {
     done
 }
 
+write_pair_progress_receipt() {
+    local receipt_path="$1"
+    local state="$2"
+    local function_name="$3"
+    local left_id="$4"
+    local right_id="$5"
+    local started_at="$6"
+    local finished_at="$7"
+    local elapsed_seconds="$8"
+    local max_rss_kb="$9"
+    local status="${10}"
+    local error_kind="${11}"
+    local child_returncode="${12}"
+    local timed_command_pid="${13}"
+    local temporary_path
+    temporary_path="${receipt_path}.tmp.$$"
+    "$PYTHON_BIN" - "$temporary_path" "$receipt_path" "$state" \
+        "$function_name" "$left_id" "$right_id" "$started_at" \
+        "$finished_at" "$elapsed_seconds" "$max_rss_kb" \
+        "$status" "$error_kind" "$child_returncode" \
+        "$timed_command_pid" \
+        "$EQBENCH_CPU_TOKENS" "$EQBENCH_PAIR_CPU_TOKENS" \
+        "$PARALLEL_JOBS_REQUESTED" "$PARALLEL_JOBS" <<'PY'
+import json
+import os
+import sys
+
+(
+    temporary_path, receipt_path, state, function_name, left_id, right_id,
+    started_at, finished_at, elapsed_seconds, max_rss_kb, status, error_kind,
+    child_returncode, timed_command_pid, cpu_tokens, pair_cpu_tokens,
+    requested_jobs, effective_jobs,
+) = sys.argv[1:]
+
+def number(value):
+    if value in {"", "-", "None"}:
+        return None
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        return None
+
+payload = {
+    "schema": "eqbench-pair-progress-receipt-v1",
+    "state": state,
+    "function_name": function_name,
+    "left_binary_id": left_id,
+    "right_binary_id": right_id,
+    "started_at_epoch": number(started_at),
+    "finished_at_epoch": number(finished_at),
+    "elapsed_seconds": number(elapsed_seconds),
+    "max_rss_kb": number(max_rss_kb),
+    "status": None if status == "-" else status,
+    "error_kind": None if error_kind == "-" else error_kind,
+    "child_returncode": number(child_returncode),
+    "cpu_tokens": int(cpu_tokens),
+    "pair_cpu_tokens": int(pair_cpu_tokens),
+    "parallel_jobs_requested": int(requested_jobs),
+    "parallel_jobs_effective": int(effective_jobs),
+    "writer_pid": os.getpid(),
+    "timed_command_pid": number(timed_command_pid),
+}
+with open(temporary_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary_path, receipt_path)
+PY
+}
+
 run_pair() {
     local sample_label="$1"
     local function_name="$2"
@@ -296,6 +390,16 @@ run_pair() {
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
     local pair_tmpdir
     pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
+    local runtime_metrics_dir progress_receipt runtime_metrics_file
+    runtime_metrics_dir="${output_dir}/.runtime-metrics"
+    mkdir -p "$runtime_metrics_dir"
+    progress_receipt="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.progress.json"
+    runtime_metrics_file="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.runtime.json"
+    local started_at finished_at elapsed_seconds max_rss_kb
+    started_at="$(date +%s.%N)"
+    write_pair_progress_receipt "$progress_receipt" "RUNNING" \
+        "$function_name" "$left_id" "$right_id" "$started_at" \
+        "-" "-" "-" "-" "-" "-" "-"
     local result_entry_occurrence_nonce
     result_entry_occurrence_nonce="$("$PYTHON_BIN" -c \
         'import secrets; print(secrets.token_hex(24))')"
@@ -331,8 +435,10 @@ run_pair() {
         equiv_cmd+=( -d )
     fi
 
-    local ec
-    if "$PYTHON_BIN" -m \
+    local ec command_pid resource_metrics_file
+    resource_metrics_file="${pair_tmpdir}/resource-usage.txt"
+    /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' \
+        -o "$resource_metrics_file" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command \
         --checkpoint-root "$checkpoint_root" \
         --authority-output "$authority_output" \
@@ -349,11 +455,24 @@ run_pair() {
         --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" \
         --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" \
         --allow-child-exit-resolution \
-        -- "${equiv_cmd[@]}" > "$log_file" 2>&1; then
+        -- "${equiv_cmd[@]}" > "$log_file" 2>&1 &
+    command_pid=$!
+    while kill -0 "$command_pid" 2>/dev/null; do
+        sleep "$EQBENCH_PROGRESS_INTERVAL_SECONDS"
+        write_pair_progress_receipt "$progress_receipt" "RUNNING" \
+            "$function_name" "$left_id" "$right_id" "$started_at" \
+            "-" "-" "-" "-" "-" "-" "$command_pid"
+    done
+    if wait "$command_pid"; then
         ec=0
     else
         ec=$?
     fi
+    finished_at="$(date +%s.%N)"
+    elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
+    max_rss_kb="$(awk -F= '$1 == "max_rss_kb" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
+    [[ -n "$elapsed_seconds" ]] || elapsed_seconds="-"
+    [[ -n "$max_rss_kb" ]] || max_rss_kb="-"
     rm -rf -- "$pair_tmpdir"
 
     if (( ec == 124 || ec == 137 )); then
@@ -420,6 +539,11 @@ run_pair() {
     else
         cleanup_ec=$?
     fi
+    write_pair_progress_receipt "$progress_receipt" "COMPLETED" \
+        "$function_name" "$left_id" "$right_id" "$started_at" \
+        "$finished_at" "$elapsed_seconds" "$max_rss_kb" \
+        "$status" "$error_kind" "$child_returncode" "$command_pid"
+    cp "$progress_receipt" "$runtime_metrics_file"
     printf '[%s] [%s %s/%s] %s <-> %s : %s' \
         "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id" "$status"
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
@@ -642,6 +766,12 @@ eqbench_root=$EQBENCH_ROOT
 output_base_dir=$OUTPUT_BASE_DIR
 python_bin=$PYTHON_BIN
 parallel_jobs=$PARALLEL_JOBS
+parallel_jobs_requested=$PARALLEL_JOBS_REQUESTED
+resource_admission_enabled=$EQBENCH_RESOURCE_ADMISSION
+resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
+cpu_tokens=$EQBENCH_CPU_TOKENS
+pair_cpu_tokens=$EQBENCH_PAIR_CPU_TOKENS
+progress_interval_seconds=$EQBENCH_PROGRESS_INTERVAL_SECONDS
 validation_summary_level=$VALIDATION_SUMMARY_LEVEL
 pair_process_timeout=$PAIR_PROCESS_TIMEOUT
 pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
@@ -679,6 +809,9 @@ echo "EqBench root: $EQBENCH_ROOT"
 echo "Output base: $OUTPUT_BASE_DIR"
 echo "Python: $PYTHON_BIN"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Parallel jobs requested: $PARALLEL_JOBS_REQUESTED"
+echo "Resource admission: enabled=$EQBENCH_RESOURCE_ADMISSION cpu_tokens=$EQBENCH_CPU_TOKENS pair_cpu_tokens=$EQBENCH_PAIR_CPU_TOKENS admission_jobs=$RESOURCE_ADMISSION_JOBS"
+echo "Progress receipts: interval=${EQBENCH_PROGRESS_INTERVAL_SECONDS}s (wall/RSS per pair)"
 echo "Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)"
 echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
@@ -1045,6 +1178,11 @@ fi
     --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
     --exit-status "$FINAL_RUN_EXIT_STATUS" \
     -- "env" "PARALLEL_JOBS=$PARALLEL_JOBS" \
+    "PARALLEL_JOBS_REQUESTED=$PARALLEL_JOBS_REQUESTED" \
+    "EQBENCH_RESOURCE_ADMISSION=$EQBENCH_RESOURCE_ADMISSION" \
+    "EQBENCH_CPU_TOKENS=$EQBENCH_CPU_TOKENS" \
+    "EQBENCH_PAIR_CPU_TOKENS=$EQBENCH_PAIR_CPU_TOKENS" \
+    "EQBENCH_PROGRESS_INTERVAL_SECONDS=$EQBENCH_PROGRESS_INTERVAL_SECONDS" \
     "EQBENCH_RUN_SCOPE=$EQBENCH_RUN_SCOPE" \
     "EQBENCH_BUILD_POLICY=$EQBENCH_BUILD_POLICY" \
     "EQBENCH_MAX_SAMPLES=$EQBENCH_MAX_SAMPLES" \

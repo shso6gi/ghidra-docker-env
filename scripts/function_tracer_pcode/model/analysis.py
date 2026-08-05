@@ -2,7 +2,7 @@
 """関数解析結果のデータモデル"""
 
 from __future__ import annotations
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass, replace
 from copy import deepcopy
 import hashlib
 import json
@@ -49,6 +49,53 @@ def _stable_json_digest(value: Any) -> str:
     except (TypeError, ValueError):
         payload = repr(_jsonable_nested_tuple(value))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _semantic_copy(value: Any) -> Any:
+    """Copy analysis-owned structure while retaining opaque runtime leaves.
+
+    PyGhidra values such as ``data_type_obj`` are Java proxies and cannot be
+    reconstructed by :func:`copy.deepcopy`.  They are immutable references for
+    the purposes of an analysis successor.  Copy ordinary containers and
+    dataclasses recursively so those proxies do not force the surrounding
+    authority/provenance structure to be shared.
+    """
+
+    if isinstance(value, dict):
+        return {
+            _semantic_copy(key): _semantic_copy(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_semantic_copy(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_semantic_copy(item) for item in value)
+    if isinstance(value, set):
+        return {_semantic_copy(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(_semantic_copy(item) for item in value)
+    # ``DeferredCallInfo`` is an ``init=False`` dataclass with a semantic
+    # constructor.  ``dataclasses.replace`` cannot reconstruct it and falling
+    # back to the source object would share mutable call arguments/evidence
+    # between an analysis and its successor.
+    if isinstance(value, DeferredCallInfo):
+        return value.clone()
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            return replace(
+                value,
+                **{
+                    field_info.name: _semantic_copy(getattr(value, field_info.name))
+                    for field_info in dataclass_fields(value)
+                },
+            )
+        except (TypeError, AttributeError):
+            return value
+    try:
+        return deepcopy(value)
+    except (TypeError, AttributeError):
+        # Opaque Java/PyGhidra proxies are intentionally identity-preserved.
+        return value
 
 
 @dataclass
@@ -587,6 +634,34 @@ class DeferredCallInfo:
         )
         self.match_evidence = self._build_match_evidence(match_evidence)
 
+    def clone(self) -> "DeferredCallInfo":
+        """Return an independent semantic copy of this deferred call.
+
+        Ghidra target references are immutable identity objects and are kept
+        shared.  Expressions, argument evidence, and policy mappings are
+        analysis-owned mutable structures and are copied recursively through
+        the model copy policy.
+        """
+
+        return DeferredCallInfo(
+            placeholder_name=self.placeholder_name,
+            target_ref=self.target_ref,
+            arguments=[_semantic_copy(argument) for argument in self.arguments],
+            call_target_expr=(
+                _semantic_copy(self.call_target_expr)
+                if self.call_target_expr is not None else None
+            ),
+            deferred_call_ref=self.deferred_call_ref,
+            call_argument_recovery_status=self.call_argument_recovery_status,
+            call_argument_recovery_reason=self.call_argument_recovery_reason,
+            effect_class=self.effect_class,
+            match_evidence=_semantic_copy(self.match_evidence),
+            domain_policy=_semantic_copy(self.domain_policy),
+            abi_return_width_bits=self.abi_return_width_bits,
+            abi_return_type_policy=self.abi_return_type_policy,
+            call_site_multiplicity=self.call_site_multiplicity,
+        )
+
     @property
     def placeholder_name(self) -> str:
         return self.display_hint or self.deferred_call_ref.display_name()
@@ -1056,6 +1131,78 @@ def _rewrite_expression_for_param_signedness(
 
     return rebuilt, changed
 
+
+# A successor is a new analysis seed, not an implicitly certified derived
+# view. Keep the dependency table next to the API so adding a semantic input
+# field requires an explicit decision about which authority it invalidates.
+_SEMANTIC_SUCCESSOR_INVALIDATION_BY_CHANGE = {
+    "returns": frozenset({
+        "return_outcomes", "divergence_outcomes", "unknown_outcomes",
+        "outcome_seed", "analysis_view_identity", "partition_revision",
+        "comparison_surface", "completed_recovery_proof_ids",
+        "completed_recovery_proof_evidence", "summary_return_candidates",
+        "termination_path_effect_evidence", "quarantined_recurrence_proposals",
+    }),
+    "parameters": frozenset({
+        "effect_summary", "return_outcomes", "divergence_outcomes",
+        "unknown_outcomes", "outcome_seed", "analysis_view_identity",
+        "partition_revision", "comparison_surface",
+        "completed_recovery_proof_ids", "completed_recovery_proof_evidence",
+        "summary_return_candidates", "termination_path_effect_evidence",
+        "quarantined_recurrence_proposals",
+    }),
+    "deferred_calls": frozenset({
+        "effect_summary", "return_outcomes", "divergence_outcomes",
+        "unknown_outcomes", "outcome_seed", "analysis_view_identity",
+        "partition_revision", "comparison_surface",
+        "completed_recovery_proof_ids", "completed_recovery_proof_evidence",
+        "summary_return_candidates", "termination_path_effect_evidence",
+        "quarantined_recurrence_proposals",
+    }),
+    "return_type": frozenset({
+        "return_abi_facts", "return_outcomes", "divergence_outcomes",
+        "unknown_outcomes", "outcome_seed", "analysis_view_identity",
+        "partition_revision", "comparison_surface",
+        "completed_recovery_proof_ids", "completed_recovery_proof_evidence",
+    }),
+    "return_type_obj": frozenset({
+        "return_abi_facts", "return_outcomes", "divergence_outcomes",
+        "unknown_outcomes", "outcome_seed", "analysis_view_identity",
+        "partition_revision", "comparison_surface",
+        "completed_recovery_proof_ids", "completed_recovery_proof_evidence",
+    }),
+    "return_abi_facts": frozenset({
+        "return_outcomes", "divergence_outcomes", "unknown_outcomes",
+        "outcome_seed", "analysis_view_identity", "partition_revision",
+        "comparison_surface", "completed_recovery_proof_ids",
+        "completed_recovery_proof_evidence",
+    }),
+    "effect_summary": frozenset({
+        "return_outcomes", "divergence_outcomes", "unknown_outcomes",
+        "outcome_seed", "analysis_view_identity", "partition_revision",
+        "comparison_surface", "completed_recovery_proof_ids",
+        "completed_recovery_proof_evidence",
+    }),
+}
+
+_SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS = {
+    "effect_summary": None,
+    "return_abi_facts": {},
+    "return_outcomes": (),
+    "divergence_outcomes": (),
+    "unknown_outcomes": (),
+    "outcome_seed": None,
+    "analysis_view_identity": None,
+    "partition_revision": 0,
+    "comparison_surface": None,
+    "completed_recovery_proof_ids": (),
+    "completed_recovery_proof_evidence": (),
+    "summary_return_candidates": (),
+    "termination_path_effect_evidence": (),
+    "quarantined_recurrence_proposals": (),
+}
+
+
 @dataclass
 class FunctionReturnAnalysis:
     """関数のreturn値解析結果"""
@@ -1110,6 +1257,91 @@ class FunctionReturnAnalysis:
             self.return_type_provenance = self._build_return_type_provenance()
         self.normalize_deferred_calls()
 
+    def semantic_successor(self, **changes: Any) -> "FunctionReturnAnalysis":
+        """Build an invalidation-aware successor of this analysis.
+
+        Analysis rewrites commonly change only ``returns``, ``parameters``, or
+        ``deferred_calls``.  A hand-written constructor for those rewrites is
+        unsafe because new authority/provenance fields can silently be
+        dropped.  Start from every dataclass field so additions remain
+        retained by default, deep-copying the mutable analysis-owned fields
+        while keeping opaque runtime objects (for example Ghidra type objects)
+        on their original identity. Derived outcome/proof authority is
+        invalidated according to the dependency table whenever a semantic
+        input changes. Certified derived views must use their explicit
+        constructors such as ``with_accepted_return_partition``.
+        """
+
+        field_names = {field_info.name for field_info in dataclass_fields(self)}
+        unknown_changes = set(changes) - field_names
+        if unknown_changes:
+            unknown = ", ".join(sorted(unknown_changes))
+            raise TypeError(f"unknown FunctionReturnAnalysis fields: {unknown}")
+
+        invalidated_fields = frozenset().union(*(
+            _SEMANTIC_SUCCESSOR_INVALIDATION_BY_CHANGE.get(name, frozenset())
+            for name in changes
+        ))
+        conflicting_changes = invalidated_fields.intersection(changes)
+        if conflicting_changes:
+            conflicting = ", ".join(sorted(conflicting_changes))
+            raise ValueError(
+                "semantic_successor cannot override invalidated derived fields: "
+                + conflicting
+            )
+
+        # These values may refer to live Ghidra/decompiler objects or are
+        # intentionally shared semantic summaries.  The explicit tuple-valued
+        # entries are mutable through their nested records and therefore need
+        # structural copying as well as the obvious dict/list fields.
+        shared_runtime_fields = {
+            "function_ref",
+            "return_type_obj",
+            "signedness_result",
+            "effect_summary",
+        }
+        structural_copy_fields = {
+            "parameters",
+            "returns",
+            "unknown_event_reasons",
+            "analysis_notes",
+            "deferred_calls",
+            "signature_hypotheses",
+            "return_type_provenance",
+            "return_abi_facts",
+            "completed_recovery_proof_evidence",
+            "summary_return_candidates",
+            "return_outcomes",
+            "divergence_outcomes",
+            "unknown_outcomes",
+            "termination_path_effect_evidence",
+            "quarantined_recurrence_proposals",
+        }
+        successor_values: Dict[str, Any] = {}
+        for field_info in dataclass_fields(self):
+            name = field_info.name
+            if name in changes:
+                value = changes[name]
+                successor_values[name] = (
+                    value
+                    if name in shared_runtime_fields
+                    else _semantic_copy(value)
+                )
+                continue
+            if name in invalidated_fields:
+                successor_values[name] = _semantic_copy(
+                    _SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS[name]
+                )
+                continue
+            value = getattr(self, name)
+            successor_values[name] = (
+                value
+                if name in shared_runtime_fields
+                or name not in structural_copy_fields
+                else _semantic_copy(value)
+            )
+        return replace(self, **successor_values)
+
     def outcome_function_identity(self) -> Tuple[Any, ...]:
         return (
             "function_identity_v1",
@@ -1156,10 +1388,16 @@ class FunctionReturnAnalysis:
             return_abi_facts=deepcopy(self.return_abi_facts or {}),
             summary_return_candidates=tuple(summary_return_candidates or ()),
             return_outcomes=(),
+            divergence_outcomes=(),
+            unknown_outcomes=(),
             comparison_surface=None,
             outcome_seed=None,
             analysis_view_identity=view_identity,
             partition_revision=next_revision,
+            completed_recovery_proof_ids=(),
+            completed_recovery_proof_evidence=(),
+            termination_path_effect_evidence=(),
+            quarantined_recurrence_proposals=(),
         )
 
     def with_summary_return_diagnostics(

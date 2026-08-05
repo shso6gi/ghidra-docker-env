@@ -26,6 +26,7 @@ from ..return_width_pipeline import (
     prepare_pair_return_observation,
     return_coverage_artifact_ids,
 )
+from ..v2.abi_width_readonly import ReturnAbiAuthorityInvalid
 from ..query_receipt_authority import (
     canonical_region_query_receipt_digests,
 )
@@ -2034,6 +2035,29 @@ class MonolithicStrategy(CheckStrategy):
             if dispatch_frame is not None and dispatch_frame.receipt is None:
                 issue_inconclusive_monolithic_receipts(
                     dispatch_frame, frozen_surface, canonical_census, message
+                )
+                blocked_result.comparison_execution_receipt = dispatch_frame.receipt
+            return blocked_result
+
+        except ReturnAbiAuthorityInvalid as e:
+            self._debug_print(f"Monolithic check has invalid return ABI authority: {e}")
+            blocked_result = StrategyResult(
+                is_equivalent=None,
+                solver_results=ParallelResult(results=[]),
+                smt_formula=None,
+                counterexample_raw=None,
+                return_var1=None,
+                return_var2=None,
+                constrained_fragments=[],
+                error_pairs=1,
+                pairwise_debug_stats={"return_abi_authority_invalid": 1},
+                unknown_reasons=[],
+                error_kind=e.canonical_error_kind,
+                error_message=str(e),
+            )
+            if dispatch_frame is not None and dispatch_frame.receipt is None:
+                issue_inconclusive_monolithic_receipts(
+                    dispatch_frame, frozen_surface, canonical_census, str(e)
                 )
                 blocked_result.comparison_execution_receipt = dispatch_frame.receipt
             return blocked_result

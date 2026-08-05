@@ -1451,6 +1451,89 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert '"${ALL_LOG_FILES[@]}"' not in overall_summary_call
 
 
+def test_eqbench_runner_clamps_parallelism_and_records_pair_progress_contract(
+    tmp_path,
+):
+    script = Path("eqbench_run_all_32jobs.sh").read_text()
+    assert 'EQBENCH_CPU_TOKENS=' in script
+    assert 'EQBENCH_PAIR_CPU_TOKENS=' in script
+    assert 'RESOURCE_ADMISSION_JOBS=$((EQBENCH_CPU_TOKENS / EQBENCH_PAIR_CPU_TOKENS))' in script
+    assert 'write_pair_progress_receipt() {' in script
+    assert 'eqbench-pair-progress-receipt-v1' in script
+    assert "/usr/bin/time -f 'elapsed_seconds=%e\\nmax_rss_kb=%M'" in script
+    assert '"writer_pid": os.getpid()' in script
+    assert '"timed_command_pid": number(timed_command_pid)' in script
+    assert '"supervisor_pid"' not in script
+    assert '"pid": os.getpid()' not in script
+
+    output_dir = tmp_path / "eqbench"
+    env = os.environ.copy()
+    env.update({
+        "OUTPUT_BASE_DIR": str(output_dir),
+        "EQBENCH_TMPDIR": str(tmp_path / "tmp"),
+        "EQBENCH_PRIVATE_AUTHORITY_ROOT": str(tmp_path / "authority"),
+        "EQBENCH_RUN_SCOPE": "REPRESENTATIVE",
+        "EQBENCH_BUILD_POLICY": "PREBUILT_ONLY",
+        "EQBENCH_SAMPLE_FILTER": r"REVE/inlining/Eq/newV[.]c$",
+        "EQBENCH_MAX_SAMPLES": "1",
+        "EQBENCH_PAIR_FILTER": "B10_B11",
+        "PARALLEL_JOBS": "9",
+        "EQBENCH_CPU_TOKENS": "16",
+        "EQBENCH_PAIR_CPU_TOKENS": "8",
+        "DRY_RUN": "1",
+    })
+    result = subprocess.run(
+        ["bash", "eqbench_run_all_32jobs.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = (output_dir / "run_manifest.txt").read_text()
+    assert "parallel_jobs=2" in manifest
+    assert "parallel_jobs_requested=9" in manifest
+    assert "resource_admission_enabled=1" in manifest
+    assert "cpu_tokens=16" in manifest
+    assert "pair_cpu_tokens=8" in manifest
+
+
+def test_timed_command_pid_is_distinct_from_timed_child_process():
+    """The PID captured by ``$!`` identifies GNU time, not its child."""
+    wrapper = subprocess.Popen(
+        [
+            "/usr/bin/time",
+            "-f",
+            "elapsed_seconds=%e",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(2)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        child_pids = set()
+        for _ in range(100):
+            output = subprocess.check_output(
+                ["ps", "-o", "pid=", "--ppid", str(wrapper.pid)],
+                text=True,
+            )
+            child_pids = {
+                int(value) for value in output.split() if value.isdigit()
+            }
+            if child_pids:
+                break
+            import time
+            time.sleep(0.01)
+        assert wrapper.pid not in child_pids
+        assert child_pids
+    finally:
+        wrapper.terminate()
+        wrapper.wait(timeout=5)
+
+
 def test_eqbench_runner_cleans_authority_after_validation_diagnostics():
     script = Path("eqbench_run_all_32jobs.sh").read_text()
     validation_call = script.index(

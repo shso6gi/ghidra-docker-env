@@ -812,31 +812,9 @@ def _rewrite_analysis_with_abstract_calls(
     analysis: FunctionReturnAnalysis,
     placeholder_mapping: Dict[Tuple[object, ...], AbstractedCallMatch],
 ) -> FunctionReturnAnalysis:
-    cloned = FunctionReturnAnalysis(
-        function_name=analysis.function_name,
-        entry_point=analysis.entry_point,
+    cloned = analysis.semantic_successor(
         parameters=[dict(param) for param in (analysis.parameters or [])],
         returns=[],
-        function_ref=analysis.function_ref,
-        return_type=analysis.return_type,
-        return_type_obj=analysis.return_type_obj,
-        signedness_result=analysis.signedness_result,
-        unknown_event_count=analysis.unknown_event_count,
-        unknown_event_reasons=list(analysis.unknown_event_reasons),
-        analysis_notes=list(analysis.analysis_notes),
-        recovered_from_decompiler=analysis.recovered_from_decompiler,
-        incomplete_control_flow=analysis.incomplete_control_flow,
-        deferred_calls=dict(analysis.deferred_calls),
-        effect_summary=analysis.effect_summary,
-        comparison_surface=analysis.comparison_surface,
-        analysis_scope_key=analysis.analysis_scope_key,
-        program_is_big_endian=analysis.program_is_big_endian,
-        completed_recovery_proof_ids=tuple(getattr(analysis, "completed_recovery_proof_ids", ()) or ()),
-        completed_recovery_proof_evidence=tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ()),
-        quarantined_recurrence_proposals=tuple(
-            getattr(analysis, "quarantined_recurrence_proposals", ()) or ()
-        ),
-        binary_id=analysis.binary_id,
     )
 
     existing_indices = {

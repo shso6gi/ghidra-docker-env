@@ -1,4 +1,5 @@
 {
+  "artifact_digest": "eca2734a19e49b233cb627be359f4204ec9f563f0b52f356673afaa28b6d6095",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -15,9 +16,9 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "4cf55c402e62698cb01ecbece8f851bd3c0efaef4b86e8f59046dcdf6d7f7cd7",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "d462b7e32cb234ba826d8ff93ac6f1e1dde92c5a35d3c0b88f364145402f7dbe",
     "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "20c9a89aca2d1498515cb5c7df93bc3425d830aa276586bddb43033c21fceced",
-    "scripts/function_tracer_pcode/equivalence/checker.py": "e062075a0d0d79f11ad8a26ee9f6d2b260a0745db9953bc321b22783ffbdea1a",
+    "scripts/function_tracer_pcode/equivalence/checker.py": "5106f8235bac1629fc461861a5b1274c826e28b49f748c643978d60f1f71c9d7",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "31a6beee81822c1166bb0dde28327d0478b1363299a9e15e48f7c31a524dbe88",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect_sites.py": "3a37dffb52029fdcefb8ee22dc9f8c0341aa0e1afe25b51d6a0311bfcd90afdd",
     "scripts/function_tracer_pcode/equivalence/v2/contracts.py": "9066c901bcc18ff9a52aa2085b202d3df6643d4625f0c45586c41c1eddceb33c",
@@ -86,8 +87,8 @@
   "schema_version": 1,
   "source_inventory": {
     "current_source": {
-      "candidate_set_digest": "24e49dab52baf5a5080b9acdb0c6c32065cddd7e1a7ef208c9e809b86f029710",
-      "candidate_count": 607
+      "candidate_count": 608,
+      "candidate_set_digest": "641c10ca7d686e516a6f80393b65b857311dff40065730174c5202d348d92cdf"
     },
     "live_delta": {
       "added": 0,
@@ -95,6 +96,5 @@
     },
     "live_inventory_artifact": "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json"
   },
-  "status": "fixed_review_go",
-  "artifact_digest": "88c5297b70f9ad1d4f3dcd88a1ccdc37d8326f41cdf588475d438e2fec052672"
+  "status": "fixed_review_go"
 }

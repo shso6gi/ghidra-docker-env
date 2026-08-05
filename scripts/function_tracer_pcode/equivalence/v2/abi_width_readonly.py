@@ -75,6 +75,23 @@ class ReturnAbiRelationStatus(str, Enum):
     INVALID = "INVALID"
 
 
+class ReturnAbiAuthorityInvalid(ValueError):
+    """Typed fail-closed error for malformed or invalid ABI authority."""
+
+    canonical_error_kind = "return_abi_authority_invalid"
+
+    def __init__(self, reason_code: str, *, malformed_slots=(), detail: str = ""):
+        self.reason_code = str(reason_code)
+        self.malformed_slots = tuple(str(slot) for slot in malformed_slots)
+        self.detail = str(detail or "")
+        super().__init__(
+            "return ABI authority invalid: "
+            + self.reason_code
+            + (f" malformed_slots={self.malformed_slots!r}" if self.malformed_slots else "")
+            + (f" detail={self.detail}" if self.detail else "")
+        )
+
+
 @dataclass(frozen=True)
 class AbiWidthReadonlyReasonSpec:
     reason_id: str
@@ -507,7 +524,21 @@ class FunctionReturnAbiSeed:
         if analysis.outcome_function_identity() != width_seed.target_id.function_identity:
             raise ValueError("return ABI analysis and return site differ")
         raw = analysis.return_abi_facts
-        if type(raw) is not dict or raw.get("schema_version") != 1:
+        if type(raw) is not dict:
+            rows = tuple(
+                (slot, ReturnAbiFactStatus.MALFORMED, None, "return_abi_facts")
+                for slot in sorted(_ABI_SLOTS)
+            )
+        elif not raw:
+            # The production producer always emits a schema-versioned envelope,
+            # including explicit MISSING slots when Ghidra cannot provide a
+            # fact.  A raw empty dict therefore means the producer snapshot was
+            # never wired or was field-drifted; it is not a valid UNKNOWN seed.
+            rows = tuple(
+                (slot, ReturnAbiFactStatus.MALFORMED, None, "return_abi_facts")
+                for slot in sorted(_ABI_SLOTS)
+            )
+        elif raw.get("schema_version") != 1:
             rows = tuple(
                 (slot, ReturnAbiFactStatus.MALFORMED, None, "return_abi_facts")
                 for slot in sorted(_ABI_SLOTS)
@@ -4044,8 +4075,13 @@ def assess_return_abi_pair(
         right_analysis, right_width_seed
     )
     if left.malformed_slots or right.malformed_slots:
-        raise ValueError(
-            "return ABI source is MALFORMED and must make the shadow entry INVALID"
+        raise ReturnAbiAuthorityInvalid(
+            "return_abi_source_malformed",
+            malformed_slots=(
+                tuple(f"left:{slot}" for slot in left.malformed_slots)
+                + tuple(f"right:{slot}" for slot in right.malformed_slots)
+            ),
+            detail="return ABI source is MALFORMED and must make the shadow entry INVALID",
         )
     signals = [
         AbiWidthReadonlyBlockerSignal.from_return_abi_seed(seed, slot)
@@ -4077,5 +4113,8 @@ def assess_return_abi_pair(
                     )
                 )
             elif relation.status is ReturnAbiRelationStatus.INVALID:
-                raise ValueError("return ABI compatibility assessment is INVALID")
+                raise ReturnAbiAuthorityInvalid(
+                    "return_abi_compatibility_invalid",
+                    detail="return ABI compatibility assessment is INVALID",
+                )
     return ReturnAbiProductionAssessment(left, right, relation, tuple(signals))

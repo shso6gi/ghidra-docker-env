@@ -1688,6 +1688,23 @@ class EquivalenceChecker:
             if self.debug:
                 import traceback
                 print(traceback.format_exc())
+
+            from .v2.abi_width_readonly import ReturnAbiAuthorityInvalid
+            if isinstance(e, ReturnAbiAuthorityInvalid):
+                return create_error_result(
+                    analysis1=analysis1,
+                    analysis2=analysis2,
+                    binary1_name=binary1_name,
+                    binary2_name=binary2_name,
+                    error_message=e.canonical_error_kind,
+                    start_time=start_time,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                    failure_status=e.canonical_error_kind,
+                    failure_message=str(e),
+                )
             
             return self._create_error_result(
                 analysis1, analysis2, binary1_name, binary2_name,
