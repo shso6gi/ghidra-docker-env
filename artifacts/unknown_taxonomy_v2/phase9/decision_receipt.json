@@ -7,14 +7,14 @@
     "ERROR"
   ],
   "all_five_source_bound_authority": {
-    "focused_junit_sha256": "a74da449a9049ac9c4a6d5ef5d0f490a2f4a5db837c9a9b2ed21de1204663158",
+    "focused_junit_sha256": "00436da498d5ef690ef7a8cf2c575175082e7d76791bcb9a0510d2b0aa6257e2",
     "focused_test_source_sha256": "126637313554fdacb575060c88bc842f747fdab5ff6b4c97c4580c01921d7896",
     "outcome_case_count": 5,
-    "phase8_artifact_digest": "5554ae1f43cfdf4db8061304e4f12e1864c4db97d5ce50d07c063d586603a878",
-    "phase8_artifact_sha256": "b3186e39c3af8260e6792bd8e0bb5a0994ac9d3ae271dd2fda5e65b8d16b7229",
+    "phase8_artifact_digest": "4e069e7f9f9262c8108f1ff005d4d166a26e38a8341464a108ea44fb5ad44123",
+    "phase8_artifact_sha256": "658ad92489b7c655fb11b6a611d074b6504df576ec96a05d8ce7d4dec1409765",
     "test_family": "test_decision_receipt_is_only_serialized_status_authority"
   },
-  "artifact_digest": "e12cf998a29f61e7d31260f422babca20a63f32ee80ce033176aceb3f4f25387",
+  "artifact_digest": "0078b33c8c725a2f94c2ecc0431a8385dca6e47a53c11039bbf175b332d11e2f",
   "artifact_kind": "phase9-decision-receipt-census-v1",
   "observed_outcomes": [
     "UNKNOWN",

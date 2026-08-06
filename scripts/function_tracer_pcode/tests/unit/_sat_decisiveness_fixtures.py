@@ -79,6 +79,31 @@ def _param(name: str, index: int = 0, size: int = 4, data_type: str = "int"):
 def _const(value: int, size: int = 4) -> Expression:
     return Expression.constant(value, size)
 
+def _present_return_abi_facts(return_type: str = "int") -> dict:
+    """Return the schema-v1 envelope required by pairwise test producers."""
+    width = {"int": 4, "long": 8}.get(return_type, 4)
+    return {
+        "schema_version": 1,
+        "calling_convention": {
+            "status": "PRESENT",
+            "value": ("ghidra_calling_convention_v1", "default"),
+            "source": "sat_decisiveness_fixture",
+        },
+        "declared_or_effective_return_type": {
+            "status": "PRESENT",
+            "value": ("ghidra_return_type_v1", f"/{return_type}", width),
+            "source": "sat_decisiveness_fixture",
+        },
+        "return_storage_descriptor": {
+            "status": "PRESENT",
+            "value": (
+                "ghidra_return_storage_v1",
+                (("ghidra_return_storage_member_v1", "register", 0, width),),
+            ),
+            "source": "sat_decisiveness_fixture",
+        },
+    }
+
 def _eq(lhs: Expression, rhs: Expression) -> Condition:
     return Condition(Expression.binary_op("INT_EQUAL", lhs, rhs), False)
 
@@ -116,6 +141,7 @@ def _build_symbolic_post_state_analysis(name: str) -> FunctionReturnAnalysis:
         parameters=params,
         returns=[ReturnInfo(address="0x1000", value=value, conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
 
 def _base_context_for_single_int_param():
@@ -194,6 +220,7 @@ def _return_coverage_gap_analyses():
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x, _const(0))])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="func2",
@@ -201,6 +228,7 @@ def _return_coverage_gap_analyses():
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     return analysis1, analysis2
 
@@ -245,6 +273,7 @@ def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=["x"],
             effects=[],
@@ -316,6 +345,7 @@ def _analysis_with_unknown_indirect_call_effect(
         parameters=parameters,
         returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=[param["name"] for param in parameters],
             effects=[],
@@ -448,6 +478,7 @@ def _analysis_with_deferred_call_argument_blocker(
         parameters=parameters,
         returns=[ReturnInfo(address=hex(entry), value=return_value, conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=[param["name"] for param in parameters],
             effects=[],
@@ -492,6 +523,7 @@ def _analysis_with_self_recursive_unsupported_call_effect(
         parameters=[_param("x")],
         returns=[ReturnInfo(address=hex(entry), value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=["x"],
             effects=[],
@@ -534,6 +566,7 @@ def _analysis_with_effect_call_argument_evidence() -> FunctionReturnAnalysis:
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=["x"],
             effects=[],
@@ -608,6 +641,7 @@ def _analysis_with_two_effect_call_argument_evidences() -> Tuple[
             parameters=[_param("x")],
             returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
             return_type="int",
+            return_abi_facts=_present_return_abi_facts(),
             effect_summary=EffectSummary(
                 parameter_names=["x"],
                 effects=[],
@@ -662,6 +696,7 @@ def _analysis_with_effect_call_target_resolution_evidence() -> FunctionReturnAna
         parameters=[_param("fp", index=0, size=8), _param("selector", index=1)],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=["fp", "selector"],
             effects=[],
@@ -1000,6 +1035,7 @@ def _completed_proof_ids_for_call_effect_evidence(evidence):
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         completed_recovery_proof_evidence=(evidence,),
     )
     return PairwiseStrategy._completed_recovery_proof_ids(analysis)
@@ -1012,6 +1048,7 @@ def _blocking_unsafety_object_target_key(blocking_reason, analysis1):
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     reason = strategy._make_blocking_unsafety_unknown_reason(
         blocking_reason,
@@ -1028,6 +1065,7 @@ def _analysis_with_call_effect_summary_proof_evidence(**evidence_overrides) -> F
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         completed_recovery_proof_evidence=(
             _call_effect_summary_proof_evidence(**evidence_overrides),
         ),
@@ -1250,6 +1288,7 @@ def _sat_unsafety_resolution_action():
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     case1 = ReturnCase(
         index=0,
@@ -1356,6 +1395,7 @@ def _analysis_with_phi_circular_guard(
         parameters=[_param("x")],
         returns=[ReturnInfo(address=hex(entry), value=param, conditions=[guard])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(parameter_names=["x"], effects=[]),
     )
 
@@ -1511,6 +1551,7 @@ def _analysis_with_completed_evidence(*evidence_items):
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         completed_recovery_proof_evidence=tuple(evidence_items),
     )
 
@@ -1728,6 +1769,7 @@ def _coverage_identity_analysis(
         parameters=[_param("x")],
         returns=[returns[index] for index in returns_order],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         binary_id=binary_id,
     )
 

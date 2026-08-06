@@ -65,6 +65,31 @@ def _const(value: int) -> Expression:
     return Expression.constant(value, size=4)
 
 
+def _present_return_abi_facts():
+    """Return the producer-shaped ABI envelope used by loop fixtures."""
+    return {
+        "schema_version": 1,
+        "calling_convention": {
+            "status": "PRESENT",
+            "value": ("ghidra_calling_convention_v1", "default"),
+            "source": "loop_method_b_fixture",
+        },
+        "declared_or_effective_return_type": {
+            "status": "PRESENT",
+            "value": ("ghidra_return_type_v1", "/int", 4),
+            "source": "loop_method_b_fixture",
+        },
+        "return_storage_descriptor": {
+            "status": "PRESENT",
+            "value": (
+                "ghidra_return_storage_v1",
+                (("ghidra_return_storage_member_v1", "register", 0, 4),),
+            ),
+            "source": "loop_method_b_fixture",
+        },
+    }
+
+
 class _FakePcodeOpRef:
     def __init__(self, *, seq_time: int, target_offset: int = 0x100C, opcode: int = 60):
         self.seq_time = int(seq_time)
@@ -1104,6 +1129,7 @@ def _analysis(function_name: str, returns, *, comparison_bits: int = 32) -> Func
         ],
         returns=list(returns),
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         comparison_surface=ComparisonSurface(
             kind="return_value",
             explicit_bit_width=int(comparison_bits),
@@ -3925,6 +3951,7 @@ def test_counted_loop_summary_vs_shifted_affine_parameter_closed_form_is_dischar
             ReturnInfo(address="0x1004", value=Expression.constant(0, size=4), conditions=[non_positive]),
         ],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
     analysis_right = replace(
@@ -4061,6 +4088,7 @@ def test_counted_loop_summary_vs_nonzero_start_step3_closed_form_is_discharged()
                 ReturnInfo(address="0x7404", value=Expression.constant(0, size=4), conditions=[non_positive]),
             ],
             return_type="int",
+            return_abi_facts=_present_return_abi_facts(),
             comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
         ),
         FunctionReturnAnalysis(
@@ -4072,6 +4100,7 @@ def test_counted_loop_summary_vs_nonzero_start_step3_closed_form_is_discharged()
                 ReturnInfo(address="0x740c", value=Expression.constant(0, size=4), conditions=[non_positive]),
             ],
             return_type="int",
+            return_abi_facts=_present_return_abi_facts(),
             comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
         ),
     )
@@ -4235,6 +4264,7 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
             ReturnInfo(address="0x1004", value=zero, conditions=[non_positive]),
         ],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
     analysis_right = replace(
@@ -4351,6 +4381,7 @@ def test_monkeypatched_method_b_producer_falls_back_to_canonical_solver():
             ReturnInfo(address="0x1000", value=left_counted, conditions=[positive]),
         ],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
     analysis_right = replace(
@@ -4976,6 +5007,7 @@ def _mips64_counted_loop_vs_low32_closed_form_fixture():
         ],
         returns=[ReturnInfo(address="0x1000", value=counted, conditions=[positive])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
     analysis_right = replace(

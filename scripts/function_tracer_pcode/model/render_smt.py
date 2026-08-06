@@ -360,6 +360,8 @@ def expression_node_has_unsupported_smt_ops(
     if expr_type == expr_kind.BINARY_OP:
         if expr.operator not in _SUPPORTED_BINARY_OPERATORS:
             return True
+        if expr.operator in {"PIECE", "SUBPIECE"}:
+            return _piece_subpiece_width_issue(expr) is not None
         if expr.operator in _FLOAT_ARITHMETIC_FP_SPECS:
             operands = getattr(expr, "operands", None) or []
             if len(operands) == 2 and any(
@@ -943,6 +945,141 @@ def _expr_constant_int(expr) -> Optional[int]:
         return int(getattr(expr, "value", 0) or 0)
     except Exception:
         return None
+
+
+def _safe_size_bytes(expr) -> Optional[int]:
+    """Return an expression size in bytes, or ``None`` for malformed metadata."""
+
+    raw_size = getattr(expr, "size", 0)
+    if raw_size is None:
+        return 0
+    if isinstance(raw_size, bool):
+        return None
+    try:
+        size_bytes = int(raw_size)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(raw_size, float) and raw_size != size_bytes:
+        return None
+    return size_bytes
+
+
+def _smt_width_if_known(expr) -> int:
+    """Return an explicit/derivable width without using model fallbacks."""
+
+    if expr is None:
+        return 0
+    if expression_returns_bool(expr):
+        return 1
+    size_bytes = _safe_size_bytes(expr)
+    explicit_bits = size_bytes * 8 if size_bytes is not None and size_bytes > 0 else 0
+    if explicit_bits > 0:
+        return explicit_bits
+
+    expr_type = getattr(expr, "expr_type", None)
+    expr_kind = getattr(expr_type, "__class__", None)
+    if expr_kind is None:
+        return 0
+    if expr_type in {
+        expr_kind.CONSTANT,
+        expr_kind.PARAMETER,
+        expr_kind.VARIABLE,
+        expr_kind.MEMORY,
+        expr_kind.UNKNOWN,
+    }:
+        return 0
+    operands = getattr(expr, "operands", None) or ()
+    if expr_type == expr_kind.UNARY_OP:
+        if getattr(expr, "operator", None) in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT"}:
+            return 0
+        return _smt_width_if_known(operands[0]) if len(operands) == 1 else 0
+    if expr_type == expr_kind.BINARY_OP:
+        operator = getattr(expr, "operator", None)
+        if operator == "PIECE" and len(operands) == 2:
+            left_bits = _smt_width_if_known(operands[0])
+            right_bits = _smt_width_if_known(operands[1])
+            return left_bits + right_bits if left_bits > 0 and right_bits > 0 else 0
+        if operator == "SUBPIECE":
+            return 0
+        if operator in _BOOLEAN_BINARY_OPERATORS:
+            return 1
+        if len(operands) == 2:
+            left_bits = _smt_width_if_known(operands[0])
+            right_bits = _smt_width_if_known(operands[1])
+            if left_bits > 0 and right_bits > 0:
+                return max(left_bits, right_bits)
+        return 0
+    if expr_type == expr_kind.PHI:
+        branches = getattr(expr, "value", None) or ()
+        branch_widths = tuple(
+            _smt_width_if_known(branch_value)
+            for _condition, branch_value in branches
+        )
+        if not branch_widths or any(width <= 0 for width in branch_widths):
+            return 0
+        return branch_widths[0] if len(set(branch_widths)) == 1 else 0
+    return 0
+
+
+def _piece_subpiece_contract(
+    expr,
+) -> Tuple[Optional[str], int, int, int, Optional[int]]:
+    """Validate a PIECE/SUBPIECE node and return normalized lowering inputs."""
+
+    operator = getattr(expr, "operator", None)
+    operands = getattr(expr, "operands", None) or ()
+    if len(operands) != 2:
+        return f"{operator} requires exactly two operands", 0, 0, 0, None
+
+    left, right = operands
+    left_bits = _smt_width_if_known(left)
+    right_bits = _smt_width_if_known(right)
+    size_bytes = _safe_size_bytes(expr)
+    if size_bytes is None:
+        return f"{operator} result width is invalid", left_bits, right_bits, 0, None
+    if size_bytes < 0:
+        return f"{operator} result width is invalid", left_bits, right_bits, 0, None
+
+    if operator == "PIECE":
+        if left_bits <= 0 or right_bits <= 0:
+            return "PIECE operand width is unavailable", left_bits, right_bits, 0, None
+        expected_bits = left_bits + right_bits
+        result_bits = size_bytes * 8 if size_bytes > 0 else expected_bits
+        if size_bytes > 0 and result_bits != expected_bits:
+            return (
+                "PIECE result width does not equal the concatenated operand widths",
+                left_bits,
+                right_bits,
+                result_bits,
+                None,
+            )
+        return None, left_bits, right_bits, result_bits, None
+
+    if operator != "SUBPIECE":
+        return None, left_bits, right_bits, size_bytes * 8, None
+    if left_bits <= 0:
+        return "SUBPIECE source width is unavailable", left_bits, right_bits, 0, None
+    result_bits = size_bytes * 8
+    if result_bits <= 0:
+        return "SUBPIECE result width is unavailable", left_bits, right_bits, 0, None
+    byte_offset = _expr_constant_int(right)
+    if byte_offset is None:
+        if right_bits <= 0:
+            return "SUBPIECE byte-offset width is unavailable", left_bits, right_bits, result_bits, None
+        return "SUBPIECE dynamic byte offset has no exact SMT lowering", left_bits, right_bits, result_bits, None
+    if byte_offset < 0:
+        return "SUBPIECE byte offset is negative", left_bits, right_bits, result_bits, byte_offset
+    low_bit = byte_offset * 8
+    high_bit = low_bit + result_bits - 1
+    if high_bit >= left_bits:
+        return "SUBPIECE extraction range exceeds source width", left_bits, right_bits, result_bits, byte_offset
+    return None, left_bits, right_bits, result_bits, byte_offset
+
+
+def _piece_subpiece_width_issue(expr) -> Optional[str]:
+    """Return a width/range defect before lowering a byte/bit-vector adapter."""
+
+    return _piece_subpiece_contract(expr)[0]
 
 
 def _expr_is_known_zero_bitpattern(expr, bits: int) -> bool:
@@ -1988,24 +2125,52 @@ def _to_smt_internal(
         )
 
     if expr_type == expr_kind.BINARY_OP:
-        left = expr.operands[0]
-        right = expr.operands[1]
+        operator = getattr(expr, "operator", None)
+        operands = tuple(getattr(expr, "operands", None) or ())
 
-        if expr.operator == "PIECE":
-            left_bits = expression_smt_bit_width(left)
-            right_bits = expression_smt_bit_width(right)
-            concat_smt = (
-                f"(concat "
-                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)})"
-            )
-            return _coerce_smt_bitvec_width(
-                concat_smt,
-                left_bits + right_bits,
-                expression_smt_bit_width(expr) or (left_bits + right_bits),
-            )
+        if operator in {"PIECE", "SUBPIECE"}:
+            (
+                width_issue,
+                left_bits,
+                right_bits,
+                result_bits,
+                byte_offset,
+            ) = _piece_subpiece_contract(expr)
+            if width_issue is not None:
+                raise UnsupportedSmtOperatorError(
+                    operator=operator,
+                    reason=width_issue,
+                    operand_bits=max(left_bits, right_bits),
+                    result_bits=result_bits,
+                )
+            # The contract has already checked arity and normalized every
+            # value used below, so these accesses cannot escape as raw index
+            # or conversion errors.
+            left, right = operands
 
-        if expr.operator == "SUBPIECE":
+            if operator == "PIECE":
+                left_smt = _to_smt_internal(
+                    left,
+                    prefer_signed_arithmetic,
+                    symbol_name_mapping,
+                    address_context,
+                    float_mode,
+                )
+                right_smt = _to_smt_internal(
+                    right,
+                    prefer_signed_arithmetic,
+                    symbol_name_mapping,
+                    address_context,
+                    float_mode,
+                )
+                left_smt = _coerce_expr_to_bitvec_width(
+                    left, left_smt, left_bits, float_mode=float_mode
+                )
+                right_smt = _coerce_expr_to_bitvec_width(
+                    right, right_smt, right_bits, float_mode=float_mode
+                )
+                return f"(concat {left_smt} {right_smt})"
+
             source_smt = _to_smt_internal(
                 left,
                 prefer_signed_arithmetic,
@@ -2013,17 +2178,17 @@ def _to_smt_internal(
                 address_context,
                 float_mode,
             )
-            right_kind = right.expr_type.__class__
-            if right.expr_type == right_kind.CONSTANT:
-                byte_offset = right.value
-                output_size = expr.size if expr.size else 4
-                high_bit = (byte_offset + output_size) * 8 - 1
-                low_bit = byte_offset * 8
-                return f"((_ extract {high_bit} {low_bit}) {source_smt})"
-            return (
-                f"(subpiece {source_smt} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)})"
+            source_smt = _coerce_expr_to_bitvec_width(
+                left, source_smt, left_bits, float_mode=float_mode
             )
+            low_bit = byte_offset * 8
+            high_bit = low_bit + result_bits - 1
+            return f"((_ extract {high_bit} {low_bit}) {source_smt})"
+
+        # Other binary operators retain their existing lowering path. Their
+        # arity contract is unrelated to the PIECE/SUBPIECE bit-vector gate.
+        left = operands[0]
+        right = operands[1]
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)

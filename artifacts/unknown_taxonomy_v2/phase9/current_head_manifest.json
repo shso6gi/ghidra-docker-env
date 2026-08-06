@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "0e7f81c28339079e0f35f1cbe7fa13ae61596c1c5d6899ace29f125f4d6c2b7a",
+  "artifact_digest": "80e2ea3721a74b8e0c9e20247dfab699f02e5a5e5444706c9edafae00c516602",
   "artifact_kind": "phase9-source-tree-manifest-v3",
   "closeout_bindings": [
     {
@@ -8,14 +8,14 @@
       "sha256": "f669755785476aec433ca3d9e4220f80c3451682859e06c75fdd71923b6d7e87"
     },
     {
-      "artifact_digest": "e12cf998a29f61e7d31260f422babca20a63f32ee80ce033176aceb3f4f25387",
+      "artifact_digest": "0078b33c8c725a2f94c2ecc0431a8385dca6e47a53c11039bbf175b332d11e2f",
       "path": "decision_receipt.json",
-      "sha256": "c2a54b7573d2148300d4c8057775f3412cc365a1ce70e077c8ec87fec0555118"
+      "sha256": "92cba9aae51df51841f10dc6afdb279f8d75924a7b7bc861923dcff328b6f548"
     },
     {
-      "artifact_digest": "5171c34e7994f9e5e5c9d1221e049720091101aa085c354824cbc22c1778d5d7",
+      "artifact_digest": "a9fdaa0df3e3f13692eeb4ff9a42d3331a8dd9ddc9a4b70ac2ffee79a7e0c1ce",
       "path": "decision_transition_matrix.json",
-      "sha256": "6dfd05f27f75adba3ee1ef171d31f13b76ea47ac1c0f2d0d7bfbd615aa6cbd9e"
+      "sha256": "7a5fc0c6425e4056d3eeb07b15590b2d9ba9b556a5b377c76f7f0e5c6caf9c3d"
     },
     {
       "artifact_digest": "fea7e41a34eed42335df935aafe0d7c5e296415a5e5bfe6aaddca01fe51c8087",
@@ -28,21 +28,21 @@
       "sha256": "56536108da5be0fdae827d17bbcdb2467002a4fa21cf8c014cf27b8cd4c01f01"
     },
     {
-      "artifact_digest": "070e5773a0767385a243cbede1def5a1e73205d6a41209e520254dcef2053324",
+      "artifact_digest": "f04a6e429cc6c1f6db2438bb82e24732a1e0e7daaa8dcb9c5cc9ed56f9f9ab8e",
       "path": "reason_before_after.json",
-      "sha256": "10e46f64c497f30fa54b4a6ed33eee3c4ca98d4867cf16cdb5a22fec85f47660"
+      "sha256": "ee58d9b0752683fbf548652651076612e428a25d8319f95a7384ce525484ad17"
     },
     {
-      "artifact_digest": "e2978a90b726b8fc0fa7cf7a609f45ccb8cb3c7415b206bac7efc4b8b250b13d",
+      "artifact_digest": "61c6919838f60a28c9be5e107ac0eacc1eea09cd027b9342b71369a7f452cd58",
       "path": "validation_run.json",
-      "sha256": "0d2a1273c600d4726268c9bc2a91efdd2aa28e1aa369cc566cd9d547ff076b40"
+      "sha256": "2051961e0f8a18314865f950b5fc4e7922be4b6c3a66018505eac2ba11795aa9"
     }
   ],
   "phase7_artifact_sha256": "8088b8add552b20ce6ed94e82aebd286bd0bca29478f109f08d0fb11e683b74f",
-  "phase8_artifact_sha256": "b3186e39c3af8260e6792bd8e0bb5a0994ac9d3ae271dd2fda5e65b8d16b7229",
+  "phase8_artifact_sha256": "658ad92489b7c655fb11b6a611d074b6504df576ec96a05d8ce7d4dec1409765",
   "phase9_focused_junit": {
     "path": "artifacts/unknown_taxonomy_v2/phase9/phase9-focused-validation.xml",
-    "sha256": "ee63703c1c8dd6eec81823cafc62f50f84d869f3c46883743dd62913e52954ef",
+    "sha256": "9f5317bc486fd57d74259f502909411c4ef0747ca80e0fb7f338dd6ac6106109",
     "test_count": 6
   },
   "producer_manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
@@ -125,7 +125,7 @@
     },
     {
       "path": "scripts/function_tracer_pcode/model/render_smt.py",
-      "sha256": "438577f6ed19f800ccd225e31f2e5217ca5e9eea9537b3ceb301c38743c6a6ea"
+      "sha256": "2f78398758b7b4485389cc0b777a75c230d987d5a12ec8c2982347554ce7d4e3"
     },
     {
       "path": "scripts/function_tracer_pcode/transform/expander.py",
@@ -149,15 +149,15 @@
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_monolithic_region_split.py",
-      "sha256": "0f08e2beba4919dd70065724b402784d5bfa0c38c023c51d86d2db378deb2051"
+      "sha256": "81bb7ba7f9acaeae3c063b000f5d179b045c243602e3953188472b351a9456d5"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_loop_method_b_regressions.py",
-      "sha256": "5a65e9140d928e09cec309368285e5b94522b506e53b1cf9cc4a2f94a6f20faf"
+      "sha256": "43868dbd2e0222c833ff7fb17d573fb34f03c1c006715cb0173fcda3ce9b016a"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_render_smt_bool_comparison_regression.py",
-      "sha256": "4d68fe042cb3e9515f6f41d044339a692074f565eab2a73a1a7a0d7bd6f94904"
+      "sha256": "c8ee17b6673a35429034e267e1a1415bdd01522acb4d860d5621446c3c54040e"
     },
     {
       "path": "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_1.py",
@@ -196,6 +196,6 @@
       "sha256": "66204325b8f166c83a7099e59fa424bfc62f04e56e14e3164eb145db1893efe0"
     }
   ],
-  "source_tree_digest": "a0a6db739312d1f818b63ff1f6f7e3073630a07fb4fa15c513cfcc892570920b",
-  "validation_run_log_sha256": "dd98f33c96915a8700f56a6c7f7f89f9fb812cada5cdbd18d9751ce6012422a4"
+  "source_tree_digest": "1aca0b9e7876a9253dbf797ff5d7b06e3ca40feb4e02f11772071c1bf6158f38",
+  "validation_run_log_sha256": "9c0d92a5e45d7c2e939034a56e7238b403337f6eb9affa5d7157a1948d581321"
 }

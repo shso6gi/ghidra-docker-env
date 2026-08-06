@@ -38,6 +38,7 @@ def test_function_return_analysis_scans_raw_sibling_after_lowerable_post_state_r
             )
         ],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         effect_summary=EffectSummary(
             parameter_names=["trace"],
             effects=[
@@ -83,6 +84,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
         parameters=[],
         returns=[ReturnInfo(address="0x1000", value=_const(1, size=4), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="f2",
@@ -90,6 +92,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
         parameters=[],
         returns=[ReturnInfo(address="0x2000", value=_const(1, size=8), conditions=[])],
         return_type="long",
+        return_abi_facts=_present_return_abi_facts("long"),
     )
     case1 = ReturnCase(
         index=0,
@@ -156,6 +159,7 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="right",
@@ -163,6 +167,7 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
 
     result = strategy.check(analysis1, analysis2)
@@ -185,11 +190,13 @@ def test_monolithic_does_not_classify_arbitrary_value_error_from_message_text():
         function_name="left", entry_point="0x1000", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="right", entry_point="0x2000", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
 
     result = strategy.check(analysis1, analysis2)
@@ -240,6 +247,7 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     case1 = ReturnCase(
         index=0,
@@ -620,6 +628,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=Expression.unknown("opaque").clone_with(size=4), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         binary_id="B1",
     )
     analysis2 = FunctionReturnAnalysis(
@@ -628,6 +637,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=Expression.unknown("opaque").clone_with(size=4), conditions=[])],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
         binary_id="B14",
     )
     _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2)
@@ -1037,6 +1047,7 @@ def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():
         parameters=[],
         returns=[],
         return_type="int",
+        return_abi_facts=_present_return_abi_facts(),
     )
     analysis.binary_id = "B10"
     key = (

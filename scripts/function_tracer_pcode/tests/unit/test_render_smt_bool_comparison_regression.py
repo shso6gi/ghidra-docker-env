@@ -208,6 +208,121 @@ def test_float_binary_arithmetic_is_supported_by_smt_gate():
     assert "(fp.sub RNE" in smt
 
 
+def test_piece_converts_both_fp_operands_before_concat():
+    import z3
+
+    left = _binary("FLOAT_ADD", _param("left_a", size=8), _param("left_b", size=8))
+    right = _binary("FLOAT_SUB", _param("right_a", size=8), _param("right_b", size=8))
+    expr = _binary("PIECE", left, right)
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt.count("((_ fp.to_ieee_bv) (fp.") == 2
+    assert smt.startswith("(concat ")
+    z3.parse_smt2_string(
+        "\n".join(
+            [
+                "(set-logic QF_FPBV)",
+                "(declare-const left_a (_ BitVec 64))",
+                "(declare-const left_b (_ BitVec 64))",
+                "(declare-const right_a (_ BitVec 64))",
+                "(declare-const right_b (_ BitVec 64))",
+                f"(assert (= {smt} {smt}))",
+                "(check-sat)",
+            ]
+        )
+    )
+
+
+def test_piece_converts_only_fp_operand_in_mixed_fp_bitvector_concat():
+    fp_value = _binary("FLOAT_ADD", _param("a", size=8), _param("b", size=8))
+    expr = _binary("PIECE", fp_value, _param("tail", size=8))
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt.count("fp.to_ieee_bv") == 1
+    assert smt.endswith(" tail)")
+    assert "(concat (fp." not in smt
+
+
+def test_subpiece_converts_fp_source_before_extract():
+    source = _binary("FLOAT_ADD", _param("a", size=8), _param("b", size=8))
+    expr = _binary("SUBPIECE", source, _const(0, size=4))
+    expr.size = 4
+
+    smt = expression_to_smt(expr, float_mode="fp")
+
+    assert smt.startswith("((_ extract 31 0) ((_ fp.to_ieee_bv) (fp.add RNE")
+
+
+def test_piece_and_subpiece_width_contracts_fail_closed():
+    unknown_operand = Expression.parameter("unknown", size=0)
+    piece = _binary("PIECE", unknown_operand, _param("tail", size=8))
+    unknown_subpiece = _binary("SUBPIECE", _param("source", size=8), _const(0))
+    out_of_range = _binary("SUBPIECE", _param("source", size=8), _const(4))
+    out_of_range.size = 8
+    mismatched_piece = _binary("PIECE", _param("left", size=8), _param("right", size=8))
+    mismatched_piece.size = 8
+
+    for expr, reason in (
+        (piece, "PIECE operand width is unavailable"),
+        (unknown_subpiece, "SUBPIECE result width is unavailable"),
+        (out_of_range, "SUBPIECE extraction range exceeds source width"),
+        (mismatched_piece, "PIECE result width does not equal"),
+    ):
+        assert expression_contains_unsupported_smt_ops(expr)
+        with pytest.raises(UnsupportedSmtOperatorError, match=reason):
+            expression_to_smt(expr, float_mode="fp")
+
+
+@pytest.mark.parametrize("operator", ["PIECE", "SUBPIECE"])
+@pytest.mark.parametrize("bad_size", ["bad", -1])
+def test_piece_and_subpiece_malformed_size_is_typed_at_direct_renderer_boundary(
+    operator,
+    bad_size,
+):
+    expr = _binary(operator, _param("source", size=8), _param("tail", size=8))
+    expr.size = bad_size
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError, match="result width is invalid"):
+        expression_to_smt(expr, float_mode="fp")
+
+
+@pytest.mark.parametrize("operator", ["PIECE", "SUBPIECE"])
+def test_piece_and_subpiece_bad_arity_is_typed_at_direct_renderer_boundary(operator):
+    expr = _binary(operator, _param("source", size=8), _param("tail", size=8))
+    expr.operands = expr.operands[:1]
+
+    assert expression_contains_unsupported_smt_ops(expr)
+    with pytest.raises(UnsupportedSmtOperatorError, match="requires exactly two operands"):
+        expression_to_smt(expr, float_mode="fp")
+
+
+def test_piece_and_subpiece_reject_phi_with_an_unknown_branch_width():
+    selector = Condition(
+        _binary("INT_EQUAL", _param("selector"), _const(0)),
+        True,
+    )
+    phi = Expression.phi(
+        [
+            (selector, _param("known", size=8)),
+            (None, _param("unknown", size=0)),
+        ]
+    )
+    piece = _binary("PIECE", phi, _param("tail", size=8))
+    subpiece = _binary("SUBPIECE", phi, _const(0))
+    subpiece.size = 4
+
+    for expr, reason in (
+        (piece, "PIECE operand width is unavailable"),
+        (subpiece, "SUBPIECE source width is unavailable"),
+    ):
+        assert expression_contains_unsupported_smt_ops(expr)
+        with pytest.raises(UnsupportedSmtOperatorError, match=reason):
+            expression_to_smt(expr, float_mode="fp")
+
+
 def test_int2float_signed_i32_to_binary64_uses_exact_fp_theory_lowering():
     import z3
 

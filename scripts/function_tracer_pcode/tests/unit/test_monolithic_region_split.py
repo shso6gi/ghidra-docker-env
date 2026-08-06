@@ -8,6 +8,30 @@ from scripts.function_tracer_pcode.model import Condition, Expression, FunctionR
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
 
+def _present_return_abi_facts() -> dict:
+    return {
+        "schema_version": 1,
+        "calling_convention": {
+            "status": "PRESENT",
+            "value": ("ghidra_calling_convention_v1", "default"),
+            "source": "monolithic_region_fixture",
+        },
+        "declared_or_effective_return_type": {
+            "status": "PRESENT",
+            "value": ("ghidra_return_type_v1", "/long", 8),
+            "source": "monolithic_region_fixture",
+        },
+        "return_storage_descriptor": {
+            "status": "PRESENT",
+            "value": (
+                "ghidra_return_storage_v1",
+                (("ghidra_return_storage_member_v1", "register", 0, 8),),
+            ),
+            "source": "monolithic_region_fixture",
+        },
+    }
+
+
 def _analysis(name: str, value: int) -> FunctionReturnAnalysis:
     return FunctionReturnAnalysis(
         function_name=name,
@@ -207,6 +231,7 @@ def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None
         parameters=[],
         returns=[ReturnInfo("0x1010", extended, [])],
         return_type="long",
+        return_abi_facts=_present_return_abi_facts(),
     )
 
     result = EquivalenceChecker(
