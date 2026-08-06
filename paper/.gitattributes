@@ -1,0 +1,4 @@
+css.cls whitespace=-trailing-space
+ipsj.cls whitespace=-trailing-space,-blank-at-eof
+ipsjtech.sty whitespace=-trailing-space,-blank-at-eof
+tech-sample-css.tex whitespace=-trailing-space
