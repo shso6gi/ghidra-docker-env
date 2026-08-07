@@ -429,6 +429,7 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     runner = Path("neqbench_run_all_32jobs.sh").read_text(encoding="utf-8")
     assert 'default_value NEQ_RUN_SCOPE FULL_NEQ' in runner
     assert 'pair_selected "N_${a}_O_${b}"' in runner
+    assert 'target="${10}"' in runner
     for field in (
         "max_samples", "sample_filter", "pair_filter", "debug",
         "skip_completed_results", "validation_summary_level", "dry_run",

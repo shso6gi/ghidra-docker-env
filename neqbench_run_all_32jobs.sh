@@ -248,7 +248,7 @@ pair_complete() {
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --resume-disposition 2>/dev/null | grep -q '^COMPLETE_'
 }
 run_pair() {
-    local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="$10"
+    local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="${10}"
     local log="$out/$function"_"$left_id"_"$right_id.log" pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"

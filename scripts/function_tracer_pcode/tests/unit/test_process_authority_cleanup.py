@@ -11,9 +11,11 @@ from scripts.function_tracer_pcode.validation.process_authority_cleanup import (
 EXECUTION_NONCE = "0123456789abcdef01234567"
 
 
-def _run_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _run_paths(
+    tmp_path: Path, prefix: str = "eqbench-run"
+) -> tuple[Path, Path, Path]:
     tmp_root = tmp_path / "tmp"
-    run_tmpdir = tmp_root / "eqbench-run.test"
+    run_tmpdir = tmp_root / f"{prefix}.test"
     checkpoint_root = run_tmpdir / "process-authority"
     checkpoint_root.mkdir(parents=True)
     return tmp_root, run_tmpdir, checkpoint_root
@@ -42,6 +44,25 @@ def test_cleanup_removes_only_the_exact_nonce_tree_without_following_leaf_symlin
     assert removed is True
     assert not nonce_dir.exists()
     assert (outside / "keep.txt").read_text() == "keep"
+
+
+def test_cleanup_accepts_neqbench_run_directory(tmp_path):
+    tmp_root, run_tmpdir, checkpoint_root = _run_paths(
+        tmp_path, prefix="neqbench-run"
+    )
+    nonce_dir = checkpoint_root / EXECUTION_NONCE
+    nonce_dir.mkdir()
+    (nonce_dir / "checkpoint.json").write_text("authority")
+
+    removed = remove_process_authority_nonce(
+        tmp_root=tmp_root,
+        run_tmpdir=run_tmpdir,
+        checkpoint_root=checkpoint_root,
+        execution_nonce=EXECUTION_NONCE,
+    )
+
+    assert removed is True
+    assert not nonce_dir.exists()
 
 
 def test_cleanup_rejects_symlinked_checkpoint_parent_without_touching_target(

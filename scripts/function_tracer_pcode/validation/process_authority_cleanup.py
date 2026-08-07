@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 
-_RUN_DIRECTORY_PATTERN = re.compile(r"eqbench-run\.[A-Za-z0-9]+")
+# EqBench and NeqBench use separate run-directory prefixes, but both are
+# governed by the same no-follow cleanup boundary.
+_RUN_DIRECTORY_PATTERN = re.compile(r"(?:eq|neq)bench-run\.[A-Za-z0-9]+")
 _EXECUTION_NONCE_PATTERN = re.compile(r"[0-9a-f]{24}")
 _DIRECTORY_OPEN_FLAGS = (
     os.O_RDONLY
