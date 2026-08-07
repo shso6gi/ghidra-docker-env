@@ -55,6 +55,7 @@ ANALYSIS_CONFIG_FIELDS = frozenset({
     "pairwise_timeout_hard_seconds", "pair_process_timeout_seconds",
     "pair_process_kill_after_seconds", "prefilter_source_census_digest",
 })
+MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
 
 
 def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
@@ -96,7 +97,7 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         not isinstance(config, Mapping) or set(config) != ANALYSIS_CONFIG_FIELDS
         or config["schema"] != "eqbench-analysis-config-v1"
         or config["authority_kind"] != "EqBenchAnalysisConfig"
-        or config["run_scope"] not in {"REPRESENTATIVE", "FULL_EQBENCH"}
+        or config["run_scope"] not in MATRIX_RUN_SCOPES
         or config["build_policy"] not in {
             "REUSE_OR_COMPILE", "PREBUILT_ONLY", "FRESH_ONLY",
         }
@@ -241,7 +242,7 @@ def validate_matrix_publication_manifest(payload: Mapping[str, Any]) -> Mapping[
         ))
         or any(type(payload[field]) is not list for field in census_fields)
         or any(len(payload[field]) != len(set(payload[field])) for field in census_fields)
-        or payload["run_scope"] not in {"REPRESENTATIVE", "FULL_EQBENCH"}
+        or payload["run_scope"] not in MATRIX_RUN_SCOPES
         or type(payload["build_receipts"]) is not list
         or not isinstance(payload["analysis_config"], Mapping)
         or payload["prefilter_source_count"] != len(payload["prefilter_source_paths"])

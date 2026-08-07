@@ -18,7 +18,7 @@ from scripts.function_tracer_pcode.validation.execution_identity import (
 )
 from scripts.function_tracer_pcode.validation.execution_receipt import (
     MATRIX_EXECUTION_RECEIPT_FILE, MATRIX_PUBLICATION_MANIFEST_FILE,
-    build_matrix_publication_manifest, main as receipt_main,
+    analysis_config_from_run, build_matrix_publication_manifest, main as receipt_main,
     seal_execution_receipt, validate_execution_receipt,
     validate_matrix_publication_manifest,
 )
@@ -221,6 +221,29 @@ def test_full_scope_rejects_max_samples_or_filters(tmp_path):
         validate_full_eqbench_scope(publication, expectation)
 
 
+def test_analysis_config_accepts_full_neq_scope():
+    config = analysis_config_from_run({
+        "run_scope": "FULL_NEQ",
+        "build_policy": "REUSE_OR_COMPILE",
+        "max_samples": "0",
+        "sample_filter": "",
+        "pair_filter": "",
+        "debug": "0",
+        "skip_completed_results": "1",
+        "dry_run": "0",
+        "parallel_jobs": "1",
+        "validation_summary_level": "compact",
+        "equiv_timeout": "10",
+        "decompile_timeout": "60",
+        "pairwise_timeout": "5",
+        "pairwise_timeout_hard": "30",
+        "pair_process_timeout_seconds": "600",
+        "pair_process_kill_after_seconds": "30",
+        "prefilter_source_census_digest": "a" * 64,
+    })
+    assert config["run_scope"] == "FULL_NEQ"
+
+
 def test_phase10_manifest_rejects_pair_status_copy_to_another_target(tmp_path):
     repo, junit, receipt, matrix = _fixture_repo(tmp_path)
     root = repo / matrix
@@ -400,6 +423,30 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert 'EQBENCH_MAX_SAMPLES=$EQBENCH_MAX_SAMPLES' in runner
     assert "stale-binaries" not in runner
     assert 'mv -- "$binary_path"' not in runner
+
+
+def test_neq_runner_emits_typed_matrix_receipt_inputs():
+    runner = Path("neqbench_run_all_32jobs.sh").read_text(encoding="utf-8")
+    assert 'default_value NEQ_RUN_SCOPE FULL_NEQ' in runner
+    assert 'pair_selected "N_${a}_O_${b}"' in runner
+    for field in (
+        "max_samples", "sample_filter", "pair_filter", "debug",
+        "skip_completed_results", "validation_summary_level", "dry_run",
+        "prefilter_source_count", "prefilter_source_census_digest",
+        "target_sources", "completed_samples", "total_functions",
+        "expected_binary_count", "compiled_binary_count",
+        "compile_failure_count", "missing_binary_count",
+        "function_census_failure_count", "run_pair_failures",
+        "analysis_source_digest_end",
+    ):
+        assert f"{field}=" in runner
+    for artifact in (
+        "prefilter_source_paths.txt", "compile_failure_samples.txt",
+        "missing_binary_axes.txt", "function_census_failures.txt",
+        "used_build_receipts.jsonl", "run_health_summary.json",
+        "verified_skipped_pair_status_paths.txt",
+    ):
+        assert artifact in runner
 
 
 def test_adopted_prebuilt_receipt_is_hash_bound_but_not_full_authority(tmp_path):
