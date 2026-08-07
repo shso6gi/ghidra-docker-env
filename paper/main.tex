@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリレベルのOSS/TPL検出は，脆弱性・ライセンス・サプライチェーンリスク把握に重要である．既存検出手法は類似関数候補の生成と集約によりライブラリを判定する．しかし，構造が類似するだけで出力が異なる候補関数によりスコアが過大評価され，false positiveを招く．候補生成や集約の精度向上は進む一方，個々の候補の動作面での信頼性検証は不十分である． 本研究では，関数対応候補の集約前に再検証する後段手法を提案する．GhidraのHigh P-codeから戻り値と出力ポインタのデータフローを抽出し，同一入力での出力差の有無をSMTソルバで検査する．評価では，同一ソースを異なるコンパイラ・最適化・アーキテクチャで生成した関数の同一性と意味を変えた関数の非同一性を判定し，さらに未判定の場合の要因と処理時間を確認する．以上により，後段検証器としての判定能力と適用限界を明らかにする．
+バイナリレベルのOSS/TPL検出では，関数やモジュールの類似度に基づいて候補を生成し，その対応を集約してライブラリの再利用を判定する．構造的特徴だけでなく意味的特徴を用いる手法も提案されているが，高い類似度は，同一入力に対する観測結果の一致を保証しない．このため，指定したバージョンの関数とは動作が異なる候補が，厳密な関数対応として集約へ混入し得る．本研究では，TPL検出器が生成した関数候補を集約前に再検証する後段手法を提案する．GhidraのHigh P-codeから戻り値と出力ポインタへの書き込みを抽出し，SMTソルバを用いて，定義した観測モデルに関する出力差の有無を検査する．結果はEQ，NOT\_EQ，UNKNOWN，TIMEOUTに分類し，差または一致を示す証拠と，判定を保留した原因とを区別する．関数レベル評価では，等価ペアと非等価ペアを別の評価系として扱い，判定網羅率，危険な誤判定，保留結果および関数特徴との関連を分析する．これにより，厳密一致でない関数候補の除外を可能にする範囲と，追加の証拠を要する現在の課題を明らかにする．ライブラリ単位の検出精度向上は，本評価の主張対象としない．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,9 +32,7 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detection plays a critical role in identifying vulnerabilities, license compliance issues, and software supply chain risks. Existing detection approaches determine the presence of libraries by generating and aggregating candidate similar functions. However, candidates that are structurally similar but produce different outputs can lead to overestimated scores, resulting in false positives. While significant progress has been made in improving candidate generation and aggregation accuracy, the reliability of individual candidates in terms of their actual behavior remains insufficiently verified.
-
-In this work, we propose a post-analysis method that re-validates candidate function pairs before aggregation. Specifically, we extract data flows related to return values and output pointers from Ghidra's High P-code representation, and use an SMT solver to check whether output discrepancies exist under identical inputs. For evaluation, we examine both equivalence of functions compiled from the same source under different compilers, optimizations, and architectures, as well as non-equivalence of functions with modified semantics. We further analyze the causes of undecidable cases and the associated processing time. Through this, we clarify the capability and limitations of the proposed method as a post-validation component.
+Binary-level OSS/TPL detectors commonly generate candidates from function or module similarity and aggregate their correspondences to identify library reuse. Although recent approaches employ semantic as well as structural features, a high similarity score does not guarantee identical observable results for the same input. A candidate may therefore differ from the function in the specified library version while still entering aggregation as an exact function correspondence. We propose a post-validation method that re-validates TPL function candidates before aggregation. The method extracts return values and writes through output pointers from Ghidra's High P-code and uses an SMT solver to determine whether the two functions can produce different outputs under a defined observation model. It classifies each result as EQ, NOT\_EQ, UNKNOWN, or TIMEOUT, thereby separating evidence of agreement or disagreement from reasons for deferring a decision. Our function-level evaluation treats equivalent and non-equivalent pairs as separate experimental groups and measures decision coverage, unsafe misclassifications, deferred outcomes, and relationships with function characteristics. It clarifies when non-identical candidates can be excluded from exact-version function matching and which cases require additional evidence. This evaluation does not claim an improvement in library-level detection accuracy.
 \end{eabstract}
 
 \begin{ekeyword}
@@ -46,15 +44,29 @@ binary analysis, program equivalence, High P-code, SMT
 \input{sections/01_introduction}
 \input{sections/02_related_work}
 \input{sections/03_method}
-\input{sections/04_implementation}
-\input{sections/05_evaluation}
-\input{sections/06_conclusion}
+\input{sections/04_evaluation}
+\input{sections/05_conclusion}
 
-% TODO(references): 参考文献が確定した後に，必要な環境を有効化する．
-%
-% \begin{thebibliography}{99}
-% \bibitem{reference-key}
-% 参考文献をCSSテンプレートの書式で記入する．
-% \end{thebibliography}
+\begin{thebibliography}{99}
+\bibitem{modx}
+C. Yang, Z. Xu, H. Chen, Y. Liu, X. Gong, and B. Liu,
+``ModX: Binary Level Partially Imported Third-Party Library Detection via Program Modularization and Semantic Matching,''
+Proc. ICSE, 2022.
+
+\bibitem{binaryai}
+L. Jiang, J. An, H. Huang, Q. Tang, S. Nie, S. Wu, and Y. Zhang,
+``BinaryAI: Binary Software Composition Analysis via Intelligent Binary Source Code Matching,''
+Proc. ICSE, 2024.
+
+\bibitem{binhunt}
+D. Gao, M. K. Reiter, and D. Song,
+``BinHunt: Automatically Finding Semantic Differences in Binary Programs,''
+Proc. ICICS, LNCS 5308, pp. 238--255, 2008.
+
+\bibitem{ddec}
+R. Sharma, E. Schkufza, B. Churchill, and A. Aiken,
+``Data-Driven Equivalence Checking,''
+Proc. OOPSLA, 2013.
+\end{thebibliography}
 
 \end{document}
