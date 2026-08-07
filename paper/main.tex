@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリレベルのOSS/TPL検出では，関数やモジュールの類似度に基づいて候補を生成し，その対応を集約してライブラリの再利用を判定する．構造的特徴だけでなく意味的特徴を用いる手法も提案されているが，高い類似度は，同一入力に対する観測結果の一致を保証しない．このため，指定したバージョンの関数とは動作が異なる候補が，厳密な関数対応として集約へ混入し得る．本研究では，TPL検出器が生成した関数候補を集約前に再検証する後段手法を提案する．GhidraのHigh P-codeから戻り値と出力ポインタへの書き込みを抽出し，SMTソルバを用いて，定義した観測モデルに関する出力差の有無を検査する．結果はEQ，NOT\_EQ，UNKNOWN，TIMEOUTに分類し，差または一致を示す証拠と，判定を保留した原因とを区別する．関数レベル評価では，等価ペアと非等価ペアを別の評価系として扱い，判定網羅率，危険な誤判定，保留結果および関数特徴との関連を分析する．これにより，厳密一致でない関数候補の除外を可能にする範囲と，追加の証拠を要する現在の課題を明らかにする．ライブラリ単位の検出精度向上は，本評価の主張対象としない．
+バイナリを対象とするOSS/TPL検出では，対象バイナリの関数と既知ライブラリの関数との類似性から候補を求め，ライブラリ単位に集約する．既存のTPL候補生成手法は大規模な候補探索に適している一方，候補となった2関数が同じ入力に対して同じ出力を返すかは検証しない．そこで本研究は，TPL検出器が出力した関数候補を，集約前に定義した観測範囲で機能的に等価か再検証する．提案する証拠閉包型クロスABI等価性検証は，GhidraのHigh P-codeから出力関係を構成し，異なるABIの物理状態を共通の意味状態へ射影する．経路，関数呼出し，メモリ効果および出力差の局所証拠を同一対象・同一試行へ閉包し，すべての証明義務と試行全体が正常完了した場合だけEQを確定する．NOT\_EQは，指定バージョンの候補から除外する根拠として利用する．現段階ではEqBenchの等価な代表ペアの証拠を追跡し，EQとUNKNOWNを分けた機構から3つの検証仮説を導いた．非等価ペアに対するNOT\_EQ判定能力は今後評価する．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,7 +32,7 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detectors commonly generate candidates from function or module similarity and aggregate their correspondences to identify library reuse. Although recent approaches employ semantic as well as structural features, a high similarity score does not guarantee identical observable results for the same input. A candidate may therefore differ from the function in the specified library version while still entering aggregation as an exact function correspondence. We propose a post-validation method that re-validates TPL function candidates before aggregation. The method extracts return values and writes through output pointers from Ghidra's High P-code and uses an SMT solver to determine whether the two functions can produce different outputs under a defined observation model. It classifies each result as EQ, NOT\_EQ, UNKNOWN, or TIMEOUT, thereby separating evidence of agreement or disagreement from reasons for deferring a decision. Our function-level evaluation treats equivalent and non-equivalent pairs as separate experimental groups and measures decision coverage, unsafe misclassifications, deferred outcomes, and relationships with function characteristics. It clarifies when non-identical candidates can be excluded from exact-version function matching and which cases require additional evidence. This evaluation does not claim an improvement in library-level detection accuracy.
+Binary-level OSS/TPL detectors identify candidate functions by comparing a target binary with known libraries and then aggregate the candidates at the library level. Although existing TPL candidate-generation methods scale to large candidate sets, they do not verify whether two candidate functions produce the same outputs for the same inputs. We therefore propose evidence-closure cross-ABI equivalence checking for verifying TPL function candidates before aggregation. The method builds output relations from Ghidra High P-code and projects ABI-specific physical states to common semantic states. It returns EQ only when local evidence for paths, calls, memory effects, and output equality is closed over the same target and analysis attempt, and the complete analysis run terminates normally. A NOT\_EQ result provides evidence for excluding a candidate for the specified library version. At the current stage, we traced evidence for representative equivalent pairs from EqBench and derived three testable hypotheses from the mechanisms that separated EQ from UNKNOWN. We will evaluate NOT\_EQ decisions on non-equivalent pairs in future work.
 \end{eabstract}
 
 \begin{ekeyword}
@@ -49,24 +49,60 @@ binary analysis, program equivalence, High P-code, SMT
 
 \begin{thebibliography}{99}
 \bibitem{modx}
-C. Yang, Z. Xu, H. Chen, Y. Liu, X. Gong, and B. Liu,
-``ModX: Binary Level Partially Imported Third-Party Library Detection via Program Modularization and Semantic Matching,''
-Proc. ICSE, 2022.
+Yang, C., Xu, Z., Chen, H., Liu, Y., Gong, X. and Liu, B.:
+ModX: Binary Level Partially Imported Third-Party Library Detection via Program Modularization and Semantic Matching,
+Proc. ICSE, pp.1393--1405, DOI: 10.1145/3510003.3510627 (2022).
 
 \bibitem{binaryai}
-L. Jiang, J. An, H. Huang, Q. Tang, S. Nie, S. Wu, and Y. Zhang,
-``BinaryAI: Binary Software Composition Analysis via Intelligent Binary Source Code Matching,''
-Proc. ICSE, 2024.
+Jiang, L., An, J., Huang, H., Tang, Q., Nie, S., Wu, S. and Zhang, Y.:
+BinaryAI: Binary Software Composition Analysis via Intelligent Binary Source Code Matching,
+Proc. ICSE, Article 224, pp.1--13, DOI: 10.1145/3597503.3639100 (2024).
 
 \bibitem{binhunt}
-D. Gao, M. K. Reiter, and D. Song,
-``BinHunt: Automatically Finding Semantic Differences in Binary Programs,''
-Proc. ICICS, LNCS 5308, pp. 238--255, 2008.
+Gao, D., Reiter, M. K. and Song, D.:
+BinHunt: Automatically Finding Semantic Differences in Binary Programs,
+Proc. ICICS, LNCS 5308, pp.238--255 (2008).
+
+\bibitem{ibinhunt}
+Ming, J., Pan, M. and Gao, D.:
+iBinHunt: Binary Hunting with Inter-Procedural Control Flow,
+Proc. ICISC, LNCS 7839, pp.92--109 (2013).
+
+\bibitem{bingo}
+Chandramohan, M., Xue, Y., Xu, Z., Liu, Y., Cho, C. Y. and Tan, H. B. K.:
+BinGo: Cross-Architecture Cross-OS Binary Search,
+Proc. FSE, pp.678--689 (2016).
+
+\bibitem{blex}
+Egele, M., Woo, M., Chapman, P. and Brumley, D.:
+Blanket Execution: Dynamic Similarity Testing for Program Binaries and Components,
+Proc. USENIX Security, pp.303--317 (2014).
+
+\bibitem{binsim}
+Ming, J., Xu, D., Jiang, Y. and Wu, D.:
+BinSim: Trace-Based Semantic Binary Diffing via System Call Sliced Segment Equivalence Checking,
+Proc. USENIX Security, pp.253--270 (2017).
 
 \bibitem{ddec}
-R. Sharma, E. Schkufza, B. Churchill, and A. Aiken,
-``Data-Driven Equivalence Checking,''
-Proc. OOPSLA, 2013.
+Sharma, R., Schkufza, E., Churchill, B. and Aiken, A.:
+Data-Driven Equivalence Checking,
+Proc. OOPSLA, pp.391--406 (2013).
+
+\bibitem{formal-pcode}
+Naus, N., Verbeek, F., Walker, D. and Ravindran, B.:
+A Formal Semantics for P-Code,
+Proc. VSTTE, LNCS 13800, pp.111--128 (2023).
+
+\bibitem{proof-cert-smt}
+Mebsout, A. and Tinelli, C.:
+Proof Certificates for SMT-based Model Checkers for Infinite-State Systems,
+Proc. FMCAD, pp.117--124 (2016).
+
+\bibitem{lowlevel-eq}
+Putro, P. A.:
+Low-Level Code Semantic Equivalence Checker,
+Programming and Computer Software, No.6, pp.53--71,
+DOI: 10.7868/S3034584725060047 (2025).
 \end{thebibliography}
 
 \end{document}
