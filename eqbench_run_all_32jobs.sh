@@ -219,7 +219,7 @@ status_from_log() {
     esac
 }
 
-signed_pair_status_is_complete() {
+signed_pair_status_is_terminal_result() {
     local log_file="$1"
     local pair_target_file="$2"
     local pair_status_file="${log_file%.log}.pair-status.json"
@@ -228,8 +228,8 @@ signed_pair_status_is_complete() {
         scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
         --validate-pair-status "$pair_status_file" \
         --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
-        --expected-pair-target "$pair_target_file" \
-        --resume-disposition 2>/dev/null | grep -q '^COMPLETE_'
+        --expected-pair-target "$pair_target_file" 2>/dev/null \
+        | grep -Eq '^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$'
 }
 
 validate_current_pair_status() {
@@ -1076,7 +1076,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
                     --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
                     > "$pair_target_file"
-                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && signed_pair_status_is_complete "$log_file" "$pair_target_file"; then
+                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && signed_pair_status_is_terminal_result "$log_file" "$pair_target_file"; then
                     skipped_completed_pairs=$((skipped_completed_pairs + 1))
                     TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                     printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"

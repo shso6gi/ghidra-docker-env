@@ -1432,7 +1432,8 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert 'PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-600s}"' in script
     assert "--classify-pair-log" in script
     assert "validation_result_log_is_complete" not in script
-    assert "signed_pair_status_is_complete" in script
+    assert "signed_pair_status_is_terminal_result" in script
+    assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in script
     assert "validate_current_pair_status" in script
     assert "remove_pair_process_authority" in script
     assert "validation.process_authority_cleanup" in script

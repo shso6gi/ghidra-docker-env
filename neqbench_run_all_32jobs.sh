@@ -241,11 +241,11 @@ prepare_variant() {
     VARIANT_BUILD_RESOLUTION=FRESH_COMPILE
 }
 
-pair_complete() {
+pair_status_is_terminal_result() {
     local log="$1" target="$2" status
     status="$(printf '%s' "$log" | sed 's/\.log$/.pair-status.json/')"
     [[ -s "$log" && -s "$status" ]] || return 1
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --resume-disposition 2>/dev/null | grep -q '^COMPLETE_'
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" 2>/dev/null | grep -Eq '^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$'
 }
 run_pair() {
     local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="${10}"
@@ -385,7 +385,7 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
             log="$function_dir/$function"_"$pair.log"; status_file="$function_dir/$function"_"$pair.pair-status.json"; target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
             printf '%s\n' "$status_file" | sed "s#^$OUTPUT_BASE_DIR/##" >> "$EXPECTED_STATUS"
             "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
-            if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] && pair_complete "$log" "$target"; then
+            if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] && pair_status_is_terminal_result "$log" "$target"; then
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
                 TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                 continue

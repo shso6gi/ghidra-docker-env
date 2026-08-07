@@ -430,6 +430,8 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert 'default_value NEQ_RUN_SCOPE FULL_NEQ' in runner
     assert 'pair_selected "N_${a}_O_${b}"' in runner
     assert 'target="${10}"' in runner
+    assert 'pair_status_is_terminal_result' in runner
+    assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in runner
     for field in (
         "max_samples", "sample_filter", "pair_filter", "debug",
         "skip_completed_results", "validation_summary_level", "dry_run",
