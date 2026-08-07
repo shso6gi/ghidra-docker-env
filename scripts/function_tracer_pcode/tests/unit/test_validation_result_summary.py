@@ -1437,6 +1437,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "results_summary.txt" in script
     assert "function_summary_is_complete" in script
     assert 'dirname "$existing_pair_status"' in script
+    assert 'COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]' in script
     assert "Skipped completed function: results_summary.txt exists" in script
     assert "validate_current_pair_status" in script
     assert "remove_pair_process_authority" in script

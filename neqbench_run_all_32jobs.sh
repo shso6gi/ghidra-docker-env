@@ -403,8 +403,8 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         [[ -n "$function" ]] || continue
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         function_dir="$OUTPUT_SAMPLE/$function"; mkdir -p "$function_dir"; total="$(pair_count)"; count=0
-        if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] \
-            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]:-}"; then
+        if [[ "$SKIP_COMPLETED_RESULTS" != 0 \
+            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]:-}" ]]; then
             function_skipped_pairs=0
             while read -r a; do while read -r b; do
                 left_id="N_$a"; right_id="O_$b"; pair="$left_id"_"$right_id"; pair_selected "$pair" || continue

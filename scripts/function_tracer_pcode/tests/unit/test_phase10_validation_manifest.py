@@ -435,6 +435,7 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert "results_summary.txt" in runner
     assert "function_summary_is_complete" in runner
     assert 'dirname "$existing_status"' in runner
+    assert 'COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]' in runner
     assert "Skipped completed function: results_summary.txt exists" in runner
     for field in (
         "max_samples", "sample_filter", "pair_filter", "debug",

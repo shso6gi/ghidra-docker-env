@@ -1086,8 +1086,8 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             continue
         fi
 
-        if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] \
-            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]:-}"; then
+        if [[ "$SKIP_COMPLETED_RESULTS" != "0" \
+            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]:-}" ]]; then
             function_skipped_pairs=0
             for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
                 left_id="${IDS[$i]}"
