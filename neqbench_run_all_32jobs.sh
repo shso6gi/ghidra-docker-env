@@ -83,6 +83,16 @@ pair_count() {
     printf '%s\n' "$count"
 }
 
+function_summary_is_complete() {
+    local function_dir="$1" expected_pairs="$2" log_count status_count
+    [[ -s "$function_dir/results_summary.txt" ]] || return 1
+    log_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)"
+    status_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)"
+    [[ "$log_count" == "$expected_pairs" && "$status_count" == "$expected_pairs" ]]
+}
+
+EXPECTED_PAIRS_PER_FUNCTION="$(pair_count)"
+
 mkdir -p "$EQBENCH_TMPDIR"; chmod 1777 "$EQBENCH_TMPDIR" 2>/dev/null || true
 probe="$(mktemp "$EQBENCH_TMPDIR/neqbench-tmp.XXXXXX")"; rm -f "$probe"
 export TMPDIR="$EQBENCH_TMPDIR" TEMP="$EQBENCH_TMPDIR" TMP="$EQBENCH_TMPDIR"
@@ -92,6 +102,15 @@ trap cleanup EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 mkdir -p "$OUTPUT_BASE_DIR"; OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
+declare -A COMPLETED_FUNCTION_SUMMARY_DIRS=()
+if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]]; then
+    while IFS= read -r -d '' summary_file; do
+        function_dir="${summary_file%/results_summary.txt}"
+        if function_summary_is_complete "$function_dir" "$EXPECTED_PAIRS_PER_FUNCTION"; then
+            COMPLETED_FUNCTION_SUMMARY_DIRS["$function_dir"]=1
+        fi
+    done < <(find "$OUTPUT_BASE_DIR" -type f -name 'results_summary.txt' -print0)
+fi
 if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then exit 1; fi
 CENSUS="$OUTPUT_BASE_DIR/neq_source_pairs.tsv"; : > "$CENSUS"
 SOURCE_PAIR_COUNT=0
@@ -137,6 +156,11 @@ fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
 while IFS= read -r existing_status; do
     [[ -n "$existing_status" ]] || continue
+    existing_function_dir="$(dirname "$existing_status")"
+    if [[ "$SKIP_COMPLETED_RESULTS" != 0 \
+        && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$existing_function_dir]:-}" ]]; then
+        continue
+    fi
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$existing_status" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
 done < <(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print)
 
@@ -379,6 +403,21 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         [[ -n "$function" ]] || continue
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         function_dir="$OUTPUT_SAMPLE/$function"; mkdir -p "$function_dir"; total="$(pair_count)"; count=0
+        if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] \
+            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]:-}"; then
+            function_skipped_pairs=0
+            while read -r a; do while read -r b; do
+                left_id="N_$a"; right_id="O_$b"; pair="$left_id"_"$right_id"; pair_selected "$pair" || continue
+                status_file="$function_dir/$function"_"$pair.pair-status.json"
+                printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$EXPECTED_STATUS"
+                printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
+                TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
+                TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                function_skipped_pairs=$((function_skipped_pairs + 1))
+            done < <(printf '%s\n' $IDS); done < <(printf '%s\n' $IDS)
+            echo "[$sample] [$function] Skipped completed function: results_summary.txt exists; pairs=$function_skipped_pairs/$total"
+            continue
+        fi
         while read -r a; do while read -r b; do
             left_id="N_$a"; right_id="O_$b"; pair="$left_id"_"$right_id"; pair_selected "$pair" || continue
             left="$source_dir/$(binary_name "$new" "$a")"; right="$source_dir/$(binary_name "$old" "$b")"; count=$((count + 1)); TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))

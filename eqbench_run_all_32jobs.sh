@@ -288,6 +288,27 @@ pair_is_selected() {
     [[ ",$EQBENCH_PAIR_FILTER," == *",$pair_id,"* ]]
 }
 
+selected_pair_count() {
+    local count=0 i j left_id right_id
+    for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
+        left_id="${IDS[$i]}"
+        for ((j = i + 1; j < ${#IDS[@]}; j++)); do
+            right_id="${IDS[$j]}"
+            pair_is_selected "${left_id}_${right_id}" || continue
+            count=$((count + 1))
+        done
+    done
+    printf '%s\n' "$count"
+}
+
+function_summary_is_complete() {
+    local function_dir="$1" expected_pairs="$2" log_count status_count
+    [[ -s "$function_dir/results_summary.txt" ]] || return 1
+    log_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)"
+    status_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)"
+    [[ "$log_count" == "$expected_pairs" && "$status_count" == "$expected_pairs" ]]
+}
+
 required_binary_ids() {
     local -A selected=()
     local i j left_id right_id
@@ -304,6 +325,8 @@ required_binary_ids() {
         [[ -n "${selected[$left_id]:-}" ]] && printf '%s\n' "$left_id"
     done
 }
+
+EXPECTED_PAIRS_PER_FUNCTION="$(selected_pair_count)"
 
 write_pair_progress_receipt() {
     local receipt_path="$1"
@@ -670,6 +693,15 @@ fi
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
 EQBENCH_PRIVATE_AUTHORITY_ROOT="$(realpath -m "$EQBENCH_PRIVATE_AUTHORITY_ROOT")"
+declare -A COMPLETED_FUNCTION_SUMMARY_DIRS=()
+if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]]; then
+    while IFS= read -r -d '' summary_file; do
+        function_dir="${summary_file%/results_summary.txt}"
+        if function_summary_is_complete "$function_dir" "$EXPECTED_PAIRS_PER_FUNCTION"; then
+            COMPLETED_FUNCTION_SUMMARY_DIRS["$function_dir"]=1
+        fi
+    done < <(find "$OUTPUT_BASE_DIR" -type f -name 'results_summary.txt' -print0)
+fi
 if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" \
     || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then
     echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
@@ -723,6 +755,11 @@ fi
     --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
     --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
 while IFS= read -r -d '' existing_pair_status; do
+    existing_function_dir="$(dirname "$existing_pair_status")"
+    if [[ "$SKIP_COMPLETED_RESULTS" != "0" \
+        && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$existing_function_dir]:-}" ]]; then
+        continue
+    fi
     if ! "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
         --validate-pair-status "$existing_pair_status" \
@@ -1046,6 +1083,25 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
 
         if (( total_pairs == 0 )); then
             echo "[$sample_label] [$function_name] No complete binary pairs found; skipping."
+            continue
+        fi
+
+        if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] \
+            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]:-}"; then
+            function_skipped_pairs=0
+            for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
+                left_id="${IDS[$i]}"
+                for ((j = i + 1; j < ${#IDS[@]}; j++)); do
+                    right_id="${IDS[$j]}"
+                    pair_is_selected "${left_id}_${right_id}" || continue
+                    pair_status_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
+                    printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" \
+                        >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
+                    function_skipped_pairs=$((function_skipped_pairs + 1))
+                done
+            done
+            TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + function_skipped_pairs))
+            echo "[$sample_label] [$function_name] Skipped completed function: results_summary.txt exists; pairs=$function_skipped_pairs/$total_pairs"
             continue
         fi
 

@@ -432,6 +432,10 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert 'target="${10}"' in runner
     assert 'pair_status_is_terminal_result' in runner
     assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in runner
+    assert "results_summary.txt" in runner
+    assert "function_summary_is_complete" in runner
+    assert 'dirname "$existing_status"' in runner
+    assert "Skipped completed function: results_summary.txt exists" in runner
     for field in (
         "max_samples", "sample_filter", "pair_filter", "debug",
         "skip_completed_results", "validation_summary_level", "dry_run",
