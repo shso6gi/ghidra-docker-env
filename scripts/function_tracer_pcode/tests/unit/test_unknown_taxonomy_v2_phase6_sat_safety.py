@@ -9,9 +9,15 @@ import pytest
 
 from scripts.function_tracer_pcode.equivalence.obligations.pair_disposition import (
     CounterexampleSafetyReceipt,
+    emit_safe_counterexample_production_signal,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
+from scripts.function_tracer_pcode.model import (
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 from scripts.function_tracer_pcode.equivalence.v2.pilot import (
     ProductionDualWritePilotConnector,
 )
@@ -114,6 +120,64 @@ def test_sat_observation_without_safety_completion_remains_unknown():
     assert {
         row.proof_kind for row in evidence.pilot_result.reduction.projection.q_open_base
     } == {"counterexample_safety"}
+
+
+def test_shared_monolithic_safe_counterexample_signal_promotes_not_eq():
+    connector = _connector()
+    session = connector.begin({"phase": "monolithic", "case": "safe-sat"})
+    with production_signal_scope(session):
+        assert emit_safe_counterexample_production_signal(
+            proof_artifact_digest="a" * 64,
+            formula_digest="b" * 64,
+            model_digest="c" * 64,
+            premise_digest="d" * 64,
+            pair_key=("monolithic", "region:0"),
+        ) == 1
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.NOT_EQ), case_id="monolithic-safe-sat"
+    )
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+    assert [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ] == ["COUNTEREXAMPLE"]
+
+
+def test_monolithic_strategy_publishes_safe_counterexample_to_v2():
+    from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+
+    connector = _connector()
+    session = connector.begin({"phase": "monolithic", "case": "strategy-sat"})
+    checker = EquivalenceChecker(
+        strategy="monolithic",
+        timeout=5,
+        monolithic_timeout=5,
+        enable_rewrite=False,
+    )
+    with production_signal_scope(session):
+        result = checker.check(
+            FunctionReturnAnalysis(
+                function_name="left",
+                entry_point="0x1000",
+                parameters=[],
+                returns=[ReturnInfo("0x1010", Expression.constant(7, size=4), [])],
+                return_type="int",
+            ),
+            FunctionReturnAnalysis(
+                function_name="right",
+                entry_point="0x1000",
+                parameters=[],
+                returns=[ReturnInfo("0x1010", Expression.constant(8, size=4), [])],
+                return_type="int",
+            ),
+        )
+    evidence = connector.finish(session, result, case_id="monolithic-strategy-sat")
+    assert result.is_equivalent is False
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+    assert [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ] == ["COUNTEREXAMPLE"]
 
 
 def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authority():

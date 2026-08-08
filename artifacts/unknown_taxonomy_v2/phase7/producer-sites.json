@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
+  "manifest_digest": "7df682789ed21ca0e87fa833024918dced6512152b03b12be199ad7711bc5990",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 28,
   "sites": [
@@ -390,24 +390,6 @@
     },
     {
       "allowed_dispositions": [
-        "DECISIVE"
-      ],
-      "allowed_producer_ids": [
-        "pair-disposition-safe-counterexample-v2"
-      ],
-      "branch_or_attempt_contract_id": "pair-disposition-safe-counterexample:invocation",
-      "column": 8,
-      "domain": "sat_safety",
-      "emitter": "emit_sat_safety_signal",
-      "enclosing_function": "from_pairwise_validation",
-      "expected_cause_slots": [],
-      "line": 281,
-      "path": "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py",
-      "producer_site_manifest_id": "pair-disposition-safe-counterexample",
-      "source_sha256": "a435b7066780c7c08e9c412ba994ea61f05d9c2463ffe60f3a9ab1f15f37979f"
-    },
-    {
-      "allowed_dispositions": [
         "ELIGIBLE"
       ],
       "allowed_producer_ids": [
@@ -520,7 +502,7 @@
       "line": 1537,
       "path": "scripts/function_tracer_pcode/equivalence/v2/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170"
+      "source_sha256": "e263b7fad7989ad416f335a7d7e5aa94a50eada6af572fdbf39a76099a7dbd27"
     },
     {
       "allowed_dispositions": [
@@ -1051,6 +1033,24 @@
       "path": "scripts/function_tracer_pcode/equivalence/return_width_surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
       "source_sha256": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "safe-counterexample-production-v2"
+      ],
+      "branch_or_attempt_contract_id": "safe-counterexample-production:invocation",
+      "column": 11,
+      "domain": "sat_safety",
+      "emitter": "emit_sat_safety_signal",
+      "enclosing_function": "emit_safe_counterexample_production_signal",
+      "expected_cause_slots": [],
+      "line": 268,
+      "path": "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py",
+      "producer_site_manifest_id": "safe-counterexample-production",
+      "source_sha256": "ea08113dd00b5571a4841995b8cb3ced9747abaeb8056e072ec63b826c3ed578"
     },
     {
       "allowed_dispositions": [

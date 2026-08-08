@@ -244,6 +244,36 @@ class GuardUnsatClosureArtifact:
         )
 
 
+def emit_safe_counterexample_production_signal(
+    *,
+    proof_artifact_digest: str,
+    formula_digest: str,
+    model_digest: str,
+    premise_digest: str,
+    pair_key: Tuple[Any, Any],
+) -> int:
+    """Publish one validated SAT witness through the shared V2 bridge.
+
+    Pairwise and Monolithic produce different native safety receipts, but the
+    V2 decision authority must consume the same typed decisive event. Keep
+    the audited emitter in this shared producer so either strategy cannot
+    accidentally stop at a strategy-local receipt.
+    """
+
+    from ..v2.production_signals import (
+        SafeCounterexampleProductionSignal,
+        emit_sat_safety_signal,
+    )
+
+    return emit_sat_safety_signal(SafeCounterexampleProductionSignal(
+        proof_artifact_digest=proof_artifact_digest,
+        formula_digest=formula_digest,
+        model_digest=model_digest,
+        premise_digest=premise_digest,
+        pair_key=pair_key,
+    ), producer_site_manifest_id="safe-counterexample-production")
+
+
 @dataclass(frozen=True)
 class CounterexampleSafetyReceipt:
     formula_digest: str
@@ -273,18 +303,13 @@ class CounterexampleSafetyReceipt:
             formula_digest, model_digest, premise_digest, pair_key, steps,
             _closure_artifact_seal(payload),
         )
-        from ..v2.production_signals import (
-            SafeCounterexampleProductionSignal,
-            emit_sat_safety_signal,
-        )
-
-        emit_sat_safety_signal(SafeCounterexampleProductionSignal(
+        emit_safe_counterexample_production_signal(
             proof_artifact_digest=receipt.authority_digest,
             formula_digest=receipt.formula_digest,
             model_digest=receipt.model_digest,
             premise_digest=receipt.premise_digest,
             pair_key=receipt.pair_key,
-        ), producer_site_manifest_id="pair-disposition-safe-counterexample")
+        )
         return receipt
 
     def validates(self, binding: PairLedgerBinding, pair_key: Tuple[int, int]) -> bool:

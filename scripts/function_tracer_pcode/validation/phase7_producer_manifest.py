@@ -81,8 +81,8 @@ _PRODUCER_IDS_BY_SITE = {
         spec.site_id: (spec.producer_id,)
         for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
     },
-    "pair-disposition-safe-counterexample": (
-        "pair-disposition-safe-counterexample-v2",
+    "safe-counterexample-production": (
+        "safe-counterexample-production-v2",
     ),
     "outcome-partition-stage-result": ("reachable_outcome_producer_v1",),
     "pairwise-loop-fallback-blocker": ("typed-loop-pair-fallback-signal-v2",),
@@ -147,7 +147,7 @@ _DISPOSITIONS_BY_SITE = {
         "DECISIVE", "ELIGIBLE",
     ),
     "outcome-partition-stage-result": ("DECISIVE", "ELIGIBLE"),
-    "pair-disposition-safe-counterexample": ("DECISIVE",),
+    "safe-counterexample-production": ("DECISIVE",),
     "pairwise-loop-fallback-blocker": ("ELIGIBLE",),
     "pairwise-loop-guard-completed": ("DECISIVE",),
     "pairwise-loop-term-completed": ("DECISIVE",),

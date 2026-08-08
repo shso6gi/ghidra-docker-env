@@ -257,7 +257,7 @@ class SafeCounterexampleProductionSignal:
     formula_digest: str
     model_digest: str
     premise_digest: str
-    pair_key: tuple[int, int]
+    pair_key: tuple[Any, Any]
 
     def __post_init__(self) -> None:
         for value in (
@@ -266,12 +266,12 @@ class SafeCounterexampleProductionSignal:
         ):
             if type(value) is not str or not value:
                 raise TypeError("safe counterexample signal authority is incomplete")
-        if (
-            type(self.pair_key) is not tuple
-            or len(self.pair_key) != 2
-            or any(type(item) is not int for item in self.pair_key)
-        ):
+        if type(self.pair_key) is not tuple or len(self.pair_key) != 2:
             raise TypeError("safe counterexample signal pair key is invalid")
+        try:
+            object.__setattr__(self, "pair_key", canonical_value(self.pair_key))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("safe counterexample signal pair key is invalid") from exc
 
 
 _PENDING_EQ_CLOSURE_TOKEN = object()

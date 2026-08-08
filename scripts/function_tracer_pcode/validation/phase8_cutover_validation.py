@@ -279,7 +279,7 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     if (
         producer_manifest["site_count"] != len(producer_manifest["sites"])
         or producer_manifest["site_count"] < 1
-        or "pair-disposition-safe-counterexample" not in site_ids
+        or "safe-counterexample-production" not in site_ids
     ):
         raise ValueError("Phase 8 decisive producer sites are not audited")
     pending_eq_source = (
