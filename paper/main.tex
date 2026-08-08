@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリを対象とするOSS/TPL検出では，対象バイナリの関数と既知ライブラリの関数との類似性から候補を求め，ライブラリ単位に集約する．既存のTPL候補生成手法は大規模な候補探索に適している一方，候補となった2関数が同じ入力に対して同じ出力を返すかは検証しない．そこで本研究は，TPL検出器が出力した関数候補を，集約前に定義した観測範囲で機能的に等価か再検証する．提案する証拠閉包型クロスABI等価性検証は，GhidraのHigh P-codeから出力関係を構成し，異なるABIの物理状態を共通の意味状態へ射影する．経路，関数呼出し，メモリ効果および出力差の局所証拠を同一対象・同一試行へ閉包し，すべての証明義務と試行全体が正常完了した場合だけEQを確定する．NOT\_EQは，指定バージョンの候補から除外する根拠として利用する．現段階ではEqBenchの等価な代表ペアの証拠を追跡し，EQとUNKNOWNを分けた機構から3つの検証仮説を導いた．非等価ペアに対するNOT\_EQ判定能力は今後評価する．
+バイナリを対象とするOSS/TPL検出では，対象バイナリと既知ライブラリの類似関数を求め，ライブラリ単位に集約する．しかし，類似性が高い候補が同じ入力に対して同じ出力を返すとは限らない．そこで本研究は，TPL候補関数を集約前に意味的に再検証する．GhidraのHigh P-codeから，既定契約で観測する戻り値，メモリ，入出力および終了に関係する式と効果を構成し，SMTソルバで差を調べる．観測対象を十分に表現できなければEQとせずUNKNOWNとする．EqBenchのCコードを16条件でビルドし，4関数の全480ペアを調べた結果，257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTとなった．実High P-codeと未完了証拠の分析から，ループの循環合流値，戻り値格納域および関数呼出しが判定を妨げる過程を示した．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,7 +32,7 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detectors identify candidate functions by comparing a target binary with known libraries and then aggregate the candidates at the library level. Although existing TPL candidate-generation methods scale to large candidate sets, they do not verify whether two candidate functions produce the same outputs for the same inputs. We therefore propose evidence-closure cross-ABI equivalence checking for verifying TPL function candidates before aggregation. The method builds output relations from Ghidra High P-code and projects ABI-specific physical states to common semantic states. It returns EQ only when local evidence for paths, calls, memory effects, and output equality is closed over the same target and analysis attempt, and the complete analysis run terminates normally. A NOT\_EQ result provides evidence for excluding a candidate for the specified library version. At the current stage, we traced evidence for representative equivalent pairs from EqBench and derived three testable hypotheses from the mechanisms that separated EQ from UNKNOWN. We will evaluate NOT\_EQ decisions on non-equivalent pairs in future work.
+Binary-level OSS/TPL detectors find functions similar to known library functions and aggregate them at the library level. However, a highly similar candidate does not necessarily produce the same output for the same input. We therefore revalidate TPL function candidates before aggregation. From Ghidra High P-code, our implementation constructs expressions and effects for returns, memory, I/O, and termination enabled by its default observation contract, and uses an SMT solver to search for differences. It returns UNKNOWN rather than EQ when an observed behavior cannot be represented sufficiently. We compiled EqBench C programs under 16 build configurations and examined all 480 pairs of four functions: 257 were EQ, 216 were UNKNOWN, and seven timed out. High P-code and proof-backlog evidence identify cyclic merge values, return storage, and call composition as representative barriers in these cases.
 \end{eabstract}
 
 \begin{ekeyword}
@@ -97,6 +97,11 @@ Proc. VSTTE, LNCS 13800, pp.111--128 (2023).
 Mebsout, A. and Tinelli, C.:
 Proof Certificates for SMT-based Model Checkers for Infinite-State Systems,
 Proc. FMCAD, pp.117--124 (2016).
+
+\bibitem{eqbench}
+Badihi, S., Li, Y. and Rubin, J.:
+EqBench: A Dataset of Equivalent and Non-equivalent Program Pairs,
+Proc. MSR, pp.610--614 (2021).
 
 \bibitem{lowlevel-eq}
 Putro, P. A.:
