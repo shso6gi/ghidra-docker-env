@@ -398,7 +398,9 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summ
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(True)
+    )
 
     result = strategy.check(analysis1, analysis2)
 
@@ -471,7 +473,9 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(True)
+    )
 
     result = strategy.check(analysis1, analysis2)
 

@@ -503,6 +503,7 @@ def _impl__make_sat_unsafety_unknown_reason(
     case2: Any,
     pair_id: str,
     stage: str,
+    counterexample_binding: Any = None,
 ) -> UnknownReasonRecord:
     object_target_key = self._sat_unsafety_object_target_key(
         sat_unsafety_reasons,
@@ -512,6 +513,17 @@ def _impl__make_sat_unsafety_unknown_reason(
         case2=case2,
         pair_id=pair_id,
     )
+    if counterexample_binding is not None:
+        object_target_key = (
+            *object_target_key,
+            (
+                "counterexample_evidence_binding",
+                counterexample_binding.formula_digest,
+                counterexample_binding.model_digest,
+                counterexample_binding.premise_digest,
+                counterexample_binding.pair_key,
+            ),
+        )
     compatibility_reason_id = (
         "counterexample_same_function_replay_unproven"
         if sat_unsafety_reasons
@@ -553,7 +565,10 @@ def _impl__make_sat_unsafety_unknown_reason(
         ),
         recovery_action="sat_unsafety_resolution_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
-    ))
+    ),
+        counterexample_binding=counterexample_binding,
+        defer_until_terminal=(stage == "S_PAIRWISE"),
+    )
 
 def _impl__make_sat_counterexample_ambiguous_unknown_reason(
     self,
@@ -842,10 +857,17 @@ def _impl__sat_unsafety_reason_object_target_key(
     ), analysis)
 
 
-def _v2_observe_sat_unsafety_reason(reason_record: UnknownReasonRecord) -> UnknownReasonRecord:
+def _v2_observe_sat_unsafety_reason(
+    reason_record: UnknownReasonRecord,
+    *,
+    counterexample_binding: Any = None,
+    defer_until_terminal: bool = False,
+) -> UnknownReasonRecord:
     _emit_v2_sat_safety_blockers_observed(
         tuple(str(ref) for ref in reason_record.evidence_refs),
         reason_record.object_target_key,
+        counterexample_binding=counterexample_binding,
+        defer_until_terminal=defer_until_terminal,
     )
     return reason_record
 
@@ -934,6 +956,9 @@ def _v2_sat_safety_reason_for_ref(reason_ref: str) -> str:
 def _emit_v2_sat_safety_blockers_observed(
     reason_refs: Sequence[str],
     object_target_key: Any,
+    *,
+    counterexample_binding: Any = None,
+    defer_until_terminal: bool = False,
 ) -> None:
     from ...v2.production_signals import (
         SatSafetyBlockerProductionSignal,
@@ -948,6 +973,8 @@ def _emit_v2_sat_safety_blockers_observed(
             missing_semantic_fact=("counterexample_safety_gate_unproven", reason_ref),
             evidence_refs=(reason_ref,),
             producer_id=SAT_SAFETY_BLOCKER_OBSERVED_SITE.producer_id,
+            counterexample_binding=counterexample_binding,
+            defer_until_terminal=defer_until_terminal,
         ), producer_site_manifest_id="sat-safety-blocker-observed")
 
 

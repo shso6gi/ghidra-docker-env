@@ -641,6 +641,42 @@ def build_condition_only_query(
     return "\n".join(lines)
 
 
+def build_void_return_disequivalence_query(
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+) -> str:
+    """Build the full observable-difference query for two void returns.
+
+    There is no return value to compare.  Pair-local call/effect projection
+    assertions still have to be present in an executed query so their binding
+    uses can be audited.  Once those certified observations are assumed, the
+    remaining return-value disequality is false by construction.
+    """
+
+    lines = _build_query_header(
+        f"; Pairwise Void-Return Disequivalence: Pair {pair_id}",
+        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
+        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
+    )
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
+    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
+    lines.extend([
+        "",
+        "; Both functions return void; no return-value difference exists",
+        "(assert false)",
+        "(check-sat)",
+        "(get-model)",
+    ])
+    return "\n".join(lines)
+
+
 def build_single_case_condition_query(
     base_ctx: Dict[str, Any],
     case: ReturnCase,

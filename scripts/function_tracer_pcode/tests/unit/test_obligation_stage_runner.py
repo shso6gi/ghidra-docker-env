@@ -18,6 +18,9 @@ from scripts.function_tracer_pcode.equivalence.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
+from scripts.function_tracer_pcode.equivalence.obligations.stage_runner import (
+    merge_stage_debug_statistics,
+)
 
 
 def _result(value, reasons=()):
@@ -31,6 +34,44 @@ def _result(value, reasons=()):
         counterexample=None,
         is_timeout=lambda: False,
     )
+
+
+def test_stage_debug_statistics_project_only_terminal_dispositions() -> None:
+    accumulated = {}
+    pairwise = _result(None)
+    pairwise.pairwise_stats = {
+        "total_pairs": 4,
+        "unsat_pairs": 3,
+        "sat_pairs": 0,
+        "unknown_pairs": 1,
+        "error_pairs": 0,
+    }
+    pairwise.pairwise_debug_stats = {
+        "unsat_results": 3,
+        "sat_results": 0,
+        "unknown_results": 1,
+    }
+    merge_stage_debug_statistics(accumulated, pairwise)
+
+    monolithic = _result(False)
+    monolithic.pairwise_stats = {
+        "total_pairs": 4,
+        "unsat_pairs": 3,
+        "sat_pairs": 1,
+        "unknown_pairs": 0,
+        "error_pairs": 0,
+    }
+    monolithic.pairwise_debug_stats = {
+        "monolithic_split_planned_regions": 4,
+    }
+    merge_stage_debug_statistics(accumulated, monolithic)
+
+    assert monolithic.pairwise_debug_stats["unsat_results"] == 3
+    assert monolithic.pairwise_debug_stats["sat_results"] == 1
+    assert monolithic.pairwise_debug_stats["unknown_results"] == 0
+    assert monolithic.pairwise_debug_stats["stage_attempt_unsat_results"] == 3
+    assert monolithic.pairwise_debug_stats["stage_attempt_sat_results"] == 0
+    assert monolithic.pairwise_debug_stats["stage_attempt_unknown_results"] == 1
 
 
 def _analysis(binary_id):
@@ -93,6 +134,40 @@ def test_obligation_runner_short_circuits_after_pairwise_not_eq():
     assert result.is_equivalent is False
     assert checker.check.call_count == 1
     assert checker._last_obligation_branch_trace.records[-1].activation_state == ActivationState.SHORT_CIRCUITED
+
+
+def test_timeout_contradiction_cannot_short_circuit_as_equivalent() -> None:
+    stale = _result(True)
+    stale.is_timeout = lambda: True
+    recovered = _result(True)
+    checker = _checker([stale, recovered])
+
+    result = _run(checker, "_run_stage_plan")
+
+    assert checker.check.call_count == 2
+    assert stale.is_equivalent is None
+    assert stale.pairwise_debug_stats[
+        "timeout_decisive_state_contradiction"
+    ] == 1
+    assert result.is_equivalent is True
+    assert result.stage_path == ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
+
+
+def test_legacy_timeout_contradiction_cannot_short_circuit_as_equivalent() -> None:
+    stale = _result(True)
+    stale.is_timeout = lambda: True
+    recovered = _result(True)
+    checker = _checker([stale, recovered])
+
+    result = _run(checker, "_run_stage_plan_legacy")
+
+    assert checker.check.call_count == 2
+    assert stale.is_equivalent is None
+    assert stale.pairwise_debug_stats[
+        "timeout_decisive_state_contradiction"
+    ] == 1
+    assert result.is_equivalent is True
+    assert result.stage_path == ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
 
 
 def test_short_circuit_marks_correct_later_branch_when_an_earlier_branch_was_inapplicable():

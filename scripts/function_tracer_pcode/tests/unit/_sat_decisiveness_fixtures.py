@@ -62,6 +62,9 @@ from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
 from scripts.function_tracer_pcode.model.runtime_refs import UnknownValueRef
 
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.equivalence.obligations import (
+    SolverQueryExecutionReceipt,
+)
 
 from scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety import (
     _object_target_key_is_specific,
@@ -75,6 +78,39 @@ def _param(name: str, index: int = 0, size: int = 4, data_type: str = "int"):
         "data_type": data_type,
         "is_signed": "unsigned" not in data_type,
     }
+
+
+def _solver_bound_query_result(
+    is_equivalent,
+    *,
+    query="(assert false)\n(check-sat)",
+    model=None,
+    pair_id="(0,0)",
+    stage="with-ineq",
+):
+    status = SolverStatus.UNSAT if is_equivalent else SolverStatus.SAT
+    parallel_result = ParallelResult(
+        results=[SolverResult("fake", status, model=model)]
+    )
+    result = QueryResult(
+        is_equivalent=is_equivalent,
+        counterexample_raw=model,
+        solver_results=parallel_result,
+    )
+    result.last_query = query
+    result.pair_stage = stage
+    result.solver_query_execution_receipt = (
+        SolverQueryExecutionReceipt.from_execution(
+            query=query,
+            query_label=pair_id,
+            proof_stage=stage,
+            parallel_result=parallel_result,
+            solver_identity=("unit", "fake", ("fake",)),
+            timeout_budget=5.0,
+            use_hard_timeout=False,
+        )
+    )
+    return result
 
 def _const(value: int, size: int = 4) -> Expression:
     return Expression.constant(value, size)
@@ -185,7 +221,9 @@ def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(True)
+    )
 
 def _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2):
     case1 = ReturnCase(
@@ -257,7 +295,9 @@ def _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, a
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
-    strategy._solve_query_after_guard = Mock(return_value=QueryResult(is_equivalent=True))
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(True)
+    )
 
 def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
     site = UnsupportedCallEffectRef(

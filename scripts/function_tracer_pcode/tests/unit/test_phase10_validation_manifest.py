@@ -428,7 +428,14 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
 def test_neq_runner_emits_typed_matrix_receipt_inputs():
     runner = Path("neqbench_run_all_32jobs.sh").read_text(encoding="utf-8")
     assert 'default_value NEQ_RUN_SCOPE FULL_NEQ' in runner
-    assert 'pair_selected "N_${a}_O_${b}"' in runner
+    assert 'default_value OUTPUT_BASE_DIR "$SCRIPT_DIR/logs/EqBench/all_neq_same_isa_closure_current"' in runner
+    assert 'FUNCTION_SELECTOR="$SCRIPT_DIR/scripts/eqbench/select_neq_functions.py"' in runner
+    assert 'function_policy=changed_functions_plus_recursive_source_callers' in runner
+    assert 'expected_same_isa_pairs_per_function=128' in runner
+    assert 'ANALYSIS_PAIR_IDS=()' in runner
+    assert 'progress_update() {' in runner
+    assert 'planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS' in runner
+    assert 'pair_selected "$pair"' in runner
     assert 'target="${10}"' in runner
     assert 'pair_status_is_terminal_result' in runner
     assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in runner

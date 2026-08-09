@@ -20,7 +20,7 @@ def test_phase7_producer_manifest_is_current_complete_and_unique():
     validate_phase7_producer_manifest(root, stored)
     assert stored["site_count"] > 0
     ids = [row["producer_site_manifest_id"] for row in stored["sites"]]
-    assert len(ids) == len(set(ids)) == stored["site_count"] == 28
+    assert len(ids) == len(set(ids)) == stored["site_count"] == 30
     assert "pairwise-return-width-relation-blocker" not in ids
     assert "obligation-stage-final-eq-closure" not in ids
     assert "sat-safety-blocker-observed" in ids
@@ -68,6 +68,11 @@ def test_phase7_producer_manifest_is_current_complete_and_unique():
         ),
         "sat-safety-blocker-completed": (
             ("sat_unsafety_resolution_producer",),
+            ("DECISIVE",),
+            "emit_sat_safety_completion_if_observed",
+        ),
+        "sat-safety-counterexample-bound-completed": (
+            ("sat_counterexample_bound_resolution_producer",),
             ("DECISIVE",),
             "emit_sat_safety_completion_if_observed",
         ),

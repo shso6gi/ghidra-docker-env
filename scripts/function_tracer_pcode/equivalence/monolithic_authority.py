@@ -1052,6 +1052,23 @@ class MonolithicProofVerificationBundle:
     session_certificate: SharedZ3SessionCertificate = field(repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class LegacyMonolithicCounterexampleProofBundle:
+    """Proof authority for a fixed-model whole-surface legacy fallback."""
+
+    bundle_digest: str
+    frozen_surface_digest: str
+    census_digest: str
+    legacy_replay_receipt_digest: str
+    whole_surface_replay_receipt_digest: str
+    outcome_kind: str
+    seal: str
+    frozen: FrozenSurface = field(repr=False, compare=False)
+    census: CanonicalRegionCensus = field(repr=False, compare=False)
+    legacy_replay_receipt: Any = field(repr=False, compare=False)
+    whole_surface_replay_receipt: Any = field(repr=False, compare=False)
+
+
 def _record_digest(record: Any, _digest_fn=_digest) -> str:
     return _digest_fn(("query_execution_record_v2",
         (type(record).__module__, type(record).__qualname__, id(type(record))),
@@ -1250,7 +1267,7 @@ def seal_monolithic_proof_bundle(
 
 
 def verify_monolithic_proof_bundle(
-    bundle: MonolithicProofVerificationBundle,
+    bundle: Any,
     _seal_fn=_seal,
     _compare=hmac.compare_digest,
     _verify_frozen=_verify_frozen_surface,
@@ -1264,6 +1281,47 @@ def verify_monolithic_proof_bundle(
     _verify_record=_verify_query_execution_record,
 ) -> bool:
     """Independently reconstruct ExpectedP and verify exact execution closure."""
+    if type(bundle) is LegacyMonolithicCounterexampleProofBundle:
+        fields = (
+            bundle.frozen_surface_digest,
+            bundle.census_digest,
+            bundle.legacy_replay_receipt_digest,
+            bundle.whole_surface_replay_receipt_digest,
+            bundle.outcome_kind,
+        )
+        payload = (
+            "legacy_monolithic_counterexample_proof_bundle_v1",
+            bundle.bundle_digest,
+            *fields,
+        )
+        legacy = bundle.legacy_replay_receipt
+        whole = bundle.whole_surface_replay_receipt
+        return bool(
+            bundle.outcome_kind == "decisive_counterexample"
+            and _compare(bundle.seal, _seal_fn(payload))
+            and _verify_frozen(bundle.frozen)
+            and bundle.census.census_digest
+            == reconstruct_fallback_census(bundle.frozen).census_digest
+            and bundle.frozen_surface_digest == bundle.frozen.surface_digest
+            and bundle.census_digest == bundle.census.census_digest
+            and type(legacy) is ReplayQueryExecutionReceipt
+            and type(whole) is ReplayQueryExecutionReceipt
+            and legacy.validates(bundle.frozen, bundle.census)
+            and whole.validates(bundle.frozen, bundle.census)
+            and legacy.contract.replay_kind == "legacy_violation_predicate"
+            and whole.contract.replay_kind
+            == "global_case_validation:whole_surface"
+            and legacy.disposition == whole.disposition == "sat"
+            and legacy.contract.model_digest == whole.contract.model_digest
+            and legacy.contract.fixed_model_assertion_digest
+            == whole.contract.fixed_model_assertion_digest
+            and legacy.contract.formula_digest == whole.contract.formula_digest
+            and bundle.legacy_replay_receipt_digest == legacy.receipt_digest
+            and bundle.whole_surface_replay_receipt_digest == whole.receipt_digest
+            and bundle.bundle_digest == _digest((
+                "legacy_monolithic_counterexample_proof_bundle_v1", *fields
+            ))
+        )
     if type(bundle) is not MonolithicProofVerificationBundle:
         return False
     fields = (
@@ -1563,6 +1621,37 @@ def execute_global_violation_replay(
     return result, _issue_replay_execution_receipt(contract, result)
 
 
+def seal_legacy_counterexample_proof_bundle(
+    frozen: FrozenSurface,
+    census: CanonicalRegionCensus,
+    legacy_replay_receipt: ReplayQueryExecutionReceipt,
+    whole_surface_replay_receipt: ReplayQueryExecutionReceipt,
+) -> LegacyMonolithicCounterexampleProofBundle:
+    """Seal two independent SAT executions of the same fixed-model surface."""
+
+    fields = (
+        frozen.surface_digest,
+        census.census_digest,
+        legacy_replay_receipt.receipt_digest,
+        whole_surface_replay_receipt.receipt_digest,
+        "decisive_counterexample",
+    )
+    digest = _digest(("legacy_monolithic_counterexample_proof_bundle_v1", *fields))
+    payload = ("legacy_monolithic_counterexample_proof_bundle_v1", digest, *fields)
+    bundle = LegacyMonolithicCounterexampleProofBundle(
+        digest,
+        *fields,
+        _seal(payload),
+        frozen,
+        census,
+        legacy_replay_receipt,
+        whole_surface_replay_receipt,
+    )
+    if not verify_monolithic_proof_bundle(bundle):
+        raise RuntimeError("legacy_monolithic_counterexample_proof_bundle_invalid")
+    return bundle
+
+
 def create_global_replay_collector(
     frozen: FrozenSurface,
     census: CanonicalRegionCensus,
@@ -1846,10 +1935,11 @@ def issue_gate_artifact_reference(
     *,
     artifact_id: str,
     status: str,
+    census: Optional[CanonicalRegionCensus] = None,
 ) -> GateArtifactReference:
     if str(artifact_id) != gate_source_artifact_id(gate_kind, source_artifact):
         raise RuntimeError("gate_artifact_reference_source_mismatch")
-    census = reconstruct_canonical_census(frozen)
+    census = census or reconstruct_canonical_census(frozen)
     if census is None:
         raise RuntimeError("gate_artifact_reference_census_missing")
     derived_status, reason = _verify_gate_source(
@@ -2052,14 +2142,28 @@ def issue_counterexample_safety_decision_receipt(
 def reconstruct_fallback_census(frozen: FrozenSurface) -> CanonicalRegionCensus:
     """Bind a legacy relation/width query to an explicit one-region census."""
     expected = ("legacy",)
-    left_ids = (("legacy_surface", frozen.left_identity),)
-    right_ids = (("legacy_surface", frozen.right_identity),)
+    cases1 = tuple(_pinned_extract_cases(
+        frozen.analysis1,
+        frozen.normalization_settings,
+        apply_effective_partition=False,
+    ))
+    cases2 = tuple(_pinned_extract_cases(
+        frozen.analysis2,
+        frozen.normalization_settings,
+        apply_effective_partition=False,
+    ))
+    left_ids = tuple(_case_identity(case) for case in cases1) or (
+        ("legacy_surface", frozen.left_identity),
+    )
+    right_ids = tuple(_case_identity(case) for case in cases2) or (
+        ("legacy_surface", frozen.right_identity),
+    )
     census_digest = _digest(("canonical_monolithic_census_v1", frozen.surface_digest,
                              left_ids, right_ids, expected))
     payload = ("canonical_monolithic_census_v1", census_digest, frozen.surface_digest,
                expected, left_ids, right_ids)
     return CanonicalRegionCensus(census_digest, frozen.surface_digest, expected,
-                                 left_ids, right_ids, _seal(payload), (), ())
+                                 left_ids, right_ids, _seal(payload), cases1, cases2)
 
 
 @dataclass(frozen=True)

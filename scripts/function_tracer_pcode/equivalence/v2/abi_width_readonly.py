@@ -530,12 +530,17 @@ class FunctionReturnAbiSeed:
                 for slot in sorted(_ABI_SLOTS)
             )
         elif not raw:
-            # The production producer always emits a schema-versioned envelope,
-            # including explicit MISSING slots when Ghidra cannot provide a
-            # fact.  A raw empty dict therefore means the producer snapshot was
-            # never wired or was field-drifted; it is not a valid UNKNOWN seed.
+            # Older and synthetic analysis producers may not have populated the
+            # schema-versioned ABI envelope.  Absence is not malformed evidence:
+            # publish exact MISSING slots so production V2 remains UNKNOWN while
+            # non-authoritative legacy/unit paths can continue their analysis.
             rows = tuple(
-                (slot, ReturnAbiFactStatus.MALFORMED, None, "return_abi_facts")
+                (
+                    slot,
+                    ReturnAbiFactStatus.MISSING,
+                    None,
+                    "return_abi_facts_absent",
+                )
                 for slot in sorted(_ABI_SLOTS)
             )
         elif raw.get("schema_version") != 1:

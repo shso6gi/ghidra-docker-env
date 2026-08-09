@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -122,6 +123,16 @@ def _top_level_depths(text: str) -> list[int]:
     return depths
 
 
+@dataclass(frozen=True)
+class FunctionDefinition:
+    """A top-level function definition span in the original source text."""
+
+    name: str
+    declaration_start: int
+    body_start: int
+    body_end: int
+
+
 def _candidate_name(text: str, paren_index: int) -> Optional[str]:
     prefix = text[:paren_index].rstrip()
     match = _IDENT_RE.search(prefix)
@@ -148,7 +159,19 @@ def _candidate_name(text: str, paren_index: int) -> Optional[str]:
     return name
 
 
-def iter_function_names(source_text: str) -> Iterator[str]:
+def _matching_brace(text: str, open_index: int) -> Optional[int]:
+    depth = 0
+    for index in range(open_index, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def iter_function_definitions(source_text: str) -> Iterator[FunctionDefinition]:
     text = _mask_comments_and_literals(source_text)
     depths = _top_level_depths(text)
     seen: set[str] = set()
@@ -169,9 +192,34 @@ def iter_function_names(source_text: str) -> Iterator[str]:
 
         name = _candidate_name(text, index)
         if name and name != "main" and name not in seen:
+            body_end = _matching_brace(text, body_index)
+            if body_end is None:
+                index = body_index + 1
+                continue
+            prefix = text[:index].rstrip()
+            name_start = prefix.rfind(name)
+            if name_start < 0:
+                index = body_end + 1
+                continue
+            declaration_prefix = prefix[:name_start]
+            separator_index = max(
+                declaration_prefix.rfind(";"),
+                declaration_prefix.rfind("{"),
+                declaration_prefix.rfind("}"),
+            )
             seen.add(name)
-            yield name
+            yield FunctionDefinition(
+                name=name,
+                declaration_start=separator_index + 1,
+                body_start=body_index,
+                body_end=body_end,
+            )
         index = body_index + 1
+
+
+def iter_function_names(source_text: str) -> Iterator[str]:
+    for definition in iter_function_definitions(source_text):
+        yield definition.name
 
 
 def list_function_names(path: Path) -> Iterable[str]:

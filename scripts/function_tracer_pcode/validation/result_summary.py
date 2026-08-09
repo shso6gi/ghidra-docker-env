@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
@@ -352,6 +353,15 @@ def read_validation_log_record(
 
 def parse_log_identity(path: Path) -> Tuple[str, str]:
     stem = path.stem
+    matrix_identity = re.fullmatch(
+        r"(?P<function>.+)_N_(?P<left>B\d+)_O_(?P<right>B\d+)",
+        stem,
+    )
+    if matrix_identity is not None:
+        return (
+            matrix_identity.group("function"),
+            f"{matrix_identity.group('left')} ↔ {matrix_identity.group('right')}",
+        )
     parts = stem.rsplit("_", 2)
     if len(parts) == 3:
         return parts[0], f"{parts[1]} ↔ {parts[2]}"

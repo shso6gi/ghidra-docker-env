@@ -11,9 +11,15 @@ from ..formula.returns import ReturnWidthMismatchError, require_equal_return_bit
 from ..normalize.context import NormalizationContext
 from ..normalize.core import normalize_expression
 from ..normalize.facts import extract_sign_facts
+from ..obligations import (
+    SolverQueryExecutionReceipt,
+    issue_structural_equality_receipt,
+    register_structural_equality_producer,
+)
 from ...model import Condition, Expression, ExpressionType, expression_key_or_identity
 from .pairwise import PairwiseStrategy
 from .pairwise_models import QueryResult, ReturnCase
+from .pairwise_query_builder import build_pair_query
 
 
 class LoopTemplatePairwiseStrategy(PairwiseStrategy):
@@ -83,9 +89,76 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
         self._debug_print(
             f"    Loop-template abstraction proved pair {pair_id} equivalent: {reason}"
         )
-        result = QueryResult(is_equivalent=True)
-        result.last_query = base_result.last_query
+        required_projection_bindings = tuple(
+            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                pair_id, ()
+            )
+            or ()
+        )
+        supporting_solver_receipts = ()
+        if required_projection_bindings:
+            template_case1 = deepcopy(case1)
+            template_case2 = deepcopy(case2)
+            template_case1.value_expr = template_value1
+            template_case1.normalized_value_expr = template_value1
+            template_case2.value_expr = template_value2
+            template_case2.normalized_value_expr = template_value2
+            template_query = build_pair_query(
+                base_ctx,
+                template_case1,
+                template_case2,
+                param_replace_fn1,
+                param_replace_fn2,
+                pair_id,
+            )
+            result = self._solve_query_internal(
+                template_query,
+                pair_id,
+                stage="loop-template-projection",
+                use_hard_timeout=True,
+            )
+            result.last_query = template_query
+            result.pair_stage = "loop-template-projection"
+            execution_receipt = getattr(
+                result, "solver_query_execution_receipt", None
+            )
+            if result.is_equivalent is not True:
+                return result
+            if (
+                type(execution_receipt) is not SolverQueryExecutionReceipt
+                or not execution_receipt.validates_execution(
+                    query=template_query,
+                    expected_disposition="unsat",
+                    expected_query_label=pair_id,
+                )
+            ):
+                result.is_equivalent = None
+                result.blocking_reason = "structural_projection_query_authority_missing"
+                result.blocking_detail = (
+                    "loop-template equality with call projection lacks an exact "
+                    "UNSAT execution receipt"
+                )
+                return result
+            supporting_solver_receipts = (execution_receipt,)
+        else:
+            result = QueryResult(is_equivalent=True)
+            result.last_query = base_result.last_query
+            result.pair_stage = "loop-template"
         result.normalization_rules = list(base_result.normalization_rules)
+        result.structural_equality_receipt = (
+            issue_structural_equality_receipt(
+                query_label=pair_id,
+                proof_kind="loop-template",
+                evidence=(
+                    "loop-template",
+                    repr(expression_key_or_identity(template_value1)),
+                    repr(expression_key_or_identity(template_value2)),
+                    int(target_bits),
+                    str(reason),
+                ),
+                supporting_solver_receipts=supporting_solver_receipts,
+            )
+        )
         return result
 
 
@@ -554,3 +627,9 @@ def _const_value(expr: Expression) -> int | None:
     if expr.operator == "SUBPIECE" and right == 0:
         return left
     return None
+
+
+register_structural_equality_producer(
+    "loop-template",
+    LoopTemplatePairwiseStrategy._try_normalization_equivalence,
+)

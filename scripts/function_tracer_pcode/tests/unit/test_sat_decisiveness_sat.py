@@ -1,4 +1,14 @@
+import pytest
+
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
+
+
+def _formula_bound_sat_result(model):
+    return _solver_bound_query_result(
+        False,
+        model=model,
+        query="(assert (distinct (_ bv1 32) (_ bv2 32)))\n(check-sat)",
+    )
 
 def test_function_return_analysis_marks_symbolic_post_state_reads_as_sat_unsafe():
     analysis = _build_symbolic_post_state_analysis("with_locread")
@@ -112,9 +122,8 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
         ),
     )
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"trace_1": 1, "trace_2": 1},
+        return_value=_formula_bound_sat_result(
+            {"trace_1": 1, "trace_2": 1}
         )
     )
 
@@ -489,10 +498,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"x_1": 0, "x_2": 0},
-        )
+        return_value=_formula_bound_sat_result({"x_1": 0, "x_2": 0})
     )
 
     result = strategy.check(analysis1, analysis2)
@@ -532,7 +538,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     )
     assert actions[0].proof_obligation_id == reason.proof_obligation_id
 
-def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
+def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -575,10 +581,7 @@ def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"x_1": 0, "x_2": 0},
-        )
+        return_value=_formula_bound_sat_result({"x_1": 0, "x_2": 0})
     )
     reason = strategy._make_sat_unsafety_unknown_reason(
         ("function1:unsupported_call_effect_summary",),
@@ -596,11 +599,32 @@ def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is False
-    assert result.sat_pairs == 1
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    assert {
+        reason.reason_id for reason in result.unknown_reasons
+    } >= {"counterexample_analysis_safety_unproven"}
 
-def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monkeypatch):
+@pytest.mark.parametrize(
+    ("last_query", "executed_query", "expected_equivalent"),
+    (
+        (
+            "(assert (distinct (_ bv1 32) (_ bv2 32)))\n(check-sat)",
+            "(assert (distinct (_ bv1 32) (_ bv2 32)))\n(check-sat)",
+            False,
+        ),
+        (None, None, None),
+        (
+            "(assert (distinct (_ bv9 32) (_ bv10 32)))\n(check-sat)",
+            "(assert (distinct (_ bv1 32) (_ bv2 32)))\n(check-sat)",
+            None,
+        ),
+    ),
+)
+def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
+    monkeypatch, last_query, executed_query, expected_equivalent,
+):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -648,12 +672,20 @@ def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monk
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
-    strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
+    sat_result = (
+        _solver_bound_query_result(
+            False,
+            model={"x_1": 0, "x_2": 0},
+            query=executed_query,
+        )
+        if executed_query is not None
+        else QueryResult(
             is_equivalent=False,
             counterexample_raw={"x_1": 0, "x_2": 0},
         )
     )
+    sat_result.last_query = last_query
+    strategy._solve_query_after_guard = Mock(return_value=sat_result)
     pending_reason = strategy._make_sat_unsafety_unknown_reason(
         ("counterexample_replay_missing",),
         analysis1,
@@ -670,10 +702,23 @@ def test_pairwise_same_function_sat_accepts_completed_counterexample_replay(monk
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is False
-    assert result.sat_pairs == 1
-    assert result.unknown_pairs == 0
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is expected_equivalent
+    if expected_equivalent is False:
+        assert result.sat_pairs == 1
+        assert result.unknown_pairs == 0
+        assert result.unknown_reasons == []
+    else:
+        assert result.sat_pairs == 0
+        assert result.unknown_pairs == 1
+        assert [reason.reason_id for reason in result.unknown_reasons] == [
+            "unexpected_pairwise_state"
+        ]
+        expected_ref = (
+            "sat_terminal_query_receipt_missing"
+            if last_query is None
+            else "sat_query_execution_receipt_invalid"
+        )
+        assert expected_ref in result.unknown_reasons[0].evidence_refs
 
 def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexample_replay(monkeypatch):
     formula_builder = Mock()
@@ -724,10 +769,7 @@ def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexamp
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"x_1": 0, "x_2": 0},
-        )
+        return_value=_formula_bound_sat_result({"x_1": 0, "x_2": 0})
     )
 
     result = strategy.check(analysis1, analysis2)
@@ -792,10 +834,7 @@ def test_pairwise_same_function_sat_without_model_still_requires_counterexample_
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw=None,
-        )
+        return_value=_formula_bound_sat_result(None)
     )
 
     result = strategy.check(analysis1, analysis2)
@@ -858,9 +897,8 @@ def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexa
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"return_1": 1, "return_2": 2},
+        return_value=_formula_bound_sat_result(
+            {"return_1": 1, "return_2": 2}
         )
     )
 
@@ -1040,10 +1078,7 @@ def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(mo
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
     strategy._solve_query_after_guard = Mock(
-        return_value=QueryResult(
-            is_equivalent=False,
-            counterexample_raw={"x_1": 0, "x_2": 0},
-        )
+        return_value=_formula_bound_sat_result({"x_1": 0, "x_2": 0})
     )
     pending_reason = strategy._make_sat_unsafety_unknown_reason(
         ("function1:unsupported_call_effect_summary",),

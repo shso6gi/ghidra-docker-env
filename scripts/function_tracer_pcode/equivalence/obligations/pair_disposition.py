@@ -37,6 +37,7 @@ class PairDisposition(str, Enum):
 class PairClosureKind(str, Enum):
     GUARD_QUERY = "guard_query"
     VALUE_QUERY = "value_query"
+    STRUCTURAL_EQUALITY = "structural_equality"
     CACHE = "cache"
     RECOVERY = "recovery"
     RETURN_WIDTH = "return_width"
@@ -73,6 +74,367 @@ class PairLedgerPromotionState(str, Enum):
     OPEN = "open"
     COMPOSED = "composed"
     ABORTED = "aborted"
+
+
+@dataclass(frozen=True)
+class SolverQueryExecutionReceipt:
+    """Process-local authority for the exact query submitted to a solver."""
+
+    formula_digest: str
+    model_digest: str
+    query_label: str
+    proof_stage: str
+    disposition: str
+    solver_identity_digest: str
+    timeout_budget: float
+    execution_policy: str
+    source_receipt: Optional["SolverQueryExecutionReceipt"]
+    authority_digest: str
+    schema_version: str = "solver_query_execution_receipt_v1"
+
+    @classmethod
+    def from_execution(
+        cls,
+        *,
+        query: str,
+        query_label: str,
+        proof_stage: str,
+        parallel_result: Any,
+        solver_identity: Tuple[Any, ...],
+        timeout_budget: float,
+        use_hard_timeout: bool,
+    ) -> "SolverQueryExecutionReceipt":
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("solver execution receipt requires a non-empty query")
+        semantic = getattr(parallel_result, "is_equivalent", None)
+        if type(semantic) is bool:
+            disposition = "unsat" if semantic else "sat"
+        else:
+            disposition = "unknown"
+        model = (
+            parallel_result.get_counterexample()
+            if disposition == "sat"
+            else None
+        )
+        schema_version = "solver_query_execution_receipt_v1"
+        formula_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        model_digest = hashlib.sha256(repr(model).encode("utf-8")).hexdigest()
+        solver_identity_digest = hashlib.sha256(
+            repr(solver_identity).encode("utf-8")
+        ).hexdigest()
+        execution_policy = "hard_timeout" if use_hard_timeout else "normal_timeout"
+        payload = (
+            schema_version,
+            formula_digest,
+            model_digest,
+            str(query_label),
+            str(proof_stage),
+            disposition,
+            solver_identity_digest,
+            float(timeout_budget),
+            execution_policy,
+            (),
+        )
+        return cls(
+            formula_digest=formula_digest,
+            model_digest=model_digest,
+            query_label=str(query_label),
+            proof_stage=str(proof_stage),
+            disposition=disposition,
+            solver_identity_digest=solver_identity_digest,
+            timeout_budget=float(timeout_budget),
+            execution_policy=execution_policy,
+            source_receipt=None,
+            authority_digest=_closure_artifact_seal(payload),
+            schema_version=schema_version,
+        )
+
+    def _authority_payload(self) -> Tuple[Any, ...]:
+        return (
+            self.schema_version,
+            self.formula_digest,
+            self.model_digest,
+            self.query_label,
+            self.proof_stage,
+            self.disposition,
+            self.solver_identity_digest,
+            float(self.timeout_budget),
+            self.execution_policy,
+            (
+                self.source_receipt.stable_key()
+                if self.source_receipt is not None
+                else ()
+            ),
+        )
+
+    def for_cache_reuse(
+        self,
+        *,
+        query_label: str,
+        proof_stage: str,
+    ) -> "SolverQueryExecutionReceipt":
+        if not self.validates_authority():
+            raise ValueError("cache reuse requires valid source execution receipt")
+        payload = (
+            self.schema_version,
+            self.formula_digest,
+            self.model_digest,
+            str(query_label),
+            str(proof_stage),
+            self.disposition,
+            self.solver_identity_digest,
+            float(self.timeout_budget),
+            "cache_reuse",
+            self.stable_key(),
+        )
+        return type(self)(
+            formula_digest=self.formula_digest,
+            model_digest=self.model_digest,
+            query_label=str(query_label),
+            proof_stage=str(proof_stage),
+            disposition=self.disposition,
+            solver_identity_digest=self.solver_identity_digest,
+            timeout_budget=float(self.timeout_budget),
+            execution_policy="cache_reuse",
+            source_receipt=self,
+            authority_digest=_closure_artifact_seal(payload),
+            schema_version=self.schema_version,
+        )
+
+    def validates_authority(self) -> bool:
+        return (
+            self.schema_version == "solver_query_execution_receipt_v1"
+            and len(self.formula_digest) == 64
+            and len(self.model_digest) == 64
+            and bool(self.query_label)
+            and bool(self.proof_stage)
+            and self.disposition in {"sat", "unsat", "unknown"}
+            and len(self.solver_identity_digest) == 64
+            and self.timeout_budget >= 0.0
+            and self.execution_policy
+            in {"normal_timeout", "hard_timeout", "cache_reuse"}
+            and (
+                self.execution_policy != "cache_reuse"
+                or (
+                    type(self.source_receipt)
+                    is SolverQueryExecutionReceipt
+                    and self.source_receipt.validates_authority()
+                    and self.source_receipt.formula_digest
+                    == self.formula_digest
+                    and self.source_receipt.model_digest == self.model_digest
+                    and self.source_receipt.disposition == self.disposition
+                    and self.source_receipt.solver_identity_digest
+                    == self.solver_identity_digest
+                    and float(self.source_receipt.timeout_budget)
+                    == float(self.timeout_budget)
+                )
+            )
+            and (
+                self.execution_policy == "cache_reuse"
+                or self.source_receipt is None
+            )
+            and hmac.compare_digest(
+                self.authority_digest,
+                _closure_artifact_seal(self._authority_payload()),
+            )
+        )
+
+    def validates_execution(
+        self,
+        *,
+        query: str,
+        expected_disposition: str,
+        expected_query_label: str,
+        expected_model: Any = None,
+        verify_model: bool = True,
+    ) -> bool:
+        return (
+            self.validates_authority()
+            and isinstance(query, str)
+            and bool(query.strip())
+            and self.formula_digest
+            == hashlib.sha256(query.encode("utf-8")).hexdigest()
+            and self.disposition == expected_disposition
+            and self.query_label == str(expected_query_label)
+            and (
+                not verify_model
+                or self.model_digest
+                == hashlib.sha256(
+                    repr(expected_model).encode("utf-8")
+                ).hexdigest()
+            )
+        )
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return self._authority_payload() + (self.authority_digest,)
+
+
+@dataclass(frozen=True)
+class StructuralEqualityReceipt:
+    """Typed authority for equality proved without an UNSAT value query."""
+
+    query_label: str
+    proof_kind: str
+    evidence_digest: str
+    supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...]
+    authority_digest: str
+    schema_version: str = "structural_equality_receipt_v1"
+
+    @classmethod
+    def from_validated_structure(
+        cls,
+        *,
+        query_label: str,
+        proof_kind: str,
+        evidence: Any,
+        supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...] = (),
+    ) -> "StructuralEqualityReceipt":
+        raise RuntimeError(
+            "structural equality receipt must be issued by a registered producer"
+        )
+
+    def _authority_payload(self) -> Tuple[Any, ...]:
+        return (
+            self.schema_version,
+            self.query_label,
+            self.proof_kind,
+            self.evidence_digest,
+            tuple(
+                receipt.stable_key()
+                for receipt in self.supporting_solver_receipts
+            ),
+        )
+
+    def validates_authority(self) -> bool:
+        return (
+            self.schema_version == "structural_equality_receipt_v1"
+            and bool(self.query_label)
+            and self.proof_kind
+            in {"rewrite-structural", "void-return", "loop-template"}
+            and len(self.evidence_digest) == 64
+            and all(
+                type(receipt) is SolverQueryExecutionReceipt
+                and receipt.validates_authority()
+                and receipt.disposition == "unsat"
+                for receipt in self.supporting_solver_receipts
+            )
+            and hmac.compare_digest(
+                self.authority_digest,
+                _closure_artifact_seal(self._authority_payload()),
+            )
+        )
+
+    def validates(self, *, expected_query_label: str) -> bool:
+        return (
+            self.validates_authority()
+            and self.query_label == str(expected_query_label)
+        )
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return self._authority_payload() + (self.authority_digest,)
+
+
+_STRUCTURAL_EQUALITY_PRODUCER_IDENTITIES = {
+    "rewrite-structural": (
+        "function_tracer_pcode.equivalence.strategies."
+        "pairwise_solver_proven_rewrite",
+        "try_solver_proven_rewrite_equivalence",
+    ),
+    "void-return": (
+        "function_tracer_pcode.equivalence.strategies."
+        "pairwise_query_executor",
+        "solve_query_after_guard",
+    ),
+    "loop-template": (
+        "function_tracer_pcode.equivalence.strategies.loop_template",
+        "LoopTemplatePairwiseStrategy._try_normalization_equivalence",
+    ),
+}
+_TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES: Dict[str, Any] = {}
+
+
+def register_structural_equality_producer(
+    proof_kind: str,
+    producer: Any,
+) -> None:
+    """Pin the exact production code object allowed to issue one proof kind."""
+
+    expected = _STRUCTURAL_EQUALITY_PRODUCER_IDENTITIES.get(str(proof_kind))
+    if expected is None:
+        raise RuntimeError("structural equality producer kind is not trusted")
+    frame = inspect.currentframe()
+    caller = frame.f_back if frame is not None else None
+    try:
+        producer_module = str(getattr(producer, "__module__", "") or "")
+        producer_qualname = str(getattr(producer, "__qualname__", "") or "")
+        if (
+            caller is None
+            or caller.f_code.co_name != "<module>"
+            or not producer_module.endswith(expected[0])
+            or producer_qualname != expected[1]
+            or caller.f_globals.get("__name__") != producer_module
+        ):
+            raise RuntimeError("structural equality producer registrar is not trusted")
+    finally:
+        del caller
+        del frame
+    code = getattr(producer, "__code__", None)
+    if code is None:
+        raise RuntimeError("structural equality producer code is unavailable")
+    existing = _TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES.get(str(proof_kind))
+    if existing is not None and marshal.dumps(existing) != marshal.dumps(code):
+        raise RuntimeError("structural equality producer replacement rejected")
+    _TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES[str(proof_kind)] = code
+
+
+def issue_structural_equality_receipt(
+    *,
+    query_label: str,
+    proof_kind: str,
+    evidence: Any,
+    supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...] = (),
+) -> StructuralEqualityReceipt:
+    """Seal structural EQ only from the registered proof implementation."""
+
+    current = inspect.currentframe()
+    caller = current.f_back if current is not None else None
+    try:
+        if (
+            caller is None
+            or _TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES.get(str(proof_kind))
+            is not caller.f_code
+        ):
+            raise RuntimeError("structural equality receipt issuer is not trusted")
+    finally:
+        del caller
+        del current
+    if not isinstance(evidence, tuple) or not evidence or evidence[0] != proof_kind:
+        raise ValueError("structural equality evidence kind mismatch")
+    receipts = tuple(supporting_solver_receipts)
+    if any(
+        type(receipt) is not SolverQueryExecutionReceipt
+        or not receipt.validates_authority()
+        or receipt.disposition != "unsat"
+        for receipt in receipts
+    ):
+        raise ValueError("structural equality has invalid solver support")
+    schema_version = "structural_equality_receipt_v1"
+    evidence_digest = hashlib.sha256(repr(evidence).encode("utf-8")).hexdigest()
+    payload = (
+        schema_version,
+        str(query_label),
+        str(proof_kind),
+        evidence_digest,
+        tuple(receipt.stable_key() for receipt in receipts),
+    )
+    return StructuralEqualityReceipt(
+        query_label=str(query_label),
+        proof_kind=str(proof_kind),
+        evidence_digest=evidence_digest,
+        supporting_solver_receipts=receipts,
+        authority_digest=_closure_artifact_seal(payload),
+        schema_version=schema_version,
+    )
 
 
 @dataclass(frozen=True)
@@ -152,7 +514,8 @@ class SolverUnsatClosureArtifact:
     producer_kind: str
     authority_digest: str = ""
     solver_status: str = "unsat"
-    schema_version: str = "solver_unsat_closure_v1"
+    execution_receipt: Optional[SolverQueryExecutionReceipt] = None
+    schema_version: str = "solver_unsat_closure_v2"
 
     @classmethod
     def from_validated_result(
@@ -161,30 +524,77 @@ class SolverUnsatClosureArtifact:
     ) -> "SolverUnsatClosureArtifact":
         if getattr(result, "is_equivalent", None) is not True:
             raise ValueError("solver closure requires a validated UNSAT result")
+        execution_receipt = getattr(
+            result, "solver_query_execution_receipt", None
+        )
+        if (
+            type(execution_receipt) is not SolverQueryExecutionReceipt
+            or not execution_receipt.validates_execution(
+                query=query,
+                expected_disposition="unsat",
+                expected_query_label=query_label,
+                expected_model=None,
+            )
+        ):
+            raise ValueError(
+                "solver closure requires the exact UNSAT execution receipt"
+            )
         formula_digest = hashlib.sha256(query.encode()).hexdigest()
         payload = (
-            formula_digest, premise_digest, query_label, producer_kind, "unsat",
+            "solver_unsat_closure_v2",
+            formula_digest,
+            premise_digest,
+            query_label,
+            producer_kind,
+            "unsat",
+            execution_receipt.stable_key(),
         )
         return cls(
-            formula_digest, premise_digest, query_label, producer_kind,
-            _closure_artifact_seal(payload),
+            formula_digest=formula_digest,
+            premise_digest=premise_digest,
+            query_label=query_label,
+            producer_kind=producer_kind,
+            authority_digest=_closure_artifact_seal(payload),
+            execution_receipt=execution_receipt,
         )
 
     @classmethod
     def from_terminal_record(
         cls, query: str, premise_digest: str, query_label: str,
         producer_kind: str, disposition: PairDisposition,
+        execution_receipt: Optional[SolverQueryExecutionReceipt] = None,
     ) -> "SolverUnsatClosureArtifact":
         if disposition == PairDisposition.UNSAT:
             raise ValueError("UNSAT requires validated solver authority")
-        formula_digest = hashlib.sha256(query.encode()).hexdigest()
         status = disposition.value
+        if status == "sat" and (
+            type(execution_receipt) is not SolverQueryExecutionReceipt
+            or not execution_receipt.validates_execution(
+                query=query,
+                expected_disposition="sat",
+                expected_query_label=query_label,
+                verify_model=False,
+            )
+        ):
+            raise ValueError("SAT terminal record requires exact execution receipt")
+        formula_digest = hashlib.sha256(query.encode()).hexdigest()
         payload = (
-            formula_digest, premise_digest, query_label, producer_kind, status,
+            "solver_unsat_closure_v2",
+            formula_digest,
+            premise_digest,
+            query_label,
+            producer_kind,
+            status,
+            execution_receipt.stable_key() if execution_receipt else (),
         )
         return cls(
-            formula_digest, premise_digest, query_label, producer_kind,
-            _closure_artifact_seal(payload), solver_status=status,
+            formula_digest=formula_digest,
+            premise_digest=premise_digest,
+            query_label=query_label,
+            producer_kind=producer_kind,
+            authority_digest=_closure_artifact_seal(payload),
+            solver_status=status,
+            execution_receipt=execution_receipt,
         )
 
     def validates(
@@ -192,8 +602,14 @@ class SolverUnsatClosureArtifact:
         expected_status: str = "unsat",
         expected_premise_digest: Optional[str] = None,
     ) -> bool:
+        receipt_key = (
+            self.execution_receipt.stable_key()
+            if self.execution_receipt is not None
+            else ()
+        )
         return (
-            self.solver_status == expected_status
+            self.schema_version == "solver_unsat_closure_v2"
+            and self.solver_status == expected_status
             and len(self.formula_digest) == 64
             and bool(self.premise_digest)
             and (
@@ -202,17 +618,111 @@ class SolverUnsatClosureArtifact:
             )
             and bool(self.query_label)
             and self.producer_kind in {"value_query", "return_width", "recovery", "aggregate"}
+            and (
+                self.solver_status not in {"sat", "unsat"}
+                or (
+                    type(self.execution_receipt)
+                    is SolverQueryExecutionReceipt
+                    and self.execution_receipt.validates_authority()
+                    and self.execution_receipt.disposition
+                    == self.solver_status
+                    and self.execution_receipt.formula_digest
+                    == self.formula_digest
+                    and self.execution_receipt.query_label
+                    == self.query_label
+                )
+            )
             and hmac.compare_digest(
                 self.authority_digest,
                 _closure_artifact_seal((
-                    self.formula_digest, self.premise_digest, self.query_label,
-                    self.producer_kind, self.solver_status,
+                    self.schema_version,
+                    self.formula_digest,
+                    self.premise_digest,
+                    self.query_label,
+                    self.producer_kind,
+                    self.solver_status,
+                    receipt_key,
                 )),
             )
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
         return tuple(self.__dict__.values())
+
+
+@dataclass(frozen=True)
+class StructuralEqualityClosureArtifact:
+    receipt: StructuralEqualityReceipt
+    premise_digest: str
+    query_label: str
+    producer_kind: str
+    authority_digest: str
+    schema_version: str = "structural_equality_closure_v1"
+
+    @classmethod
+    def from_validated_result(
+        cls,
+        *,
+        premise_digest: str,
+        query_label: str,
+        result: Any,
+    ) -> "StructuralEqualityClosureArtifact":
+        if getattr(result, "is_equivalent", None) is not True:
+            raise ValueError("structural closure requires an equivalent result")
+        receipt = getattr(result, "structural_equality_receipt", None)
+        if (
+            type(receipt) is not StructuralEqualityReceipt
+            or not receipt.validates(expected_query_label=query_label)
+        ):
+            raise ValueError("structural closure requires exact typed receipt")
+        schema_version = "structural_equality_closure_v1"
+        payload = (
+            schema_version,
+            receipt.stable_key(),
+            premise_digest,
+            query_label,
+            receipt.proof_kind,
+        )
+        return cls(
+            receipt=receipt,
+            premise_digest=premise_digest,
+            query_label=query_label,
+            producer_kind=receipt.proof_kind,
+            authority_digest=_closure_artifact_seal(payload),
+            schema_version=schema_version,
+        )
+
+    def validates(self, binding: PairLedgerBinding) -> bool:
+        payload = (
+            self.schema_version,
+            self.receipt.stable_key(),
+            self.premise_digest,
+            self.query_label,
+            self.producer_kind,
+        )
+        return (
+            self.schema_version == "structural_equality_closure_v1"
+            and type(self.receipt) is StructuralEqualityReceipt
+            and self.receipt.validates(
+                expected_query_label=self.query_label
+            )
+            and self.producer_kind == self.receipt.proof_kind
+            and self.premise_digest == binding.premise_digest
+            and hmac.compare_digest(
+                self.authority_digest,
+                _closure_artifact_seal(payload),
+            )
+        )
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            self.schema_version,
+            self.receipt.stable_key(),
+            self.premise_digest,
+            self.query_label,
+            self.producer_kind,
+            self.authority_digest,
+        )
 
 
 @dataclass(frozen=True)
@@ -246,11 +756,7 @@ class GuardUnsatClosureArtifact:
 
 def emit_safe_counterexample_production_signal(
     *,
-    proof_artifact_digest: str,
-    formula_digest: str,
-    model_digest: str,
-    premise_digest: str,
-    pair_key: Tuple[Any, Any],
+    safety_receipt: "CounterexampleSafetyReceipt",
 ) -> int:
     """Publish one validated SAT witness through the shared V2 bridge.
 
@@ -262,16 +768,22 @@ def emit_safe_counterexample_production_signal(
 
     from ..v2.production_signals import (
         SafeCounterexampleProductionSignal,
+        active_production_pilot_session,
         emit_sat_safety_signal,
     )
 
-    return emit_sat_safety_signal(SafeCounterexampleProductionSignal(
-        proof_artifact_digest=proof_artifact_digest,
-        formula_digest=formula_digest,
-        model_digest=model_digest,
-        premise_digest=premise_digest,
-        pair_key=pair_key,
-    ), producer_site_manifest_id="safe-counterexample-production")
+    session = active_production_pilot_session()
+    if session is not None and session.domain_signal_state.get(
+        "sat_safety_safe_counterexample_committed"
+    ):
+        return 0
+    signal = SafeCounterexampleProductionSignal.from_pairwise_receipt(
+        safety_receipt
+    )
+    return emit_sat_safety_signal(
+        signal,
+        producer_site_manifest_id="safe-counterexample-pairwise-production",
+    )
 
 
 @dataclass(frozen=True)
@@ -298,30 +810,30 @@ class CounterexampleSafetyReceipt:
             "analysis_summary_safe", "global_case_replay_safe",
             "same_function_replay_safe",
         )
-        payload = (formula_digest, model_digest, premise_digest, pair_key, steps)
+        schema_version = "counterexample_safety_receipt_v1"
+        payload = (
+            schema_version, formula_digest, model_digest, premise_digest,
+            pair_key, steps,
+        )
         receipt = cls(
             formula_digest, model_digest, premise_digest, pair_key, steps,
-            _closure_artifact_seal(payload),
+            _closure_artifact_seal(payload), schema_version,
         )
-        emit_safe_counterexample_production_signal(
-            proof_artifact_digest=receipt.authority_digest,
-            formula_digest=receipt.formula_digest,
-            model_digest=receipt.model_digest,
-            premise_digest=receipt.premise_digest,
-            pair_key=receipt.pair_key,
-        )
+        emit_safe_counterexample_production_signal(safety_receipt=receipt)
         return receipt
 
-    def validates(self, binding: PairLedgerBinding, pair_key: Tuple[int, int]) -> bool:
+    def validates_authority(self) -> bool:
         payload = (
-            self.formula_digest, self.model_digest, self.premise_digest,
-            self.pair_key, self.validation_steps,
+            self.schema_version, self.formula_digest, self.model_digest,
+            self.premise_digest, self.pair_key, self.validation_steps,
         )
         return (
-            len(self.formula_digest) == 64
+            self.schema_version == "counterexample_safety_receipt_v1"
+            and len(self.formula_digest) == 64
             and len(self.model_digest) == 64
-            and self.premise_digest == binding.premise_digest
-            and self.pair_key == pair_key
+            and bool(self.premise_digest)
+            and type(self.pair_key) is tuple
+            and len(self.pair_key) == 2
             and self.validation_steps == (
                 "analysis_summary_safe", "global_case_replay_safe",
                 "same_function_replay_safe",
@@ -329,6 +841,13 @@ class CounterexampleSafetyReceipt:
             and hmac.compare_digest(
                 self.authority_digest, _closure_artifact_seal(payload)
             )
+        )
+
+    def validates(self, binding: PairLedgerBinding, pair_key: Tuple[int, int]) -> bool:
+        return (
+            self.validates_authority()
+            and self.premise_digest == binding.premise_digest
+            and self.pair_key == pair_key
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
@@ -353,6 +872,9 @@ class TerminalPairArtifact:
                     and self.safety_receipt.validates(binding, pair_key)
                     and self.safety_receipt.formula_digest
                     == self.terminal_record.formula_digest
+                    and self.terminal_record.execution_receipt is not None
+                    and self.safety_receipt.model_digest
+                    == self.terminal_record.execution_receipt.model_digest
                 )
             )
         )
@@ -491,6 +1013,7 @@ def register_producer_closure_validator(
 ValidatedClosureArtifact = Union[
     GuardUnsatClosureArtifact,
     SolverUnsatClosureArtifact,
+    StructuralEqualityClosureArtifact,
     TerminalPairArtifact,
     ProducerValidatedClosureArtifact,
 ]
@@ -519,7 +1042,11 @@ class PairClosureEvidence:
             artifact.validates(binding)
             if isinstance(
                 artifact,
-                (GuardUnsatClosureArtifact, ProducerValidatedClosureArtifact),
+                (
+                    GuardUnsatClosureArtifact,
+                    StructuralEqualityClosureArtifact,
+                    ProducerValidatedClosureArtifact,
+                ),
             )
             else artifact.validates("unsat", binding.premise_digest)
         )
@@ -545,7 +1072,11 @@ class PairClosureEvidence:
             self.artifact.validates(binding)
             if isinstance(
                 self.artifact,
-                (GuardUnsatClosureArtifact, ProducerValidatedClosureArtifact),
+                (
+                    GuardUnsatClosureArtifact,
+                    StructuralEqualityClosureArtifact,
+                    ProducerValidatedClosureArtifact,
+                ),
             )
             else self.artifact.validates("unsat", binding.premise_digest)
         )
@@ -640,16 +1171,23 @@ class PairDispositionLedger:
         self, pair_key: Tuple[int, int], disposition: PairDisposition,
         query: str, producer_kind: str, *,
         safety_receipt: Optional[CounterexampleSafetyReceipt] = None,
+        query_execution_receipt: Optional[SolverQueryExecutionReceipt] = None,
     ) -> None:
         if disposition == PairDisposition.UNSAT:
             raise ValueError("UNSAT requires validated closure path")
         with self._lock:
             if self.lifecycle != LedgerLifecycle.OPEN or pair_key in self.provisional:
                 raise RuntimeError("cannot record terminal pair")
+            query_label = (
+                query_execution_receipt.query_label
+                if query_execution_receipt is not None
+                else repr(pair_key)
+            )
             terminal_record = SolverUnsatClosureArtifact.from_terminal_record(
                 query or repr((pair_key, disposition.value)),
                 self.binding.premise_digest,
-                repr(pair_key), producer_kind, disposition,
+                query_label, producer_kind, disposition,
+                query_execution_receipt,
             )
             artifact = TerminalPairArtifact(terminal_record, safety_receipt)
             if not artifact.validates(self.binding, pair_key, disposition):

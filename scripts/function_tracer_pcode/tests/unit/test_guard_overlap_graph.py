@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import hashlib
 import json
 
 import pytest
@@ -9,6 +10,7 @@ from scripts.function_tracer_pcode.equivalence.cause_identity import (
 )
 from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
     TypedProjectionAssertionBundle,
+    projection_binding_evidence_from_query,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
     _build_pairwise_extra_assertions,
@@ -18,6 +20,13 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
     execute_canonical_guard_query,
+    solve_query_after_guard,
+)
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.smt import (
+    ParallelResult,
+    SolverResult,
+    SolverStatus,
 )
 from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
 from scripts.function_tracer_pcode.equivalence.obligations import (
@@ -37,13 +46,46 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     PairLedgerBinding,
     CounterexampleSafetyReceipt,
     GuardUnsatClosureArtifact,
+    SolverQueryExecutionReceipt,
     SolverUnsatClosureArtifact,
+    StructuralEqualityClosureArtifact,
+    StructuralEqualityReceipt,
+    issue_structural_equality_receipt,
 )
+from scripts.function_tracer_pcode.model import Expression, ExpressionType, ReturnInfo
 
 
 _UNSAT_QUERY = "(set-logic QF_BV)\n(assert false)\n(check-sat)"
 _SAT_QUERY = "(set-logic QF_BV)\n(assert true)\n(check-sat)"
 _UNKNOWN_QUERY = "(set-logic QF_BV)\n(assert invalid)\n(check-sat)"
+
+
+def _solver_execution_result(
+    query: str,
+    status: SolverStatus,
+    *,
+    model=None,
+    query_label="(0,0)",
+):
+    parallel_result = ParallelResult(
+        results=[SolverResult("fake", status, model=model)]
+    )
+    result = SimpleNamespace(
+        is_equivalent=(status == SolverStatus.UNSAT),
+        counterexample_raw=model,
+    )
+    result.solver_query_execution_receipt = (
+        SolverQueryExecutionReceipt.from_execution(
+            query=query,
+            query_label=query_label,
+            proof_stage="value_query",
+            parallel_result=parallel_result,
+            solver_identity=("unit", "fake", ("fake",)),
+            timeout_budget=5.0,
+            use_hard_timeout=False,
+        )
+    )
+    return result
 
 
 def _seed(side, index=0):
@@ -270,9 +312,18 @@ def test_sat_terminal_requires_typed_counterexample_safety_receipt():
     binding = _binding()
     ledger = PairDispositionLedger(binding, 1)
     query = "(assert true)\n(check-sat)"
-    with pytest.raises(ValueError, match="terminal pair artifact"):
+    with pytest.raises(ValueError, match="execution receipt"):
         ledger.record_terminal_query(
             (0, 0), PairDisposition.SAT, query, "value_query"
+        )
+
+    sat_execution = _solver_execution_result(
+        query, SolverStatus.SAT, model={"x": 1}
+    ).solver_query_execution_receipt
+    with pytest.raises(ValueError, match="terminal pair artifact"):
+        ledger.record_terminal_query(
+            (0, 0), PairDisposition.SAT, query, "value_query",
+            query_execution_receipt=sat_execution,
         )
 
     receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
@@ -287,6 +338,7 @@ def test_sat_terminal_requires_typed_counterexample_safety_receipt():
     ledger.record_terminal_query(
         (0, 0), PairDisposition.SAT, query, "value_query",
         safety_receipt=receipt,
+        query_execution_receipt=sat_execution,
     )
     assert ledger.validates_complete_snapshot()
     snapshot = ledger.closure_snapshot()[0]
@@ -296,9 +348,10 @@ def test_sat_terminal_requires_typed_counterexample_safety_receipt():
 
 def test_closure_snapshot_audits_binding_use_partition():
     binding = _binding()
+    query = "(assert false)\n(check-sat)"
     artifact = SolverUnsatClosureArtifact.from_validated_result(
-        "(assert false)\n(check-sat)", binding.premise_digest, "(0,0)",
-        "value_query", SimpleNamespace(is_equivalent=True),
+        query, binding.premise_digest, "(0,0)",
+        "value_query", _solver_execution_result(query, SolverStatus.UNSAT),
     )
     evidence = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact,
@@ -320,9 +373,10 @@ def test_closure_snapshot_audits_binding_use_partition():
 
 def test_duplicate_closure_is_rejected_even_when_evidence_is_identical():
     binding = _binding()
+    query = "(assert false)\n(check-sat)"
     artifact = SolverUnsatClosureArtifact.from_validated_result(
-        "(assert false)\n(check-sat)", binding.premise_digest, "(0,0)",
-        "value_query", SimpleNamespace(is_equivalent=True),
+        query, binding.premise_digest, "(0,0)",
+        "value_query", _solver_execution_result(query, SolverStatus.UNSAT),
     )
     evidence = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact
@@ -331,6 +385,113 @@ def test_duplicate_closure_is_rejected_even_when_evidence_is_identical():
     ledger.close(evidence)
     with pytest.raises(RuntimeError, match="duplicate pair closure"):
         ledger.close(evidence)
+
+
+def test_structural_equality_uses_distinct_typed_closure_authority():
+    binding = _binding()
+    void_expr1 = Expression(ExpressionType.UNKNOWN, name="void", size=0)
+    void_expr2 = Expression(ExpressionType.UNKNOWN, name="void", size=0)
+    case1 = ReturnCase(
+        0, [], void_expr1,
+        return_info=ReturnInfo(address="0x100", value=void_expr1),
+    )
+    case2 = ReturnCase(
+        0, [], void_expr2,
+        return_info=ReturnInfo(address="0x200", value=void_expr2),
+    )
+
+    class Strategy:
+        _case_value_contains_unresolved = staticmethod(lambda *args, **kwargs: False)
+
+        @staticmethod
+        def _build_condition_only_query(*args, **kwargs):
+            return _SAT_QUERY
+
+        @staticmethod
+        def _debug_print(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def _solve_query_internal(query, pair_id, **kwargs):
+            return _solver_execution_result(
+                query, SolverStatus.UNSAT, query_label=pair_id
+            )
+
+    assertion = "(assert true)"
+    assertion_digest = hashlib.sha256(assertion.encode("utf-8")).hexdigest()
+    binding_id = "a" * 64
+    base_ctx = {
+        "header_lines": [],
+        "return_size1": 0,
+        "return_size2": 0,
+        "call_projection_binding_ids_by_pair": {
+            "(0,0)": (binding_id,),
+        },
+        "call_projection_binding_digests_by_pair": {
+            "(0,0)": {binding_id: assertion_digest},
+        },
+        "call_projection_assertions_by_pair": {
+            "(0,0)": (
+                f"; call_projection_binding {binding_id} "
+                f"assertion_sha256={assertion_digest}",
+                assertion,
+                f"; call_projection_binding_end {binding_id}",
+            ),
+        },
+    }
+
+    result = solve_query_after_guard(
+        Strategy(),
+        base_ctx,
+        case1,
+        case2,
+        lambda expr: expr.to_smt(),
+        lambda expr: expr.to_smt(),
+        "(0,0)",
+    )
+    consumed_bindings = tuple(sorted(
+        binding_id
+        for binding_id, digest in projection_binding_evidence_from_query(
+            result.last_query
+        ).items()
+        if base_ctx["call_projection_binding_digests_by_pair"]["(0,0)"].get(
+            binding_id
+        ) == digest
+    ))
+    artifact = StructuralEqualityClosureArtifact.from_validated_result(
+        premise_digest=binding.premise_digest,
+        query_label="(0,0)",
+        result=result,
+    )
+    evidence = PairClosureEvidence.validated(
+        (0, 0), PairClosureKind.STRUCTURAL_EQUALITY, binding, artifact,
+        required_binding_uses=(binding_id,),
+        consumed_binding_uses=consumed_bindings,
+    )
+
+    assert evidence.validates(binding)
+    assert evidence.closure_kind is PairClosureKind.STRUCTURAL_EQUALITY
+    assert evidence.excluded_binding_uses == ()
+    assert type(evidence.artifact) is StructuralEqualityClosureArtifact
+    with pytest.raises(ValueError, match="exact UNSAT execution receipt"):
+        SolverUnsatClosureArtifact.from_validated_result(
+            "", binding.premise_digest, "(0,0)", "value_query", result
+        )
+
+
+def test_structural_equality_receipt_rejects_unregistered_issuer():
+    with pytest.raises(RuntimeError, match="registered producer"):
+        StructuralEqualityReceipt.from_validated_structure(
+            query_label="(0,0)",
+            proof_kind="rewrite-structural",
+            evidence=("rewrite-structural", "forged"),
+        )
+    with pytest.raises(RuntimeError, match="issuer is not trusted"):
+        issue_structural_equality_receipt(
+            query_label="(0,0)",
+            proof_kind="rewrite-structural",
+            evidence=("rewrite-structural", "forged"),
+        )
 
 
 def test_duplicate_terminal_query_is_rejected():
@@ -436,9 +597,10 @@ def test_other_producer_execution_namespace_mutation_fails_closed(
 
 def test_solver_unsat_closure_rejects_wrong_premise():
     binding = _binding()
+    query = "(assert false)\n(check-sat)"
     artifact = SolverUnsatClosureArtifact.from_validated_result(
-        "(assert false)\n(check-sat)", "different-premise", "(0,0)",
-        "value_query", SimpleNamespace(is_equivalent=True),
+        query, "different-premise", "(0,0)",
+        "value_query", _solver_execution_result(query, SolverStatus.UNSAT),
     )
     with pytest.raises(ValueError, match="failed validation"):
         PairClosureEvidence.validated(

@@ -364,10 +364,11 @@ def _child_persist_canonical_return_abi_authority_error():
     right_analysis = FunctionReturnAnalysis(
         "f", "0x2000", [], [], binary_id="bin-right"
     )
-    # This is deliberately the producer-contract violation under test.  A
-    # normal unavailable producer emits the sealed schema-v1 MISSING envelope.
-    left_analysis.return_abi_facts = {}
-    right_analysis.return_abi_facts = {}
+    # This is deliberately malformed rather than merely absent.  An absent
+    # envelope is a typed MISSING/UNKNOWN surface; a wrong schema remains an
+    # authority error across the child/supervisor/classifier boundary.
+    left_analysis.return_abi_facts = {"schema_version": 999}
+    right_analysis.return_abi_facts = {"schema_version": 999}
     left_seed = malformed_fixture_width_seed(
         "left", function_identity=left_analysis.outcome_function_identity()
     )

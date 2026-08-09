@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# NeqBench cross-source matrix: 16 new-side builds x 16 old-side builds.
+# NeqBench primary NOT_EQ evaluation: changed/caller-closure functions and
+# same-ISA pairs (8 x 8 ARM64 plus 8 x 8 MIPS64 = 128 pairs/function).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,7 +13,7 @@ default_value() {
 }
 if [[ -x "$SCRIPT_DIR/.venv-pyghidra/bin/python" ]]; then PYTHON_BIN="$SCRIPT_DIR/.venv-pyghidra/bin/python"; else default_value PYTHON_BIN python3; fi
 default_value NEQ_ROOT "$SCRIPT_DIR/targets/EqBench/benchmarks"
-default_value OUTPUT_BASE_DIR "$SCRIPT_DIR/logs/EqBench/all_neq_matrix_current"
+default_value OUTPUT_BASE_DIR "$SCRIPT_DIR/logs/EqBench/all_neq_same_isa_closure_current"
 default_value NEQ_RUN_SCOPE FULL_NEQ
 default_value NEQ_BUILD_POLICY REUSE_OR_COMPILE
 default_value NEQ_SAMPLE_FILTER ""
@@ -38,11 +39,13 @@ fi
 default_value EQBENCH_PRIVATE_AUTHORITY_ROOT "$EQBENCH_TMPDIR/eqbench-private-authority-neq"
 COMPILE_TEMPLATE="$SCRIPT_DIR/scripts/eqbench/compile_all_arm_mips.sh"
 FUNCTION_LISTER="$SCRIPT_DIR/scripts/eqbench/list_c_functions.py"
+FUNCTION_SELECTOR="$SCRIPT_DIR/scripts/eqbench/select_neq_functions.py"
+EXPECTED_FULL_SOURCE_PAIRS=125
 
 [[ "$NEQ_RUN_SCOPE" == FULL_NEQ || "$NEQ_RUN_SCOPE" == REPRESENTATIVE ]] || exit 1
 [[ "$NEQ_BUILD_POLICY" == REUSE_OR_COMPILE || "$NEQ_BUILD_POLICY" == FRESH_ONLY ]] || exit 1
 [[ "$NEQ_MAX_SAMPLES" =~ ^[0-9]+$ && "$PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]] || exit 1
-[[ -f "$COMPILE_TEMPLATE" && -f "$FUNCTION_LISTER" ]] || exit 1
+[[ -f "$COMPILE_TEMPLATE" && -f "$FUNCTION_LISTER" && -f "$FUNCTION_SELECTOR" ]] || exit 1
 NEQ_ROOT="$(realpath -m "$NEQ_ROOT")"
 case "$NEQ_ROOT" in "$SCRIPT_DIR"/*) ;; *) echo "NEQ_ROOT must be inside repository" >&2; exit 1 ;; esac
 [[ -d "$NEQ_ROOT" ]] || exit 1
@@ -59,6 +62,7 @@ if (( EQBENCH_RESOURCE_ADMISSION == 1 )); then
 fi
 
 IDS="B1 B2 B3 B4 B5 B6 B7 B8 B9 B10 B11 B12 B13 B14 B15 B16"
+SAME_ISA_GROUPS=("B1 B2 B3 B4 B5 B6 B7 B8" "B9 B10 B11 B12 B13 B14 B15 B16")
 BINARY_ID_ARGS=()
 for id in $IDS; do BINARY_ID_ARGS+=(--binary-id "$id"); done
 binary_name() {
@@ -76,10 +80,33 @@ binary_name() {
     esac
     printf '%s-%s-%s-%s' "$variant" "$arch" "$compiler" "$opt"
 }
+ANALYSIS_PAIR_IDS=()
+for same_isa_group in "${SAME_ISA_GROUPS[@]}"; do
+    for left_binary_id in $same_isa_group; do
+        for right_binary_id in $same_isa_group; do
+            ANALYSIS_PAIR_IDS+=("N_${left_binary_id}_O_${right_binary_id}")
+        done
+    done
+done
+declare -A ANALYSIS_PAIR_SET=()
+for analysis_pair in "${ANALYSIS_PAIR_IDS[@]}"; do
+    ANALYSIS_PAIR_SET["$analysis_pair"]=1
+done
+if [[ -n "$NEQ_PAIR_FILTER" ]]; then
+    IFS=',' read -r -a requested_pairs <<< "$NEQ_PAIR_FILTER"
+    for requested_pair in "${requested_pairs[@]}"; do
+        [[ -n "${ANALYSIS_PAIR_SET[$requested_pair]:-}" ]] || {
+            echo "NEQ_PAIR_FILTER contains a non-primary-matrix pair: $requested_pair" >&2
+            exit 1
+        }
+    done
+fi
 pair_selected() { [[ -z "$NEQ_PAIR_FILTER" || ",$NEQ_PAIR_FILTER," == *",$1,"* ]]; }
 pair_count() {
-    local count=0 a b
-    for a in $IDS; do for b in $IDS; do pair_selected "N_${a}_O_${b}" && count=$((count + 1)); done; done
+    local count=0 pair
+    for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
+        pair_selected "$pair" && count=$((count + 1))
+    done
     printf '%s\n' "$count"
 }
 
@@ -102,6 +129,12 @@ trap cleanup EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 mkdir -p "$OUTPUT_BASE_DIR"; OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
+if [[ -s "$OUTPUT_BASE_DIR/run_manifest.txt" ]] \
+    && grep -q '^run_kind=neqbench_all_cross_matrix_current$' "$OUTPUT_BASE_DIR/run_manifest.txt"; then
+    echo "Existing output uses the old 256-pair cross-ISA scope: $OUTPUT_BASE_DIR" >&2
+    echo "Use a fresh OUTPUT_BASE_DIR for the same-ISA caller-closure evaluation." >&2
+    exit 1
+fi
 declare -A COMPLETED_FUNCTION_SUMMARY_DIRS=()
 if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]]; then
     while IFS= read -r -d '' summary_file; do
@@ -127,13 +160,64 @@ while IFS= read -r dir; do
     if (( NEQ_MAX_SAMPLES > 0 && SOURCE_PAIR_COUNT >= NEQ_MAX_SAMPLES )); then break; fi
 done < <(find "$NEQ_ROOT" -type d -name Neq -print | sort)
 (( SOURCE_PAIR_COUNT > 0 )) || exit 1
+if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && "$SOURCE_PAIR_COUNT" != "$EXPECTED_FULL_SOURCE_PAIRS" ]]; then
+    echo "FULL_NEQ source census must contain exactly $EXPECTED_FULL_SOURCE_PAIRS source pairs; got $SOURCE_PAIR_COUNT" >&2
+    exit 1
+fi
 CENSUS_DIGEST="$(sha256sum "$CENSUS" | awk '{print $1}')"
 PREFILTER_SOURCE_CENSUS_FILE="$OUTPUT_BASE_DIR/prefilter_source_paths.txt"
 cut -f1 "$CENSUS" > "$PREFILTER_SOURCE_CENSUS_FILE"
 PREFILTER_SOURCE_CENSUS_DIGEST="$(sha256sum "$PREFILTER_SOURCE_CENSUS_FILE" | awk '{print $1}')"
+
+FUNCTION_SELECTION_CENSUS_FILE="$OUTPUT_BASE_DIR/neq_function_selection.tsv"
+FUNCTION_SELECTION_FAILURES_FILE="$OUTPUT_BASE_DIR/function_selection_failures.txt"
+: > "$FUNCTION_SELECTION_CENSUS_FILE"
+: > "$FUNCTION_SELECTION_FAILURES_FILE"
+printf 'sample\tall_functions\tchanged_functions\tcaller_closure_functions\tselected_functions\n' \
+    > "$FUNCTION_SELECTION_CENSUS_FILE"
+TOTAL_PLANNED_FUNCTIONS=0
+TOTAL_PLANNED_PAIR_JOBS=0
+FUNCTION_SELECTION_INDEX=0
+while IFS="$(printf '\t')" read -r sample new_source old_source; do
+    [[ -n "$sample" ]] || continue
+    FUNCTION_SELECTION_INDEX=$((FUNCTION_SELECTION_INDEX + 1))
+    selection_dir="$OUTPUT_BASE_DIR/$sample"
+    mkdir -p "$selection_dir"
+    if ! "$PYTHON_BIN" "$FUNCTION_SELECTOR" \
+        --new-source "$new_source" --old-source "$old_source" \
+        --all-output "$selection_dir/functions.all.txt" \
+        --changed-output "$selection_dir/changed_functions.txt" \
+        --caller-output "$selection_dir/caller_closure.txt" \
+        --selected-output "$selection_dir/functions.txt" \
+        > "$selection_dir/function-selection-summary.txt" \
+        2> "$selection_dir/function-selection.error"; then
+        printf '%s\n' "$sample" >> "$FUNCTION_SELECTION_FAILURES_FILE"
+        echo "Function selection failed for $sample; see $selection_dir/function-selection.error" >&2
+        exit 1
+    fi
+    all_function_count="$(wc -l < "$selection_dir/functions.all.txt")"
+    changed_function_count="$(wc -l < "$selection_dir/changed_functions.txt")"
+    caller_closure_count="$(wc -l < "$selection_dir/caller_closure.txt")"
+    selected_function_count="$(wc -l < "$selection_dir/functions.txt")"
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$sample" "$all_function_count" "$changed_function_count" \
+        "$caller_closure_count" "$selected_function_count" \
+        >> "$FUNCTION_SELECTION_CENSUS_FILE"
+    TOTAL_PLANNED_FUNCTIONS=$((TOTAL_PLANNED_FUNCTIONS + selected_function_count))
+    TOTAL_PLANNED_PAIR_JOBS=$((TOTAL_PLANNED_PAIR_JOBS + selected_function_count * EXPECTED_PAIRS_PER_FUNCTION))
+    printf '[SELECTION %s/%s] %s: all=%s changed=%s caller_closure=%s selected=%s\n' \
+        "$FUNCTION_SELECTION_INDEX" "$SOURCE_PAIR_COUNT" "$sample" \
+        "$all_function_count" "$changed_function_count" \
+        "$caller_closure_count" "$selected_function_count"
+done < "$CENSUS"
+FUNCTION_SELECTION_CENSUS_DIGEST="$(sha256sum "$FUNCTION_SELECTION_CENSUS_FILE" | awk '{print $1}')"
+
 if (( DRY_RUN == 1 )); then
     cp "$CENSUS" "$OUTPUT_BASE_DIR/dry_run_sources.txt"
-    echo "selected=$SOURCE_PAIR_COUNT"
+    echo "selected_sources=$SOURCE_PAIR_COUNT"
+    echo "selected_functions=$TOTAL_PLANNED_FUNCTIONS"
+    echo "planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS"
+    echo "pairs_per_function=$EXPECTED_PAIRS_PER_FUNCTION"
     exit 0
 fi
 
@@ -271,7 +355,22 @@ pair_status_is_terminal_result() {
     [[ -s "$log" && -s "$status" ]] || return 1
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" 2>/dev/null | grep -Eq '^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$'
 }
+progress_update() {
+    local sample="$1" function="$2" left_id="$3" right_id="$4" status="$5"
+    {
+        flock -x 9
+        local completed remaining
+        completed="$(cat "$PROGRESS_COUNT_FILE")"
+        completed=$((completed + 1))
+        printf '%s\n' "$completed" > "$PROGRESS_COUNT_FILE"
+        remaining=$((TOTAL_PLANNED_PAIR_JOBS - completed))
+        printf '[PROGRESS] completed=%s/%s remaining=%s sample=%s function=%s pair=%s<->%s status=%s\n' \
+            "$completed" "$TOTAL_PLANNED_PAIR_JOBS" "$remaining" \
+            "$sample" "$function" "$left_id" "$right_id" "$status"
+    } 9>"$PROGRESS_LOCK_FILE"
+}
 run_pair() {
+    local sample_position="${11}" function_position="${12}" function_total="${13}"
     local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="${10}"
     local log="$out/$function"_"$left_id"_"$right_id.log" pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
@@ -285,7 +384,11 @@ run_pair() {
     if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then status="$detail"; else status=ERROR; ec=1; fi
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
     rm -rf "$pair_tmp"
-    printf '[%s] [%s %s/%s] %s <-> %s : %s\n' "$sample" "$function" "$count" "$total" "$left_id" "$right_id" "$status"
+    progress_update "$sample" "$function" "$left_id" "$right_id" "$status"
+    printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : %s\n' \
+        "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
+        "$function_position" "$function_total" "$count" "$total" \
+        "$left_id" "$right_id" "$status"
     return "$ec"
 }
 wait_slot() {
@@ -304,7 +407,7 @@ wait_all() {
 ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
 cat > "$RUN_MANIFEST" <<EOF
-run_kind=neqbench_all_cross_matrix_current
+run_kind=neqbench_all_same_isa_function_closure_current
 run_scope=$NEQ_RUN_SCOPE
 build_policy=$NEQ_BUILD_POLICY
 neq_root=$NEQ_ROOT
@@ -329,10 +432,19 @@ dry_run=$DRY_RUN
 prefilter_source_count=$SOURCE_PAIR_COUNT
 prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
 target_sources=$SOURCE_PAIR_COUNT
+expected_full_source_pairs=$EXPECTED_FULL_SOURCE_PAIRS
+function_policy=changed_functions_plus_recursive_source_callers
+function_selection_census_file=$(basename "$FUNCTION_SELECTION_CENSUS_FILE")
+function_selection_census_digest=$FUNCTION_SELECTION_CENSUS_DIGEST
 compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
 new_binary_count=16
 old_binary_count=16
-expected_cross_pairs_per_function=256
+same_isa_pair_policy=arm64_B1_B8_and_mips64_B9_B16
+expected_same_isa_pairs_per_function=128
+expected_arm64_pairs_per_function=64
+expected_mips64_pairs_per_function=64
+planned_functions=$TOTAL_PLANNED_FUNCTIONS
+planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS
 source_pair_count=$SOURCE_PAIR_COUNT
 source_pair_census_digest=$CENSUS_DIGEST
 runner_script_sha256=$(sha256sum "$SCRIPT_DIR/neqbench_run_all_32jobs.sh" | awk '{print $1}')
@@ -340,6 +452,15 @@ analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
 EOF
 CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
 printf 'analysis_config_digest=%s\n' "$CONFIG_DIGEST" >> "$RUN_MANIFEST"
+
+PROGRESS_COUNT_FILE="$RUN_TMP/progress.completed"
+PROGRESS_LOCK_FILE="$RUN_TMP/progress.lock"
+printf '0\n' > "$PROGRESS_COUNT_FILE"
+touch "$PROGRESS_LOCK_FILE"
+printf '[PROGRESS] planned samples=%s functions=%s pair_jobs=%s pairs_per_function=%s remaining=%s\n' \
+    "$SOURCE_PAIR_COUNT" "$TOTAL_PLANNED_FUNCTIONS" \
+    "$TOTAL_PLANNED_PAIR_JOBS" "$EXPECTED_PAIRS_PER_FUNCTION" \
+    "$TOTAL_PLANNED_PAIR_JOBS"
 
 ACTIVE_JOBS=0
 RUN_PAIR_FAILURES=0
@@ -355,8 +476,10 @@ TOTAL_PAIR_JOBS=0
 TOTAL_SCHEDULED_PAIR_JOBS=0
 TOTAL_SKIPPED_PAIR_JOBS=0
 CURRENT_PAIR_INDEX=0
+CURRENT_SAMPLE_INDEX=0
 while IFS="$(printf '\t')" read -r sample new_source old_source; do
     [[ -n "$sample" ]] || continue
+    CURRENT_SAMPLE_INDEX=$((CURRENT_SAMPLE_INDEX + 1))
     dir="$(dirname "$new_source")"; new="$(basename "$new_source" .c)"; old="$(basename "$old_source" .c)"
     source_dir="$dir/source"; OUTPUT_SAMPLE="$OUTPUT_BASE_DIR/$sample"; mkdir -p "$source_dir" "$OUTPUT_SAMPLE"
     cmp -s "$new_source" "$source_dir/$new.c" || cp "$new_source" "$source_dir/$new.c"
@@ -373,6 +496,9 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
         continue
     fi
+    functions_file="$OUTPUT_SAMPLE/functions.txt"
+    function_total="$(wc -l < "$functions_file")"
+    function_position=0
     EXPECTED_BINARY_COUNT=$((EXPECTED_BINARY_COUNT + 32))
     new_ready=1
     if ! prepare_variant "$new_source" "$new" "$source_dir" "$sample"; then
@@ -401,43 +527,50 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
     COMPLETED_SAMPLES=$((COMPLETED_SAMPLES + 1))
     while IFS= read -r function; do
         [[ -n "$function" ]] || continue
+        function_position=$((function_position + 1))
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         function_dir="$OUTPUT_SAMPLE/$function"; mkdir -p "$function_dir"; total="$(pair_count)"; count=0
         if [[ "$SKIP_COMPLETED_RESULTS" != 0 \
             && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]:-}" ]]; then
             function_skipped_pairs=0
-            while read -r a; do while read -r b; do
-                left_id="N_$a"; right_id="O_$b"; pair="$left_id"_"$right_id"; pair_selected "$pair" || continue
+            for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
+                pair_selected "$pair" || continue
+                left_id="${pair%%_O_*}"; right_id="O_${pair#*_O_}"
                 status_file="$function_dir/$function"_"$pair.pair-status.json"
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$EXPECTED_STATUS"
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
                 TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
                 TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                 function_skipped_pairs=$((function_skipped_pairs + 1))
-            done < <(printf '%s\n' $IDS); done < <(printf '%s\n' $IDS)
+                progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
+            done
             echo "[$sample] [$function] Skipped completed function: results_summary.txt exists; pairs=$function_skipped_pairs/$total"
             continue
         fi
-        while read -r a; do while read -r b; do
-            left_id="N_$a"; right_id="O_$b"; pair="$left_id"_"$right_id"; pair_selected "$pair" || continue
-            left="$source_dir/$(binary_name "$new" "$a")"; right="$source_dir/$(binary_name "$old" "$b")"; count=$((count + 1)); TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
+        for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
+            pair_selected "$pair" || continue
+            left_id="${pair%%_O_*}"; right_id="O_${pair#*_O_}"
+            left_binary_id="${left_id#N_}"; right_binary_id="${right_id#O_}"
+            left="$source_dir/$(binary_name "$new" "$left_binary_id")"; right="$source_dir/$(binary_name "$old" "$right_binary_id")"; count=$((count + 1)); TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
             log="$function_dir/$function"_"$pair.log"; status_file="$function_dir/$function"_"$pair.pair-status.json"; target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
             printf '%s\n' "$status_file" | sed "s#^$OUTPUT_BASE_DIR/##" >> "$EXPECTED_STATUS"
             "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
             if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] && pair_status_is_terminal_result "$log" "$target"; then
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
                 TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
                 continue
             fi
             wait_slot
             TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
-            run_pair "$sample" "$function" "$left_id" "$right_id" "$left" "$right" "$function_dir" "$count" "$total" "$target" &
+            run_pair "$sample" "$function" "$left_id" "$right_id" "$left" "$right" "$function_dir" "$count" "$total" "$target" \
+                "$CURRENT_SAMPLE_INDEX" "$function_position" "$function_total" &
             ACTIVE_JOBS=$((ACTIVE_JOBS + 1))
-        done < <(printf '%s\n' $IDS); done < <(printf '%s\n' $IDS)
+        done
         wait_all
         find "$function_dir" -maxdepth 1 -type f -name '*.log' -print0 > "$function_dir/.summary-log-paths.list0"
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary --function-summary --canonical-only --function-name "$function" --summary-level compact --log-list0 "$function_dir/.summary-log-paths.list0" > "$function_dir/results_summary.txt" || true
-    done < "$RUN_TMP/new.functions"
+    done < "$functions_file"
 done < "$CENSUS"
 wait_all
 find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'run_stdout.log' -print0 > "$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0"
@@ -454,7 +587,8 @@ total_functions=$TOTAL_FUNCTIONS
 total_pair_jobs=$TOTAL_PAIR_JOBS
 total_scheduled_pair_jobs=$TOTAL_SCHEDULED_PAIR_JOBS
 total_skipped_pair_jobs=$TOTAL_SKIPPED_PAIR_JOBS
-expected_pairs_per_function=256
+progress_completed_pair_jobs=$(cat "$PROGRESS_COUNT_FILE")
+expected_pairs_per_function=$EXPECTED_PAIRS_PER_FUNCTION
 expected_binary_count=$EXPECTED_BINARY_COUNT
 compiled_binary_count=$COMPILED_BINARY_COUNT
 compile_failure_count=$RUN_COMPILE_FAILURES
@@ -469,5 +603,5 @@ if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT 
     exit_status=1
 fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "./neqbench_run_all_32jobs.sh"
-echo "NeqBench cross matrix finished: $OUTPUT_BASE_DIR"
+echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
 exit "$exit_status"

@@ -152,6 +152,14 @@ class SatSafetyPilotEncoder:
 
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is SafeCounterexampleProductionSignal:
+            if not signal.validates():
+                raise ValueError(
+                    "safe counterexample signal lacks validated receipt authority"
+                )
+            if session.domain_signal_state.get(
+                "sat_safety_safe_counterexample_committed"
+            ):
+                return ()
             return (EventIntent(
                 EventType.COUNTEREXAMPLE,
                 DecisiveProofEventAuthority(signal.proof_artifact_digest),
@@ -209,6 +217,17 @@ class SatSafetyPilotEncoder:
     def commit_emitted_signal(
         self, session: Any, signal: Any, intents: tuple[EventIntent, ...],
     ) -> None:
+        if type(signal) is SafeCounterexampleProductionSignal:
+            if len(intents) != 1 or intents[0].event_type is not EventType.COUNTEREXAMPLE:
+                raise ValueError("safe counterexample emission transaction is invalid")
+            if session.domain_signal_state.get(
+                "sat_safety_safe_counterexample_committed"
+            ):
+                raise ValueError("safe counterexample was already committed")
+            session.domain_signal_state[
+                "sat_safety_safe_counterexample_committed"
+            ] = signal.proof_artifact_digest
+            return
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
         pending_key = "sat_safety_pending_emission_transactions"
@@ -234,6 +253,15 @@ class SatSafetyPilotEncoder:
         if occurrence_key in ledger:
             raise ValueError("SAT safety transaction duplicates committed state")
         ledger.add(occurrence_key)
+        if action == "OBSERVED":
+            observed = session.domain_signal_state.setdefault(
+                "sat_safety_observed_signals", {}
+            )
+            if type(observed) is not dict:
+                raise TypeError("SAT safety observed signal ledger is not exact")
+            prior = observed.setdefault(occurrence_key, signal)
+            if prior != signal:
+                raise ValueError("SAT safety observed signal authority collided")
         pending.pop(id(signal))
         if not pending:
             session.domain_signal_state.pop(pending_key, None)

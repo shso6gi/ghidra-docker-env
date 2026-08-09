@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+from scripts.function_tracer_pcode.equivalence.obligations import (
+    SolverQueryExecutionReceipt,
+)
 from scripts.function_tracer_pcode.model import ComparisonSurface, Expression, FunctionReturnAnalysis, ReturnInfo
 
 
@@ -17,6 +20,34 @@ _CROSS_SIDE_EXTENSION_SURFACE_EVIDENCE = {
     "extension_surface_extension_kind": "INT_ZEXT",
     "extension_surface_source_bit_widths": (32,),
 }
+
+
+def _solver_bound_sat_result() -> QueryResult:
+    query = "(check-sat)"
+    model = {}
+    parallel_result = SimpleNamespace(
+        is_equivalent=False,
+        results=(),
+        get_counterexample=lambda: model,
+    )
+    result = QueryResult(
+        is_equivalent=False,
+        counterexample_raw=model,
+        solver_results=parallel_result,
+    )
+    result.last_query = query
+    result.solver_query_execution_receipt = (
+        SolverQueryExecutionReceipt.from_execution(
+            query=query,
+            query_label="(0,0)",
+            proof_stage="with-ineq",
+            parallel_result=parallel_result,
+            solver_identity=("unit", "fake", ("fake",)),
+            timeout_budget=5.0,
+            use_hard_timeout=False,
+        )
+    )
+    return result
 
 
 def _analysis(
@@ -60,9 +91,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_without_surface_
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
@@ -100,9 +129,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_artifact_not_equivalent_w
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
@@ -144,9 +171,7 @@ def test_pairwise_keeps_subsurface_constant_sign_artifact_decisive_for_wider_sur
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
@@ -188,9 +213,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_one_sided_s
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
@@ -230,9 +253,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_detached_su
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 
@@ -272,9 +293,7 @@ def test_pairwise_keeps_true_constant_sat_decisive():
     }
 
     def _sat_query(_self, *_args, **_kwargs):
-        result = QueryResult(is_equivalent=False, counterexample_raw={})
-        result.last_query = "(check-sat)"
-        return result
+        return _solver_bound_sat_result()
 
     strategy._solve_query_after_guard = MethodType(_sat_query, strategy)
 

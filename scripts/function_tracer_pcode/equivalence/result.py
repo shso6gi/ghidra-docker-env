@@ -343,6 +343,14 @@ class EquivalenceResult:
         if self.pairwise_debug_stats:
             stats = self.pairwise_debug_stats
             lines.append("")
+            lines.append("Pairwise Final Solver Disposition Summary:")
+            lines.append(
+                "  unsat={unsat}, sat={sat}, unknown={unknown}".format(
+                    unsat=stats.get("unsat_results", 0),
+                    sat=stats.get("sat_results", 0),
+                    unknown=stats.get("unknown_results", 0),
+                )
+            )
             lines.append("Pairwise Timeout Normalization Summary:")
             lines.append(
                 "  attempts={attempts}, changed={changed}, no_change={no_change}, "
@@ -350,9 +358,18 @@ class EquivalenceResult:
                     attempts=stats.get("timeout_fallback_attempts", 0),
                     changed=stats.get("changed_pairs", 0),
                     no_change=stats.get("no_change_pairs", 0),
-                    unsat=stats.get("unsat_results", 0),
-                    sat=stats.get("sat_results", 0),
-                    unknown=stats.get("unknown_results", 0),
+                    unsat=stats.get(
+                        "normalization_unsat_results",
+                        stats.get("unsat_results", 0),
+                    ),
+                    sat=stats.get(
+                        "normalization_sat_results",
+                        stats.get("sat_results", 0),
+                    ),
+                    unknown=stats.get(
+                        "normalization_unknown_results",
+                        stats.get("unknown_results", 0),
+                    ),
                 )
             )
             if (

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import hashlib
 import pytest
 
 from scripts.function_tracer_pcode.equivalence.formula import FormulaBuilder
@@ -42,6 +43,25 @@ def _analysis(name: str, value: int) -> FunctionReturnAnalysis:
     )
 
 
+def _partitioned_analysis(name: str, first_value: int) -> FunctionReturnAnalysis:
+    parameter = Expression.parameter("x", 0, data_type="int", size=4)
+    zero = Expression.constant(0, size=4)
+    is_zero = Condition(Expression.binary_op("INT_EQUAL", parameter, zero))
+    is_nonzero = Condition(Expression.binary_op("INT_NOTEQUAL", parameter, zero))
+    return FunctionReturnAnalysis(
+        function_name=name,
+        entry_point="0x1000",
+        parameters=[
+            {"name": "x", "index": 0, "size": 4, "data_type": "int"}
+        ],
+        returns=[
+            ReturnInfo("0x1010", Expression.constant(first_value, size=4), [is_zero]),
+            ReturnInfo("0x1020", Expression.constant(9, size=4), [is_nonzero]),
+        ],
+        return_type="int",
+    )
+
+
 def test_monolithic_ordered_ite_surface_is_split_into_closed_regions() -> None:
     strategy = MonolithicStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5))
 
@@ -63,6 +83,76 @@ def test_monolithic_local_sat_requires_global_violation_replay() -> None:
     assert result.is_equivalent is False
     assert result.pairwise_debug_stats["monolithic_split_planned_regions"] == 1
     assert result.sat_pairs == 1
+
+
+def test_structured_sat_keeps_the_exact_replay_formula_after_later_regions(
+    monkeypatch,
+) -> None:
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        enable_rewrite=False,
+    )
+    original_execute = checker.monolithic_strategy._execute_region_plan
+    captured = {}
+
+    def capture_execution(*args, **kwargs):
+        execution = original_execute(*args, **kwargs)
+        captured["execution"] = execution
+        return execution
+
+    monkeypatch.setattr(
+        checker.monolithic_strategy, "_execute_region_plan", capture_execution,
+    )
+
+    result = checker.check(
+        _partitioned_analysis("left", 7),
+        _partitioned_analysis("right", 8),
+    )
+
+    execution = captured["execution"]
+    assert execution.final_is_equivalent is False
+    assert execution.sat_replay_formula
+    assert execution.last_formula != execution.sat_replay_formula
+    assert hashlib.sha256(
+        execution.sat_replay_formula.encode("utf-8")
+    ).hexdigest() == execution.legacy_replay_receipt.contract.formula_digest
+    from scripts.function_tracer_pcode.equivalence.strategies import (
+        monolithic as monolithic_module,
+    )
+    with pytest.raises(
+        ValueError, match="monolithic_counterexample_replay_formula_mismatch"
+    ):
+        monolithic_module._TypedMonolithicCounterexampleEvidence(
+            execution.sat_replay_census,
+            execution.model_digest,
+            execution.fixed_model_assertion_digest,
+            execution.sat_replay_formula + "\n; tampered",
+            execution.legacy_replay_receipt,
+            execution.sat_region_id,
+        )
+
+
+def test_structured_sat_without_canonical_census_gets_typed_replay_receipts(
+    monkeypatch,
+) -> None:
+    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+
+    monkeypatch.setattr(
+        monolithic_authority, "reconstruct_canonical_census", lambda _frozen: None,
+    )
+    result = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        enable_rewrite=False,
+    ).check(_analysis("left", 7), _analysis("right", 8))
+
+    assert result.is_equivalent is False
+    terminal = result.call_proof_terminal_provenance["monolithic_terminal_receipt"]
+    assert terminal["outcome_kind"] == "decisive_counterexample"
+    assert terminal["model_digest"]
+    assert terminal["legacy_replay_receipt_digest"]
+    assert terminal["counterexample_safety_receipt_digest"]
+    assert terminal["proof_bundle_digest"]
+    assert terminal["validated"] is True
 
 
 def test_rebuilt_unknown_extension_region_queries_are_z3_parseable() -> None:
@@ -1126,7 +1216,7 @@ def test_production_split_legacy_unsat_without_bundle_is_inconclusive(
     assert terminal["validated"] is True
 
 
-def test_production_split_legacy_sat_without_bundle_is_inconclusive(
+def test_production_split_legacy_sat_has_typed_replay_proof_bundle(
     monkeypatch,
 ) -> None:
     checker = EquivalenceChecker(
@@ -1143,13 +1233,15 @@ def test_production_split_legacy_sat_without_bundle_is_inconclusive(
 
     result = checker.check(_analysis("left", 7), _analysis("right", 8))
 
-    assert result.is_equivalent is None
-    assert any(
-        reason.reason_id == "counterexample_analysis_safety_unproven"
-        for reason in result.unknown_reasons
-    )
+    assert result.is_equivalent is False
     terminal = result.call_proof_terminal_provenance[
         "monolithic_terminal_receipt"
     ]
-    assert terminal["outcome_kind"] == "inconclusive_diagnostic"
+    assert terminal["outcome_kind"] == "decisive_counterexample"
+    assert terminal["sat_region_id"] == "legacy"
+    assert terminal["model_digest"]
+    assert terminal["fixed_model_assertion_digest"]
+    assert terminal["legacy_replay_receipt_digest"]
+    assert terminal["counterexample_safety_receipt_digest"]
+    assert terminal["proof_bundle_digest"]
     assert terminal["validated"] is True

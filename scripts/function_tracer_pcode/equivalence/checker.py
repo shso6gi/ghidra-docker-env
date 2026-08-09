@@ -874,6 +874,11 @@ class EquivalenceChecker:
         original_signature2: Optional[FunctionSignature]
     ) -> EquivalenceResult:
         """Stage plan を実行"""
+        from .obligations.stage_runner import (
+            merge_stage_debug_statistics,
+            normalize_timeout_contradiction,
+        )
+
         result = None
         last_result = None
         stage_path = []
@@ -947,16 +952,14 @@ class EquivalenceChecker:
                     force_strategy=strategy
                 )
             
+            normalize_timeout_contradiction(result)
+
             # stage_path を記録
             result.stage_path = stage_path.copy()
-            current_debug_stats = dict(result.pairwise_debug_stats or {})
-            if current_debug_stats:
-                for key, value in current_debug_stats.items():
-                    accumulated_pairwise_debug_stats[key] = (
-                        accumulated_pairwise_debug_stats.get(key, 0) + int(value or 0)
-                    )
-            if accumulated_pairwise_debug_stats:
-                result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
+            merge_stage_debug_statistics(
+                accumulated_pairwise_debug_stats,
+                result,
+            )
             self._merge_completed_recovery_proofs_from_result(
                 analysis1,
                 analysis2,

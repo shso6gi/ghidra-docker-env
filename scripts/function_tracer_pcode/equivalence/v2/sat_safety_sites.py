@@ -40,6 +40,11 @@ SAT_SAFETY_BLOCKER_COMPLETED_SITE = SatSafetyProducerSiteSpec(
     "sat_unsafety_resolution_producer",
     "DECISIVE",
 )
+SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE = SatSafetyProducerSiteSpec(
+    "sat-safety-counterexample-bound-completed",
+    "sat_counterexample_bound_resolution_producer",
+    "DECISIVE",
+)
 SAT_SAFETY_AMBIGUITY_OBSERVED_SITE = SatSafetyProducerSiteSpec(
     "sat-safety-ambiguity-observed",
     "sat_counterexample_ambiguity_producer",
@@ -55,6 +60,7 @@ SAT_SAFETY_AMBIGUITY_COMPLETED_SITE = SatSafetyProducerSiteSpec(
 SAT_SAFETY_PRODUCER_SITE_SPECS = (
     SAT_SAFETY_BLOCKER_OBSERVED_SITE,
     SAT_SAFETY_BLOCKER_COMPLETED_SITE,
+    SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE,
     SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
     SAT_SAFETY_AMBIGUITY_COMPLETED_SITE,
 )

@@ -94,6 +94,12 @@ WORKFLOW_TEST_PATHS = (
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_process_supervisor_command.py",
 )
 
+_PHASE7_DECLARED_EXTERNAL_FIXTURE_SKIPS = (
+    "test_phase7_legacy_manifest_binds_exact_ordered_411_raw_files",
+    "test_phase7_legacy_manifest_rejects_drop_duplicate_reorder_and_digest_drift",
+    "test_phase7_legacy_validator_rejects_self_consistent_source_and_id_substitution",
+)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -114,17 +120,22 @@ def _dry_run_source_ids(path: Path) -> tuple[str, ...]:
 
 def _passing_junit(
     path: Path, *, minimum: int, required_names: tuple[str, ...] = (),
+    allowed_skipped_names: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
     root = ElementTree.parse(path).getroot()
     suites = tuple(root.iter("testsuite"))
     cases = tuple(root.iter("testcase"))
     tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+    skipped_names = tuple(sorted(
+        case.attrib.get("name", "")
+        for case in cases if case.find("skipped") is not None
+    ))
     if (
         tests != len(cases)
         or tests < minimum
         or any(int(suite.attrib.get("errors", "0")) for suite in suites)
         or any(int(suite.attrib.get("failures", "0")) for suite in suites)
-        or any(int(suite.attrib.get("skipped", "0")) for suite in suites)
+        or skipped_names != tuple(sorted(allowed_skipped_names))
     ):
         raise ValueError("Phase 8 JUnit is not a complete passing run")
     names = {case.attrib.get("name", "") for case in cases}
@@ -257,6 +268,7 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     phase7 = _passing_junit(
         phase7_junit,
         minimum=508,
+        allowed_skipped_names=_PHASE7_DECLARED_EXTERNAL_FIXTURE_SKIPS,
         required_names=(
             "test_canonical_census_is_all_or_nothing_and_never_returns_partial_metrics",
             "test_census_rejects_timeout_stream_mismatch_and_missing_required_materialization",
@@ -279,7 +291,10 @@ def build_phase8_cutover_validation(repo_root: Path) -> Mapping[str, Any]:
     if (
         producer_manifest["site_count"] != len(producer_manifest["sites"])
         or producer_manifest["site_count"] < 1
-        or "safe-counterexample-production" not in site_ids
+        or not {
+            "safe-counterexample-pairwise-production",
+            "safe-counterexample-monolithic-production",
+        }.issubset(site_ids)
     ):
         raise ValueError("Phase 8 decisive producer sites are not audited")
     pending_eq_source = (

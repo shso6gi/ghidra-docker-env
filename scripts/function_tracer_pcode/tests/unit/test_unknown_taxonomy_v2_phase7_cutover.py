@@ -571,7 +571,7 @@ def test_real_solver_checker_unknown_uses_all_site_activation_census(tmp_path):
     })
 
     def analysis(name, value, notes=()):
-        return FunctionReturnAnalysis(
+        result = FunctionReturnAnalysis(
             function_name=name,
             entry_point="0x1000",
             parameters=[],
@@ -581,6 +581,31 @@ def test_real_solver_checker_unknown_uses_all_site_activation_census(tmp_path):
             return_type="int",
             analysis_notes=list(notes),
         )
+        result.return_abi_facts = {
+            "schema_version": 1,
+            "calling_convention": {
+                "status": "PRESENT",
+                "value": ("ghidra_calling_convention_v1", "default"),
+                "source": "phase7-test",
+            },
+            "declared_or_effective_return_type": {
+                "status": "PRESENT",
+                "value": ("ghidra_return_type_v1", "/int", 4),
+                "source": "phase7-test",
+            },
+            "return_storage_descriptor": {
+                "status": "PRESENT",
+                "value": (
+                    "ghidra_return_storage_v1",
+                    ((
+                        "ghidra_return_storage_member_v1",
+                        "register", 0, 8,
+                    ),),
+                ),
+                "source": "phase7-test",
+            },
+        }
+        return result
 
     checker = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,

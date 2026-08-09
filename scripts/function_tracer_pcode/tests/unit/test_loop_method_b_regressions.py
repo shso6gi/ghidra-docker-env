@@ -14,6 +14,9 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.obligations import (
+    SolverQueryExecutionReceipt,
+)
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
 from scripts.function_tracer_pcode.analysis.condition import ConditionNormalizer
 from scripts.function_tracer_pcode.analysis.recurrence_summary import ResidueLoopCase, StructuralRecurrenceSummarizer
@@ -1292,10 +1295,29 @@ def _pairwise_strategy() -> PairwiseStrategy:
 
 def _stub_pair_solver_unsat(strategy: PairwiseStrategy) -> None:
     from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
-    result = QueryResult(True)
-    result.last_query = "(assert false)\n(check-sat)"
-    result.pair_stage = "value"
-    strategy._solve_query_after_guard = Mock(return_value=result)
+    def solve(*args, **_kwargs):
+        pair_id = str(args[-1])
+        query = "(assert false)\n(check-sat)"
+        parallel_result = ParallelResult(
+            results=[SolverResult("fake", SolverStatus.UNSAT)]
+        )
+        result = QueryResult(True, solver_results=parallel_result)
+        result.last_query = query
+        result.pair_stage = "value"
+        result.solver_query_execution_receipt = (
+            SolverQueryExecutionReceipt.from_execution(
+                query=query,
+                query_label=pair_id,
+                proof_stage="value",
+                parallel_result=parallel_result,
+                solver_identity=("unit", "fake", ("fake",)),
+                timeout_budget=5.0,
+                use_hard_timeout=False,
+            )
+        )
+        return result
+
+    strategy._solve_query_after_guard = Mock(side_effect=solve)
 
 
 def _shared_input_base_context() -> dict:

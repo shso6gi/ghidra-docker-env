@@ -24,8 +24,11 @@ from ..obligations import (
     GuardOverlapAttempt,
     GuardOverlapExecutionResult,
     GuardOverlapGraph,
+    SolverQueryExecutionReceipt,
     canonical_guard_query_digest,
     guard_seed,
+    issue_structural_equality_receipt,
+    register_structural_equality_producer,
     status_from_query_result,
 )
 from ..obligations.guard_overlap import (
@@ -33,6 +36,7 @@ from ..obligations.guard_overlap import (
     register_guard_query_executor,
 )
 from ..cause_identity import ProofRequirementContract, ProofRequirementId
+from .pairwise_query_builder import build_void_return_disequivalence_query
 
 
 class _SealedLoopV2RendererReceiptMeta(type):
@@ -530,6 +534,17 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
         if cached is not None:
             result = copy.copy(cached.outcome)
             result.normalization_rules = list(cached.outcome.normalization_rules)
+            source_receipt = getattr(
+                result, "solver_query_execution_receipt", None
+            )
+            if type(source_receipt) is SolverQueryExecutionReceipt:
+                result.solver_query_execution_receipt = (
+                    source_receipt.for_cache_reuse(
+                        query_label=pair_id,
+                        proof_stage=stage,
+                    )
+                )
+            result.last_query = query
             strategy._debug_print(
                 f"  Pair {pair_id} {stage}: ATTEMPT CACHE HIT "
                 f"(query={query_digest[:12]}, t_saved={cached.elapsed_time:.3f}s)"
@@ -575,6 +590,18 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
         is_equivalent=semantic,
         counterexample_raw=counterexample_raw,
         solver_results=parallel_result,
+    )
+    result.last_query = query
+    result.solver_query_execution_receipt = (
+        SolverQueryExecutionReceipt.from_execution(
+            query=query,
+            query_label=pair_id,
+            proof_stage=stage,
+            parallel_result=parallel_result,
+            solver_identity=solver_identity,
+            timeout_budget=float(timeout),
+            use_hard_timeout=use_hard_timeout,
+        )
     )
     if cache is not None:
         cache.put(
@@ -806,9 +833,70 @@ def solve_query_after_guard(
         return result
 
     if _cases_have_void_return_placeholders(case1, case2):
-        result = QueryResult(is_equivalent=True)
-        result.last_query = cond_query
-        result.pair_stage = "void-return"
+        required_projection_bindings = tuple(
+            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                pair_id, ()
+            )
+            or ()
+        )
+        supporting_solver_receipts = ()
+        if required_projection_bindings:
+            void_query = build_void_return_disequivalence_query(
+                base_ctx,
+                case1,
+                case2,
+                param_replace_fn1,
+                param_replace_fn2,
+                pair_id,
+            )
+            result = strategy._solve_query_internal(
+                void_query,
+                pair_id,
+                stage="void-return-projection",
+                use_hard_timeout=True,
+            )
+            result.last_query = void_query
+            result.pair_stage = "void-return-projection"
+            execution_receipt = getattr(
+                result, "solver_query_execution_receipt", None
+            )
+            if result.is_equivalent is not True:
+                return result
+            if (
+                type(execution_receipt) is not SolverQueryExecutionReceipt
+                or not execution_receipt.validates_execution(
+                    query=void_query,
+                    expected_disposition="unsat",
+                    expected_query_label=pair_id,
+                )
+            ):
+                result.is_equivalent = None
+                result.blocking_reason = "structural_projection_query_authority_missing"
+                result.blocking_detail = (
+                    "void-return equality with call projection lacks an exact "
+                    "UNSAT execution receipt"
+                )
+                return result
+            supporting_solver_receipts = (execution_receipt,)
+        else:
+            result = QueryResult(is_equivalent=True)
+            result.last_query = cond_query
+            result.pair_stage = "void-return"
+        result.structural_equality_receipt = (
+            issue_structural_equality_receipt(
+                query_label=pair_id,
+                proof_kind="void-return",
+                evidence=(
+                    "void-return",
+                    hashlib.sha256(cond_query.encode("utf-8")).hexdigest(),
+                    int(base_ctx.get("return_size1", 0) or 0),
+                    int(base_ctx.get("return_size2", 0) or 0),
+                    int(getattr(case1, "index", 0) or 0),
+                    int(getattr(case2, "index", 0) or 0),
+                ),
+                supporting_solver_receipts=supporting_solver_receipts,
+            )
+        )
         return result
 
     try:
@@ -999,11 +1087,9 @@ def solve_query_after_guard(
             pair_id,
         )
         if norm_result.is_equivalent is True:
-            norm_result.last_query = full_query
             norm_result.pair_stage = "norm-ineq"
             return norm_result
         if norm_result.is_equivalent is False:
-            norm_result.last_query = full_query
             norm_result.pair_stage = "norm-ineq"
             return norm_result
         if getattr(norm_result, "blocking_reason", None):
@@ -1719,3 +1805,9 @@ def _log_solver_errors(strategy, query: str, solver_results) -> None:
 
         error_msg = solver_result.error_message or ""
         strategy._debug_print(f"  Solver error: {error_msg}")
+
+
+register_structural_equality_producer(
+    "void-return",
+    solve_query_after_guard,
+)

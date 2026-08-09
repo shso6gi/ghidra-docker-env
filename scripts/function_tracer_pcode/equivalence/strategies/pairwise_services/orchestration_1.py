@@ -15,7 +15,10 @@ from ...obligations import (
     CounterexampleSafetyReceipt,
     GuardOverlapGraph,
     GuardUnsatClosureArtifact,
+    SolverQueryExecutionReceipt,
     SolverUnsatClosureArtifact,
+    StructuralEqualityClosureArtifact,
+    StructuralEqualityReceipt,
 )
 from ...obligations.pair_closure_producers import (
     AggregatePartitionCandidate,
@@ -276,6 +279,7 @@ def _impl_check(
     error_count = 0
     sat_pair_info = None
     sat_safety_receipt = None
+    sat_query_execution_receipt = None
     counterexample_raw = None
     last_formula = None
     resolved_pairs: set[tuple[int, int]] = set()
@@ -1138,7 +1142,29 @@ def _impl_check(
 
             binding_ids = ()
             query_text = str(result.last_query or "")
-            if query_text:
+            expected_solver_disposition = (
+                "unsat" if result.is_equivalent is True
+                else "sat" if result.is_equivalent is False
+                else "unknown"
+            )
+            solver_execution_receipt = getattr(
+                result, "solver_query_execution_receipt", None
+            )
+            solver_execution_valid = (
+                type(solver_execution_receipt)
+                is SolverQueryExecutionReceipt
+                and solver_execution_receipt.validates_execution(
+                    query=query_text,
+                    expected_disposition=expected_solver_disposition,
+                    expected_query_label=pair_id,
+                    expected_model=(
+                        result.counterexample_raw
+                        if expected_solver_disposition == "sat"
+                        else None
+                    ),
+                )
+            )
+            if query_text and solver_execution_valid:
                 formula_digest = hashlib.sha256(query_text.encode("utf-8")).hexdigest()
                 premise_digest = ledger_binding.premise_digest
                 disposition = (
@@ -1206,8 +1232,52 @@ def _impl_check(
                 all_normalization_rules.extend(result.normalization_rules)
 
             if result.is_equivalent is False:
+                sat_terminal_query = (
+                    result.last_query
+                    if isinstance(result.last_query, str)
+                    and result.last_query.strip()
+                    else None
+                )
+                if sat_terminal_query is None or not solver_execution_valid:
+                    unknown_count += 1
+                    unknown_reasons.append(make_unknown_reason(
+                        "unexpected_pairwise_state",
+                        stage="S_PAIRWISE",
+                        pair_or_case=pair_id,
+                        evidence_refs=(
+                            result.pair_stage or "unknown",
+                            (
+                                "sat_terminal_query_receipt_missing"
+                                if sat_terminal_query is None
+                                else "sat_query_execution_receipt_invalid"
+                            ),
+                        ),
+                        detail=(
+                            "SAT result is not bound to the exact solver "
+                            "execution receipt; counterexample promotion is "
+                            "prohibited"
+                        ),
+                    ))
+                    self._debug_print(
+                        f"  Pair {pair_id}: SAT downgraded to UNKNOWN because "
+                        "the terminal solver query is unavailable"
+                    )
+                    continue
                 analysis_safety_validated = not sat_unsafety_reasons
                 if sat_unsafety_reasons:
+                    from ...v2.production_signals import (
+                        SatCounterexampleEvidenceBinding,
+                    )
+                    sat_counterexample_binding = SatCounterexampleEvidenceBinding(
+                        hashlib.sha256(
+                            str(result.last_query or "").encode("utf-8")
+                        ).hexdigest(),
+                        hashlib.sha256(
+                            repr(result.counterexample_raw).encode("utf-8")
+                        ).hexdigest(),
+                        ledger_binding.premise_digest,
+                        (i, j),
+                    )
                     sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
                         sat_unsafety_reasons,
                         analysis1,
@@ -1216,6 +1286,7 @@ def _impl_check(
                         case2=case2,
                         pair_id=pair_id,
                         stage="S_PAIRWISE",
+                        counterexample_binding=sat_counterexample_binding,
                     )
                     if not self._sat_unsafety_resolution_proof_is_complete(
                         sat_unsafety_reason,
@@ -1293,9 +1364,6 @@ def _impl_check(
                         continue
                     same_function_replay_validated = True
 
-                sat_terminal_query = str(
-                    result.last_query or repr(((i, j), PairDisposition.SAT.value))
-                )
                 safety_receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
                     query=sat_terminal_query,
                     model=result.counterexample_raw,
@@ -1306,6 +1374,7 @@ def _impl_check(
                     same_function_replay_safe=same_function_replay_validated,
                 )
                 sat_safety_receipt = safety_receipt
+                sat_query_execution_receipt = solver_execution_receipt
 
                 sat_count += 1
                 sat_pair_info = {
@@ -1328,15 +1397,68 @@ def _impl_check(
                 break
 
             if result.is_equivalent is True:
+                structural_receipt = getattr(
+                    result, "structural_equality_receipt", None
+                )
+                if (
+                    type(structural_receipt) is StructuralEqualityReceipt
+                    and structural_receipt.validates(
+                        expected_query_label=pair_id
+                    )
+                ):
+                    closure_kind = PairClosureKind.STRUCTURAL_EQUALITY
+                    closure_artifact = (
+                        StructuralEqualityClosureArtifact.from_validated_result(
+                            premise_digest=getattr(
+                                runtime,
+                                "premise_digest",
+                                ledger_binding.premise_digest,
+                            ),
+                            query_label=pair_id,
+                            result=result,
+                        )
+                    )
+                elif solver_execution_valid:
+                    closure_kind = PairClosureKind.VALUE_QUERY
+                    closure_artifact = (
+                        SolverUnsatClosureArtifact.from_validated_result(
+                            query_text,
+                            getattr(
+                                runtime,
+                                "premise_digest",
+                                ledger_binding.premise_digest,
+                            ),
+                            pair_id,
+                            "value_query",
+                            result,
+                        )
+                    )
+                else:
+                    unknown_count += 1
+                    unknown_reasons.append(make_unknown_reason(
+                        "unexpected_pairwise_state",
+                        stage="S_PAIRWISE",
+                        pair_or_case=pair_id,
+                        evidence_refs=(
+                            result.pair_stage or "unknown",
+                            "unsat_or_structural_authority_missing",
+                        ),
+                        detail=(
+                            "equivalent pair result has neither an exact "
+                            "UNSAT execution receipt nor a typed structural "
+                            "equality receipt"
+                        ),
+                    ))
+                    self._debug_print(
+                        f"  Pair {pair_id}: equivalent result downgraded to "
+                        "UNKNOWN because proof authority is unavailable"
+                    )
+                    continue
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 pair_ledger.close(PairClosureEvidence.validated(
-                    (i, j), PairClosureKind.VALUE_QUERY, ledger_binding,
-                    SolverUnsatClosureArtifact.from_validated_result(
-                        str(result.last_query or ""),
-                        getattr(runtime, "premise_digest", ledger_binding.premise_digest),
-                        pair_id, "value_query", result,
-                    ),
+                    (i, j), closure_kind, ledger_binding,
+                    closure_artifact,
                     required_binding_uses=tuple(
                         (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
                             pair_id, ()
@@ -1534,6 +1656,7 @@ def _impl_check(
                     pair_key, PairDisposition.SAT,
                     str((sat_pair_info or {}).get("final_query") or ""), "value_query",
                     safety_receipt=sat_safety_receipt,
+                    query_execution_receipt=sat_query_execution_receipt,
                 )
             elif sat_count > 0:
                 pair_ledger.record_terminal_query(
@@ -1656,6 +1779,14 @@ def _impl_check(
                 ledger_counts[PairDisposition.SKIPPED.value]
             ),
         }
+        normalization_stats.update({
+            "normalization_unsat_results": normalization_stats["unsat_results"],
+            "normalization_sat_results": normalization_stats["sat_results"],
+            "normalization_unknown_results": normalization_stats["unknown_results"],
+            "unsat_results": unsat_count,
+            "sat_results": sat_count,
+            "unknown_results": unknown_count,
+        })
         if dispatch_frame is not None and runtime is not None:
             dispatch_frame.pending_query_records = tuple(query_execution_records)
             dispatch_frame.pending_consumed_projection_binding_ids = (

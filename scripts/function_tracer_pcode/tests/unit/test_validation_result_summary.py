@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     format_overall_results_summary,
     format_run_health_summary,
     format_validation_baseline_comparison,
+    parse_log_identity,
     read_validation_log_record,
 )
 from scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight import (
@@ -132,6 +133,13 @@ def _write_pair_status(log_path, outcome):
     )
     path.write_text(json.dumps(sealed))
     return path
+
+
+def test_parse_log_identity_handles_neqbench_axis_filename() -> None:
+    assert parse_log_identity(Path("f_N_B10_O_B11.log")) == (
+        "f",
+        "B10 ↔ B11",
+    )
 
 
 def _payload(function_name, is_equivalent, **extra):

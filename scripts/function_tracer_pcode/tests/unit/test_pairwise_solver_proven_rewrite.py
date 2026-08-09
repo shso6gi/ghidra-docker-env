@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for solver-proven rewrite fallback in pairwise execution."""
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -21,8 +22,39 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    projection_binding_evidence_from_query,
+)
 from scripts.function_tracer_pcode.equivalence.normalize import NormalizationSettings
+from scripts.function_tracer_pcode.equivalence.obligations import (
+    SolverQueryExecutionReceipt,
+    StructuralEqualityReceipt,
+)
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+
+
+def _unsat_query_result(query: str, pair_id: str, stage: str) -> QueryResult:
+    parallel_result = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.UNSAT)]
+    )
+    result = QueryResult(
+        is_equivalent=True,
+        solver_results=parallel_result,
+    )
+    result.last_query = query
+    result.solver_query_execution_receipt = (
+        SolverQueryExecutionReceipt.from_execution(
+            query=query,
+            query_label=pair_id,
+            proof_stage=stage,
+            parallel_result=parallel_result,
+            solver_identity=("unit", "fake", ("fake",)),
+            timeout_budget=5.0,
+            use_hard_timeout=False,
+        )
+    )
+    return result
 
 
 def _param(name: str) -> Expression:
@@ -91,10 +123,10 @@ def test_solver_proven_rewrite_equivalence_proves_and_retries(monkeypatch):
             self.stages.append((stage, use_hard_timeout, query))
             if stage == "rewrite-proof-2":
                 assert "(assert (not (= " in query
-                return QueryResult(is_equivalent=True)
+                return _unsat_query_result(query, pair_id, stage)
             if stage == "rewrite-ineq":
                 assert use_hard_timeout is True
-                return QueryResult(is_equivalent=True)
+                return _unsat_query_result(query, pair_id, stage)
             raise AssertionError(f"unexpected stage: {stage}")
 
     strategy = FakeStrategy()
@@ -140,7 +172,7 @@ def test_solver_proven_rewrite_returns_after_structural_match(monkeypatch):
             self.stages.append(stage)
             if stage == "rewrite-proof-2":
                 assert "(assert (not (= " in query
-                return QueryResult(is_equivalent=True)
+                return _unsat_query_result(query, pair_id, stage)
             raise AssertionError(f"unexpected stage: {stage}")
 
     strategy = FakeStrategy()
@@ -156,7 +188,74 @@ def test_solver_proven_rewrite_returns_after_structural_match(monkeypatch):
 
     assert result.is_equivalent is True
     assert result.pair_stage == "rewrite-structural"
+    assert type(result.structural_equality_receipt) is StructuralEqualityReceipt
+    assert result.structural_equality_receipt.validates(
+        expected_query_label="(0,0)"
+    )
     assert strategy.stages == ["rewrite-proof-2"]
+
+
+def test_structural_rewrite_executes_full_query_for_projection_binding(monkeypatch):
+    param1 = _param("param_1")
+    param2 = _param("param_2")
+    half_b = Expression.binary_op("INT_SDIV", param2, _const(2))
+    canonical = Expression.binary_op("INT_ADD", param1, half_b)
+    commuted = Expression.binary_op("INT_ADD", half_b, param1)
+    case1 = _case(0, canonical)
+    case2 = _case(1, commuted)
+
+    monkeypatch.setattr(
+        rewrite_module,
+        "_build_rewrite_candidate",
+        lambda expr, settings: canonical if expr is commuted else expr,
+    )
+    assertion = "(assert true)"
+    assertion_digest = hashlib.sha256(assertion.encode("utf-8")).hexdigest()
+    binding_id = "a" * 64
+    base_ctx = _base_ctx()
+    base_ctx["call_projection_binding_ids_by_pair"] = {
+        "(0,0)": (binding_id,),
+    }
+    base_ctx["call_projection_binding_digests_by_pair"] = {
+        "(0,0)": {binding_id: assertion_digest},
+    }
+    base_ctx["call_projection_assertions_by_pair"] = {
+        "(0,0)": (
+            f"; call_projection_binding {binding_id} "
+            f"assertion_sha256={assertion_digest}",
+            assertion,
+            f"; call_projection_binding_end {binding_id}",
+        ),
+    }
+
+    class FakeStrategy:
+        debug = False
+
+        def __init__(self):
+            self.stages = []
+
+        def _solve_query_internal(self, query, pair_id, stage="full", use_hard_timeout=False):
+            self.stages.append(stage)
+            return _unsat_query_result(query, pair_id, stage)
+
+    strategy = FakeStrategy()
+    result = try_solver_proven_rewrite_equivalence(
+        strategy,
+        base_ctx,
+        case1,
+        case2,
+        lambda obj: obj.to_smt(),
+        lambda obj: obj.to_smt(),
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is True
+    assert result.pair_stage == "rewrite-structural-projection"
+    assert strategy.stages == ["rewrite-proof-2", "rewrite-structural-projection"]
+    assert projection_binding_evidence_from_query(result.last_query) == {
+        binding_id: assertion_digest,
+    }
+    assert len(result.structural_equality_receipt.supporting_solver_receipts) == 2
 
 
 def test_solve_query_twostage_uses_solver_proven_rewrite_after_timeout():

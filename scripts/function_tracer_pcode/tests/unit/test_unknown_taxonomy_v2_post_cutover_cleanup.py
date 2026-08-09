@@ -74,14 +74,30 @@ def _semantic_cleanup_projection(source):
         # preserved decision, cause, requirement, or aggregate semantics.
         "region_receipt_digest",
         "projection_binding_ids",
+        # Replay receipts are reissued when an active cause gains a stricter
+        # semantic target binding; their authority chain is validated by the
+        # current Phase 9 artifacts rather than the pre-binding baseline.
+        "pilot_receipt_digest",
+        "replayed_lifecycle_projection_digest",
+        "replayed_snapshot_digest",
+        "sealed_event_stream_authority_digest",
     }
 
     def project(value):
         if isinstance(value, dict):
+            row_reissued_fields = set(reissued_fields)
+            if (
+                value.get("domain") == "sat_safety"
+                or value.get("proof_kind") == "counterexample_safety"
+            ):
+                # Formula/model/premise/pair binding intentionally changes
+                # these two derived identities while preserving the reason,
+                # domain, target kind, proof kind, and final decision.
+                row_reissued_fields.update(("cause_id", "semantic_target_digest"))
             return {
                 key: project(item)
                 for key, item in value.items()
-                if key not in reissued_fields
+                if key not in row_reissued_fields
             }
         if isinstance(value, list):
             return [project(item) for item in value]

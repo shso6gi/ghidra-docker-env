@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     WorkItem,
     ObligationInstanceId,
     ObligationRuntimeSession,
+    SolverQueryExecutionReceipt,
     validate_artifact_applicability,
     validate_proof_closure,
     UnaryProducerResult,
@@ -1083,5 +1084,17 @@ def test_pairwise_solver_attempt_cache_reuses_identical_query(monkeypatch):
     first = executor.solve_query_internal(strategy, "(check-sat)", "(0,0)", "conds-only")
     second = executor.solve_query_internal(strategy, "(check-sat)", "(4,7)", "conds-only")
     assert first.is_equivalent is True and second.is_equivalent is True
+    assert type(first.solver_query_execution_receipt) is SolverQueryExecutionReceipt
+    assert first.solver_query_execution_receipt.validates_execution(
+        query="(check-sat)",
+        expected_disposition="unsat",
+        expected_query_label="(0,0)",
+    )
+    assert second.solver_query_execution_receipt.validates_execution(
+        query="(check-sat)",
+        expected_disposition="unsat",
+        expected_query_label="(4,7)",
+    )
+    assert second.solver_query_execution_receipt.execution_policy == "cache_reuse"
     assert calls == [5]
     assert strategy._active_normalization_stats["exact_query_attempt_cache_hits"] == 1

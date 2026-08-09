@@ -49,6 +49,40 @@ _RECOVERY_TO_GATE = {
     "sat_unsafety_resolution": "counterexample_safety",
 }
 
+_FINAL_DISPOSITION_DEBUG_KEYS = {
+    "unsat_results": "unsat_pairs",
+    "sat_results": "sat_pairs",
+    "unknown_results": "unknown_pairs",
+}
+
+
+def merge_stage_debug_statistics(
+    accumulated: Dict[str, int],
+    result: Any,
+) -> None:
+    """Keep terminal dispositions separate from cross-stage attempt totals."""
+
+    current = dict(getattr(result, "pairwise_debug_stats", None) or {})
+    for key, value in current.items():
+        target_key = (
+            f"stage_attempt_{key}"
+            if key in _FINAL_DISPOSITION_DEBUG_KEYS
+            else key
+        )
+        accumulated[target_key] = (
+            accumulated.get(target_key, 0) + int(value or 0)
+        )
+
+    final_stats = dict(getattr(result, "pairwise_stats", None) or {})
+    for debug_key, pairwise_key in _FINAL_DISPOSITION_DEBUG_KEYS.items():
+        if pairwise_key in final_stats:
+            accumulated[debug_key] = int(final_stats[pairwise_key] or 0)
+        elif debug_key in current:
+            accumulated[debug_key] = int(current[debug_key] or 0)
+
+    if accumulated:
+        result.pairwise_debug_stats = dict(accumulated)
+
 
 def project_proof_gates(result: Any) -> Tuple[ProofGateProjection, ...]:
     grouped: Dict[str, List[str]] = {}
@@ -86,6 +120,9 @@ def _view_identity(analysis1: Any, analysis2: Any, branch_id: str) -> Tuple[Any,
 
 
 def _outcome(result: Any) -> FunctionProofOutcome:
+    is_timeout = getattr(result, "is_timeout", None)
+    if callable(is_timeout) and is_timeout():
+        return FunctionProofOutcome.INCONCLUSIVE
     value = getattr(result, "is_equivalent", None)
     if value is True:
         return FunctionProofOutcome.EQUIVALENT
@@ -103,15 +140,34 @@ def _cutover_attempt_outcome(result: Any) -> Any:
         result, "failure_status", None
     ) in {"strategy_exception", "unexpected_pairwise_state"}:
         return Outcome.ERROR
+    is_timeout = getattr(result, "is_timeout", None)
+    if callable(is_timeout) and is_timeout():
+        return Outcome.TIMEOUT
     value = getattr(result, "is_equivalent", None)
     if value is True:
         return Outcome.EQUIVALENT
     if value is False:
         return Outcome.NOT_EQ
-    is_timeout = getattr(result, "is_timeout", None)
-    if callable(is_timeout) and is_timeout():
-        return Outcome.TIMEOUT
     return Outcome.UNKNOWN
+
+
+def normalize_timeout_contradiction(result: Any) -> None:
+    """Fail closed when a stale decisive value also reports a timeout."""
+
+    is_timeout = getattr(result, "is_timeout", None)
+    if not callable(is_timeout) or not is_timeout():
+        return
+    if getattr(result, "is_equivalent", None) not in {True, False}:
+        return
+    result.is_equivalent = None
+    strategy_result = getattr(result, "_strategy_result", None)
+    if strategy_result is not None:
+        strategy_result.is_equivalent = None
+    stats = dict(getattr(result, "pairwise_debug_stats", None) or {})
+    stats["timeout_decisive_state_contradiction"] = (
+        int(stats.get("timeout_decisive_state_contradiction", 0) or 0) + 1
+    )
+    result.pairwise_debug_stats = stats
 
 
 def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
@@ -268,15 +324,14 @@ def run_obligation_branch_plan(
             ))
             continue
 
+        normalize_timeout_contradiction(result)
+
         stage_path.append(branch_id)
         result.stage_path = stage_path.copy()
-        current_debug_stats = dict(getattr(result, "pairwise_debug_stats", None) or {})
-        for key, value in current_debug_stats.items():
-            accumulated_pairwise_debug_stats[key] = (
-                accumulated_pairwise_debug_stats.get(key, 0) + int(value or 0)
-            )
-        if accumulated_pairwise_debug_stats:
-            result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
+        merge_stage_debug_statistics(
+            accumulated_pairwise_debug_stats,
+            result,
+        )
         if getattr(result, "call_effect_shadow_manifest", None) is not None:
             last_call_effect_manifest = result.call_effect_shadow_manifest
         elif last_call_effect_manifest is not None:
@@ -365,6 +420,7 @@ def run_obligation_branch_plan(
             if replanned is None:
                 break
             result = replanned
+            normalize_timeout_contradiction(result)
             result.stage_path = stage_path.copy()
             replanned_stats = dict(
                 getattr(result, "pairwise_debug_stats", None) or {}
@@ -373,12 +429,11 @@ def run_obligation_branch_plan(
                 int(replanned_stats.get("derived_view_pair_replans", 0) or 0)
                 + 1
             )
-            for key, value in replanned_stats.items():
-                accumulated_pairwise_debug_stats[key] = (
-                    accumulated_pairwise_debug_stats.get(key, 0)
-                    + int(value or 0)
-                )
-            result.pairwise_debug_stats = dict(accumulated_pairwise_debug_stats)
+            result.pairwise_debug_stats = replanned_stats
+            merge_stage_debug_statistics(
+                accumulated_pairwise_debug_stats,
+                result,
+            )
             if getattr(result, "call_effect_shadow_manifest", None) is not None:
                 last_call_effect_manifest = result.call_effect_shadow_manifest
             elif last_call_effect_manifest is not None:

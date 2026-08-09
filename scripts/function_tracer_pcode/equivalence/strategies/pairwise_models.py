@@ -187,6 +187,8 @@ class QueryResult:
         self.counterexample_raw = counterexample_raw
         self.solver_results = solver_results
         self.last_query: Optional[str] = None
+        self.solver_query_execution_receipt: Optional[Any] = None
+        self.structural_equality_receipt: Optional[Any] = None
         self.normalization_rules: List = []
         self.pair_stage: Optional[str] = None
         self.blocking_reason: Optional[str] = None

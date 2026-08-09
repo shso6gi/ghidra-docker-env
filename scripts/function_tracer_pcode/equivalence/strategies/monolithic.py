@@ -207,6 +207,43 @@ class _MonolithicRegionExecution:
     execution_receipts: Tuple[Any, ...] = ()
     expected_query_set: Any = None
     session_certificate: Any = None
+    sat_replay_formula: str = field(default="", repr=False, compare=False)
+    sat_replay_census: Any = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _TypedMonolithicCounterexampleEvidence:
+    census: Any
+    model_digest: str
+    fixed_model_assertion_digest: str
+    replay_formula: str = field(repr=False, compare=False)
+    legacy_replay_receipt: Any = field(repr=False, compare=False)
+    sat_region_id: str = "legacy"
+    fixed_model_assertion_count: int = 0
+
+    def __post_init__(self) -> None:
+        contract = getattr(self.legacy_replay_receipt, "contract", None)
+        if contract is None:
+            raise TypeError("monolithic_counterexample_replay_contract_missing")
+        formula_digest = hashlib.sha256(
+            self.replay_formula.encode("utf-8")
+        ).hexdigest()
+        if formula_digest != getattr(contract, "formula_digest", None):
+            raise ValueError("monolithic_counterexample_replay_formula_mismatch")
+        if self.model_digest != getattr(contract, "model_digest", None):
+            raise ValueError("monolithic_counterexample_replay_model_mismatch")
+        if (
+            self.fixed_model_assertion_digest
+            != getattr(contract, "fixed_model_assertion_digest", None)
+        ):
+            raise ValueError(
+                "monolithic_counterexample_fixed_model_assertion_mismatch"
+            )
+        if (
+            getattr(self.census, "census_digest", None)
+            != getattr(contract, "census_digest", None)
+        ):
+            raise ValueError("monolithic_counterexample_replay_census_mismatch")
 
 
 class MonolithicStrategy(CheckStrategy):
@@ -370,6 +407,8 @@ class MonolithicStrategy(CheckStrategy):
         base_ctx: Optional[Mapping[str, Any]] = None,
         expected_query_set: Any = None,
         shared_region_session: Any = None,
+        replay_frozen_surface: Any = None,
+        replay_census: Any = None,
         _execute_guard=_PINNED_EXECUTE_EXPECTED_GUARD_QUERY,
         _execute_value=_PINNED_EXECUTE_EXPECTED_VALUE_QUERY,
     ) -> _MonolithicRegionExecution:
@@ -406,6 +445,8 @@ class MonolithicStrategy(CheckStrategy):
         fixed_model_assertion_digest = ""
         legacy_replay_receipt_digest = ""
         legacy_replay_receipt = None
+        sat_replay_formula = ""
+        sat_replay_census = None
         sliced_assertion_bytes = 0
         shared_prelude_digests: Set[str] = set()
         configured_region_timeout = max(1, int(self.per_query_timeout))
@@ -612,12 +653,19 @@ class MonolithicStrategy(CheckStrategy):
                     ],
                 )
                 replay_formula = replay.formula
-                if plan.census is not None:
+                authoritative_replay_frozen = (
+                    replay_frozen_surface or plan.frozen_surface
+                )
+                authoritative_replay_census = replay_census or plan.census
+                if (
+                    authoritative_replay_frozen is not None
+                    and authoritative_replay_census is not None
+                ):
                     from ..monolithic_authority import execute_legacy_violation_replay
                     replay_result, legacy_replay_receipt = execute_legacy_violation_replay(
                         self,
-                        plan.frozen_surface,
-                        plan.census,
+                        authoritative_replay_frozen,
+                        authoritative_replay_census,
                         formula=replay_formula,
                         model_digest=model_digest,
                         fixed_model_assertion_digest=fixed_model_assertion_digest,
@@ -660,6 +708,8 @@ class MonolithicStrategy(CheckStrategy):
                     region_counts["sat"] = 1
                     counterexample_raw = replay_result.get_counterexample() or value_result.counterexample_raw
                     sat_region_id = region_id
+                    sat_replay_formula = replay_formula
+                    sat_replay_census = authoritative_replay_census
                     continue
                 region_counts["unknown"] += 1
 
@@ -701,22 +751,24 @@ class MonolithicStrategy(CheckStrategy):
             )),
         }
         return _MonolithicRegionExecution(
-            final,
-            aggregate,
-            counterexample_raw,
-            last_formula,
-            tuple(records),
-            counts,
-            stats,
-            plan,
-            sat_region_id,
-            model_digest,
-            fixed_model_assertion_digest,
-            legacy_replay_receipt_digest,
-            legacy_replay_receipt,
-            tuple(execution_receipts),
-            expected_query_set,
-            getattr(shared_region_session, "certificate", None),
+            final_is_equivalent=final,
+            parallel_result=aggregate,
+            counterexample_raw=counterexample_raw,
+            last_formula=last_formula,
+            query_records=tuple(records),
+            disposition_counts=counts,
+            debug_stats=stats,
+            plan=plan,
+            sat_region_id=sat_region_id,
+            model_digest=model_digest,
+            fixed_model_assertion_digest=fixed_model_assertion_digest,
+            legacy_replay_receipt_digest=legacy_replay_receipt_digest,
+            legacy_replay_receipt=legacy_replay_receipt,
+            execution_receipts=tuple(execution_receipts),
+            expected_query_set=expected_query_set,
+            session_certificate=getattr(shared_region_session, "certificate", None),
+            sat_replay_formula=sat_replay_formula,
+            sat_replay_census=sat_replay_census,
         )
 
     def _canonical_return_width_observation_for_analyses(
@@ -1217,6 +1269,13 @@ class MonolithicStrategy(CheckStrategy):
             if region_plan is not None:
                 shared_region_session = None
                 try:
+                    structured_replay_census = (
+                        canonical_census
+                        if canonical_census is not None
+                        else reconstruct_fallback_census(frozen_surface)
+                        if frozen_surface is not None
+                        else None
+                    )
                     if (
                         expected_query_set is not None
                         and production_runner
@@ -1239,6 +1298,8 @@ class MonolithicStrategy(CheckStrategy):
                         base_ctx=region_base_ctx,
                         expected_query_set=expected_query_set,
                         shared_region_session=shared_region_session,
+                        replay_frozen_surface=frozen_surface,
+                        replay_census=structured_replay_census,
                     )
                 except (ReturnWidthMismatchError, TypeError, KeyError, AttributeError) as split_error:
                     # Width bridging has its own proof-backed legacy path below.
@@ -1320,7 +1381,7 @@ class MonolithicStrategy(CheckStrategy):
                         raise
                     parallel_result = runner_method(smt_formula)
                 counterexample_raw = (
-                    parallel_result.get_counterexample()
+                    parallel_result.get_counterexample() or {}
                     if parallel_result.is_equivalent is False
                     else None
                 )
@@ -1340,6 +1401,7 @@ class MonolithicStrategy(CheckStrategy):
             final_is_equivalent = parallel_result.is_equivalent
             global_replay_receipts = []
             counterexample_safety_receipt = None
+            typed_counterexample_evidence = None
             unknown_reasons = []
             sat_unsafety_reason = None
             sat_unsafety_resolution_pending = False
@@ -1366,6 +1428,116 @@ class MonolithicStrategy(CheckStrategy):
                     decision_context,
                 )
             sat_unsafety_reasons.extend(coverage_unsafety_reasons)
+            if (
+                final_is_equivalent is False
+                and frozen_surface is not None
+            ):
+                if (
+                    region_execution is not None
+                    and region_execution.legacy_replay_receipt is not None
+                ):
+                    typed_counterexample_evidence = (
+                        _TypedMonolithicCounterexampleEvidence(
+                            region_execution.sat_replay_census,
+                            region_execution.model_digest,
+                            region_execution.fixed_model_assertion_digest,
+                            region_execution.sat_replay_formula,
+                            region_execution.legacy_replay_receipt,
+                            region_execution.sat_region_id,
+                            count_counterexample_model_assertions(
+                                region_base_ctx or dict(
+                                    self.formula_builder.build_base_context(
+                                        analysis1, analysis2
+                                    )
+                                ),
+                                counterexample_raw,
+                            ),
+                        )
+                    )
+                elif region_execution is None and counterexample_raw is not None:
+                    try:
+                        typed_census = reconstruct_fallback_census(frozen_surface)
+                        replay_base_ctx = dict(
+                            self.formula_builder.build_base_context(
+                                analysis1, analysis2
+                            )
+                        )
+                        model_assertions = tuple(
+                            build_counterexample_model_assertions(
+                                replay_base_ctx, counterexample_raw
+                            )
+                        )
+                        replay_targets_exist = bool(
+                            replay_base_ctx.get("params1")
+                            or replay_base_ctx.get("params2")
+                            or replay_base_ctx.get("extra_vars1")
+                            or replay_base_ctx.get("extra_vars2")
+                        )
+                        if replay_targets_exist and not model_assertions:
+                            raise RuntimeError(
+                                "legacy_fixed_model_assertions_missing"
+                            )
+                        replay_build_kwargs = {
+                            "extra_assertions": [
+                                *list(call_projection_assertions),
+                                *list(model_assertions),
+                            ]
+                        }
+                        if canonical_width_observation is not None:
+                            replay_build_kwargs[
+                                "canonical_return_observation_width"
+                            ] = canonical_width_observation.canonical_width
+                            replay_build_kwargs["extra_assertions"].extend(
+                                canonical_width_observation.ordered_markers
+                            )
+                        replay_result = (
+                            self.formula_builder.build_equivalence_formula_extended(
+                                analysis1, analysis2, **replay_build_kwargs
+                            )
+                        )
+                        replay_formula = replay_result.formula
+                        model_digest = hashlib.sha256(
+                            repr(counterexample_raw).encode("utf-8")
+                        ).hexdigest()
+                        fixed_digest = hashlib.sha256(
+                            "\n".join(model_assertions).encode("utf-8")
+                        ).hexdigest()
+                        from ..monolithic_authority import (
+                            execute_legacy_violation_replay,
+                        )
+                        replay_solver_result, legacy_replay_receipt = (
+                            execute_legacy_violation_replay(
+                                self,
+                                frozen_surface,
+                                typed_census,
+                                formula=replay_formula,
+                                model_digest=model_digest,
+                                fixed_model_assertion_digest=fixed_digest,
+                                timeout=max(1, int(self.per_query_timeout)),
+                            )
+                        )
+                        if replay_solver_result.is_equivalent is not False:
+                            raise RuntimeError(
+                                "legacy_fixed_model_whole_surface_replay_not_sat"
+                            )
+                        typed_counterexample_evidence = (
+                            _TypedMonolithicCounterexampleEvidence(
+                                typed_census,
+                                model_digest,
+                                fixed_digest,
+                                replay_formula,
+                                legacy_replay_receipt,
+                                "legacy",
+                                len(model_assertions),
+                            )
+                        )
+                    except (
+                        RuntimeError, ValueError, TypeError, KeyError, AttributeError
+                    ) as exc:
+                        self._debug_print(
+                            "Legacy monolithic fixed-model replay unavailable: "
+                            f"{exc}"
+                        )
             if final_is_equivalent is True and coverage_unsafety_reasons:
                 coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
                     coverage_unsafety_reasons,
@@ -1400,6 +1572,24 @@ class MonolithicStrategy(CheckStrategy):
                         f"({', '.join(equivalence_blocking_reasons)})"
                     )
             if final_is_equivalent is False and sat_unsafety_reasons:
+                from ..v2.production_signals import (
+                    SatCounterexampleEvidenceBinding,
+                )
+                sat_counterexample_binding = (
+                    SatCounterexampleEvidenceBinding(
+                        typed_counterexample_evidence.legacy_replay_receipt
+                        .contract.formula_digest,
+                        typed_counterexample_evidence.model_digest,
+                        typed_counterexample_evidence.legacy_replay_receipt
+                        .contract.contract_digest,
+                        (
+                            "monolithic",
+                            typed_counterexample_evidence.sat_region_id,
+                        ),
+                    )
+                    if typed_counterexample_evidence is not None
+                    else None
+                )
                 sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
                     sat_unsafety_reasons,
                     analysis1,
@@ -1408,6 +1598,7 @@ class MonolithicStrategy(CheckStrategy):
                     case2=None,
                     pair_id="monolithic",
                     stage="S_MONOLITHIC_FALLBACK",
+                    counterexample_binding=sat_counterexample_binding,
                 )
                 if not self._sat_unsafety_resolution_proof_is_complete(
                     sat_unsafety_reason,
@@ -1430,17 +1621,16 @@ class MonolithicStrategy(CheckStrategy):
             if final_is_equivalent is False:
                 replay_collector = None
                 if (
-                    region_execution is not None
+                    typed_counterexample_evidence is not None
                     and frozen_surface is not None
-                    and canonical_census is not None
                 ):
                     from ..monolithic_authority import create_global_replay_collector
                     global_replay_receipts, replay_collector = create_global_replay_collector(
                         frozen_surface,
-                        canonical_census,
-                        model_digest=region_execution.model_digest,
+                        typed_counterexample_evidence.census,
+                        model_digest=typed_counterexample_evidence.model_digest,
                         fixed_model_assertion_digest=(
-                            region_execution.fixed_model_assertion_digest
+                            typed_counterexample_evidence.fixed_model_assertion_digest
                         ),
                     )
                     self._monolithic_replay_execution_collector = replay_collector
@@ -1457,19 +1647,18 @@ class MonolithicStrategy(CheckStrategy):
                     )
                 if (
                     counterexample_is_decisive
-                    and region_execution is not None
+                    and typed_counterexample_evidence is not None
                     and frozen_surface is not None
-                    and canonical_census is not None
                 ):
                     from ..monolithic_authority import execute_global_violation_replay
                     global_result, global_receipt = execute_global_violation_replay(
                         self,
                         frozen_surface,
-                        canonical_census,
-                        formula=region_execution.last_formula,
-                        model_digest=region_execution.model_digest,
+                        typed_counterexample_evidence.census,
+                        formula=typed_counterexample_evidence.replay_formula,
+                        model_digest=typed_counterexample_evidence.model_digest,
                         fixed_model_assertion_digest=(
-                            region_execution.fixed_model_assertion_digest
+                            typed_counterexample_evidence.fixed_model_assertion_digest
                         ),
                         timeout=max(1, int(self.per_query_timeout)),
                     )
@@ -1497,9 +1686,9 @@ class MonolithicStrategy(CheckStrategy):
             same_function_replay_reasons = ()
             if final_is_equivalent is False:
                 typed_whole_surface_replay_complete = bool(
-                    region_execution is not None
-                    and region_execution.legacy_replay_receipt is not None
-                    and region_execution.legacy_replay_receipt.disposition == "sat"
+                    typed_counterexample_evidence is not None
+                    and typed_counterexample_evidence.legacy_replay_receipt.disposition
+                    == "sat"
                     and any(
                         receipt.contract.replay_kind
                         == "global_case_validation:whole_surface"
@@ -1654,9 +1843,7 @@ class MonolithicStrategy(CheckStrategy):
                             issue_gate_artifact_reference,
                         )
                         if (
-                            region_execution is None
-                            or region_execution.legacy_replay_receipt is None
-                            or canonical_census is None
+                            typed_counterexample_evidence is None
                         ):
                             raise RuntimeError(
                                 "typed_counterexample_replay_evidence_missing"
@@ -1693,6 +1880,7 @@ class MonolithicStrategy(CheckStrategy):
                                     "coverage", coverage_source
                                 ),
                                 status=("proven" if coverage_ids else "not_required"),
+                                census=typed_counterexample_evidence.census,
                             ),
                             issue_gate_artifact_reference(
                                 frozen_surface, "effect",
@@ -1701,11 +1889,13 @@ class MonolithicStrategy(CheckStrategy):
                                     "effect",
                                     effect_source,
                                 ), status=projection_status,
+                                census=typed_counterexample_evidence.census,
                             ),
                             issue_gate_artifact_reference(
                                 frozen_surface, "projection", dispatch_frame.projection,
                                 artifact_id=dispatch_frame.projection.projection_id,
                                 status=projection_status,
+                                census=typed_counterexample_evidence.census,
                             ),
                             issue_gate_artifact_reference(
                                 frozen_surface, "width", width_source,
@@ -1713,18 +1903,19 @@ class MonolithicStrategy(CheckStrategy):
                                     "width", width_source
                                 ), status=("proven" if canonical_width_observation
                                            is not None else "not_required"),
+                                census=typed_counterexample_evidence.census,
                             ),
                         )
                         counterexample_safety_receipt = (
                             issue_counterexample_safety_decision_receipt(
                                 frozen_surface,
-                                canonical_census,
-                                model_digest=region_execution.model_digest,
+                                typed_counterexample_evidence.census,
+                                model_digest=typed_counterexample_evidence.model_digest,
                                 fixed_model_assertion_digest=(
-                                    region_execution.fixed_model_assertion_digest
+                                    typed_counterexample_evidence.fixed_model_assertion_digest
                                 ),
                                 legacy_replay_receipt=(
-                                    region_execution.legacy_replay_receipt
+                                    typed_counterexample_evidence.legacy_replay_receipt
                                 ),
                                 global_replay_receipts=global_replay_receipts,
                                 gate_references=typed_gate_refs,
@@ -1763,7 +1954,8 @@ class MonolithicStrategy(CheckStrategy):
                                 analysis2,
                                 counterexample_raw=counterexample_raw,
                                 fixed_model_assertion_count=max(
-                                    1, len(typed_gate_refs)
+                                    1,
+                                    typed_counterexample_evidence.fixed_model_assertion_count,
                                 ),
                                 replay_source=(
                                     "monolithic-counterexample-safety-receipt:"
@@ -1829,6 +2021,31 @@ class MonolithicStrategy(CheckStrategy):
                         ))
                         strategy_result.unknown_reasons = unknown_reasons
                     dispatch_frame.monolithic_proof_bundle = proof_bundle
+                elif (
+                    strategy_result.is_equivalent is False
+                    and typed_counterexample_evidence is not None
+                ):
+                    from ..monolithic_authority import (
+                        seal_legacy_counterexample_proof_bundle,
+                        verify_monolithic_proof_bundle,
+                    )
+                    whole_surface_receipts = tuple(
+                        receipt for receipt in global_replay_receipts
+                        if receipt.contract.replay_kind
+                        == "global_case_validation:whole_surface"
+                    )
+                    if len(whole_surface_receipts) == 1:
+                        proof_bundle = seal_legacy_counterexample_proof_bundle(
+                            frozen_surface,
+                            typed_counterexample_evidence.census,
+                            typed_counterexample_evidence.legacy_replay_receipt,
+                            whole_surface_receipts[0],
+                        )
+                        if not verify_monolithic_proof_bundle(proof_bundle):
+                            raise RuntimeError(
+                                "legacy_monolithic_proof_bundle_invalid"
+                            )
+                        dispatch_frame.monolithic_proof_bundle = proof_bundle
                 if (
                     strategy_result.is_equivalent in {True, False}
                     and proof_bundle is None
@@ -1863,8 +2080,13 @@ class MonolithicStrategy(CheckStrategy):
                     consumed_projection_binding_ids=actual_call_projection_binding_ids,
                     disposition_counts=dict(disposition_counts),
                 )
-                terminal_census = canonical_census or reconstruct_fallback_census(
-                    frozen_surface
+                terminal_census = (
+                    typed_counterexample_evidence.census
+                    if final_is_equivalent is False
+                    and typed_counterexample_evidence is not None
+                    else canonical_census or reconstruct_fallback_census(
+                        frozen_surface
+                    )
                 )
                 gate_refs = (
                     counterexample_safety_receipt.gate_reference_digests
@@ -1909,22 +2131,31 @@ class MonolithicStrategy(CheckStrategy):
                     outcome_kind=outcome_kind,
                     comparison_receipt_id=comparison_receipt.receipt_id,
                     region_receipt_digests=region_receipt_digests,
-                    sat_region_id=(region_execution.sat_region_id if region_execution else "legacy"),
+                    sat_region_id=(
+                        typed_counterexample_evidence.sat_region_id
+                        if final_is_equivalent is False
+                        and typed_counterexample_evidence is not None
+                        else region_execution.sat_region_id
+                        if region_execution else "legacy"
+                    ),
                     model_digest=(
-                        region_execution.model_digest
-                        if region_execution is not None
+                        typed_counterexample_evidence.model_digest
+                        if final_is_equivalent is False
+                        and typed_counterexample_evidence is not None
                         else hashlib.sha256(repr(counterexample_raw).encode("utf-8")).hexdigest()
                         if final_is_equivalent is False else ""
                     ),
                     fixed_model_assertion_digest=(
-                        region_execution.fixed_model_assertion_digest
-                        if region_execution is not None
+                        typed_counterexample_evidence.fixed_model_assertion_digest
+                        if final_is_equivalent is False
+                        and typed_counterexample_evidence is not None
                         else hashlib.sha256(repr(counterexample_raw).encode("utf-8")).hexdigest()
                         if final_is_equivalent is False else ""
                     ),
                     legacy_replay_receipt_digest=(
-                        region_execution.legacy_replay_receipt_digest
-                        if region_execution is not None
+                        typed_counterexample_evidence.legacy_replay_receipt.receipt_digest
+                        if final_is_equivalent is False
+                        and typed_counterexample_evidence is not None
                         else query_records[-1].formula_digest
                         if final_is_equivalent is False else ""
                     ),
@@ -1942,23 +2173,23 @@ class MonolithicStrategy(CheckStrategy):
                     terminal_receipt.outcome_kind == "decisive_counterexample"
                     and counterexample_safety_receipt is not None
                 ):
-                    from ..obligations.pair_disposition import (
-                        emit_safe_counterexample_production_signal,
+                    from ..v2.production_signals import (
+                        SafeCounterexampleProductionSignal,
+                        complete_observed_sat_safety_for_counterexample,
+                        emit_sat_safety_signal,
                     )
-
-                    replay_contract = (
-                        counterexample_safety_receipt.legacy_replay_receipt.contract
+                    safe_counterexample_signal = (
+                        SafeCounterexampleProductionSignal.from_monolithic_receipt(
+                            terminal_receipt,
+                        )
                     )
-                    emit_safe_counterexample_production_signal(
-                        proof_artifact_digest=(
-                            counterexample_safety_receipt.receipt_digest
-                        ),
-                        formula_digest=replay_contract.formula_digest,
-                        model_digest=counterexample_safety_receipt.model_digest,
-                        premise_digest=replay_contract.contract_digest,
-                        pair_key=(
-                            "monolithic",
-                            terminal_receipt.sat_region_id,
+                    complete_observed_sat_safety_for_counterexample(
+                        safe_counterexample_signal
+                    )
+                    emit_sat_safety_signal(
+                        safe_counterexample_signal,
+                        producer_site_manifest_id=(
+                            "safe-counterexample-monolithic-production"
                         ),
                     )
                 strategy_result.comparison_execution_receipt = comparison_receipt

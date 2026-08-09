@@ -2600,7 +2600,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
     assert invalid_storage["return_storage_descriptor"]["status"] == "MALFORMED"
 
 
-def test_empty_abi_facts_are_invalid_but_explicit_missing_envelope_is_unknown():
+def test_empty_and_explicit_missing_abi_facts_are_typed_unknown_not_invalid():
     from scripts.function_tracer_pcode.analysis.analyzer_services import session_helpers_1
     sealed_return_abi_facts = getattr(session_helpers_1, "_sealed_return_abi_facts")
 
@@ -2612,12 +2612,12 @@ def test_empty_abi_facts_are_invalid_but_explicit_missing_envelope_is_unknown():
     raw_empty = FunctionReturnAbiSeed.from_analysis_and_width_seed(
         analysis, width_seed
     )
-    assert raw_empty.malformed_slots == (
+    assert raw_empty.malformed_slots == ()
+    assert raw_empty.missing_slots == (
         "calling_convention",
         "declared_or_effective_return_type",
         "return_storage_descriptor",
     )
-    assert raw_empty.missing_slots == ()
 
     analysis.return_abi_facts = sealed_return_abi_facts(object(), None, None)
     explicit_missing = FunctionReturnAbiSeed.from_analysis_and_width_seed(

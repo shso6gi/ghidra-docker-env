@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import secrets
 from typing import Any, Callable, Iterator, Mapping, Optional
 
@@ -225,6 +225,32 @@ SAT_SAFETY_TYPED_REASON_IDS = frozenset({
 })
 
 
+_SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class SatCounterexampleEvidenceBinding:
+    formula_digest: str
+    model_digest: str
+    premise_digest: str
+    pair_key: tuple[Any, Any]
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.formula_digest,
+            self.model_digest,
+            self.premise_digest,
+        ):
+            if type(value) is not str or not value:
+                raise TypeError("SAT counterexample binding authority is incomplete")
+        if type(self.pair_key) is not tuple or len(self.pair_key) != 2:
+            raise TypeError("SAT counterexample binding pair key is invalid")
+        try:
+            object.__setattr__(self, "pair_key", canonical_value(self.pair_key))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("SAT counterexample binding pair key is invalid") from exc
+
+
 @dataclass(frozen=True)
 class SatSafetyBlockerProductionSignal:
     action: str
@@ -234,6 +260,8 @@ class SatSafetyBlockerProductionSignal:
     evidence_refs: tuple[str, ...]
     producer_id: str
     proof_artifact_digest: Optional[str] = None
+    counterexample_binding: Optional[SatCounterexampleEvidenceBinding] = None
+    defer_until_terminal: bool = False
 
     def __post_init__(self) -> None:
         if self.action not in {"OBSERVED", "COMPLETED"}:
@@ -249,29 +277,174 @@ class SatSafetyBlockerProductionSignal:
             raise TypeError("SAT safety evidence references must be exact strings")
         if self.action == "COMPLETED" and not self.proof_artifact_digest:
             raise ValueError("SAT safety completion lacks proof artifact authority")
+        if (
+            self.counterexample_binding is not None
+            and type(self.counterexample_binding) is not SatCounterexampleEvidenceBinding
+        ):
+            raise TypeError("SAT safety counterexample binding is invalid")
+        if type(self.defer_until_terminal) is not bool:
+            raise TypeError("SAT safety deferral marker is invalid")
+        if self.defer_until_terminal and self.action != "OBSERVED":
+            raise ValueError("only SAT safety observations may be deferred")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SafeCounterexampleProductionSignal:
     proof_artifact_digest: str
     formula_digest: str
     model_digest: str
     premise_digest: str
     pair_key: tuple[Any, Any]
+    receipt_kind: str
+    safety_receipt: Any = field(repr=False, compare=False)
+    verification_context: tuple[Any, ...] = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        for value in (
-            self.proof_artifact_digest, self.formula_digest,
-            self.model_digest, self.premise_digest,
+    def __init__(self, **values: Any) -> None:
+        if values.pop("_factory_token", None) is not _SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN:
+            raise TypeError(
+                "safe counterexample signal must be issued from a typed safety receipt"
+            )
+        for name in (
+            "proof_artifact_digest", "formula_digest", "model_digest",
+            "premise_digest", "pair_key", "receipt_kind", "safety_receipt",
+            "verification_context",
         ):
-            if type(value) is not str or not value:
-                raise TypeError("safe counterexample signal authority is incomplete")
+            object.__setattr__(self, name, values.pop(name))
+        if values:
+            raise TypeError("safe counterexample signal fields are not sealed")
+        object.__setattr__(self, "pair_key", canonical_value(self.pair_key))
+        object.__setattr__(
+            self, "verification_context", tuple(self.verification_context)
+        )
+        if not self.validates():
+            raise ValueError("safe counterexample typed receipt validation failed")
+
+    @classmethod
+    def from_pairwise_receipt(cls, receipt: Any):
+        from ..obligations.pair_disposition import CounterexampleSafetyReceipt
+
+        if (
+            type(receipt) is not CounterexampleSafetyReceipt
+            or not receipt.validates_authority()
+        ):
+            raise ValueError("pairwise counterexample safety receipt is invalid")
+        return cls(
+            proof_artifact_digest=receipt.authority_digest,
+            formula_digest=receipt.formula_digest,
+            model_digest=receipt.model_digest,
+            premise_digest=receipt.premise_digest,
+            pair_key=receipt.pair_key,
+            receipt_kind="pairwise_counterexample_safety_receipt_v1",
+            safety_receipt=receipt,
+            verification_context=(),
+            _factory_token=_SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN,
+        )
+
+    @classmethod
+    def from_monolithic_receipt(cls, terminal_receipt: Any):
+        from ..monolithic_authority import (
+            CounterexampleSafetyDecisionReceipt,
+            MonolithicTerminalDecisionReceipt,
+        )
+
+        if (
+            type(terminal_receipt) is not MonolithicTerminalDecisionReceipt
+            or terminal_receipt.outcome_kind != "decisive_counterexample"
+            or not terminal_receipt.validates()
+        ):
+            raise ValueError("monolithic terminal counterexample receipt is invalid")
+        receipt = terminal_receipt.counterexample_safety_receipt
+        if type(receipt) is not CounterexampleSafetyDecisionReceipt:
+            raise ValueError("monolithic terminal safety receipt is invalid")
+        replay_contract = receipt.legacy_replay_receipt.contract
+        return cls(
+            proof_artifact_digest=terminal_receipt.receipt_digest,
+            formula_digest=replay_contract.formula_digest,
+            model_digest=receipt.model_digest,
+            premise_digest=replay_contract.contract_digest,
+            pair_key=("monolithic", terminal_receipt.sat_region_id),
+            receipt_kind="monolithic_terminal_counterexample_receipt_v1",
+            safety_receipt=receipt,
+            verification_context=(terminal_receipt,),
+            _factory_token=_SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN,
+        )
+
+    def validates(self) -> bool:
         if type(self.pair_key) is not tuple or len(self.pair_key) != 2:
-            raise TypeError("safe counterexample signal pair key is invalid")
-        try:
-            object.__setattr__(self, "pair_key", canonical_value(self.pair_key))
-        except (TypeError, ValueError) as exc:
-            raise TypeError("safe counterexample signal pair key is invalid") from exc
+            return False
+        if any(
+            type(value) is not str or not value
+            for value in (
+                self.proof_artifact_digest, self.formula_digest,
+                self.model_digest, self.premise_digest,
+            )
+        ):
+            return False
+        if self.receipt_kind == "pairwise_counterexample_safety_receipt_v1":
+            from ..obligations.pair_disposition import CounterexampleSafetyReceipt
+
+            receipt = self.safety_receipt
+            return bool(
+                type(receipt) is CounterexampleSafetyReceipt
+                and self.verification_context == ()
+                and receipt.validates_authority()
+                and self.proof_artifact_digest == receipt.authority_digest
+                and self.formula_digest == receipt.formula_digest
+                and self.model_digest == receipt.model_digest
+                and self.premise_digest == receipt.premise_digest
+                and self.pair_key == canonical_value(receipt.pair_key)
+            )
+        if self.receipt_kind == "monolithic_terminal_counterexample_receipt_v1":
+            from ..monolithic_authority import (
+                CounterexampleSafetyDecisionReceipt,
+                MonolithicTerminalDecisionReceipt,
+            )
+
+            if len(self.verification_context) != 1:
+                return False
+            receipt = self.safety_receipt
+            terminal_receipt = self.verification_context[0]
+            if (
+                type(receipt) is not CounterexampleSafetyDecisionReceipt
+                or type(terminal_receipt) is not MonolithicTerminalDecisionReceipt
+                or terminal_receipt.outcome_kind != "decisive_counterexample"
+                or not terminal_receipt.validates()
+                or terminal_receipt.counterexample_safety_receipt is not receipt
+            ):
+                return False
+            replay_contract = receipt.legacy_replay_receipt.contract
+            return bool(
+                self.proof_artifact_digest == terminal_receipt.receipt_digest
+                and self.formula_digest == replay_contract.formula_digest
+                and self.model_digest == receipt.model_digest
+                and self.premise_digest == replay_contract.contract_digest
+                and self.pair_key == canonical_value(
+                    ("monolithic", terminal_receipt.sat_region_id)
+                )
+            )
+        return False
+
+    @property
+    def counterexample_binding(self) -> SatCounterexampleEvidenceBinding:
+        return SatCounterexampleEvidenceBinding(
+            self.formula_digest,
+            self.model_digest,
+            self.premise_digest,
+            self.pair_key,
+        )
+
+    def _phase7_signal_authority(self) -> Mapping[str, Any]:
+        """Project only receipt-verified identities into the runtime digest."""
+        if not self.validates():
+            raise ValueError("safe counterexample signal authority is invalid")
+        return {
+            "proof_artifact_digest": self.proof_artifact_digest,
+            "formula_digest": self.formula_digest,
+            "model_digest": self.model_digest,
+            "premise_digest": self.premise_digest,
+            "pair_key": self.pair_key,
+            "receipt_kind": self.receipt_kind,
+        }
 
 
 _PENDING_EQ_CLOSURE_TOKEN = object()
@@ -1125,10 +1298,40 @@ def emit_sat_safety_signal(
     session = active_production_pilot_session()
     if session is None:
         return 0
+    if type(signal) is SafeCounterexampleProductionSignal:
+        if not signal.validates():
+            raise ValueError("safe counterexample signal authority is invalid")
+        if session.domain_signal_state.get(
+            "sat_safety_safe_counterexample_committed"
+        ):
+            # A prior validated receipt already made NOT_EQ decisive.  Retry
+            # phases may independently rediscover a counterexample, but must
+            # not open a second Phase 7 activation for the encoder's no-op.
+            return 0
     if (
         type(signal) is SatSafetyBlockerProductionSignal
         and signal.action == "OBSERVED"
     ):
+        if signal.defer_until_terminal:
+            pending = session.domain_signal_state.setdefault(
+                "sat_safety_deferred_observations", {}
+            )
+            if type(pending) is not dict:
+                raise TypeError("deferred SAT safety ledger is not exact")
+            authority_for_signal = getattr(
+                session.domain_signal_encoder, "authority_for_signal", None
+            )
+            if not callable(authority_for_signal):
+                raise TypeError("SAT safety encoder lacks occurrence authority")
+            occurrence_id = authority_for_signal(
+                session, signal
+            ).occurrence.occurrence_id
+            prior = pending.setdefault(
+                occurrence_id, (signal, producer_site_manifest_id)
+            )
+            if prior != (signal, producer_site_manifest_id):
+                raise ValueError("deferred SAT safety authority collided")
+            return 0
         already_observed = getattr(
             session.domain_signal_encoder, "has_observed", None
         )
@@ -1157,10 +1360,95 @@ def emit_sat_safety_completion_if_observed(
     session = active_production_pilot_session()
     if session is None:
         return 0
+    pending = session.domain_signal_state.get(
+        "sat_safety_deferred_observations", {}
+    )
+    if type(pending) is not dict:
+        raise TypeError("deferred SAT safety ledger is not exact")
+    authority_for_signal = getattr(
+        session.domain_signal_encoder, "authority_for_signal", None
+    )
+    if callable(authority_for_signal):
+        occurrence_id = authority_for_signal(
+            session, signal
+        ).occurrence.occurrence_id
+        if occurrence_id in pending:
+            pending.pop(occurrence_id)
+            if not pending:
+                session.domain_signal_state.pop(
+                    "sat_safety_deferred_observations", None
+                )
+            return 0
     emit = getattr(session, "emit_domain_signal_if_observed", None)
     if not callable(emit):
         raise TypeError("active production pilot session lacks conditional signal authority")
     return int(emit(signal, producer_site_manifest_id))
+
+
+def complete_observed_sat_safety_for_counterexample(
+    signal: SafeCounterexampleProductionSignal,
+) -> int:
+    """Complete only blockers bound to this exact validated SAT witness."""
+
+    if type(signal) is not SafeCounterexampleProductionSignal:
+        raise TypeError("SAT safety completion requires a safe counterexample signal")
+    if not signal.validates():
+        raise ValueError("SAT safety completion receipt validation failed")
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    observed = session.domain_signal_state.get("sat_safety_observed_signals", {})
+    if type(observed) is not dict:
+        raise TypeError("SAT safety observed signal ledger is not exact")
+
+    from .sat_safety_sites import SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE
+
+    expected_binding = signal.counterexample_binding
+    emitted = 0
+    for occurrence_key in sorted(observed):
+        observed_signal = observed[occurrence_key]
+        if type(observed_signal) is not SatSafetyBlockerProductionSignal:
+            raise TypeError("SAT safety observed signal has an invalid type")
+        if observed_signal.counterexample_binding != expected_binding:
+            continue
+        emitted += emit_sat_safety_completion_if_observed(
+            SatSafetyBlockerProductionSignal(
+                action="COMPLETED",
+                reason_id=observed_signal.reason_id,
+                canonical_target_key=observed_signal.canonical_target_key,
+                missing_semantic_fact=observed_signal.missing_semantic_fact,
+                evidence_refs=observed_signal.evidence_refs,
+                producer_id=(
+                    SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE.producer_id
+                ),
+                proof_artifact_digest=signal.proof_artifact_digest,
+                counterexample_binding=expected_binding,
+            ),
+            producer_site_manifest_id=(
+                "sat-safety-counterexample-bound-completed"
+            ),
+        )
+    return emitted
+
+
+def finalize_deferred_sat_safety_observations(session: Any) -> None:
+    pending = session.domain_signal_state.pop(
+        "sat_safety_deferred_observations", {}
+    )
+    if type(pending) is not dict:
+        raise TypeError("deferred SAT safety ledger is not exact")
+    if not pending or session.domain_signal_state.get(
+        "sat_safety_safe_counterexample_committed"
+    ):
+        return
+    for occurrence_id in sorted(pending):
+        signal, manifest_id = pending[occurrence_id]
+        terminal_signal = replace(signal, defer_until_terminal=False)
+        if getattr(session, "phase7_runtime", None) is not None:
+            session.record_phase7_pre_emission_activation(
+                manifest_id, terminal_signal
+            )
+        session.emit_domain_signal(terminal_signal)
 
 
 def emit_call_effect_signal(

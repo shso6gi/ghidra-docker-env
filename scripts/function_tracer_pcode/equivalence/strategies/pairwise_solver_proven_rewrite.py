@@ -6,6 +6,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from ...model import Expression, ExpressionType
+from ..obligations import (
+    SolverQueryExecutionReceipt,
+    issue_structural_equality_receipt,
+    register_structural_equality_producer,
+)
 from ..formula.returns import coerce_value_to_bitvec_width
 from ..normalize import (
     NormalizationContext,
@@ -35,6 +40,7 @@ def try_solver_proven_rewrite_equivalence(
 
     changed1 = _expr_signature(rewritten_expr1) != _expr_signature(case1.value_expr)
     changed2 = _expr_signature(rewritten_expr2) != _expr_signature(case2.value_expr)
+    supporting_solver_receipts = []
     if not changed1 and not changed2:
         result = QueryResult(is_equivalent=None)
         result.pair_stage = "rewrite-no-change"
@@ -52,7 +58,7 @@ def try_solver_proven_rewrite_equivalence(
         return result
 
     if changed1:
-        if not _prove_rewrite(
+        rewrite_receipt = _prove_rewrite(
             strategy,
             base_ctx,
             case1,
@@ -60,7 +66,8 @@ def try_solver_proven_rewrite_equivalence(
             rewritten_expr1,
             pair_id,
             label="rewrite-proof-1",
-        ):
+        )
+        if rewrite_receipt is None:
             result = QueryResult(is_equivalent=None)
             result.pair_stage = "rewrite-proof-1"
             result.blocking_reason = "solver_proven_rewrite_proof_failed"
@@ -78,11 +85,12 @@ def try_solver_proven_rewrite_equivalence(
                     rewrite_label="rewrite-proof-1",
                 )
             return result
+        supporting_solver_receipts.append(rewrite_receipt)
     else:
         rewritten_expr1 = case1.value_expr
 
     if changed2:
-        if not _prove_rewrite(
+        rewrite_receipt = _prove_rewrite(
             strategy,
             base_ctx,
             case2,
@@ -90,7 +98,8 @@ def try_solver_proven_rewrite_equivalence(
             rewritten_expr2,
             pair_id,
             label="rewrite-proof-2",
-        ):
+        )
+        if rewrite_receipt is None:
             result = QueryResult(is_equivalent=None)
             result.pair_stage = "rewrite-proof-2"
             result.blocking_reason = "solver_proven_rewrite_proof_failed"
@@ -108,6 +117,7 @@ def try_solver_proven_rewrite_equivalence(
                     rewrite_label="rewrite-proof-2",
                 )
             return result
+        supporting_solver_receipts.append(rewrite_receipt)
     else:
         rewritten_expr2 = case2.value_expr
 
@@ -119,8 +129,71 @@ def try_solver_proven_rewrite_equivalence(
         rewritten_case1,
         rewritten_case2,
     ):
-        result = QueryResult(is_equivalent=True)
-        result.pair_stage = "rewrite-structural"
+        required_projection_bindings = tuple(
+            (base_ctx.get("call_projection_binding_ids_by_pair") or {}).get(
+                pair_id, ()
+            )
+            or ()
+        )
+        if required_projection_bindings:
+            rewritten_query = build_pair_query(
+                base_ctx,
+                rewritten_case1,
+                rewritten_case2,
+                param_replace_fn1,
+                param_replace_fn2,
+                pair_id,
+            )
+            result = strategy._solve_query_internal(
+                rewritten_query,
+                pair_id,
+                stage="rewrite-structural-projection",
+                use_hard_timeout=True,
+            )
+            result.last_query = rewritten_query
+            result.pair_stage = "rewrite-structural-projection"
+            execution_receipt = getattr(
+                result, "solver_query_execution_receipt", None
+            )
+            if result.is_equivalent is not True:
+                return result
+            if (
+                type(execution_receipt) is not SolverQueryExecutionReceipt
+                or not execution_receipt.validates_execution(
+                    query=rewritten_query,
+                    expected_disposition="unsat",
+                    expected_query_label=pair_id,
+                )
+            ):
+                result.is_equivalent = None
+                result.blocking_reason = "structural_projection_query_authority_missing"
+                result.blocking_detail = (
+                    "structural rewrite with call projection lacks an exact "
+                    "UNSAT execution receipt"
+                )
+                return result
+            supporting_solver_receipts.append(execution_receipt)
+        else:
+            result = QueryResult(is_equivalent=True)
+            result.pair_stage = "rewrite-structural"
+        result.structural_equality_receipt = (
+            issue_structural_equality_receipt(
+                query_label=pair_id,
+                proof_kind="rewrite-structural",
+                evidence=(
+                    "rewrite-structural",
+                    _expr_signature(rewritten_expr1),
+                    _expr_signature(rewritten_expr2),
+                    int(base_ctx.get("return_size1", 0) or 0),
+                    int(base_ctx.get("return_size2", 0) or 0),
+                    bool(rewritten_case1.should_sign_extend_value()),
+                    bool(rewritten_case2.should_sign_extend_value()),
+                ),
+                supporting_solver_receipts=tuple(
+                    supporting_solver_receipts
+                ),
+            )
+        )
         return result
 
     rewritten_query = build_pair_query(
@@ -382,7 +455,7 @@ def _prove_rewrite(
     pair_id: str,
     *,
     label: str,
-) -> bool:
+) -> Optional[SolverQueryExecutionReceipt]:
     query = _build_rewrite_proof_query(
         base_ctx,
         case,
@@ -396,7 +469,19 @@ def _prove_rewrite(
         stage=label,
         use_hard_timeout=False,
     )
-    return result.is_equivalent is True
+    receipt = getattr(result, "solver_query_execution_receipt", None)
+    if (
+        result.is_equivalent is True
+        and type(receipt) is SolverQueryExecutionReceipt
+        and receipt.validates_execution(
+            query=query,
+            expected_disposition="unsat",
+            expected_query_label=pair_id,
+            expected_model=None,
+        )
+    ):
+        return receipt
+    return None
 
 
 def _build_rewrite_proof_query(
@@ -527,3 +612,9 @@ def _render_expression_smt(
         target_bits,
         use_sign_extension=use_sign_extension,
     )
+
+
+register_structural_equality_producer(
+    "rewrite-structural",
+    try_solver_proven_rewrite_equivalence,
+)

@@ -1049,6 +1049,10 @@ class ProductionDualWritePilotConnector:
         before_surface = self._legacy_surface(result)
         before_outcome = self._legacy_outcome(result)
         before_digest = authority_digest(before_surface)
+        from .production_signals import (
+            finalize_deferred_sat_safety_observations,
+        )
+        finalize_deferred_sat_safety_observations(session)
         execution_history_finalizer = getattr(
             session.domain_signal_encoder,
             "finalize_open_execution_history",

@@ -120,13 +120,18 @@ def test_to_string_includes_pairwise_timeout_normalization_summary():
             "timeout_fallback_attempts": 4,
             "changed_pairs": 3,
             "no_change_pairs": 1,
-            "unsat_results": 2,
-            "sat_results": 1,
-            "unknown_results": 1,
+            "unsat_results": 4,
+            "sat_results": 0,
+            "unknown_results": 0,
+            "normalization_unsat_results": 2,
+            "normalization_sat_results": 1,
+            "normalization_unknown_results": 1,
         },
     )
 
     output = result.to_string()
 
+    assert "Pairwise Final Solver Disposition Summary:" in output
+    assert "unsat=4, sat=0, unknown=0" in output
     assert "Pairwise Timeout Normalization Summary:" in output
     assert "attempts=4, changed=3, no_change=1, unsat=2, sat=1, unknown=1" in output

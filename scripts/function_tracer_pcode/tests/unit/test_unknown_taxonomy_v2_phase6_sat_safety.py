@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from unittest.mock import Mock
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -23,7 +24,10 @@ from scripts.function_tracer_pcode.equivalence.v2.pilot import (
 )
 from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     SafeCounterexampleProductionSignal,
+    SatCounterexampleEvidenceBinding,
     SatSafetyBlockerProductionSignal,
+    complete_observed_sat_safety_for_counterexample,
+    emit_sat_safety_completion_if_observed,
     emit_sat_safety_signal,
     production_signal_scope,
 )
@@ -97,6 +101,21 @@ def _strategy_and_surface():
     return strategy, analysis1, analysis2, case1, case2
 
 
+def _safe_pairwise_receipt(
+    *, query="(assert distinct)\n(check-sat)", model=None,
+    premise="typed-premise", pair_key=(0, 1),
+):
+    return CounterexampleSafetyReceipt.from_pairwise_validation(
+        query=query,
+        model={"x": 1} if model is None else model,
+        premise_digest=premise,
+        pair_key=pair_key,
+        analysis_safe=True,
+        global_case_replay_safe=True,
+        same_function_replay_safe=True,
+    )
+
+
 def test_sat_observation_without_safety_completion_remains_unknown():
     connector = _connector()
     session = connector.begin({"phase": "10", "case": "sat-safety-open"})
@@ -122,17 +141,21 @@ def test_sat_observation_without_safety_completion_remains_unknown():
     } == {"counterexample_safety"}
 
 
-def test_shared_monolithic_safe_counterexample_signal_promotes_not_eq():
+def test_shared_typed_safe_counterexample_signal_promotes_not_eq():
     connector = _connector()
     session = connector.begin({"phase": "monolithic", "case": "safe-sat"})
+    receipt = _safe_pairwise_receipt()
+    retry_receipt = _safe_pairwise_receipt(
+        query="(assert (= x 2))\n(check-sat)", model={"x": 2},
+        premise="retry-premise", pair_key=(1, 2),
+    )
     with production_signal_scope(session):
         assert emit_safe_counterexample_production_signal(
-            proof_artifact_digest="a" * 64,
-            formula_digest="b" * 64,
-            model_digest="c" * 64,
-            premise_digest="d" * 64,
-            pair_key=("monolithic", "region:0"),
+            safety_receipt=receipt,
         ) == 1
+        assert emit_safe_counterexample_production_signal(
+            safety_receipt=retry_receipt,
+        ) == 0
     evidence = connector.finish(
         session, _LegacyResult(Outcome.NOT_EQ), case_id="monolithic-safe-sat"
     )
@@ -141,6 +164,199 @@ def test_shared_monolithic_safe_counterexample_signal_promotes_not_eq():
         event.header.event_type.value
         for event in evidence.pilot_result.sealed_event_stream.events
     ] == ["COUNTEREXAMPLE"]
+
+
+def test_safe_independent_counterexample_discards_deferred_pairwise_blockers():
+    connector = _connector()
+    session = connector.begin({"phase": "pairwise-fallback", "case": "safe-sat"})
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    pairwise_binding = SatCounterexampleEvidenceBinding(
+        "1" * 64, "2" * 64, "3" * 64, (0, 1)
+    )
+    receipt = _safe_pairwise_receipt(
+        query="(assert distinct)\n(check-sat)", model={"x": 7},
+        premise="monolithic-independent", pair_key=("monolithic", "region:0"),
+    )
+    with production_signal_scope(session):
+        strategy._make_sat_unsafety_unknown_reason(
+            ("function1:incomplete_control_flow",),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            stage="S_PAIRWISE",
+            counterexample_binding=pairwise_binding,
+        )
+        assert session.recorder.event_count == 0
+        assert emit_safe_counterexample_production_signal(
+            safety_receipt=receipt,
+        ) == 1
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.NOT_EQ), case_id="safe-independent-sat"
+    )
+    assert [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ] == ["COUNTEREXAMPLE"]
+    assert evidence.pilot_result.reduction.projection.c_active_base == ()
+    assert evidence.pilot_result.reduction.projection.q_open_base == ()
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+
+
+def test_same_case_pair_different_sat_bindings_are_distinct_occurrences():
+    connector = _connector()
+    session = connector.begin({"phase": "pairwise", "case": "two-sat-attempts"})
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    bindings = (
+        SatCounterexampleEvidenceBinding(
+            "1" * 64, "2" * 64, "3" * 64, (0, 1)
+        ),
+        SatCounterexampleEvidenceBinding(
+            "4" * 64, "5" * 64, "6" * 64, (0, 1)
+        ),
+    )
+    with production_signal_scope(session):
+        for binding in bindings:
+            strategy._make_sat_unsafety_unknown_reason(
+                ("function1:incomplete_control_flow",),
+                analysis1,
+                analysis2,
+                case1=case1,
+                case2=case2,
+                pair_id="(0,1)",
+                stage="S_PAIRWISE",
+                counterexample_binding=binding,
+            )
+    assert len(session.domain_signal_state["sat_safety_deferred_observations"]) == 2
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.UNKNOWN), case_id="two-sat-attempts"
+    )
+    assert len(evidence.pilot_result.reduction.projection.c_active_base) == 2
+    assert len(evidence.pilot_result.reduction.projection.q_open_base) == 2
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_same_function_multiple_sat_pairs_complete_only_the_exact_occurrence():
+    connector = _connector()
+    session = connector.begin({"phase": "10", "case": "safe-sat-closes-open"})
+    receipt = _safe_pairwise_receipt(
+        query="(assert (= x 1))\n(check-sat)", model={"x": 1},
+        premise="region-zero", pair_key=("monolithic", "region:0"),
+    )
+    safe_signal = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt)
+    binding = safe_signal.counterexample_binding
+    unrelated_receipt = _safe_pairwise_receipt(
+        query="(assert (= x 2))\n(check-sat)", model={"x": 2},
+        premise="region-one", pair_key=("monolithic", "region:1"),
+    )
+    unrelated_binding = (
+        SafeCounterexampleProductionSignal.from_pairwise_receipt(
+            unrelated_receipt
+        ).counterexample_binding
+    )
+    observed = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=(
+            "legacy-case", ("pair", "region:0"), ("function", "left", 1),
+            ("function", "right", 2), ("safety_gate_ref", "return"),
+        ),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "return"),
+        evidence_refs=("return",),
+        producer_id="phase10-high-bit-sat-transform",
+        counterexample_binding=binding,
+    )
+    unrelated = SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=(
+            "legacy-case", ("pair", "region:1"), ("function", "left", 1),
+            ("function", "right", 2), ("safety_gate_ref", "return"),
+        ),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "return"),
+        evidence_refs=("other-return",),
+        producer_id="phase10-high-bit-sat-transform",
+        counterexample_binding=unrelated_binding,
+    )
+    unrelated_occurrence_id = session.domain_signal_encoder.authority_for_signal(
+        session, unrelated
+    ).occurrence.occurrence_id
+    mismatches = (
+        _safe_pairwise_receipt(
+            query="(assert (= x 9))\n(check-sat)", model={"x": 1},
+            premise="region-zero", pair_key=("monolithic", "region:0"),
+        ),
+        _safe_pairwise_receipt(
+            query="(assert (= x 1))\n(check-sat)", model={"x": 9},
+            premise="region-zero", pair_key=("monolithic", "region:0"),
+        ),
+        _safe_pairwise_receipt(
+            query="(assert (= x 1))\n(check-sat)", model={"x": 1},
+            premise="different-premise", pair_key=("monolithic", "region:0"),
+        ),
+        _safe_pairwise_receipt(
+            query="(assert (= x 1))\n(check-sat)", model={"x": 1},
+            premise="region-zero", pair_key=("monolithic", "region:1"),
+        ),
+    )
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(observed) == 1
+        assert emit_sat_safety_signal(unrelated) == 1
+        for mismatch_receipt in mismatches:
+            mismatch = SafeCounterexampleProductionSignal.from_pairwise_receipt(
+                mismatch_receipt
+            )
+            assert complete_observed_sat_safety_for_counterexample(mismatch) == 0
+        assert complete_observed_sat_safety_for_counterexample(safe_signal) == 1
+        assert emit_safe_counterexample_production_signal(
+            safety_receipt=receipt,
+        ) == 1
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.NOT_EQ), case_id="safe-sat-closes-open"
+    )
+    assert [
+        event.header.event_type.value
+        for event in evidence.pilot_result.sealed_event_stream.events
+    ] == [
+        "CAUSE_OBSERVED",
+        "CAUSE_OBSERVED",
+        "REQUIREMENT_COMPLETED",
+        "COUNTEREXAMPLE",
+    ]
+    active = evidence.pilot_result.reduction.projection.c_active_base
+    assert len(active) == 1
+    assert active[0].occurrence_id == unrelated_occurrence_id
+    assert len(evidence.pilot_result.reduction.projection.q_open_base) == 1
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is not Outcome.NOT_EQ
+
+
+def test_safe_counterexample_rejects_raw_digests_and_tampered_typed_receipt():
+    with pytest.raises(TypeError, match="typed safety receipt"):
+        SafeCounterexampleProductionSignal(
+            proof_artifact_digest="a" * 64,
+            formula_digest="b" * 64,
+            model_digest="c" * 64,
+            premise_digest="d" * 64,
+            pair_key=(0, 1),
+            receipt_kind="pairwise_counterexample_safety_receipt_v1",
+            safety_receipt=None,
+            verification_context=(),
+        )
+
+    receipt = _safe_pairwise_receipt()
+    tampered = replace(receipt, formula_digest="0" * 64)
+    with pytest.raises(ValueError, match="receipt is invalid"):
+        emit_safe_counterexample_production_signal(safety_receipt=tampered)
+
+    schema_tampered = replace(
+        receipt, schema_version="counterexample_safety_receipt_v2"
+    )
+    assert schema_tampered.validates_authority() is False
+    with pytest.raises(ValueError, match="receipt is invalid"):
+        emit_safe_counterexample_production_signal(
+            safety_receipt=schema_tampered
+        )
 
 
 def test_monolithic_strategy_publishes_safe_counterexample_to_v2():
@@ -250,9 +466,10 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
         event for event in evidence.pilot_result.sealed_event_stream.events
         if event.header.event_type.value == "REQUIREMENT_COMPLETED"
     ]
-    assert len(observed) == 2
-    assert len(completed) == 2
-    assert len({row.authority_payload.occurrence_authority.occurrence.cause_id.value for row in observed}) == 2
+    # Pairwise blockers proven before terminalization remain provisional and
+    # never enter the canonical lifecycle stream.
+    assert observed == []
+    assert completed == []
     assert evidence.pilot_result.reduction.projection.c_active_base == ()
     assert evidence.pilot_result.reduction.projection.q_open_base == ()
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
