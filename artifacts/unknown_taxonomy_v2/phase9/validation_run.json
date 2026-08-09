@@ -1,11 +1,11 @@
 {
-  "artifact_digest": "61c6919838f60a28c9be5e107ac0eacc1eea09cd027b9342b71369a7f452cd58",
+  "artifact_digest": "a6f4fe6e1985ed79403a1b5a79f2d35e26382cc838974043379c875307b57440",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "62def7d373bf46366a0983f9e5f85bd5b7a5279ad2cdece72e4154543f220a24",
-      "test_count": 613
+      "sha256": "fbfa828ade50a2d1cba1014e2a35ad60130643bf38584253776ffdd103dc42e0",
+      "test_count": 622
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml",
@@ -27,7 +27,7 @@
   "phase8_validator": "PASS",
   "refactor_contract": "GREEN",
   "refactor_replacement_contract": {
-    "abi_width_readonly_line_count": 4120,
+    "abi_width_readonly_line_count": 4125,
     "added_private_imports": [],
     "baseline_contract_digest": "24058991106c71a4deca6fbae60c54ef9b91233bade390e8db997a18c4645c30",
     "baseline_dependency_cycles": [
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "557edf1f608734a59b9c3695e548fcd459691dcecd4786469edad1c780845d6c",
+    "current_contract_digest": "6496b01e420d62a133f63f925960a97d9c1a27922f6098fa1fd275900ffeb16f",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -2978,7 +2978,7 @@
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_loop_case_object_identity",
-        126
+        130
       ],
       [
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_services._shared",
@@ -3020,7 +3020,7 @@
         "scripts.function_tracer_pcode.equivalence.v2.production_signals",
         "scripts.function_tracer_pcode.equivalence.v2.loop_recurrence",
         "_issue_loop_solver_query_authority",
-        1457
+        1745
       ],
       [
         "scripts.function_tracer_pcode.equivalence.v2.reducer",
@@ -3200,7 +3200,7 @@
         "scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures",
         "scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety",
         "_object_target_key_is_specific",
-        66
+        69
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.formula_builder.test_public_api_and_context",
@@ -3272,7 +3272,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_guard_overlap_graph",
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder",
         "_build_pairwise_extra_assertions",
-        13
+        15
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_loop_template_abstraction",
@@ -3332,13 +3332,13 @@
         "scripts.function_tracer_pcode.tests.unit.test_pairwise_solver_proven_rewrite",
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_solver_proven_rewrite",
         "_build_rewrite_candidate",
-        15
+        16
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_pairwise_solver_proven_rewrite",
         "scripts.function_tracer_pcode.equivalence.strategies.pairwise_solver_proven_rewrite",
         "_build_rewrite_proof_query",
-        15
+        16
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_phase15_regression_gates",
@@ -3878,7 +3878,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_sat_safety",
         "scripts.function_tracer_pcode.tests.unit.test_phase3_sat_unsafety_lane5",
         "_case",
-        30
+        40
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_subordinate_decompilation",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "382a2338cf67d220aefd3b59d1b7920e467f05f92c018a376f7b07b86a1a15eb",
+    "current_source_tree_hash": "d16cf48a03d8aa22b57fd8985f482de45ac6065ce7eee0869f40e476dee6a187",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

@@ -1,11 +1,11 @@
 {
-  "candidate_set_digest": "a4a804719710a2478cb6575aad3be8e968ada5b2b9b8c0efa33cb2a6ed3834ff",
+  "candidate_set_digest": "3d0e31cc09e0eddaa4db8e6b4b7bb016f88a61f37d88d17e76ab8322d2114df6",
   "dynamic_site_decisions": [
     {
       "disposition": "ReturnWidthMismatchError is sealed to non-retired return_width_bridge_missing",
       "finite_reason_set": [],
       "in_scope": false,
-      "line": 1912,
+      "line": 2211,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "relation": null,
       "symbol": "check"
@@ -14,7 +14,25 @@
       "disposition": "loop fallback classifier returns only sealed non-retired slice-4 reason IDs or fails closed",
       "finite_reason_set": [],
       "in_scope": false,
-      "line": 743,
+      "line": 747,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "relation": null,
+      "symbol": "_impl_check"
+    },
+    {
+      "disposition": "SAT terminal query gate emits exact non-retired unexpected_pairwise_state and cannot authorize NOT_EQ",
+      "finite_reason_set": [],
+      "in_scope": false,
+      "line": 1243,
+      "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
+      "relation": null,
+      "symbol": "_impl_check"
+    },
+    {
+      "disposition": "equivalent-result authority gate emits exact non-retired unexpected_pairwise_state and cannot authorize EQ",
+      "finite_reason_set": [],
+      "in_scope": false,
+      "line": 1438,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
       "relation": null,
       "symbol": "_impl_check"
@@ -23,7 +41,7 @@
       "disposition": "query-result blocker flow contains typed semantic reasons and no timeout-derived reason fallback",
       "finite_reason_set": [],
       "in_scope": false,
-      "line": 1400,
+      "line": 1522,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
       "relation": null,
       "symbol": "_impl_check"
@@ -32,7 +50,7 @@
       "disposition": "pending loop fallback is sealed to non-retired slice-4 reason IDs",
       "finite_reason_set": [],
       "in_scope": false,
-      "line": 1489,
+      "line": 1611,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
       "relation": null,
       "symbol": "_impl_check"

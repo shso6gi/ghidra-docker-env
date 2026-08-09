@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "3c66cebf449dc38a9aa175710ae09bd4c7946a7d552684e6fccae8a75b1097da",
+  "artifact_digest": "e80f37b68011949f5b21f5deb3a5f6689fa34ae683bc94f0f8fefbd7302275de",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -208,19 +208,19 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice5_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "237c2fa2e4b0f54780da226fbaafbc9613702b85bf850c5d943ac0136a2234f9",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "118783f8825908a69334b705f9b0c57d939226f500848e4d5b68a16f1c9f923f",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/return_width_pipeline.py": "763eb03944830423c6993f863b4de492c2b6f61d5a9c52c1042ad4cb17eba47f",
     "scripts/function_tracer_pcode/equivalence/return_width_surface.py": "0b85c8ec89ba84bab40edf4790ecae86f16b99b48525845da702855fbb81d154",
-    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "a5fe7dac5b1d63b1ebe637c6a2cd54c6e99d43399dbc42679e6ecfe27eef01ca",
-    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "b987d061eacde7a0230e1d84ce344ffc880dc06bde962d0c80fad6d25869eadb",
+    "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py": "3ddc0806f9f007ff402eea63b7f2ca2581ef1cd30feedf0997ab66f025e62a0e",
+    "scripts/function_tracer_pcode/equivalence/v2/abi_width_readonly.py": "7c9443d9c494b4330dc296f1887a47e28934767f45bbe68c43d5eb8709d2a3e7",
     "scripts/function_tracer_pcode/equivalence/v2/execution_authority.py": "2712dbf0409ae3d2d61bc7270e84ec0adb307cd10f8c7d57318b824bb8f9494a",
-    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "7b915eaba82c1d25f701c2e412f2e5488cbc8152ca00cf73f2df0c55ea789614",
-    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "f349274286a7a88426ff1d041292d6513345c497d79209f8089d92c2e0e12170",
+    "scripts/function_tracer_pcode/equivalence/v2/pilot.py": "3f88a09e2ea70630d7c79df8e29581119b1b72131f44df4774445b3f3e0912ab",
+    "scripts/function_tracer_pcode/equivalence/v2/production_signals.py": "ab35a7e0fc3246adca9f2744feafc90fb6a8c0695b82f6f5006c8c7cc4531a64",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_left.c": "fb895510c59fbbccb8af642fb51b8ee5dac2c60291346d4f49b61140c2050c60",
     "scripts/function_tracer_pcode/tests/fixtures/slice5_high_bit_right.c": "e1e5803ca6cb9a86fd0dd98b64d7072f6b143b52897446203488539ea611c5c2",
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_summary_pyghidra_regressions.py": "80a09c3d5f2b9155f24b637ccdc0505b26b746ab5ce38494479c37d5a9efb84e",
-    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "4ab724525ea661bc705a403e17366e125309eaaf863ef88f599c0fc0929fee6a",
+    "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_abi_width_readonly.py": "7745b29a93712c19f8445f4ddcf66bb5252484f26fa822379420b3867374dc05",
     "targets/cate1/zext_or_repro/zext_or_repro.c": "0590830964333ee3885ec27b379aaf0e9ac555cf279c68a17ca0dc041b95edec"
   },
   "git_head": "29376ea952073e52185cb1821eebb6d04a383ef3",
@@ -402,8 +402,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 608,
-      "candidate_set_digest": "0a5fa72c9ac7d87a1016e15e50c1f5ad7d82574ee92cfbefa49b89db8880a800"
+      "candidate_count": 630,
+      "candidate_set_digest": "593bda52978a4982479c02a21b36e1b31d1bbc9e286e21c4f89d089fa5b650ec"
     },
     "live_delta": {
       "added": 0,

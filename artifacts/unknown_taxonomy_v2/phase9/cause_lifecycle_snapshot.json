@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "38880c0b8b6cce06ad4cc980b732e2c127af8653aa9b5b6ff812e9da9509ff56",
+  "artifact_digest": "d21981172c7c393c10965758e2b3157c717bd51305a5d92605451cbaee14130c",
   "artifact_kind": "phase9-cause-lifecycle-snapshot-v1",
   "base_relations_exclude_final_outcome": true,
   "lifecycle_replay_authority": {
@@ -9,10 +9,10 @@
     "lifecycle_inference_count": 0,
     "materialized_completion_receipt_count": 0,
     "materialized_transformation_receipt_count": 0,
-    "pilot_receipt_digest": "40336ebdb11f1934c495700ae0733f3cb3ec8a12a7ab6f26e40b7881e0bc924e",
-    "replayed_lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
-    "replayed_snapshot_digest": "7dcb0da2634310b49848d48c67dd21f3d5a84aeb31c268e62bf929aa2251db7e",
-    "sealed_event_stream_authority_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39"
+    "pilot_receipt_digest": "564c0370be37b1a7ce1c563e2289b222999b0c080e0b8a04091feaaf725b4f5b",
+    "replayed_lifecycle_projection_digest": "95181bc417deee25bde679ce5ee9a687f894fbf8bce21c04988cc8f2f9c0ac00",
+    "replayed_snapshot_digest": "5587f65f51238b41386bb5cc6ce9e46be8c5d179059e1ea4edb36e2aa79599aa",
+    "sealed_event_stream_authority_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92"
   },
   "semantic_cause_and_proof_backlog_are_separate": true,
   "timeout": {
@@ -42,10 +42,10 @@
   "unknown": {
     "c_active": [
       {
-        "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
+        "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
         "decision_effect": "blocks_disequivalence",
         "domain": "sat_safety",
-        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+        "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
         "reason_id": "counterexample_analysis_safety_unproven",
         "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
         "target_kind": "counterexample_safety_gate"
@@ -54,12 +54,12 @@
     "final_outcome": "UNKNOWN",
     "q_open": [
       {
-        "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-        "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+        "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
+        "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
         "proof_kind": "counterexample_safety",
-        "proof_requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
+        "proof_requirement_id": "sat-safety-ef49d2182a2372d09d5598218723adb4",
         "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
-        "semantic_target_digest": "74ff6d69bcb2bb282a5b6f7b4399df8a2f871ec874670660a12d2eda600a8068"
+        "semantic_target_digest": "e1bf1bd1d775a53485221f1d17be5389011dddf4cf2a95fc9b285d30627fffc1"
       }
     ]
   }

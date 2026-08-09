@@ -1,6 +1,6 @@
 {
   "active_cause_count": 1,
-  "artifact_digest": "d51d8b75ecdfdd64c0c4669046ff9dbda7e8da08d2b173af2668633ff4860bbf",
+  "artifact_digest": "276878acb582bf709942138114aef3983bffc57a337f62474ce37301a3d3fa82",
   "binary_content_identities": [
     "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
     "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -11,10 +11,10 @@
   ],
   "c_active_rows": [
     {
-      "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
+      "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
       "decision_effect": "blocks_disequivalence",
       "domain": "sat_safety",
-      "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+      "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
       "reason_id": "counterexample_analysis_safety_unproven",
       "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
       "target_kind": "counterexample_safety_gate"
@@ -32,15 +32,15 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "decision_receipt": {
-    "authority_input_digest": "98ae32f1e126b3d3bcc2c178d015c77fb786767cd5c41e4606b4ca1fbd34de93",
-    "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
+    "authority_input_digest": "f5fc70f0cb87b641d9f765e550f483602a009a227fafd6c08bf8e2e322bb6425",
+    "lifecycle_projection_digest": "95181bc417deee25bde679ce5ee9a687f894fbf8bce21c04988cc8f2f9c0ac00",
     "outcome": "UNKNOWN",
-    "receipt_digest": "f3e34ab376728f3399c6d89b0b60557217c955c585b8a23b0dbcf07fd689feb7",
+    "receipt_digest": "54a06d46ad4400563251f4a31593bf7ca769b031556017eb48fb63218bcaf9f9",
     "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae"
   },
   "discovered_activation_count": 1,
   "expected_activation_count": 1,
-  "expected_activation_ledger_digest": "a87fafed56c1f5d9d46ea433e41e212db41183afc54b04c571d312bbd7f887b2",
+  "expected_activation_ledger_digest": "951af7f249fcf57a66e191f8b9156fed6a43e07b46517f43dec1f5d835d1e419",
   "final_outcome": "UNKNOWN",
   "function_pair": [
     "phase7_sat_witness",
@@ -49,16 +49,16 @@
   "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
   "not_reached_activation_count": 0,
   "open_requirement_count": 1,
-  "producer_manifest_digest": "48d5daede69df3cbf7ebeb6ac94ce279f3499cd942dde53db445d3eb1be14e56",
-  "producer_site_count": 28,
+  "producer_manifest_digest": "5953222ff4e568fa6f9af2d0921ceb02ef33830228f5895329dd139f85e273d7",
+  "producer_site_count": 30,
   "q_open_rows": [
     {
-      "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-      "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+      "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
+      "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
       "proof_kind": "counterexample_safety",
-      "proof_requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
+      "proof_requirement_id": "sat-safety-ef49d2182a2372d09d5598218723adb4",
       "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
-      "semantic_target_digest": "74ff6d69bcb2bb282a5b6f7b4399df8a2f871ec874670660a12d2eda600a8068"
+      "semantic_target_digest": "e1bf1bd1d775a53485221f1d17be5389011dddf4cf2a95fc9b285d30627fffc1"
     }
   ],
   "query_execution_receipts": [
@@ -67,11 +67,11 @@
       "disposition": "sat",
       "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
       "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-      "premise_digest": "a104df82f1e00072b4e685a902086262a214eee0a06ad3b55cecb69e96bec522",
+      "premise_digest": "29b6b873bd6fbb24e8df14285f52bc8154a245b069263cbeda00f6ec4cb066be",
       "projection_binding_ids": [],
       "proof_kind": "monolithic_region_guard",
       "query_label": "monolithic.region:0:0:guard",
-      "region_receipt_digest": "624151db9dd854595411ccf0f307acdb8a48f742baf6aa96bc6fc2e294393c91",
+      "region_receipt_digest": "028cff8f9ca2c697439b4f17273b6ef710cefffe44cc6297cad10283875a04e7",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
@@ -81,11 +81,11 @@
       "disposition": "sat",
       "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
       "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-      "premise_digest": "65c5c0a8a672c2d397e68f497e87991ce6eb438119aa3795f72e12c5197a8ebb",
+      "premise_digest": "e06893316da95ddf1523db14eccb8859143623e916bad5e53e561609a07483c7",
       "projection_binding_ids": [],
       "proof_kind": "monolithic_region_value_inequality",
       "query_label": "monolithic.region:0:0:value",
-      "region_receipt_digest": "9d0dbc53b1de73ac88605d032dc787604b92e9b942bdd8c6cd27f433fde65d8d",
+      "region_receipt_digest": "98421b54a67ed2bcf421b565f17473d6cbbe19426194a7811c266abf411e605c",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
@@ -95,11 +95,11 @@
       "disposition": "sat",
       "formula_digest": "06c3b78d941116d161622f67294e3d757bf3b55b9ae6e31f55588ddae4f43d40",
       "formula_text": "; ============================================================\n; Equivalence Check\n; Function 1: phase7_sat_witness\n; Function 2: phase7_sat_witness\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n; ----------------------------------------\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n; ----------------------------------------\n\n; ----------------------------------------\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n\n; ----------------------------------------\n; Return value for phase7_sat_witness\n; ----------------------------------------\n(define-fun return_1 () (_ BitVec 32)\n  (_ bv7 32))\n\n; ----------------------------------------\n; Return value for phase7_sat_witness\n; ----------------------------------------\n(define-fun return_2 () (_ BitVec 32)\n  (_ bv8 32))\n\n; ----------------------------------------\n; Equivalence assertion (negated)\n; If SAT: functions are NOT equivalent\n; If UNSAT: functions ARE equivalent\n; ----------------------------------------\n(assert (not (= return_1 return_2)))\n\n(check-sat)\n(get-model)",
-      "premise_digest": "d413c8d3da0d8d5e81f8984c22c1c61e757cbd42d1b1dc69ee732a0c2ed1dae1",
+      "premise_digest": "3fa7401d9f36c34c717600d2707fdd062b1e6bf8cc1e785af6d544b61e0abf83",
       "projection_binding_ids": [],
       "proof_kind": "monolithic_global_counterexample_replay",
       "query_label": "monolithic.region:0:0:global-replay",
-      "region_receipt_digest": "c27df6973d34ac21d67b8accaaa8c058b41599aaf67d3672f5728802d0195148",
+      "region_receipt_digest": "4297e2ac18c74f62a13d587d2e1455a3c12f286e327da79a44697e0ecedffffc",
       "return_width_binding_receipt_digest": "",
       "return_width_observation_view_digest": "",
       "validated": true
@@ -114,12 +114,12 @@
     ]
   },
   "runtime_activation_count": 1,
-  "runtime_activation_ledger_digest": "ad79e9f0edbd186c7feaa22d2d4f322bd4d718351616253de84b8c8f5a6b1289",
+  "runtime_activation_ledger_digest": "3b254f0ac414213ba8c6161f7c07441c54ae0de5f6b954e98c16261390945344",
   "sealed_event_stream": {
     "object_type": "SealedEventStream",
     "payload": {
       "envelope": {
-        "authority_chain_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+        "authority_chain_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
         "event_count": 1,
         "first_sequence": 1,
         "last_sequence": 1,
@@ -131,11 +131,11 @@
       },
       "events": [
         {
-          "authority_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+          "authority_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
           "authority_payload": {
             "occurrence_authority": {
               "bound_contract": {
-                "bound_expression_digest": "7b3bd5586908c97c5512e011e60f7c029e7ce7700f17856b00c05ca61a27256d",
+                "bound_expression_digest": "bb3af9d1922e58a19a47bc2495768ee28503d4317544457e5ba7325b9df82605",
                 "contract_definition_id": "counterexample-safety-recovery",
                 "contract_version": 1,
                 "normalized_expression_digest": "91b0cb6837755210c81acb5b5164bbe68c35ebdeb44046d4dbf431a65d5914d9",
@@ -144,10 +144,10 @@
                     "safety",
                     {
                       "proof_kind": "counterexample_safety",
-                      "requirement_id": "sat-safety-ffcedc971e36fed8cacad3663557cdbd",
+                      "requirement_id": "sat-safety-ef49d2182a2372d09d5598218723adb4",
                       "semantic_target_key": [
                         "cause",
-                        "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f"
+                        "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa"
                       ]
                     }
                   ]
@@ -155,7 +155,7 @@
               },
               "occurrence": {
                 "attempt_id": "9ef4c65cb4ebe014abe5ed83cb47d448d79adc8bbd7442eefe523b7a417c639c",
-                "bound_expression_digest": "7b3bd5586908c97c5512e011e60f7c029e7ce7700f17856b00c05ca61a27256d",
+                "bound_expression_digest": "bb3af9d1922e58a19a47bc2495768ee28503d4317544457e5ba7325b9df82605",
                 "bound_satisfaction_contract_id": "counterexample-safety-recovery",
                 "bound_satisfaction_contract_version": 1,
                 "cause_id": {
@@ -299,6 +299,16 @@
                             []
                           ]
                         ]
+                      ],
+                      [
+                        "counterexample_evidence_binding",
+                        "06c3b78d941116d161622f67294e3d757bf3b55b9ae6e31f55588ddae4f43d40",
+                        "dc937b59892604f5a86ac96936cd7ff09e25f18ae6b758e8014a24c7fa039e91",
+                        "33065da46f9205ec62060e6bb38312f61a2828cb480be5ccf244d88d080b24cd",
+                        [
+                          "monolithic",
+                          "0:0"
+                        ]
                       ]
                     ],
                     [
@@ -313,8 +323,8 @@
                   ],
                   "reason_id": "counterexample_analysis_safety_unproven",
                   "schema_version": 2,
-                  "semantic_proposition_digest": "6387515c6b09ee6b1c5cb4bca620dd9f1b99c2b1cbab296a7122744a3d72b6c5",
-                  "value": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f"
+                  "semantic_proposition_digest": "3b65fe8d23a10e2e1dec39f5cd35d497d003f5b710a6c6f42dc8ab0c0faa64b5",
+                  "value": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa"
                 },
                 "evidence_kind": "sat_safety_producer_signal",
                 "evidence_refs": [
@@ -322,21 +332,21 @@
                 ],
                 "identity_scope": "RELATIONAL",
                 "normalized_expression_digest": "91b0cb6837755210c81acb5b5164bbe68c35ebdeb44046d4dbf431a65d5914d9",
-                "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+                "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
                 "producer_id": "sat_unsafety_reason_producer",
                 "proof_requirement_ids": [
-                  "sat-safety-ffcedc971e36fed8cacad3663557cdbd"
+                  "sat-safety-ef49d2182a2372d09d5598218723adb4"
                 ],
                 "reason_id": "counterexample_analysis_safety_unproven",
                 "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e",
-                "target_id": "13f32febbba1e9b9083f0ea1671195b516aa98967c6109298d0338f968768fac",
+                "target_id": "cabc9a1a09c16068bb3f63cbd7cc5aec97ea2803e919724df5d7e2a63e673f21",
                 "target_kind": "counterexample_safety_gate"
               }
             }
           },
           "diagnostic_payload": null,
           "header": {
-            "authority_payload_digest": "83dffa67a1ef2f586321a90246b2df72fcea9fb6cc7fe081757dc50d82b238fa",
+            "authority_payload_digest": "754a8be64745eab7c3eb057e71358e307e40efd6613def28c6b9ed0538ba9ded",
             "event_type": "CAUSE_OBSERVED",
             "predecessor_authority_digest": "0000000000000000000000000000000000000000000000000000000000000000",
             "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
@@ -348,7 +358,7 @@
         }
       ]
     },
-    "payload_digest": "61bde345d2e32515a1591e58a07bd8aeded2208e5d2ce06eeec8f6853bc8cb7f",
+    "payload_digest": "0e8bdd0df589858dd9a6fcdc48330599c53cb71eac0c9007068098eda7d8876c",
     "schema_version": 2
   },
   "selected_activation_count": 1,
@@ -361,24 +371,24 @@
     "80bd2ee4db1c612bb7d5f6d12fa66e4b1245f83c1d85e28a55e97265e5f1fff4",
     "f44c7cc5269a495ac380c9f1f3cb526f34b9857dbad8ce5cc057814bc6b18738"
   ],
-  "static_producer_site_count": 28,
+  "static_producer_site_count": 30,
   "terminal_timeout_assignment_count": 0,
   "terminal_timeout_receipt_count": 0,
   "typed_projection_receipt": {
-    "activation_id": "discovered-6fc4be0d8530af6472dafe7430a31a8e2c336664391b690e6f92daf5daa2916c",
-    "cause_id": "1d09a7fd7bb139299369ee2645a46ccdef67fcea6bdaa8dbf334439a92fdef0f",
-    "event_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
-    "event_stream_digest": "43f3ba5f6ae0c9d9c9da89dbe1898cfda08465d8cc0e45dd7ef3c1e3b7223b39",
+    "activation_id": "discovered-4b1aef3cb68f504d56b419dc872915e389727d417e572255a880c34a7855b57b",
+    "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
+    "event_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
+    "event_stream_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
     "expected_cause_slot_id": "sat-safety-blocker-observed:counterexample_analysis_safety_unproven",
-    "lifecycle_projection_digest": "a4c5b455b82a1354b1d9b6ac23fb5543dbf9f8e4906d7798a64cb7048707d7b4",
-    "occurrence_id": "sat-safety-occ-a509830ae44399cbe427d86afc021596",
+    "lifecycle_projection_digest": "95181bc417deee25bde679ce5ee9a687f894fbf8bce21c04988cc8f2f9c0ac00",
+    "occurrence_id": "sat-safety-occ-f26ed9a4d231047cb7a283fcb2a1b68c",
     "projection_schema": "typed-result-projection-v1",
     "reason_id": "counterexample_analysis_safety_unproven",
     "reason_registry_digest": "cb97ad9e64b25c3949631a0bb9dafc4a98a11d96f858ae36a875ba60a1b5b1c6",
-    "receipt_digest": "44ad905034e419ea9d00e1549da94909c966ce431822b418f1c8b81b3703d8e4",
+    "receipt_digest": "60650abe22385c1e9d93f3311ef06dfb17ce6a147ae2037b180d6c498ad8420f",
     "recovery_registry_digest": "8b99b8bbcda1c9227546d57b6f37c25f5a222e2b33a6f5cc72d790d9f3b0127b",
     "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
-    "semantic_projection_digest": "e01690afbb9e11d5fefb640ae87c9c15580837b908c475704fbdf6492b462464",
+    "semantic_projection_digest": "7c90ed7a77dd853d5341c969a227682c3d8d72a181102755cf2c062c8f9e759f",
     "source_snapshot_fingerprint": "eaa6e4bc25b7f07c5f867bae450bb3d885e847bfd43227313d8fa448c494567e"
   }
 }
