@@ -359,6 +359,10 @@ def test_closure_snapshot_audits_binding_use_partition():
         consumed_binding_uses=("value-use",),
     )
     snapshot = evidence.snapshot_key()
+    import json
+
+    json.dumps(snapshot)
+    assert "SolverQueryExecutionReceipt" not in repr(snapshot)
     assert ("guard-use", "value-use") in snapshot
     assert ("value-use",) in snapshot
     assert ("guard-use",) in snapshot

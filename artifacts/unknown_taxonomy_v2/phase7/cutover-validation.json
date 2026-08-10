@@ -1,6 +1,6 @@
 {
   "active_cause_count": 6,
-  "artifact_digest": "e7579119c61a6ed6a0b8eb742cad42238be2aa9ec187fda509bcb0e535618346",
+  "artifact_digest": "78ab502ec3d977ff4015bbca7b9499ebf7ee438ccee28e64f615343708509e88",
   "contract_fixture_coverage": {
     "covered_cause_slot_count": 6,
     "eligible_cause_slot_count": 6,
@@ -8,7 +8,7 @@
     "v2_native_typed_cause_coverage": 1.0
   },
   "cross_slice_validation": {
-    "artifact_digest": "9feca1588825efe4e07ec54146828c2eff670b9a6c0f75921eb73d5d9bb55e04",
+    "artifact_digest": "0df1e7a9aa379b3501f8361c65450faa2de0b4b24549b3084d0ff24bf4247e39",
     "declared_external_fixture_skips": [
       {
         "classname": "tests.unit.test_unknown_taxonomy_v2_phase7_legacy_baseline",
@@ -27,7 +27,7 @@
       }
     ],
     "junit_path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-    "junit_sha256": "fbfa828ade50a2d1cba1014e2a35ad60130643bf38584253776ffdd103dc42e0",
+    "junit_sha256": "06b6900a26b7244ef61f8a335d17f18c782433defcfa12a189a06d2083d2fc3c",
     "manifest_kind": "unknown-taxonomy-v2-phase7-cross-slice-junit-v2",
     "pytest_selection": [
       "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
@@ -54,7 +54,7 @@
     "source_files": [
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_contracts.py",
-        "sha256": "56f0a20f31c147c615ef7a13ad5f49d4ff85df88cf29e935a8ae977438d16284"
+        "sha256": "d3c6d448f6c50964fdb99adce334fdba85575b9bfe540283b2557ea568284e63"
       },
       {
         "path": "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase2.py",
@@ -133,10 +133,10 @@
         "sha256": "cc6ef30d52fdce789dd00f54e6947fa875521866204b1929a84970cd52f8204f"
       }
     ],
-    "test_count": 622
+    "test_count": 623
   },
-  "event_stream_digest": "49abebb444b3e0a6079465f3396761919024734b416d7475970eeb908e0db93e",
-  "expected_activation_ledger_digest": "024c10829779723169939730031553df709d83988808b0f17d9d5daf64817ac5",
+  "event_stream_digest": "be3049857294ccfcc7c21a86027a46bbfb69103eaff3d180966f700b1d2f6f46",
+  "expected_activation_ledger_digest": "d3acb169c9f3b1ae4d4481da3e0e02b4f5ae69af939311e2d1a2c4eae5388014",
   "fixture_domains": [
     "operational_extraction",
     "expression_call_effect_memory",
@@ -145,13 +145,13 @@
     "sat_safety",
     "return_width"
   ],
-  "inventory_manifest_digest": "4e6e61d59217640d8ea6214f613eca9b1d6c90583f6b913da1b3e4b160911f8b",
+  "inventory_manifest_digest": "5e4f2b5e7bc1732b4fcfbca5c6ece2dc4e58664a30fe6fe822c253b7f3df54a0",
   "legacy_entry_count": 411,
   "legacy_manifest_digest": "6eb7031c243fd360aa6b271d9269be419848b59041c2f926f92052e5636dcb06",
-  "lifecycle_projection_digest": "bade9dc588fdb7e2e9e91b7875a3f03aae395c4d8603dd0350e0f94402ff5fa7",
+  "lifecycle_projection_digest": "b1ef2d8d61f8ece56dcd1acd2dfd6b8189f8e0cf9dbaef92b6dea4095d154b96",
   "manifest_kind": "unknown-taxonomy-v2-phase7-cutover-contract-fixture-v2",
   "open_requirement_count": 5,
-  "producer_site_manifest_digest": "5953222ff4e568fa6f9af2d0921ceb02ef33830228f5895329dd139f85e273d7",
+  "producer_site_manifest_digest": "438e8a7b7ee9cfd1857d540516f6dcacc43b5a45221aa907357a420bd5866e54",
   "production_runtime_coverage": {
     "activated_domains": {
       "operational_extraction": {
@@ -311,7 +311,7 @@
   },
   "production_runtime_unknown": {
     "active_cause_count": 1,
-    "artifact_digest": "276878acb582bf709942138114aef3983bffc57a337f62474ce37301a3d3fa82",
+    "artifact_digest": "df5d509b0619213720ac8c121b17347d1dd0ee9180faddf13716cdcf55839d61",
     "binary_content_identities": [
       "0dce6eca27191477191f140bb688d225f52060ab9f57b98145cb822f09a43667",
       "686255f8c4b6df9a333bf0d0253dd45c583b334ec44703922baff98199686371"
@@ -351,17 +351,17 @@
     },
     "discovered_activation_count": 1,
     "expected_activation_count": 1,
-    "expected_activation_ledger_digest": "951af7f249fcf57a66e191f8b9156fed6a43e07b46517f43dec1f5d835d1e419",
+    "expected_activation_ledger_digest": "0f5ecfeef36787849e7eda85e68c2e6def3a1eb7056616327b40073585508c94",
     "final_outcome": "UNKNOWN",
     "function_pair": [
       "phase7_sat_witness",
       "phase7_sat_witness"
     ],
-    "junit_sha256": "8cc6029e6ca7ef11d1cb350e717009262fcb4061f24f3fac243acad58f80c63b",
+    "junit_sha256": "cf9b7b80899d07d34abe940eff5bbd616c8d88c091495da39a8aba96eb437d0f",
     "manifest_kind": "unknown-taxonomy-v2-phase7-real-sat-unknown-v1",
     "not_reached_activation_count": 0,
     "open_requirement_count": 1,
-    "producer_manifest_digest": "5953222ff4e568fa6f9af2d0921ceb02ef33830228f5895329dd139f85e273d7",
+    "producer_manifest_digest": "438e8a7b7ee9cfd1857d540516f6dcacc43b5a45221aa907357a420bd5866e54",
     "producer_site_count": 30,
     "q_open_rows": [
       {
@@ -379,11 +379,11 @@
         "disposition": "sat",
         "formula_digest": "d39006d7a1fa0a63e6b5d67ae404866ddc9fa9056d05ec41e4b164993f6b18ad",
         "formula_text": "; ============================================================\n; Pairwise Query (Conditions Only): Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n(check-sat)",
-        "premise_digest": "29b6b873bd6fbb24e8df14285f52bc8154a245b069263cbeda00f6ec4cb066be",
+        "premise_digest": "2bf02fe7db20e3514ce5b30b75f45cd04d3cb6d20c305af6beb20d09e7d2910a",
         "projection_binding_ids": [],
         "proof_kind": "monolithic_region_guard",
         "query_label": "monolithic.region:0:0:guard",
-        "region_receipt_digest": "028cff8f9ca2c697439b4f17273b6ef710cefffe44cc6297cad10283875a04e7",
+        "region_receipt_digest": "c03c845ef5a78aa84e7c8a2aaebe5867edc8c4270a16102717c2e2ba5a593ca2",
         "return_width_binding_receipt_digest": "",
         "return_width_observation_view_digest": "",
         "validated": true
@@ -393,11 +393,11 @@
         "disposition": "sat",
         "formula_digest": "2e27dbbb087c7ece393545bef2ec1d0b3ea8867e964d26f6f596083bcbeefffd",
         "formula_text": "; ============================================================\n; Pairwise Query: Pair monolithic-region-0:0\n; Case1[0]: unconditional\n; Case2[0]: unconditional\n; ============================================================\n\n(set-logic QF_BV)\n\n; ----------------------------------------\n; Parameters for phase7_sat_witness\n; (Bit widths from Ghidra analysis)\n\n; Parameter equality constraints\n; For matching bit widths: direct equality unless semantic narrowing is inferred\n; For different bit widths: overlapping bits equal, upper bits free\n; ----------------------------------------\n; Value inequality\n; ----------------------------------------\n(assert (not (= (_ bv7 32) (_ bv8 32))))\n\n(check-sat)\n(get-model)",
-        "premise_digest": "e06893316da95ddf1523db14eccb8859143623e916bad5e53e561609a07483c7",
+        "premise_digest": "06ec1ad456dfa32fb06ac9006b5622834293311b9ee0e1ea10e7f9033e07b502",
         "projection_binding_ids": [],
         "proof_kind": "monolithic_region_value_inequality",
         "query_label": "monolithic.region:0:0:value",
-        "region_receipt_digest": "98421b54a67ed2bcf421b565f17473d6cbbe19426194a7811c266abf411e605c",
+        "region_receipt_digest": "7c95cc00db9cce97a409e877eb83209b93bce39954569769c7371c9713c80858",
         "return_width_binding_receipt_digest": "",
         "return_width_observation_view_digest": "",
         "validated": true
@@ -426,7 +426,7 @@
       ]
     },
     "runtime_activation_count": 1,
-    "runtime_activation_ledger_digest": "3b254f0ac414213ba8c6161f7c07441c54ae0de5f6b954e98c16261390945344",
+    "runtime_activation_ledger_digest": "dcb7750153fcc2c9c61f4d338b72ab148c03aaa55584e103404f02bc59145324",
     "sealed_event_stream": {
       "object_type": "SealedEventStream",
       "payload": {
@@ -688,7 +688,7 @@
     "terminal_timeout_receipt_count": 0,
     "test_source_sha256": "24660663ac1578c2b0599c11fc5d7bf426670d5c066d1fa80d8e40434dffd7ec",
     "typed_projection_receipt": {
-      "activation_id": "discovered-4b1aef3cb68f504d56b419dc872915e389727d417e572255a880c34a7855b57b",
+      "activation_id": "discovered-4cd897d22018a1b07aa61a3a4c89436a40bcf826dee8d453b2a1e6a7099b19f2",
       "cause_id": "4d23c9429ce669be7c58c93d0d382baff29b028be01b67797516ccabcdda6ffa",
       "event_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
       "event_stream_digest": "70ddb5ae1d43e790f7095e26e2dc23fc2bb9d30293783297d2edd48df4dc8a92",
@@ -698,7 +698,7 @@
       "projection_schema": "typed-result-projection-v1",
       "reason_id": "counterexample_analysis_safety_unproven",
       "reason_registry_digest": "cb97ad9e64b25c3949631a0bb9dafc4a98a11d96f858ae36a875ba60a1b5b1c6",
-      "receipt_digest": "60650abe22385c1e9d93f3311ef06dfb17ce6a147ae2037b180d6c498ad8420f",
+      "receipt_digest": "62351aee6c09e1ebd6f2f7d837fec7880b21261e820fbd083d7b2afc17a2cfef",
       "recovery_registry_digest": "8b99b8bbcda1c9227546d57b6f37c25f5a222e2b33a6f5cc72d790d9f3b0127b",
       "result_occurrence_id": "production-pilot-eaa6e4bc25b7f07c5f867bae",
       "semantic_projection_digest": "7c90ed7a77dd853d5341c969a227682c3d8d72a181102755cf2c062c8f9e759f",
@@ -708,16 +708,16 @@
   "production_umbrella_generation": 0,
   "production_umbrella_routing": 0,
   "projection_receipt_digests": [
-    "f63bd2e2743780c06ba736a067568f955523aad6ee324ef9231bfcdaef404df4",
-    "3e24cf75f656729903113675044f9363abf159401d6169c5d5e24d032cffafa9",
-    "8adc5c0b7f45a50a0f12bb826d6c5525fbfeb4828d7376bee9870c1f6c3d88de",
-    "81bd6e06932ad504ca159015b630826424745ece2e5ee4db91f1550756316196",
-    "80f739c5328783a8b6719e0c0e1bc7f424a68b0dad8261cc2fd48ac78c0a7d94",
-    "2595d13c37fcb87b065ace30a6e5ce7559347b5e3d9b871550e9bee93abdf9c8"
+    "1f952d98543ab4f46d32fc9eb7f350bcca37e0338d744f9f232a825222d7332a",
+    "327295aea8593183749afe1f095895a6047b1f8816a9b74cb0198b16a902d192",
+    "6e7b74dd9a70a8e50d3c64135209076abfe95e9ba63e035b090fe2c1024814b4",
+    "9fbda00bc45e8b080f4097d0999e68e98dcb02a5e0c573851c44164300687a0c",
+    "8c1e2b7297445e988ea493e85df22092b7dd736d72ba0d329a28960b33e9a7e3",
+    "713a0bac107e9d0ab39ec08e5830b8113e41406ca3e4b1426d0ce0784f7a1513"
   ],
-  "runtime_activation_ledger_digest": "1590f197ef67c7fc9c98b9dcf3471b7910d442962e78057b0e6f2fee08604b31",
+  "runtime_activation_ledger_digest": "0d22c80c66eb25787a3c60e57dd3b7f453cd17b7e23ce365f705dbd00a85ac70",
   "semantic_projection_digest": "f2b7e8eadd1f2ade099b6913bbd274276f8124dc62fd2ecaedaad2be6c7ac791",
-  "site_registry_digest": "773e1e334b6bca28e5e8f3a20cdbf5af5d58cd3b5ca9e0096d0109be19809531",
+  "site_registry_digest": "78b0d8d4a82460475468ec374a0387187af36d194fe59bd75789a4462437df84",
   "source_rows": [
     [
       "scripts/function_tracer_pcode/equivalence/v2/operational_extraction.py",
@@ -725,7 +725,7 @@
     ],
     [
       "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
-      "8d1ef8a00657958f6978a412526e771a57bdd14a1bc525074586cbc927d099eb"
+      "fb8ff08cdf73aa044bab49ffa7f129a188f932750da734399aac85541fa2814e"
     ],
     [
       "scripts/function_tracer_pcode/equivalence/strategies/pairwise_services/orchestration_1.py",
@@ -744,7 +744,7 @@
       "03f897a8a170831ed060c28bdf3d0fb28e846a441e61b7d5eb8fdee251fce95b"
     ]
   ],
-  "source_snapshot_fingerprint": "ff8ac4211bd2a78f6a1a8cdec6b85187605da32a886858b36bab29a79594b747",
+  "source_snapshot_fingerprint": "c3119ab3b437d006266071f0438bbdafeb2e7a055c284285ddb1b2bb84012f2b",
   "status": "phase7_integration_validation_pending_fixed_review",
   "validator_source_sha256": "11fe688cc44828f2b2a267030cd370f8bc33722d9a44bad54b6af80efd87615f"
 }

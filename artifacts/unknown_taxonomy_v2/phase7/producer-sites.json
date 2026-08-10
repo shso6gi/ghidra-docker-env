@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "5953222ff4e568fa6f9af2d0921ceb02ef33830228f5895329dd139f85e273d7",
+  "manifest_digest": "438e8a7b7ee9cfd1857d540516f6dcacc43b5a45221aa907357a420bd5866e54",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -180,10 +180,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1120,
+      "line": 1128,
       "path": "scripts/function_tracer_pcode/equivalence/v2/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "3f88a09e2ea70630d7c79df8e29581119b1b72131f44df4774445b3f3e0912ab"
+      "source_sha256": "b60ada4bc2b47034a92bbaaeeac6415b534bf49401256e2b7b17bbbf351a2448"
     },
     {
       "allowed_dispositions": [
@@ -1047,10 +1047,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "check",
       "expected_cause_slots": [],
-      "line": 2189,
+      "line": 2222,
       "path": "scripts/function_tracer_pcode/equivalence/strategies/monolithic.py",
       "producer_site_manifest_id": "safe-counterexample-monolithic-production",
-      "source_sha256": "8d1ef8a00657958f6978a412526e771a57bdd14a1bc525074586cbc927d099eb"
+      "source_sha256": "fb8ff08cdf73aa044bab49ffa7f129a188f932750da734399aac85541fa2814e"
     },
     {
       "allowed_dispositions": [
@@ -1065,10 +1065,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "emit_safe_counterexample_production_signal",
       "expected_cause_slots": [],
-      "line": 783,
+      "line": 796,
       "path": "scripts/function_tracer_pcode/equivalence/obligations/pair_disposition.py",
       "producer_site_manifest_id": "safe-counterexample-pairwise-production",
-      "source_sha256": "bc7298b4e054fe9a761437fd5760107bd972cfcb90cb4e3edb810d9931d4800f"
+      "source_sha256": "87ccea9136a897add7f35d34eea5fec801cfa7ea7f9211f9797fa4c67576a283"
     },
     {
       "allowed_dispositions": [

@@ -629,6 +629,49 @@ def test_production_split_uses_import_pinned_query_builder(monkeypatch) -> None:
     assert result.is_equivalent is True
 
 
+def test_zero_query_inconclusive_authority_is_typed_without_fabricated_receipt() -> None:
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.equivalence.v2.comparison_closure import (
+        ComparisonClosureProductionSignal,
+        InconclusiveComparisonAuthority,
+    )
+
+    class Comparison:
+        receipt_id = "comparison-zero-query"
+        query_records = ()
+
+        def is_trusted_for(self, frame):
+            return frame.receipt is self
+
+    class Terminal:
+        outcome_kind = "inconclusive_diagnostic"
+        comparison_receipt_id = "comparison-zero-query"
+        region_receipt_digests = ()
+        receipt_digest = "terminal-zero-query"
+
+        @staticmethod
+        def validates():
+            return True
+
+    frame = SimpleNamespace(
+        receipt=Comparison(), monolithic_terminal_receipt=Terminal()
+    )
+    authority = InconclusiveComparisonAuthority.issue(frame)
+
+    assert authority.validates()
+    assert authority.query_receipt_digests == ()
+    signal = ComparisonClosureProductionSignal(
+        comparison_receipt_id=authority.comparison_receipt_id,
+        terminal_receipt_digest=authority.terminal_receipt_digest,
+        branch_id="S_MONOLITHIC_FALLBACK",
+        runtime_premise_digest="premise",
+        runtime_view_id=("view", 1),
+        query_receipt_digests=authority.query_receipt_digests,
+    )
+    assert signal.query_receipt_digests == ()
+
+
 def test_untrusted_assert_false_in_base_context_fails_closed() -> None:
     class InjectedFalseFormulaBuilder(FormulaBuilder):
         def build_base_context(self, *args, **kwargs):

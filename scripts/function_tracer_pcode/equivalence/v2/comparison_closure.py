@@ -81,7 +81,6 @@ class InconclusiveComparisonAuthority:
             or not terminal.validates()
             or terminal.outcome_kind != "inconclusive_diagnostic"
             or terminal.comparison_receipt_id != comparison.receipt_id
-            or not comparison.query_records
         ):
             raise ValueError(
                 "inconclusive comparison receipt join is not canonical"
@@ -169,8 +168,6 @@ class InconclusiveComparisonAuthority:
         return bool(
             self.schema_version
             == "inconclusive_comparison_authority_v2"
-            and self.terminal_region_receipt_digests
-            and self.query_receipt_digests
             and authority_digest(payload) == self.binding_digest
         )
 
@@ -218,8 +215,5 @@ class ComparisonClosureProductionSignal:
                 raise TypeError("comparison closure signal authority is incomplete")
         object.__setattr__(self, "runtime_view_id", canonical_value(self.runtime_view_id))
         object.__setattr__(self, "query_receipt_digests", tuple(self.query_receipt_digests))
-        if (
-            not self.query_receipt_digests
-            or any(type(item) is not str or not item for item in self.query_receipt_digests)
-        ):
+        if any(type(item) is not str or not item for item in self.query_receipt_digests):
             raise TypeError("comparison closure query authority is incomplete")

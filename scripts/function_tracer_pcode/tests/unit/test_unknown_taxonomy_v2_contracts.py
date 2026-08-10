@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     authority_digest,
     requirement_slot,
 )
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.v2.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
@@ -493,7 +494,30 @@ def test_decision_matrix_fails_closed_for_conflicts_and_forged_authority():
     assert finalize_decision(FinalizationAuthority(
         "result", active,
         decisive_proof_receipts=(_decisive(active, DecisiveProofKind.EQ_CLOSURE),),
-    )).outcome == Outcome.ERROR
+    )).outcome == Outcome.UNKNOWN
+    assert finalize_decision(FinalizationAuthority(
+        "result", active,
+        decisive_proof_receipts=(
+            _decisive(active, DecisiveProofKind.SAFE_COUNTEREXAMPLE),
+        ),
+    )).outcome == Outcome.NOT_EQ
+    blocks_all = VerifiedLifecycleProjection.seal(
+        result_occurrence_id="blocks-all",
+        snapshot_digest="snapshot",
+        c_active_base=(replace(
+            _active(result_id="blocks-all"),
+            decision_effect="blocks_decision",
+        ),),
+        q_open_base=(_open(result_id="blocks-all"),),
+        blocker_eligibility_base=(_eligible(result_id="blocks-all"),),
+        satisfaction_projection={},
+    )
+    assert finalize_decision(FinalizationAuthority(
+        "blocks-all", blocks_all,
+        decisive_proof_receipts=(
+            _decisive(blocks_all, DecisiveProofKind.SAFE_COUNTEREXAMPLE),
+        ),
+    )).outcome == Outcome.UNKNOWN
     forged = replace(active, lifecycle_projection_digest="forged")
     assert finalize_decision(FinalizationAuthority("result", forged)).outcome == Outcome.ERROR
 
@@ -784,3 +808,12 @@ def test_typed_cause_coverage_zero_denominator_is_na_in_canonical_census():
     )
     assert result.status == CensusStatus.VALID
     assert result.canonical_metrics["v2_native_typed_cause_coverage"] is None
+
+
+def test_function_identity_freeze_converts_boxed_integer_to_builtin_int():
+    class BoxedInt(int):
+        pass
+
+    frozen = PairwiseStrategy._identity_freeze(BoxedInt(7))
+    assert frozen == 7
+    assert type(frozen) is int

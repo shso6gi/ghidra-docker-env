@@ -1090,6 +1090,14 @@ class ProductionDualWritePilotConnector:
             comparison_authority = getattr(
                 result, "_inconclusive_comparison_authority", None
             )
+            if comparison_authority is None:
+                dispatch_frame = getattr(
+                    result, "_prepared_dispatch_frame", None
+                )
+                if dispatch_frame is not None:
+                    comparison_authority = (
+                        InconclusiveComparisonAuthority.issue(dispatch_frame)
+                    )
             if (
                 type(comparison_authority)
                 is not InconclusiveComparisonAuthority

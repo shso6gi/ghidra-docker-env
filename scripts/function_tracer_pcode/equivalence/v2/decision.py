@@ -274,14 +274,15 @@ def finalize_decision(authority: FinalizationAuthority) -> DecisionReceipt:
         row.decision_effect in {"blocks_equivalence", "blocks_decision"} for row in active
     )
     blocks_not_eq = any(
-        row.decision_effect in {"blocks_disequivalence", "blocks_decision"} for row in active
+        row.decision_effect in {"blocks_disequivalence", "blocks_decision"}
+        for row in active
     )
     if malformed or authority.error_receipts or conflict:
         outcome = Outcome.ERROR
     elif has_eq:
-        outcome = Outcome.EQUIVALENT if not blocks_eq else Outcome.ERROR
+        outcome = Outcome.EQUIVALENT if not blocks_eq else Outcome.UNKNOWN
     elif has_not_eq:
-        outcome = Outcome.NOT_EQ if not blocks_not_eq else Outcome.ERROR
+        outcome = Outcome.NOT_EQ if not blocks_not_eq else Outcome.UNKNOWN
     elif authority.terminal_timeout_receipts:
         outcome = Outcome.TIMEOUT if active and projection.q_open_base else Outcome.ERROR
     elif active:

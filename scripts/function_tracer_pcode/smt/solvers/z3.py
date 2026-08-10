@@ -3,9 +3,129 @@
 
 import time
 import importlib
+import re
 from typing import Optional, Dict, Any, Tuple, Callable, cast
 
 from ..interface import SMTSolver, SolverResult, SolverStatus
+
+
+_DECLARATION_RE = re.compile(
+    r"^\(declare-(?:const\s+([^\s()]+)|fun\s+([^\s()]+)\s+\(\))\s+(.+)\)$",
+    re.DOTALL,
+)
+
+
+def _top_level_smt_commands(smt_script: str) -> tuple[str, ...]:
+    """Split SMT-LIB into top-level commands without parsing rendered terms."""
+
+    commands = []
+    start = None
+    depth = 0
+    in_string = False
+    in_quoted_symbol = False
+    in_comment = False
+    escaped = False
+    for index, char in enumerate(smt_script):
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if in_quoted_symbol:
+            if char == "|":
+                in_quoted_symbol = False
+            continue
+        if char == ";":
+            in_comment = True
+        elif char == '"':
+            in_string = True
+        elif char == "|":
+            in_quoted_symbol = True
+        elif char == "(":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("SMT-LIB command parentheses are unbalanced")
+            if depth == 0 and start is not None:
+                commands.append(smt_script[start:index + 1])
+                start = None
+    if depth or in_string or in_quoted_symbol:
+        raise ValueError("SMT-LIB command surface is incomplete")
+    return tuple(commands)
+
+
+def _existing_model_projection(model: Any) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for declaration in model.decls():
+        value = model[declaration]
+        as_long = getattr(value, "as_long", None)
+        as_signed_long = getattr(value, "as_signed_long", None)
+        try:
+            if callable(as_long):
+                projected = as_long()
+            elif callable(as_signed_long):
+                projected = as_signed_long()
+            else:
+                projected = str(value)
+        except (AttributeError, TypeError, ValueError):
+            projected = str(value)
+        result[str(declaration.name())] = projected
+    return result
+
+
+def extract_total_declared_model(
+    z3: Any, model: Any, smt_script: str,
+) -> Dict[str, Any]:
+    """Materialize every supported declared input using Z3 model completion."""
+
+    result = _existing_model_projection(model)
+    model_context = getattr(model, "ctx", None)
+    declared_names = set()
+    for command in _top_level_smt_commands(smt_script):
+        match = _DECLARATION_RE.fullmatch(command.strip())
+        if match is None:
+            continue
+        name = match.group(1) or match.group(2)
+        sort_text = match.group(3).strip()
+        if name in declared_names:
+            raise ValueError(f"duplicate SMT declaration: {name}")
+        declared_names.add(name)
+        sort_text = sort_text.strip()
+        if sort_text == "Bool":
+            symbol = z3.Bool(name, ctx=model_context)
+        elif sort_text == "Int":
+            symbol = z3.Int(name, ctx=model_context)
+        else:
+            bitvec = re.fullmatch(r"\(_ BitVec ([1-9][0-9]*)\)", sort_text)
+            if bitvec is None:
+                # Arrays, reals, floating-point values and other supported Z3
+                # sorts retain Z3's existing model projection.  They are not
+                # scalar replay inputs and must never turn SAT into ERROR.
+                continue
+            symbol = z3.BitVec(
+                name, int(bitvec.group(1)), ctx=model_context
+            )
+        value = model.eval(symbol, model_completion=True)
+        if sort_text == "Bool":
+            if z3.is_true(value):
+                result[name] = True
+            elif z3.is_false(value):
+                result[name] = False
+            else:
+                raise ValueError(f"completed Bool model value is not concrete: {name}")
+        else:
+            result[name] = value.as_long()
+    return result
 
 
 class Z3Solver(SMTSolver):
@@ -96,7 +216,9 @@ class Z3Solver(SMTSolver):
             
             if result == z3.sat:
                 self._model = self._solver.model()
-                model_dict = self._extract_model()
+                model_dict = extract_total_declared_model(
+                    z3, self._model, smt_script
+                )
                 self._debug_print(f"Model extracted: {model_dict}")
                 return SolverResult(
                     solver_name=self.name,

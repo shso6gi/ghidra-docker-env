@@ -8,13 +8,13 @@
   ],
   "all_five_source_bound_authority": {
     "focused_junit_sha256": "00436da498d5ef690ef7a8cf2c575175082e7d76791bcb9a0510d2b0aa6257e2",
-    "focused_test_source_sha256": "126637313554fdacb575060c88bc842f747fdab5ff6b4c97c4580c01921d7896",
+    "focused_test_source_sha256": "4181ed31ac27a0e6f6217a6085aa42a910c9d9fd7a50ddf69d4601ce15475c2c",
     "outcome_case_count": 5,
-    "phase8_artifact_digest": "0c0624490720b77d58188ee810f2595a39c26aede11bacbfdbf51785dee27b83",
-    "phase8_artifact_sha256": "82ea732e45b7bf70a5910f101cb8bfee5ba0bb165332f501390d6753b1f75d11",
+    "phase8_artifact_digest": "d6cf99ac6ec9c21435414a6cfac45331c67d7866a08cf3f6d88a70b23b15c6c1",
+    "phase8_artifact_sha256": "6a985fff5f4b3ebcb38eea7c05c167533d7150ae22d641b733c8f449fe241b1c",
     "test_family": "test_decision_receipt_is_only_serialized_status_authority"
   },
-  "artifact_digest": "64ca320478c6dbea472c25525d9cc74f570fc4791e254ed69b610a2288ae664d",
+  "artifact_digest": "c1404eb1ccd790375384042880835becb051f6cd826d1f00e067111e758e88e8",
   "artifact_kind": "phase9-decision-receipt-census-v1",
   "observed_outcomes": [
     "UNKNOWN",

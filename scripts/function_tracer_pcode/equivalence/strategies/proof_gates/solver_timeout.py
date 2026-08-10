@@ -1174,8 +1174,14 @@ def _impl__identity_freeze(cls, value: Any) -> Any:
         return tuple(cls._identity_freeze(item) for item in value)
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((cls._identity_freeze(item) for item in value), key=repr))
-    if isinstance(value, bool) or isinstance(value, int) or isinstance(value, str) or value is None:
-        return value
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str):
+        return str(value)
+    if value is None:
+        return None
     if isinstance(value, float):
         return ("float", repr(value))
     stable_key = getattr(value, "stable_key", None)

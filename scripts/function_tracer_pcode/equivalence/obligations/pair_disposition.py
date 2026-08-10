@@ -647,7 +647,20 @@ class SolverUnsatClosureArtifact:
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
-        return tuple(self.__dict__.values())
+        return (
+            self.schema_version,
+            self.formula_digest,
+            self.premise_digest,
+            self.query_label,
+            self.producer_kind,
+            self.authority_digest,
+            self.solver_status,
+            (
+                self.execution_receipt.stable_key()
+                if self.execution_receipt is not None
+                else ()
+            ),
+        )
 
 
 @dataclass(frozen=True)

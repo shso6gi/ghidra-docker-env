@@ -849,11 +849,15 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
     validate_canonical_result_finalization_bundle(
         bundle, result_payload_preimage=preimage
     )
+    projected_payload = _project_json_primitives(
+        result_payload, path="$.canonical_result_payload"
+    )
     envelope = {
         "schema": "canonical-result-envelope-v1",
-        "canonical_result_payload": result_payload,
+        "canonical_result_payload": projected_payload,
         "canonical_result_bundle_digest": bundle["bundle_digest"],
     }
+    _validate_json_surface(envelope, path="$")
     envelope["envelope_digest"] = authority_digest(envelope)
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
@@ -870,6 +874,81 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
         if os.path.exists(temporary):
             os.unlink(temporary)
     return path
+
+
+def _validate_json_surface(value: Any, *, path: str) -> None:
+    """Reject non-JSON values with the exact canonical payload field path."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if type(key) is not str:
+                raise TypeError(
+                    f"canonical JSON key at {path} is not a string: "
+                    f"{type(key).__name__}"
+                )
+            _validate_json_surface(child, path=f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _validate_json_surface(child, path=f"{path}[{index}]")
+        return
+    raise TypeError(
+        f"canonical JSON value at {path} is not serializable: "
+        f"{type(value).__name__}"
+    )
+
+
+def _project_json_primitives(value: Any, *, path: str) -> Any:
+    """Losslessly normalize boxed JSON scalars and reject every other object."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, Mapping):
+        projected = {}
+        for key, child in value.items():
+            if isinstance(key, str):
+                normalized_key = str(key)
+            elif isinstance(key, bool):
+                normalized_key = str(bool(key))
+            elif isinstance(key, int):
+                normalized_key = str(int(key))
+            elif isinstance(key, float):
+                normalized_key = str(float(key))
+            elif key is None:
+                normalized_key = "None"
+            else:
+                raise TypeError(
+                    f"canonical JSON key at {path} is not a primitive: "
+                    f"{type(key).__name__}"
+                )
+            if normalized_key in projected:
+                raise ValueError(
+                    f"canonical JSON keys collide after normalization at {path}: "
+                    f"{normalized_key}"
+                )
+            projected[normalized_key] = _project_json_primitives(
+                child, path=f"{path}.{normalized_key}"
+            )
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [
+            _project_json_primitives(child, path=f"{path}[{index}]")
+            for index, child in enumerate(value)
+        ]
+    raise TypeError(
+        f"canonical JSON value at {path} is not serializable: "
+        f"{type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True)
@@ -1049,7 +1128,10 @@ def classify_pair_status(
             "classification_valid": True,
         }
     if status != "RESOLVED":
-        raise ValueError("supervisor projection is not a terminal authority")
+        raise ValueError(
+            "supervisor projection is not a terminal authority: "
+            f"status={status!r}, error_kind={supervisor.get('error_kind')!r}"
+        )
 
     envelope = json.loads(
         (store.directory / RESULT_ENVELOPE_FILE).read_text(encoding="utf-8")

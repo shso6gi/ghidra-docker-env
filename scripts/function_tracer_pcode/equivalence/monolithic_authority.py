@@ -765,13 +765,11 @@ class SharedZ3RegionSession:
             self.check_count += 1
             if verdict == self._z3.sat:
                 model = self._solver.model()
-                values = {}
-                for decl in model.decls():
-                    value = model[decl]
-                    try:
-                        values[str(decl.name())] = value.as_long()
-                    except (AttributeError, TypeError, ValueError):
-                        values[str(decl.name())] = str(value)
+                from ..smt.solvers.z3 import extract_total_declared_model
+
+                values = extract_total_declared_model(
+                    self._z3, model, query
+                )
                 item = SolverResult("Z3(shared-region)", SolverStatus.SAT,
                                     elapsed_time=elapsed, model=values)
             elif verdict == self._z3.unsat:
@@ -785,7 +783,6 @@ class SharedZ3RegionSession:
             return ParallelResult(results=[item])
         finally:
             self._solver.pop()
-
 
 def create_shared_z3_region_session(
     query_set: ExpectedRegionQuerySet,

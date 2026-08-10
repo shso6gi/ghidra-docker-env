@@ -229,7 +229,11 @@ class _TypedMonolithicCounterexampleEvidence:
             self.replay_formula.encode("utf-8")
         ).hexdigest()
         if formula_digest != getattr(contract, "formula_digest", None):
-            raise ValueError("monolithic_counterexample_replay_formula_mismatch")
+            raise ValueError(
+                "monolithic_counterexample_replay_formula_mismatch: "
+                f"replay={formula_digest}, "
+                f"receipt={getattr(contract, 'formula_digest', None)}"
+            )
         if self.model_digest != getattr(contract, "model_digest", None):
             raise ValueError("monolithic_counterexample_replay_model_mismatch")
         if (
@@ -447,6 +451,10 @@ class MonolithicStrategy(CheckStrategy):
         legacy_replay_receipt = None
         sat_replay_formula = ""
         sat_replay_census = None
+        sat_model_digest = ""
+        sat_fixed_model_assertion_digest = ""
+        sat_legacy_replay_receipt = None
+        sat_legacy_replay_receipt_digest = ""
         sliced_assertion_bytes = 0
         shared_prelude_digests: Set[str] = set()
         configured_region_timeout = max(1, int(self.per_query_timeout))
@@ -657,6 +665,10 @@ class MonolithicStrategy(CheckStrategy):
                     replay_frozen_surface or plan.frozen_surface
                 )
                 authoritative_replay_census = replay_census or plan.census
+                # A receipt is valid only for the formula executed in this
+                # iteration.  Never carry a prior region's receipt into a
+                # direct-solver replay that lacks canonical surface authority.
+                legacy_replay_receipt = None
                 if (
                     authoritative_replay_frozen is not None
                     and authoritative_replay_census is not None
@@ -710,6 +722,10 @@ class MonolithicStrategy(CheckStrategy):
                     sat_region_id = region_id
                     sat_replay_formula = replay_formula
                     sat_replay_census = authoritative_replay_census
+                    sat_model_digest = model_digest
+                    sat_fixed_model_assertion_digest = fixed_model_assertion_digest
+                    sat_legacy_replay_receipt = legacy_replay_receipt
+                    sat_legacy_replay_receipt_digest = legacy_replay_receipt_digest
                     continue
                 region_counts["unknown"] += 1
 
@@ -760,10 +776,18 @@ class MonolithicStrategy(CheckStrategy):
             debug_stats=stats,
             plan=plan,
             sat_region_id=sat_region_id,
-            model_digest=model_digest,
-            fixed_model_assertion_digest=fixed_model_assertion_digest,
-            legacy_replay_receipt_digest=legacy_replay_receipt_digest,
-            legacy_replay_receipt=legacy_replay_receipt,
+            model_digest=sat_model_digest if final is False else model_digest,
+            fixed_model_assertion_digest=(
+                sat_fixed_model_assertion_digest
+                if final is False else fixed_model_assertion_digest
+            ),
+            legacy_replay_receipt_digest=(
+                sat_legacy_replay_receipt_digest
+                if final is False else legacy_replay_receipt_digest
+            ),
+            legacy_replay_receipt=(
+                sat_legacy_replay_receipt if final is False else legacy_replay_receipt
+            ),
             execution_receipts=tuple(execution_receipts),
             expected_query_set=expected_query_set,
             session_certificate=getattr(shared_region_session, "certificate", None),
@@ -1435,6 +1459,15 @@ class MonolithicStrategy(CheckStrategy):
                 if (
                     region_execution is not None
                     and region_execution.legacy_replay_receipt is not None
+                    and region_execution.sat_replay_formula
+                    and hashlib.sha256(
+                        region_execution.sat_replay_formula.encode("utf-8")
+                    ).hexdigest()
+                    == getattr(
+                        region_execution.legacy_replay_receipt.contract,
+                        "formula_digest",
+                        None,
+                    )
                 ):
                     typed_counterexample_evidence = (
                         _TypedMonolithicCounterexampleEvidence(

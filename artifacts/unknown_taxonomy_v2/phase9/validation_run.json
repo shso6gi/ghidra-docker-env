@@ -1,11 +1,11 @@
 {
-  "artifact_digest": "a6f4fe6e1985ed79403a1b5a79f2d35e26382cc838974043379c875307b57440",
+  "artifact_digest": "96f97bc41bad06b9261c2e9b5f4a61fe9ff47678ec9c9dcce3449f74cd796c3f",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-cross-slice-validation.xml",
-      "sha256": "fbfa828ade50a2d1cba1014e2a35ad60130643bf38584253776ffdd103dc42e0",
-      "test_count": 622
+      "sha256": "06b6900a26b7244ef61f8a335d17f18c782433defcfa12a189a06d2083d2fc3c",
+      "test_count": 623
     },
     {
       "path": "artifacts/unknown_taxonomy_v2/phase7/phase7-final-focused-validation.xml",
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "6496b01e420d62a133f63f925960a97d9c1a27922f6098fa1fd275900ffeb16f",
+    "current_contract_digest": "0f0805d3cb7d36375723527428e825bb0c0a98a30fce3f1645460479473fc916",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3674,7 +3674,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_contracts",
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase4",
         "_candidate",
-        532
+        556
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase4",
@@ -3944,7 +3944,7 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase8_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split",
         "_analysis",
-        670
+        680
       ],
       [
         "scripts.function_tracer_pcode.transform.expander",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "d16cf48a03d8aa22b57fd8985f482de45ac6065ce7eee0869f40e476dee6a187",
+    "current_source_tree_hash": "c0762ed5066767d548deb02c930d76623487505e1355cfb21c080ca087a62f84",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

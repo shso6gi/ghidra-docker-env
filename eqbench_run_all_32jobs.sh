@@ -27,6 +27,8 @@ VALIDATION_SUMMARY_LEVEL="${VALIDATION_SUMMARY_LEVEL:-compact}"
 EQBENCH_MAX_SAMPLES="${EQBENCH_MAX_SAMPLES:-0}"
 EQBENCH_SAMPLE_FILTER="${EQBENCH_SAMPLE_FILTER:-}"
 EQBENCH_PAIR_FILTER="${EQBENCH_PAIR_FILTER:-}"
+EQBENCH_RERUN_MANIFEST="${EQBENCH_RERUN_MANIFEST:-}"
+ERROR_RERUN_RUN_ID="${ERROR_RERUN_RUN_ID:-}"
 EQBENCH_RUN_SCOPE="${EQBENCH_RUN_SCOPE:-REPRESENTATIVE}"
 EQBENCH_BUILD_POLICY="${EQBENCH_BUILD_POLICY:-REUSE_OR_COMPILE}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -288,6 +290,40 @@ pair_is_selected() {
     [[ ",$EQBENCH_PAIR_FILTER," == *",$pair_id,"* ]]
 }
 
+declare -A EQBENCH_RERUN_TARGETS=()
+ERROR_RERUN_MANIFEST_SHA256=""
+if [[ -n "$EQBENCH_RERUN_MANIFEST" ]]; then
+    [[ -s "$EQBENCH_RERUN_MANIFEST" ]] || {
+        echo "Error: EQBENCH_RERUN_MANIFEST is not a non-empty file" >&2
+        exit 1
+    }
+    while IFS=$'\t' read -r lane sample function pair; do
+        [[ "$lane" == "EQ" && -n "$sample" && -n "$function" && -n "$pair" ]] || continue
+        EQBENCH_RERUN_TARGETS["$sample|$function|$pair"]=1
+    done < "$EQBENCH_RERUN_MANIFEST"
+    (( ${#EQBENCH_RERUN_TARGETS[@]} > 0 )) || {
+        echo "Error: rerun manifest contains no EqBench targets" >&2
+        exit 1
+    }
+    ERROR_RERUN_MANIFEST_SHA256="$(sha256sum "$EQBENCH_RERUN_MANIFEST" | awk '{print $1}')"
+    [[ -n "$ERROR_RERUN_RUN_ID" ]] || {
+        echo "Error: ERROR_RERUN_RUN_ID is required for a rerun manifest" >&2
+        exit 1
+    }
+fi
+
+rerun_target_is_selected() {
+    local sample="$1" function="$2" pair="$3"
+    [[ -z "$EQBENCH_RERUN_MANIFEST" ]] && return 0
+    [[ -n "${EQBENCH_RERUN_TARGETS[$sample|$function|$pair]:-}" ]]
+}
+
+supervisor_projection_is_terminal() {
+    "$PYTHON_BIN" -c \
+        'import json,sys; p=json.load(open(sys.argv[1])); raise SystemExit(0 if p.get("status") in {"RESOLVED","TIMEOUT","ERROR"} else 1)' \
+        "$1" 2>/dev/null
+}
+
 selected_pair_count() {
     local count=0 i j left_id right_id
     for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
@@ -458,27 +494,32 @@ run_pair() {
         equiv_cmd+=( -d )
     fi
 
+    local -a supervisor_cmd=(
+        "$PYTHON_BIN" -m
+        scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command
+        --checkpoint-root "$checkpoint_root"
+        --authority-output "$authority_output"
+        --working-directory "$SCRIPT_DIR"
+        --execution-nonce "$execution_nonce"
+        --result-occurrence-id "$result_occurrence_id"
+        --source-snapshot-fingerprint "$source_snapshot_fingerprint"
+        --stream-id "$stream_id"
+        --deadline-policy-digest "$PAIR_PROCESS_DEADLINE_POLICY_DIGEST"
+        --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID"
+        --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE"
+        --worker-signing-key-id "$PROCESS_WORKER_KEY_ID"
+        --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE"
+        --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS"
+        --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS"
+        --allow-child-exit-resolution
+        -- "${equiv_cmd[@]}"
+    )
+
     local ec command_pid resource_metrics_file
     resource_metrics_file="${pair_tmpdir}/resource-usage.txt"
     /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' \
-        -o "$resource_metrics_file" "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command \
-        --checkpoint-root "$checkpoint_root" \
-        --authority-output "$authority_output" \
-        --working-directory "$SCRIPT_DIR" \
-        --execution-nonce "$execution_nonce" \
-        --result-occurrence-id "$result_occurrence_id" \
-        --source-snapshot-fingerprint "$source_snapshot_fingerprint" \
-        --stream-id "$stream_id" \
-        --deadline-policy-digest "$PAIR_PROCESS_DEADLINE_POLICY_DIGEST" \
-        --supervisor-signing-key-id "$PROCESS_SUPERVISOR_KEY_ID" \
-        --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
-        --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
-        --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
-        --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" \
-        --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" \
-        --allow-child-exit-resolution \
-        -- "${equiv_cmd[@]}" > "$log_file" 2>&1 &
+        -o "$resource_metrics_file" "${supervisor_cmd[@]}" \
+        > "$log_file" 2>&1 &
     command_pid=$!
     while kill -0 "$command_pid" 2>/dev/null; do
         sleep "$EQBENCH_PROGRESS_INTERVAL_SECONDS"
@@ -490,6 +531,15 @@ run_pair() {
         ec=0
     else
         ec=$?
+    fi
+    if ! supervisor_projection_is_terminal "$authority_output"; then
+        echo "Supervisor recovery: resuming non-terminal projection before classification" \
+            >> "$log_file"
+        if "${supervisor_cmd[@]}" >> "$log_file" 2>&1; then
+            ec=0
+        else
+            ec=$?
+        fi
     fi
     finished_at="$(date +%s.%N)"
     elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
@@ -932,6 +982,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             for ((j = i + 1; j < ${#IDS[@]}; j++)); do
                 right_id="${IDS[$j]}"
                 pair_is_selected "${left_id}_${right_id}" || continue
+                rerun_target_is_selected "$sample_label" "$function_name" "${left_id}_${right_id}" || continue
                 pair_status_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
                 printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$EXPECTED_PAIR_STATUS_PATHS_FILE"
                 TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
@@ -1077,6 +1128,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             for ((j = i + 1; j < ${#IDS[@]}; j++)); do
                 right_id="${IDS[$j]}"
                 pair_is_selected "${left_id}_${right_id}" || continue
+                rerun_target_is_selected "$sample_label" "$function_name" "${left_id}_${right_id}" || continue
                 total_pairs=$((total_pairs + 1))
             done
         done
@@ -1094,6 +1146,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 for ((j = i + 1; j < ${#IDS[@]}; j++)); do
                     right_id="${IDS[$j]}"
                     pair_is_selected "${left_id}_${right_id}" || continue
+                    rerun_target_is_selected "$sample_label" "$function_name" "${left_id}_${right_id}" || continue
                     pair_status_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
                     printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" \
                         >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
@@ -1116,6 +1169,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 right_name="$(binary_name_for_id "$source_base" "$right_id")"
                 right_bin="$source_dir/$right_name"
                 pair_is_selected "${left_id}_${right_id}" || continue
+                rerun_target_is_selected "$sample_label" "$function_name" "${left_id}_${right_id}" || continue
 
                 pair_count=$((pair_count + 1))
                 log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
@@ -1244,6 +1298,8 @@ fi
     "EQBENCH_MAX_SAMPLES=$EQBENCH_MAX_SAMPLES" \
     "EQBENCH_SAMPLE_FILTER=$EQBENCH_SAMPLE_FILTER" \
     "EQBENCH_PAIR_FILTER=$EQBENCH_PAIR_FILTER" \
+    "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" \
+    "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" \
     "EQBENCH_DEBUG=$EQBENCH_DEBUG" \
     "DRY_RUN=$DRY_RUN" \
     "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" \

@@ -1264,3 +1264,43 @@ def test_tracer_promotes_constant_varnode_to_address_object_when_ghidra_exposes_
     assert isinstance(expr.runtime_ref, AddressValueRef)
     assert expr.runtime_ref.address_offset == 0x00112008
     assert expr.runtime_ref.block_name == ".rodata"
+
+
+def test_z3_sat_model_totalizes_irrelevant_declared_inputs():
+    query = """(set-logic QF_BV)
+(declare-const relevant (_ BitVec 8))
+(declare-const irrelevant (_ BitVec 8))
+(assert (= relevant (_ bv7 8)))
+(check-sat)
+"""
+    result = Z3Solver(timeout=2).check_equivalence_direct(query)
+
+    assert result.status == SolverStatus.SAT
+    assert result.model == {"relevant": 7, "irrelevant": 0}
+
+
+def test_z3_sat_model_totalizes_zero_arity_declare_fun():
+    query = """(set-logic QF_BV)
+(declare-fun relevant () (_ BitVec 8))
+(declare-fun irrelevant () (_ BitVec 8))
+(assert (= relevant (_ bv7 8)))
+(check-sat)
+"""
+    result = Z3Solver(timeout=2).check_equivalence_direct(query)
+
+    assert result.status == SolverStatus.SAT
+    assert result.model == {"relevant": 7, "irrelevant": 0}
+
+
+def test_z3_array_declaration_does_not_turn_sat_into_error():
+    query = """(set-logic QF_AUFBV)
+(declare-const memory (Array (_ BitVec 8) (_ BitVec 8)))
+(declare-const index (_ BitVec 8))
+(assert (= (select memory index) (_ bv3 8)))
+(check-sat)
+"""
+    result = Z3Solver(timeout=2).check_equivalence_direct(query)
+
+    assert result.status == SolverStatus.SAT
+    assert "memory" in result.model
+    assert result.model["index"] == 0

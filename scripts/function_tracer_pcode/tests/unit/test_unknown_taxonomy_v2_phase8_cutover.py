@@ -563,7 +563,15 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         validate_canonical_result_finalization_bundle,
     )
 
-    preimage = {"final_outcome": "EQUIVALENT", "total_time": 0.0}
+    class BoxedInt(int):
+        pass
+
+    preimage = {
+        "final_outcome": "EQUIVALENT",
+        "total_time": 0.0,
+        "boxed_java_integer": BoxedInt(4),
+        "integer_key_mapping": {BoxedInt(0): "int"},
+    }
     bundle_key = tmp_path / "canonical-bundle.key"
     bundle_key.write_bytes(b"k" * 32)
     monkeypatch.setenv(
@@ -608,6 +616,8 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     persisted = envelope["canonical_result_payload"]
     persisted_bundle = persisted["canonical_result_finalization_bundle"]
     assert persisted == json.loads(json.dumps(payload, sort_keys=True))
+    assert type(persisted["boxed_java_integer"]) is int
+    assert persisted["integer_key_mapping"] == {"0": "int"}
     assert validate_canonical_result_finalization_bundle(
         persisted_bundle,
         result_payload_preimage={
