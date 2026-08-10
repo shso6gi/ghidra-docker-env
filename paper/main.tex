@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリを対象とするOSS/TPL検出では，対象バイナリと既知ライブラリの類似関数を求め，ライブラリ単位に集約する．しかし，類似性が高い候補が同じ入力に対して同じ出力を返すとは限らない．そこで本研究は，TPL候補関数を集約前に意味的に再検証する．GhidraのHigh P-codeから，既定契約で観測する戻り値，メモリ，入出力および終了に関係する式と効果を構成し，SMTソルバで差を調べる．観測対象を十分に表現できなければEQとせずUNKNOWNとする．EqBenchのCコードを16条件でビルドし，4関数の全480ペアを調べた結果，257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTとなった．実High P-codeと未完了証拠の分析から，ループの循環合流値，戻り値格納域および関数呼出しが判定を妨げる過程を示した．
+バイナリを対象とするOSS/TPL検出では，対象バイナリと既知ライブラリから類似する関数を求め，その結果をライブラリ単位に集約する．しかし，類似度が高い関数の組が，同じ入力に対して同じ出力を返すとは限らない．そこで本研究では，TPL候補となった関数の組を集約前に意味的に再検証する．GhidraのHigh P-codeから，比較対象とする戻り値，メモリ，入出力および終了の振る舞いを表す式を構成し，SMTソルバで差の有無を調べる．比較対象を十分に表現できない場合はEQとせず，UNKNOWNとする．EqBenchのCコードを16条件でビルドし，4関数の全480ペアを調べた結果，257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTとなった．実際のHigh P-codeと判定に必要な未確認事項を分析し，ループの前回値を受け取る\texttt{MULTIEQUAL}，戻り値格納場所および関数呼出しがUNKNOWNに至る過程を示した．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,7 +32,7 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detectors find functions similar to known library functions and aggregate them at the library level. However, a highly similar candidate does not necessarily produce the same output for the same input. We therefore revalidate TPL function candidates before aggregation. From Ghidra High P-code, our implementation constructs expressions and effects for returns, memory, I/O, and termination enabled by its default observation contract, and uses an SMT solver to search for differences. It returns UNKNOWN rather than EQ when an observed behavior cannot be represented sufficiently. We compiled EqBench C programs under 16 build configurations and examined all 480 pairs of four functions: 257 were EQ, 216 were UNKNOWN, and seven timed out. High P-code and proof-backlog evidence identify cyclic merge values, return storage, and call composition as representative barriers in these cases.
+Binary-level OSS/TPL detectors find functions similar to known library functions and aggregate them at the library level. However, a highly similar candidate does not necessarily produce the same output for the same input. We therefore revalidate TPL function candidates before aggregation. From Ghidra High P-code, our implementation constructs expressions for the compared returns, memory effects, I/O, and termination behavior, and uses an SMT solver to search for differences. It returns UNKNOWN rather than EQ when these behaviors cannot be represented sufficiently. We compiled EqBench C programs under 16 build configurations and examined all 480 pairs of four functions: 257 were EQ, 216 were UNKNOWN, and seven timed out. Analysis of the High P-code and the remaining uncertainties shows how \texttt{MULTIEQUAL} nodes carrying values across loop iterations, differences in return-value storage, and incomplete correspondence between function calls lead to UNKNOWN.
 \end{eabstract}
 
 \begin{ekeyword}
