@@ -1,0 +1,7 @@
+services:
+  latex:
+    build:
+      context: .
+    working_dir: /work
+    volumes:
+      - .:/work

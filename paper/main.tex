@@ -1,0 +1,113 @@
+\documentclass{css}
+%\documentclass[english]{css}
+
+\usepackage[dvips]{graphicx}
+\usepackage{latexsym}
+
+\def\|{\verb|}
+
+\newcommand{\cssyear}[0]{2026}
+\newcommand{\cssname}[0]{CSS 2026}
+\newcommand{\cssversion}[0]{2026/06/01}
+\newcommand{\cssemail}[0]{css2026-office@iwsec.org}
+
+\begin{document}
+
+\title{Ghidra High P-codeに基づく関数の意味的等価性判定}
+\etitle{Determining Function Semantic Equivalence Using Ghidra High P-Code}
+
+\affiliate{AFFIL}{名古屋工業大学\\
+Nagoya Institute of Technology}
+
+\author{斎藤 勇斗}{Hayato Saito}{AFFIL}[h.saito.652@stn.nitech.ac.jp]
+\author{掛井 将平}{Shohei Kakei}{AFFIL}
+\author{齋藤 彰一}{Shoichi Saito}{AFFIL}
+
+\begin{abstract}
+バイナリを対象とするOSS/TPL検出では，対象バイナリと既知ライブラリの類似関数を求め，ライブラリ単位に集約する．しかし，類似性が高い候補が同じ入力に対して同じ出力を返すとは限らない．そこで本研究は，TPL候補関数を集約前に意味的に再検証する．GhidraのHigh P-codeから，既定契約で観測する戻り値，メモリ，入出力および終了に関係する式と効果を構成し，SMTソルバで差を調べる．観測対象を十分に表現できなければEQとせずUNKNOWNとする．EqBenchのCコードを16条件でビルドし，4関数の全480ペアを調べた結果，257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTとなった．実High P-codeと未完了証拠の分析から，ループの循環合流値，戻り値格納域および関数呼出しが判定を妨げる過程を示した．
+\end{abstract}
+
+\begin{jkeyword}
+バイナリ解析，プログラム等価性，High P-code，SMT
+\end{jkeyword}
+
+\begin{eabstract}
+Binary-level OSS/TPL detectors find functions similar to known library functions and aggregate them at the library level. However, a highly similar candidate does not necessarily produce the same output for the same input. We therefore revalidate TPL function candidates before aggregation. From Ghidra High P-code, our implementation constructs expressions and effects for returns, memory, I/O, and termination enabled by its default observation contract, and uses an SMT solver to search for differences. It returns UNKNOWN rather than EQ when an observed behavior cannot be represented sufficiently. We compiled EqBench C programs under 16 build configurations and examined all 480 pairs of four functions: 257 were EQ, 216 were UNKNOWN, and seven timed out. High P-code and proof-backlog evidence identify cyclic merge values, return storage, and call composition as representative barriers in these cases.
+\end{eabstract}
+
+\begin{ekeyword}
+binary analysis, program equivalence, High P-code, SMT
+\end{ekeyword}
+
+\maketitle
+
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_method}
+\input{sections/04_evaluation}
+\input{sections/05_conclusion}
+
+\begin{thebibliography}{99}
+\bibitem{modx}
+Yang, C., Xu, Z., Chen, H., Liu, Y., Gong, X. and Liu, B.:
+ModX: Binary Level Partially Imported Third-Party Library Detection via Program Modularization and Semantic Matching,
+Proc. ICSE, pp.1393--1405, DOI: 10.1145/3510003.3510627 (2022).
+
+\bibitem{binaryai}
+Jiang, L., An, J., Huang, H., Tang, Q., Nie, S., Wu, S. and Zhang, Y.:
+BinaryAI: Binary Software Composition Analysis via Intelligent Binary Source Code Matching,
+Proc. ICSE, Article 224, pp.1--13, DOI: 10.1145/3597503.3639100 (2024).
+
+\bibitem{binhunt}
+Gao, D., Reiter, M. K. and Song, D.:
+BinHunt: Automatically Finding Semantic Differences in Binary Programs,
+Proc. ICICS, LNCS 5308, pp.238--255 (2008).
+
+\bibitem{ibinhunt}
+Ming, J., Pan, M. and Gao, D.:
+iBinHunt: Binary Hunting with Inter-Procedural Control Flow,
+Proc. ICISC, LNCS 7839, pp.92--109 (2013).
+
+\bibitem{bingo}
+Chandramohan, M., Xue, Y., Xu, Z., Liu, Y., Cho, C. Y. and Tan, H. B. K.:
+BinGo: Cross-Architecture Cross-OS Binary Search,
+Proc. FSE, pp.678--689 (2016).
+
+\bibitem{blex}
+Egele, M., Woo, M., Chapman, P. and Brumley, D.:
+Blanket Execution: Dynamic Similarity Testing for Program Binaries and Components,
+Proc. USENIX Security, pp.303--317 (2014).
+
+\bibitem{binsim}
+Ming, J., Xu, D., Jiang, Y. and Wu, D.:
+BinSim: Trace-Based Semantic Binary Diffing via System Call Sliced Segment Equivalence Checking,
+Proc. USENIX Security, pp.253--270 (2017).
+
+\bibitem{ddec}
+Sharma, R., Schkufza, E., Churchill, B. and Aiken, A.:
+Data-Driven Equivalence Checking,
+Proc. OOPSLA, pp.391--406 (2013).
+
+\bibitem{formal-pcode}
+Naus, N., Verbeek, F., Walker, D. and Ravindran, B.:
+A Formal Semantics for P-Code,
+Proc. VSTTE, LNCS 13800, pp.111--128 (2023).
+
+\bibitem{proof-cert-smt}
+Mebsout, A. and Tinelli, C.:
+Proof Certificates for SMT-based Model Checkers for Infinite-State Systems,
+Proc. FMCAD, pp.117--124 (2016).
+
+\bibitem{eqbench}
+Badihi, S., Li, Y. and Rubin, J.:
+EqBench: A Dataset of Equivalent and Non-equivalent Program Pairs,
+Proc. MSR, pp.610--614 (2021).
+
+\bibitem{lowlevel-eq}
+Putro, P. A.:
+Low-Level Code Semantic Equivalence Checker,
+Programming and Computer Software, No.6, pp.53--71,
+DOI: 10.7868/S3034584725060047 (2025).
+\end{thebibliography}
+
+\end{document}

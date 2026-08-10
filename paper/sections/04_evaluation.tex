@@ -1,0 +1,141 @@
+\section{評価と考察}
+
+\subsection{実験条件}
+次の2点を評価する．
+\begin{description}
+  \item[RQ1] 同一ソースから生成したバイナリの判定結果は，関数とビルド条件の違いによってどのように分布するか．
+  \item[RQ2] 同一ソース由来の関数において，EQとUNKNOWNを分ける要因は何か．
+\end{description}
+
+EqBench\cite{eqbench}は，等価・非等価なCおよびJavaプログラム対を収録するデータセットである．EqBench自体をクロスISA用ベンチマークとはみなさず，本研究ではそのCコードを基準ソースとして利用した．ARM64とMIPS64，ClangとGCC，O0--O3の組合せから1ソースにつき16バイナリを作り，$16\times15/2=120$ペアを比較した．B1，B2，B5，B9はそれぞれARM64・Clang・O0，ARM64・Clang・O1，ARM64・GCC・O0，MIPS64・Clang・O0を表す．逆コンパイル，ペア全体，個別SMT問い合わせの制限時間はそれぞれ60秒，600秒，5秒である．
+
+保存済みの完了実行から，\texttt{Comp}の\texttt{foo}，\texttt{ltfive}の\texttt{lib}と\texttt{client}，\texttt{LoopMult10}の\texttt{foo}を選び，各関数の全120ペア，計480ペアを集計した．前3関数は解析版A（git \texttt{28bc6fa8784a}，source tree digest \texttt{d1a778d8f5ee}），\texttt{LoopMult10}は解析版B（analysis source digest \texttt{856444895e38}）の成果物である．版を混在させた合計は4関数の記述統計としてのみ用い，AとBの性能差や同一解析版での再現結果とは解釈しない．\texttt{LoopMult10}と\texttt{ltfive}は符号付き演算のオーバーフローを除外する入力領域を固定していないため，C意味論上のEQ率ではなく，コンパイルによるHigh P-codeの変化とツールの判定結果の関係を調べるために用いる．
+
+\subsection{関数・ビルド差別の結果（RQ1）}
+\tabref{tab:function-results}に関数別の結果と解析版を示す．480ペア中257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTであり，ERRORはなかった．単純な比較を行う\texttt{Comp/foo}は全ペアがEQである一方，CALLを含む\texttt{ltfive/client}では102ペアがUNKNOWN，7ペアがTIMEOUTとなった．\texttt{LoopMult10/foo}では45ペアがEQ，75ペアがUNKNOWNであった．同じ16ビルドを比較しても関数の制御・データ依存によって結果が大きく異なり，ビルド条件だけでは判定結果を説明できない．
+
+\begin{table}[t]
+\centering
+\caption{4関数の全120ペアに対する判定結果（解析版A/B）}
+\ecaption{Results for All 120 Pairs of Four Functions (Versions A/B).}
+\label{tab:function-results}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}llrrrr@{}}
+\hline\hline
+関数 & 版 & ペア & EQ & UNKNOWN & TIMEOUT \\
+\hline
+\texttt{Comp/foo} & A & 120 & 120 & 0 & 0 \\
+\texttt{ltfive/lib} & A & 120 & 81 & 39 & 0 \\
+\texttt{ltfive/client} & A & 120 & 11 & 102 & 7 \\
+\texttt{LoopMult10/foo} & B & 120 & 45 & 75 & 0 \\
+\hline
+合計 & A/B & 480 & 257 & 216 & 7 \\
+\hline
+\end{tabular}
+\end{table}
+
+\tabref{tab:axis-results}では，他の2条件を固定して最適化，コンパイラ，ISAの一つだけが異なるペアと，複数条件が異なるペアを分けた．最適化だけが異なる96ペアでも40ペアがUNKNOWNであり，コンパイラだけ，ISAだけが異なるペアにもUNKNOWNが存在した．ただし，これは解析版A/Bを含む4関数から得た従属するペアの記述統計である．特にISA差にはABIやGhidraが復元したCFGの差も伴うため，ISA単独の因果効果とは解釈しない．表\ref{tab:function-axis-results}では，この層別を関数ごとに示す．RQ2では，ビルド差がHigh P-code上のどの変化を介してUNKNOWNになったかを調べる．
+
+\begin{table}[t]
+\centering
+\caption{ビルド条件の違いによる480ペアの層別（解析版A/B）}
+\ecaption{Stratification of 480 Pairs by Build Difference (Versions A/B).}
+\label{tab:axis-results}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrr@{}}
+\hline\hline
+相違する条件 & ペア & EQ & UNKNOWN & TIMEOUT \\
+\hline
+最適化のみ & 96 & 56 & 40 & 0 \\
+コンパイラのみ & 32 & 17 & 15 & 0 \\
+ISAのみ & 32 & 20 & 12 & 0 \\
+複数条件 & 320 & 164 & 149 & 7 \\
+\hline
+\end{tabular}
+\end{table}
+
+セルは「EQ/UNKNOWN/TIMEOUT」の件数を表す．
+\begin{table}[t]
+\centering
+\caption{関数別のビルド軸層別（EQ/UNKNOWN/TIMEOUT）}
+\ecaption{Per-Function Build-Axis Results.}
+\label{tab:function-axis-results}
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lrrrr@{}}
+\hline\hline
+関数 & 最適化のみ & コンパイラのみ & ISAのみ & 複数条件 \\
+\hline
+\texttt{Comp/foo} & 24/0/0 & 8/0/0 & 8/0/0 & 80/0/0 \\
+\texttt{ltfive/lib} & 21/3/0 & 5/3/0 & 5/3/0 & 50/30/0 \\
+\texttt{ltfive/client} & 3/21/0 & 0/8/0 & 2/6/0 & 6/67/7 \\
+\texttt{LoopMult10/foo} & 8/16/0 & 4/4/0 & 5/3/0 & 28/52/0 \\
+\hline
+\end{tabular}
+\end{table}
+
+4関数すべてをソース上の主特徴で層別すると，ループもCALLもない2関数・240ペアはEQ 201件，UNKNOWN 39件であった．CALLを持つ1関数・120ペアはEQ 11件，UNKNOWN 102件，TIMEOUT 7件，戻り値に到達するループを持つ1関数・120ペアはEQ 45件，UNKNOWN 75件であった．これは代表ペアではなく480ペア全体の傾向であるが，各特徴群の関数数は1または2にすぎず，関数固有差と特徴の効果を分離した因果分析ではない．なお，7件のTIMEOUTは\texttt{ltfive/client}に集中したが，保存ログが示すのはペア全体の600秒超過だけであり，式構築，CALL処理，SMTのいずれが時間を消費したかは特定できない．
+
+解析版A内では，\texttt{Comp/foo}が全軸でEQであるのに対し，戻り値幅の差が現れる\texttt{ltfive/lib}とCALLを含む\texttt{ltfive/client}でUNKNOWNが増えた．解析版Bでは，\texttt{LoopMult10/foo}の非循環--非循環45ペアがすべてEQで，循環を含む75ペアがすべてUNKNOWNであった．したがって，最適化・コンパイラ・ISAの各軸を分けた比較は各解析版内の関数依存性を示すために用い，版Aと版Bをまたぐ効果量の比較は行わない．
+
+保存ログの\texttt{UNKNOWN Reasons}をペア内で重複除去し，読者向けに三つの未完了関係へまとめたものを表\ref{tab:unknown-cause-results}に示す．各セルはその理由が現れたペア数であり，原因は一つのペアに重複して現れ得るため，列の合計は\texttt{UNKNOWN}件数とは一致しない．\texttt{ltfive/client}では，CALLの意味未証明（6件）よりもCALL位置対応（44件）と，経路被覆・反例安全性（反例39件，経路領域25件，CFG到達性24件）が多く，単に「CALLがある」ことではなく，CALL関係を全到達経路へ合成できないことが主要な未完了関係である．
+
+\begin{table*}[t]
+\centering
+\caption{主なUNKNOWN理由の該当ペア数（重複計上）}
+\ecaption{Pair Counts for Main UNKNOWN Reasons (Overlaps Allowed).}
+\label{tab:unknown-cause-results}
+\scriptsize
+\setlength{\tabcolsep}{1.5pt}
+\begin{tabular}{@{}p{32mm}p{18mm}p{31mm}p{31mm}p{38mm}@{}}
+\hline\hline
+関数 & UNKNOWN & 戻り値・ABI対応 & CALL位置対応・意味合成 & 経路被覆・反例安全性 \\
+\hline
+\texttt{ltfive/lib} (A) & 39 & 観測契約39，幅の由来30，結果種別整合性9 & --- & --- \\
+\texttt{ltfive/client} (A) & 102 & ABIの由来25，結果種別整合性36 & 位置対応44，意味未証明6 & 反例安全性39，経路領域25，CFG到達性24 \\
+\texttt{LoopMult10/foo} (B) & 75 & --- & --- & 経路領域75，反例安全性58，ループ要約44，反復候補15 \\
+\hline
+\end{tabular}
+\end{table*}
+
+\subsection{ループの残存と消去（RQ2）}
+\texttt{LoopMult10/foo}のHigh P-codeを調べると，結果は循環構造の有無で分かれた．非循環--非循環45ペアはすべてEQ，片側だけが循環する60ペアと両側が循環する15ペアはすべてUNKNOWNであった．この1関数では，最適化だけが異なる24ペアがEQ 8件，UNKNOWN 16件，コンパイラだけが異なる8ペアがEQ 4件，UNKNOWN 4件，ISAだけが異なる8ペアがEQ 5件，UNKNOWN 3件である．表面的なビルド差より，その結果として循環が残ったかが判定と強く対応した．
+
+\figref{fig:loopmult10-pcode}にB1--B2の実High P-codeから，戻り値に関係する演算を抜粋して示す．演算，入力，出力およびブロック辺は，\texttt{HighFunction}，\texttt{PcodeOpAST}，\texttt{Varnode}および基本ブロックから取得した．図中の\texttt{cphi}等は説明用の別名，\texttt{:4}は4バイト幅である．B1は4ブロック12演算で，ループヘッダにバックエッジがある．B2は3ブロック7演算で，反復加算が乗算へ最適化されている．
+
+\begin{figure*}[t]
+\centering
+\begin{tabular}{@{}p{78mm}p{78mm}@{}}
+\textbf{B1: ARM64・Clang・O0（循環）} &
+\textbf{B2: ARM64・Clang・O1（非循環）} \\
+\begin{minipage}[t]{78mm}\ttfamily\scriptsize
+c0:4    = COPY 0:4\par
+i0:4    = COPY 1:4\par
+cphi:4  = MULTIEQUAL(c0,cnext)\par
+iphi:4  = MULTIEQUAL(i0,inext)\par
+guard:1 = INT\_SLESSEQUAL(iphi,a)\par
+cnext:4 = INT\_ADD(cphi,b)\par
+inext:4 = INT\_ADD(iphi,1)\par
+RETURN cphi
+\end{minipage} &
+\begin{minipage}[t]{78mm}\ttfamily\scriptsize
+prod:4  = INT\_MULT(b,a)\par
+guard:1 = INT\_SLESS(a,1)\par
+zero:4  = COPY 0:4\par
+ret:4   = MULTIEQUAL(prod,zero)\par
+RETURN ret
+\end{minipage}
+\end{tabular}
+\caption{LoopMult10 B1--B2の実High P-code依存スライス}
+\ecaption{Object-derived High P-code Dependency Slices for LoopMult10 B1--B2.}
+\label{fig:loopmult10-pcode}
+\end{figure*}
+
+B1の戻り値\texttt{cphi}を逆向きにたどると，バックエッジ側の\texttt{cnext}から再び\texttt{cphi}へ到達する．実装はこの再訪を\texttt{phi\_circular}として記録する．$c_{k+1}=c_k+b$，$i_{k+1}=i_k+1$と終了条件を結ぶ反復関係を検証できなければ，戻り値式と終了経路を確定できない．B1--B2では4経路組のうち3組の出力差がUNSAT，1組がSATとなったが，SATモデルは未解決の\texttt{phi\_circular}に任意値を割り当てていた．この差は実バイナリの反例として確認できないためNOT\_EQにできず，未解析値が残るためEQにもできない．したがって，原因は単に「ループがあること」ではなく，戻り値に到達する循環合流値の反復関係を現在の実装で検証できないことである．
+
+以上の結果から，ビルド条件の違いは，High P-codeの変化を介して判定へ影響する．本評価で確認した経路は，最適化による循環の残存・消去，コンパイラやABIによる戻り値格納幅の差，CALL位置とcallee関係の全経路への合成である．一方，非循環であっても，対象を特定できないSTORE，間接呼出し，未対応演算があればUNKNOWNとなり得る．「Clang対GCC」や「ARM64対MIPS64」だけをUNKNOWNの原因とはみなせない．
+
+\subsection{妥当性への脅威}
+本評価はEqBenchの等価な4関数の診断であり，EqBench全体や実際のTPL候補に一般化できない．480ペアは解析版A/Bの成果物を含み，同一解析版で4関数を再実行していない．Ghidraのリフティング，型復元および逆コンパイルが誤れば，抽出した式も影響を受ける．また，扱えるメモリ，CALLおよびループは限定され，符号付きオーバーフローを除外する入力領域も一部関数で未確定である．非等価ペアとTPL検出器への統合は評価していないため，候補除外の精度向上を主張しない．
