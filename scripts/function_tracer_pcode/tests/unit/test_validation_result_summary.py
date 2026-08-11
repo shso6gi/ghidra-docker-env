@@ -1440,13 +1440,11 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert 'PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-600s}"' in script
     assert "--classify-pair-log" in script
     assert "validation_result_log_is_complete" not in script
-    assert "signed_pair_status_is_terminal_result" in script
-    assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in script
+    assert "pair_status_is_skippable_for_run_mode" in script
+    assert '--resume-skip-mode "$mode"' in script
     assert "results_summary.txt" in script
-    assert "function_summary_is_complete" in script
-    assert 'dirname "$existing_pair_status"' in script
-    assert 'COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]' in script
-    assert "Skipped completed function: results_summary.txt exists" in script
+    assert "function_summary_all_pairs_reusable" in script
+    assert "Summary shortcut: skipped" in script
     assert "validate_current_pair_status" in script
     assert "remove_pair_process_authority" in script
     assert "validation.process_authority_cleanup" in script

@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "793032391e29ed6842eccc3f66caf136eccdc5ada8754bbe698abd0c29d914fd",
+  "artifact_digest": "094b5fd23cc1680ce0ad784bcb3bd28cf41ae706335735b8843e35528be38998",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -246,7 +246,7 @@
     "stored_output_contract": "result fields are rematerialized from the bound compressed JSON; stdout hash is diagnostic only"
   },
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "87679579645ac3c1799a907a9c7c99761d9ee5cd49c95ab45bcde307565ec7e0",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "6cc09e6619caea96857b1450d85d47aa740eb0f3da6d10c39363c3cf3b6f246f",
     "scripts/function_tracer_pcode/analysis/summary_returns.py": "6b8db7b2518160e4e9f9626818ed58be17ff3174f54b62789a342c16958576fb",
     "scripts/function_tracer_pcode/equivalence/checker.py": "03f897a8a170831ed060c28bdf3d0fb28e846a441e61b7d5eb8fdee251fce95b",
     "scripts/function_tracer_pcode/equivalence/recurrence_promotion.py": "731ba670697089e32852cbb7a097108e5830f61d082bc0efca4d37adc5483760",
@@ -263,7 +263,7 @@
     "scripts/function_tracer_pcode/tests/unit/test_recurrence_proof_contract.py": "490cad1eac0b1e5b8409c01d815ad803b1cda0ac8ce9acc39f6dc419ce1b966c",
     "scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_v2_phase6_loop_recurrence.py": "4a677925251785a4b173585b5a0b3ad7c624507586a4ea5471fabee015771a1f"
   },
-  "git_head": "6d580ebf4d39bced89b146d4963ba1943f32ff64",
+  "git_head": "52c55b5aa752d80573ac4198b784fb536cac5dee",
   "relation_evidence": {
     "loop_exact_guard_completed": {
       "c_active": 0,
@@ -316,8 +316,8 @@
   },
   "source_inventory": {
     "current_source": {
-      "candidate_count": 632,
-      "candidate_set_digest": "781e7a2599dbe80ff27f42da6674d8632dcce99ecfd0ba7e423ba00e5c638448"
+      "candidate_count": 630,
+      "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
     },
     "live_delta": {
       "added": 0,

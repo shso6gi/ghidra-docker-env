@@ -192,9 +192,16 @@ def validate_rerun_publication_contract(
     expected_command_rows = {
         f"ERROR_RERUN_MANIFEST_SHA256={manifest_digest}",
         f"ERROR_RERUN_RUN_ID={run_id}",
-        "SKIP_COMPLETED_RESULTS=0",
     }
     command = set(execution["command"])
+    error_only = "ERROR_ONLY_RERUN=1" in command
+    expected_command_rows.add(
+        "SKIP_COMPLETED_RESULTS=1" if error_only
+        else "SKIP_COMPLETED_RESULTS=0"
+    )
+    if error_only:
+        expected_command_rows.add("ERROR_ONLY_RERUN=1")
+    skipped_paths = sorted(publication["verified_skipped_pair_status_paths"])
     if (
         execution["execution_kind"] != "EQBENCH_MATRIX"
         or execution["exit_status"] != 0
@@ -208,10 +215,11 @@ def validate_rerun_publication_contract(
         or publication["analysis_source_digest_start"]
         != publication["analysis_source_digest_end"]
         or publication["total_pair_jobs"] != len(rows)
-        or publication["total_scheduled_pair_jobs"] != len(rows)
-        or publication["total_skipped_pair_jobs"] != 0
+        or publication["total_scheduled_pair_jobs"]
+        + publication["total_skipped_pair_jobs"] != len(rows)
+        or publication["total_skipped_pair_jobs"] != len(skipped_paths)
         or sorted(publication["expected_pair_status_paths"]) != expected_paths
-        or publication["verified_skipped_pair_status_paths"] != []
+        or not set(skipped_paths).issubset(expected_paths)
     ):
         raise ValueError("rerun execution receipt does not bind the exact scheduled target set")
     return (

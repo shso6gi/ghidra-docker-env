@@ -46,7 +46,7 @@ MATRIX_PUBLICATION_FIELDS = frozenset({
     "build_receipts", "expected_pair_status_paths",
     "verified_skipped_pair_status_paths", "artifact_digest",
 })
-ANALYSIS_CONFIG_FIELDS = frozenset({
+ANALYSIS_CONFIG_V1_FIELDS = frozenset({
     "schema", "authority_kind", "run_scope", "build_policy", "max_samples",
     "sample_filter", "pair_filter", "debug", "skip_completed_results",
     "dry_run",
@@ -55,13 +55,14 @@ ANALYSIS_CONFIG_FIELDS = frozenset({
     "pairwise_timeout_hard_seconds", "pair_process_timeout_seconds",
     "pair_process_kill_after_seconds", "prefilter_source_census_digest",
 })
+ANALYSIS_CONFIG_V2_FIELDS = ANALYSIS_CONFIG_V1_FIELDS - {"skip_completed_results"}
 MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
 
 
 def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
     try:
         config = {
-            "schema": "eqbench-analysis-config-v1",
+            "schema": "eqbench-analysis-config-v2",
             "authority_kind": "EqBenchAnalysisConfig",
             "run_scope": run["run_scope"],
             "build_policy": run["build_policy"],
@@ -69,7 +70,6 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
             "sample_filter": run["sample_filter"],
             "pair_filter": run["pair_filter"],
             "debug": bool(int(run["debug"])),
-            "skip_completed_results": bool(int(run["skip_completed_results"])),
             "dry_run": bool(int(run["dry_run"])),
             "parallel_jobs": int(run["parallel_jobs"]),
             "validation_summary_level": run["validation_summary_level"],
@@ -93,9 +93,17 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         "pairwise_timeout_seconds", "pairwise_timeout_hard_seconds",
         "pair_process_timeout_seconds", "pair_process_kill_after_seconds",
     )
+    if not isinstance(config, Mapping):
+        raise ValueError("EqBench typed analysis config is invalid")
+    expected_fields = {
+        "eqbench-analysis-config-v1": ANALYSIS_CONFIG_V1_FIELDS,
+        "eqbench-analysis-config-v2": ANALYSIS_CONFIG_V2_FIELDS,
+    }.get(config.get("schema"))
+    bool_fields = {"debug", "dry_run"}
+    if config.get("schema") == "eqbench-analysis-config-v1":
+        bool_fields.add("skip_completed_results")
     if (
-        not isinstance(config, Mapping) or set(config) != ANALYSIS_CONFIG_FIELDS
-        or config["schema"] != "eqbench-analysis-config-v1"
+        expected_fields is None or set(config) != expected_fields
         or config["authority_kind"] != "EqBenchAnalysisConfig"
         or config["run_scope"] not in MATRIX_RUN_SCOPES
         or config["build_policy"] not in {
@@ -103,17 +111,29 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         }
         or type(config["max_samples"]) is not int or config["max_samples"] < 0
         or type(config["parallel_jobs"]) is not int or config["parallel_jobs"] < 1
-        or type(config["debug"]) is not bool
-        or type(config["skip_completed_results"]) is not bool
-        or type(config["dry_run"]) is not bool
-        or any(type(config[field]) is not str for field in ANALYSIS_CONFIG_FIELDS - {
-            "max_samples", "parallel_jobs", "debug", "skip_completed_results",
-            "dry_run",
+        or any(type(config[field]) is not bool for field in bool_fields)
+        or any(type(config[field]) is not str for field in expected_fields - {
+            "max_samples", "parallel_jobs", *bool_fields,
         })
         or any(not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", config[field])
                for field in timeout_fields)
     ):
         raise ValueError("EqBench typed analysis config is invalid")
+
+
+def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Project historical v1 config onto the scheduling-free v2 authority."""
+
+    validate_analysis_config(config)
+    if config["schema"] == "eqbench-analysis-config-v2":
+        return dict(config)
+    normalized = {
+        key: value for key, value in config.items()
+        if key != "skip_completed_results"
+    }
+    normalized["schema"] = "eqbench-analysis-config-v2"
+    validate_analysis_config(normalized)
+    return normalized
 
 
 def _read_key_values(path: Path) -> Mapping[str, str]:
@@ -324,6 +344,59 @@ def validate_execution_receipt(
     return body
 
 
+def compatible_legacy_analysis_identity(
+    matrix_root: Path, *, current_config: Mapping[str, Any],
+    current_source_digest: str,
+) -> tuple[str, str] | None:
+    """Authorize an exact v2 or one migratable v1 published run identity."""
+
+    publication_path = matrix_root / MATRIX_PUBLICATION_MANIFEST_FILE
+    receipt_path = matrix_root / MATRIX_EXECUTION_RECEIPT_FILE
+    public_key_path = matrix_root / "pair-status-verification-key.json"
+    if not all(path.is_file() for path in (
+        publication_path, receipt_path, public_key_path,
+    )):
+        return None
+    try:
+        publication = validate_matrix_publication_manifest(json.loads(
+            publication_path.read_text(encoding="utf-8")
+        ))
+        receipt = validate_execution_receipt(
+            json.loads(receipt_path.read_text(encoding="utf-8")),
+            public_key_path=public_key_path,
+        )
+        legacy_config = publication["analysis_config"]
+        config_schema = legacy_config["schema"]
+        if (
+            config_schema not in {
+                "eqbench-analysis-config-v1", "eqbench-analysis-config-v2",
+            }
+            or normalize_semantic_analysis_config(legacy_config) != current_config
+            or receipt["execution_kind"] != "EQBENCH_MATRIX"
+            or receipt["exit_status"] != 0
+            or receipt["analysis_config_digest"]
+            != publication["analysis_config_digest"]
+            or receipt["artifact_sha256"].get(MATRIX_PUBLICATION_MANIFEST_FILE)
+            != sha256_file(publication_path)
+            or receipt["source_tree_digest_start"]
+            != publication["analysis_source_digest_start"]
+            or receipt["source_tree_digest_end"]
+            != publication["analysis_source_digest_end"]
+            or (
+                config_schema == "eqbench-analysis-config-v2"
+                and publication["analysis_source_digest_start"]
+                != current_source_digest
+            )
+        ):
+            return None
+        return (
+            str(publication["analysis_config_digest"]),
+            str(publication["analysis_source_digest_start"]),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+
+
 def _write(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -337,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output")
     parser.add_argument("--run-manifest")
     parser.add_argument("--print-analysis-config-digest", action="store_true")
+    parser.add_argument("--resume-compatibility-root")
+    parser.add_argument("--current-source-digest")
+    parser.add_argument(
+        "--print-compatible-analysis-config-digest", action="store_true"
+    )
     parser.add_argument("--matrix-root")
     parser.add_argument("--source-digest-start")
     parser.add_argument("--analysis-config-digest", default="full-unit-default")
@@ -346,6 +424,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
+    if args.print_compatible_analysis_config_digest:
+        if (
+            not args.run_manifest or not args.resume_compatibility_root
+            or not args.current_source_digest
+        ):
+            parser.error(
+                "resume compatibility requires matrix root, run manifest and source digest"
+            )
+        current = analysis_config_from_run(
+            _read_key_values(Path(args.run_manifest))
+        )
+        identity = compatible_legacy_analysis_identity(
+            Path(args.resume_compatibility_root), current_config=current,
+            current_source_digest=args.current_source_digest,
+        )
+        if identity is None:
+            return 1
+        print("\t".join(identity))
+        return 0
     if args.print_analysis_config_digest:
         if not args.run_manifest:
             parser.error("analysis config digest requires --run-manifest")

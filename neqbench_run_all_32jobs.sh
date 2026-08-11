@@ -27,6 +27,7 @@ default_value EQBENCH_CPU_TOKENS "$(getconf _NPROCESSORS_ONLN 2>/dev/null || npr
 default_value EQBENCH_PAIR_CPU_TOKENS 8
 default_value EQBENCH_DEBUG 0
 default_value SKIP_COMPLETED_RESULTS 1
+default_value ERROR_ONLY_RERUN 0
 default_value DRY_RUN 0
 default_value EQUIV_TIMEOUT 10
 default_value DECOMPILE_TIMEOUT 60
@@ -47,6 +48,7 @@ EXPECTED_FULL_SOURCE_PAIRS=125
 [[ "$NEQ_RUN_SCOPE" == FULL_NEQ || "$NEQ_RUN_SCOPE" == REPRESENTATIVE ]] || exit 1
 [[ "$NEQ_BUILD_POLICY" == REUSE_OR_COMPILE || "$NEQ_BUILD_POLICY" == FRESH_ONLY ]] || exit 1
 [[ "$NEQ_MAX_SAMPLES" =~ ^[0-9]+$ && "$PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]] || exit 1
+[[ "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ && "$ERROR_ONLY_RERUN" =~ ^[01]$ ]] || exit 1
 [[ -f "$COMPILE_TEMPLATE" && -f "$FUNCTION_LISTER" && -f "$FUNCTION_SELECTOR" ]] || exit 1
 NEQ_ROOT="$(realpath -m "$NEQ_ROOT")"
 case "$NEQ_ROOT" in "$SCRIPT_DIR"/*) ;; *) echo "NEQ_ROOT must be inside repository" >&2; exit 1 ;; esac
@@ -152,14 +154,6 @@ rerun_pair_count() {
     printf '%s\n' "$count"
 }
 
-function_summary_is_complete() {
-    local function_dir="$1" expected_pairs="$2" log_count status_count
-    [[ -s "$function_dir/results_summary.txt" ]] || return 1
-    log_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)"
-    status_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)"
-    [[ "$log_count" == "$expected_pairs" && "$status_count" == "$expected_pairs" ]]
-}
-
 EXPECTED_PAIRS_PER_FUNCTION="$(pair_count)"
 
 mkdir -p "$EQBENCH_TMPDIR"; chmod 1777 "$EQBENCH_TMPDIR" 2>/dev/null || true
@@ -176,15 +170,6 @@ if [[ -s "$OUTPUT_BASE_DIR/run_manifest.txt" ]] \
     echo "Existing output uses the old 256-pair cross-ISA scope: $OUTPUT_BASE_DIR" >&2
     echo "Use a fresh OUTPUT_BASE_DIR for the same-ISA caller-closure evaluation." >&2
     exit 1
-fi
-declare -A COMPLETED_FUNCTION_SUMMARY_DIRS=()
-if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]]; then
-    while IFS= read -r -d '' summary_file; do
-        function_dir="${summary_file%/results_summary.txt}"
-        if function_summary_is_complete "$function_dir" "$EXPECTED_PAIRS_PER_FUNCTION"; then
-            COMPLETED_FUNCTION_SUMMARY_DIRS["$function_dir"]=1
-        fi
-    done < <(find "$OUTPUT_BASE_DIR" -type f -name 'results_summary.txt' -print0)
 fi
 if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then exit 1; fi
 CENSUS="$OUTPUT_BASE_DIR/neq_source_pairs.tsv"; : > "$CENSUS"
@@ -284,15 +269,6 @@ if [[ ! -s "$PAIR_PRIVATE_KEY" ]]; then
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --generate-private-key "$PAIR_PRIVATE_KEY" --write-public-key "$PAIR_PUBLIC_KEY" >/dev/null
 fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
-while IFS= read -r existing_status; do
-    [[ -n "$existing_status" ]] || continue
-    existing_function_dir="$(dirname "$existing_status")"
-    if [[ "$SKIP_COMPLETED_RESULTS" != 0 \
-        && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$existing_function_dir]:-}" ]]; then
-        continue
-    fi
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$existing_status" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
-done < <(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print)
 
 PROCESS_CLEANUP_FAILURES="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"; : > "$PROCESS_CLEANUP_FAILURES"
 EXPECTED_STATUS="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"; : > "$EXPECTED_STATUS"
@@ -395,11 +371,33 @@ prepare_variant() {
     VARIANT_BUILD_RESOLUTION=FRESH_COMPILE
 }
 
-pair_status_is_terminal_result() {
-    local log="$1" target="$2" status
+pair_status_is_skippable_for_run_mode() {
+    local log="$1" target="$2" status mode decision
     status="$(printf '%s' "$log" | sed 's/\.log$/.pair-status.json/')"
     [[ -s "$log" && -s "$status" ]] || return 1
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" 2>/dev/null | grep -Eq '^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$'
+    if [[ "$ERROR_ONLY_RERUN" == 1 ]]; then mode=ERROR_ONLY; else mode=NORMAL_RESUME; fi
+    if ! decision="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        --validate-pair-status "$status" \
+        --pair-log "$log" \
+        --public-key "$PAIR_PUBLIC_KEY" \
+        --expected-pair-target "$target" \
+        "${PAIR_STATUS_RESUME_COMPAT_ARGS[@]}" \
+        --resume-skip-mode "$mode" 2>/dev/null)"; then
+        return 1
+    fi
+    [[ "$decision" == SKIP ]]
+}
+function_summary_all_pairs_reusable() {
+    local function_dir="$1" expected="$2" summary="$1/results_summary.txt"
+    [[ -s "$summary" && "$expected" -gt 0 ]] || return 1
+    awk -F: -v expected="$expected" '
+        /^[[:space:]]*Total pairs[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); total=$2 }
+        /^[[:space:]]*Error[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); error=$2 }
+        /^[[:space:]]*Incomplete[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); incomplete=$2 }
+        END { exit !(total == expected && error == 0 && incomplete == 0) }
+    ' "$summary" || return 1
+    [[ "$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)" -eq "$expected" \
+        && "$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)" -eq "$expected" ]]
 }
 progress_update() {
     local sample="$1" function="$2" left_id="$3" right_id="$4" status="$5"
@@ -413,6 +411,19 @@ progress_update() {
         printf '[PROGRESS] completed=%s/%s remaining=%s sample=%s function=%s pair=%s<->%s status=%s\n' \
             "$completed" "$TOTAL_PLANNED_PAIR_JOBS" "$remaining" \
             "$sample" "$function" "$left_id" "$right_id" "$status"
+    } 9>"$PROGRESS_LOCK_FILE"
+}
+progress_skip_function() {
+    local sample="$1" function="$2" count="$3"
+    {
+        flock -x 9
+        local completed remaining
+        completed="$(cat "$PROGRESS_COUNT_FILE")"
+        completed=$((completed + count))
+        printf '%s\n' "$completed" > "$PROGRESS_COUNT_FILE"
+        remaining=$((TOTAL_PLANNED_PAIR_JOBS - completed))
+        printf '[PROGRESS] completed=%s/%s remaining=%s sample=%s function=%s status=SUMMARY_SKIPPED count=%s\n' \
+            "$completed" "$TOTAL_PLANNED_PAIR_JOBS" "$remaining" "$sample" "$function" "$count"
     } 9>"$PROGRESS_LOCK_FILE"
 }
 run_pair() {
@@ -463,6 +474,10 @@ wait_all() {
 
 ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
+PREVIOUS_RUN_MANIFEST="$RUN_TMP/previous-run-manifest.txt"
+if [[ -s "$RUN_MANIFEST" ]]; then cp "$RUN_MANIFEST" "$PREVIOUS_RUN_MANIFEST"; fi
+# ERROR_ONLY_RERUN is receipt-bound scheduling policy, not part of the
+# semantic analysis-config digest used by reusable pair targets.
 cat > "$RUN_MANIFEST" <<EOF
 run_kind=neqbench_all_same_isa_function_closure_current
 run_scope=$NEQ_RUN_SCOPE
@@ -481,6 +496,7 @@ decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
 skip_completed_results=$SKIP_COMPLETED_RESULTS
+error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
 max_samples=$NEQ_MAX_SAMPLES
 sample_filter=$NEQ_SAMPLE_FILTER
@@ -509,6 +525,28 @@ analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
 EOF
 CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
 printf 'analysis_config_digest=%s\n' "$CONFIG_DIGEST" >> "$RUN_MANIFEST"
+PAIR_STATUS_RESUME_COMPAT_ARGS=()
+SUMMARY_SHORTCUT_AUTHORIZED=0
+if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt \
+    --run-manifest "$RUN_MANIFEST" --resume-compatibility-root "$OUTPUT_BASE_DIR" \
+    --current-source-digest "$ANALYSIS_SOURCE_DIGEST" \
+    --print-compatible-analysis-config-digest 2>/dev/null)"; then
+    IFS=$'\t' read -r compatible_config_digest compatible_source_digest <<< "$compatible_identity"
+    PAIR_STATUS_RESUME_COMPAT_ARGS=(
+        --compatible-analysis-config-digest "$compatible_config_digest"
+        --compatible-analysis-source-digest "$compatible_source_digest"
+    )
+    SUMMARY_SHORTCUT_AUTHORIZED=1
+fi
+if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 0 && -s "$PREVIOUS_RUN_MANIFEST" ]]; then
+    previous_source_digest="$(awk -F= '$1 == "analysis_source_digest_start" { print $2 }' "$PREVIOUS_RUN_MANIFEST")"
+    if previous_config_digest="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt \
+        --run-manifest "$PREVIOUS_RUN_MANIFEST" --print-analysis-config-digest 2>/dev/null)" \
+        && [[ "$previous_source_digest" == "$ANALYSIS_SOURCE_DIGEST" \
+            && "$previous_config_digest" == "$CONFIG_DIGEST" ]]; then
+        SUMMARY_SHORTCUT_AUTHORIZED=1
+    fi
+fi
 
 PROGRESS_COUNT_FILE="$RUN_TMP/progress.completed"
 PROGRESS_LOCK_FILE="$RUN_TMP/progress.lock"
@@ -587,22 +625,19 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         function_position=$((function_position + 1))
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         function_dir="$OUTPUT_SAMPLE/$function"; mkdir -p "$function_dir"; total="$(rerun_pair_count "$sample" "$function")"; count=0
-        if [[ "$SKIP_COMPLETED_RESULTS" != 0 \
-            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]:-}" ]]; then
-            function_skipped_pairs=0
-            for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
-                pair_selected "$pair" || continue
-                rerun_target_selected "$sample" "$function" "$pair" || continue
-                left_id="${pair%%_O_*}"; right_id="O_${pair#*_O_}"
-                status_file="$function_dir/$function"_"$pair.pair-status.json"
+        if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 1 ]] \
+            && [[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]] \
+            && function_summary_all_pairs_reusable "$function_dir" "$total"; then
+            while IFS= read -r status_file; do
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$EXPECTED_STATUS"
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
-                TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
-                TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
-                function_skipped_pairs=$((function_skipped_pairs + 1))
-                progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
-            done
-            echo "[$sample] [$function] Skipped completed function: results_summary.txt exists; pairs=$function_skipped_pairs/$total"
+            done < <(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' -print | sort)
+            TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + total))
+            TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + total))
+            progress_skip_function "$sample" "$function" "$total"
+            printf '[%s/%s] [%s %s/%s] summary shortcut: skipped %s/%s pairs\n' \
+                "$CURRENT_SAMPLE_INDEX" "$SOURCE_PAIR_COUNT" "$sample" \
+                "$function_position" "$function_total" "$total" "$total"
             continue
         fi
         for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
@@ -614,7 +649,8 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
             log="$function_dir/$function"_"$pair.log"; status_file="$function_dir/$function"_"$pair.pair-status.json"; target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
             printf '%s\n' "$status_file" | sed "s#^$OUTPUT_BASE_DIR/##" >> "$EXPECTED_STATUS"
             "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
-            if [[ "$SKIP_COMPLETED_RESULTS" != 0 ]] && pair_status_is_terminal_result "$log" "$target"; then
+            if [[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]] \
+                && pair_status_is_skippable_for_run_mode "$log" "$target"; then
                 printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
                 TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                 progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
@@ -661,6 +697,6 @@ exit_status=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 )); then
     exit_status=1
 fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "./neqbench_run_all_32jobs.sh"
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "./neqbench_run_all_32jobs.sh"
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
 exit "$exit_status"

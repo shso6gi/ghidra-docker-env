@@ -373,7 +373,7 @@ def _write_signed_unknown_pair_status(log: Path) -> None:
 
 def test_pair_status_resume_policy_keeps_unknown_and_timeout_resumable():
     from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
-        pair_status_resume_disposition,
+        pair_status_resume_disposition, resume_disposition_should_skip,
     )
     from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
         CLI_EXIT_MATRIX,
@@ -387,6 +387,21 @@ def test_pair_status_resume_policy_keeps_unknown_and_timeout_resumable():
     assert BATCH_RESUME_MATRIX[Outcome.UNKNOWN].startswith("RESUMABLE_")
     assert BATCH_RESUME_MATRIX[Outcome.TIMEOUT].startswith("RESUMABLE_")
     assert BATCH_RESUME_MATRIX[Outcome.EQUIVALENT].startswith("COMPLETE_")
+    expected = {
+        Outcome.EQUIVALENT: (True, True),
+        Outcome.NOT_EQ: (True, True),
+        Outcome.UNKNOWN: (True, True),
+        Outcome.TIMEOUT: (True, True),
+        Outcome.ERROR: (True, False),
+    }
+    for outcome, (normal_resume, error_only) in expected.items():
+        disposition = BATCH_RESUME_MATRIX[outcome]
+        assert resume_disposition_should_skip(
+            disposition, mode="NORMAL_RESUME"
+        ) is normal_resume
+        assert resume_disposition_should_skip(
+            disposition, mode="ERROR_ONLY"
+        ) is error_only
 
 
 def test_canonical_summary_drops_receiptless_unknown_payload_metrics(tmp_path):

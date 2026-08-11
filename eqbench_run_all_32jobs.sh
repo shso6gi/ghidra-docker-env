@@ -45,6 +45,7 @@ EQBENCH_CPU_TOKENS="${EQBENCH_CPU_TOKENS:-$(getconf _NPROCESSORS_ONLN 2>/dev/nul
 EQBENCH_PAIR_CPU_TOKENS="${EQBENCH_PAIR_CPU_TOKENS:-8}"
 EQBENCH_PROGRESS_INTERVAL_SECONDS="${EQBENCH_PROGRESS_INTERVAL_SECONDS:-5}"
 SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
+ERROR_ONLY_RERUN="${ERROR_ONLY_RERUN:-0}"
 EQBENCH_DEBUG="${EQBENCH_DEBUG:-0}"
 DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
 if [[ -d /workspace && -w /workspace ]]; then
@@ -79,8 +80,9 @@ if [[ "$EQBENCH_BUILD_POLICY" != "REUSE_OR_COMPILE" \
     echo "Error: EQBENCH_BUILD_POLICY must be REUSE_OR_COMPILE, PREBUILT_ONLY, or FRESH_ONLY" >&2
     exit 1
 fi
-if [[ ! "$EQBENCH_DEBUG" =~ ^[01]$ || ! "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ ]]; then
-    echo "Error: EQBENCH_DEBUG and SKIP_COMPLETED_RESULTS must be 0 or 1" >&2
+if [[ ! "$EQBENCH_DEBUG" =~ ^[01]$ || ! "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ \
+    || ! "$ERROR_ONLY_RERUN" =~ ^[01]$ ]]; then
+    echo "Error: EQBENCH_DEBUG, SKIP_COMPLETED_RESULTS, and ERROR_ONLY_RERUN must be 0 or 1" >&2
     exit 1
 fi
 if [[ ! "$EQBENCH_MAX_SAMPLES" =~ ^[0-9]+$ ]]; then
@@ -221,17 +223,39 @@ status_from_log() {
     esac
 }
 
-signed_pair_status_is_terminal_result() {
+pair_status_is_skippable_for_run_mode() {
     local log_file="$1"
     local pair_target_file="$2"
     local pair_status_file="${log_file%.log}.pair-status.json"
+    local mode decision
     [[ -s "$log_file" && -s "$pair_status_file" ]] || return 1
-    "$PYTHON_BIN" -m \
+    if [[ "$ERROR_ONLY_RERUN" == 1 ]]; then mode=ERROR_ONLY; else mode=NORMAL_RESUME; fi
+    if ! decision="$("$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
         --validate-pair-status "$pair_status_file" \
+        --pair-log "$log_file" \
         --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
-        --expected-pair-target "$pair_target_file" 2>/dev/null \
-        | grep -Eq '^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$'
+        --expected-pair-target "$pair_target_file" \
+        "${PAIR_STATUS_RESUME_COMPAT_ARGS[@]}" \
+        --resume-skip-mode "$mode" 2>/dev/null)"; then
+        return 1
+    fi
+    [[ "$decision" == SKIP ]]
+}
+
+function_summary_all_pairs_reusable() {
+    local function_dir="$1"
+    local expected="$2"
+    local summary="$function_dir/results_summary.txt"
+    [[ -s "$summary" && "$expected" -gt 0 ]] || return 1
+    awk -F: -v expected="$expected" '
+        /^[[:space:]]*Total pairs[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); total=$2 }
+        /^[[:space:]]*Error[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); error=$2 }
+        /^[[:space:]]*Incomplete[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); incomplete=$2 }
+        END { exit !(total == expected && error == 0 && incomplete == 0) }
+    ' "$summary" || return 1
+    [[ "$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)" -eq "$expected" \
+        && "$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)" -eq "$expected" ]]
 }
 
 validate_current_pair_status() {
@@ -335,14 +359,6 @@ selected_pair_count() {
         done
     done
     printf '%s\n' "$count"
-}
-
-function_summary_is_complete() {
-    local function_dir="$1" expected_pairs="$2" log_count status_count
-    [[ -s "$function_dir/results_summary.txt" ]] || return 1
-    log_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)"
-    status_count="$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)"
-    [[ "$log_count" == "$expected_pairs" && "$status_count" == "$expected_pairs" ]]
 }
 
 required_binary_ids() {
@@ -743,15 +759,6 @@ fi
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
 EQBENCH_PRIVATE_AUTHORITY_ROOT="$(realpath -m "$EQBENCH_PRIVATE_AUTHORITY_ROOT")"
-declare -A COMPLETED_FUNCTION_SUMMARY_DIRS=()
-if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]]; then
-    while IFS= read -r -d '' summary_file; do
-        function_dir="${summary_file%/results_summary.txt}"
-        if function_summary_is_complete "$function_dir" "$EXPECTED_PAIRS_PER_FUNCTION"; then
-            COMPLETED_FUNCTION_SUMMARY_DIRS["$function_dir"]=1
-        fi
-    done < <(find "$OUTPUT_BASE_DIR" -type f -name 'results_summary.txt' -print0)
-fi
 if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" \
     || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then
     echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
@@ -804,20 +811,6 @@ fi
     scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
     --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
     --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
-while IFS= read -r -d '' existing_pair_status; do
-    existing_function_dir="$(dirname "$existing_pair_status")"
-    if [[ "$SKIP_COMPLETED_RESULTS" != "0" \
-        && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$existing_function_dir]:-}" ]]; then
-        continue
-    fi
-    if ! "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
-        --validate-pair-status "$existing_pair_status" \
-        --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null; then
-        echo "Error: existing signed pair status failed resume preflight: $existing_pair_status" >&2
-        exit 1
-    fi
-done < <(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print0)
 EXPECTED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"
 : > "$EXPECTED_PAIR_STATUS_PATHS_FILE"
 VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/verified_skipped_pair_status_paths.txt"
@@ -845,6 +838,10 @@ export PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE PAIR_STATUS_VERIFICATION_KEY_FILE
 export PAIR_PROCESS_DEADLINE_POLICY_DIGEST
 
 RUN_MANIFEST_FILE="$OUTPUT_BASE_DIR/run_manifest.txt"
+PREVIOUS_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/previous-run-manifest.txt"
+if [[ -s "$RUN_MANIFEST_FILE" ]]; then
+    cp "$RUN_MANIFEST_FILE" "$PREVIOUS_RUN_MANIFEST_FILE"
+fi
 cat > "$RUN_MANIFEST_FILE" <<EOF
 run_kind=eqbench_all_eq_matrix_current
 run_scope=$EQBENCH_RUN_SCOPE
@@ -869,6 +866,7 @@ decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
 skip_completed_results=$SKIP_COMPLETED_RESULTS
+error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
 eqbench_tmpdir=$EQBENCH_TMPDIR
 authority_keyset_id=$AUTHORITY_KEYSET_ID
@@ -888,6 +886,32 @@ ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
     scripts.function_tracer_pcode.validation.execution_receipt \
     --run-manifest "$RUN_MANIFEST_FILE" --print-analysis-config-digest)"
 printf 'analysis_config_digest=%s\n' "$ANALYSIS_CONFIG_DIGEST" >> "$RUN_MANIFEST_FILE"
+PAIR_STATUS_RESUME_COMPAT_ARGS=()
+SUMMARY_SHORTCUT_AUTHORIZED=0
+if compatible_identity="$("$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.validation.execution_receipt \
+    --run-manifest "$RUN_MANIFEST_FILE" \
+    --resume-compatibility-root "$OUTPUT_BASE_DIR" \
+    --current-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
+    --print-compatible-analysis-config-digest 2>/dev/null)"; then
+    IFS=$'\t' read -r compatible_config_digest compatible_source_digest <<< "$compatible_identity"
+    PAIR_STATUS_RESUME_COMPAT_ARGS=(
+        --compatible-analysis-config-digest "$compatible_config_digest"
+        --compatible-analysis-source-digest "$compatible_source_digest"
+    )
+    SUMMARY_SHORTCUT_AUTHORIZED=1
+fi
+if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 0 && -s "$PREVIOUS_RUN_MANIFEST_FILE" ]]; then
+    previous_source_digest="$(awk -F= '$1 == "analysis_source_digest_start" { print $2 }' "$PREVIOUS_RUN_MANIFEST_FILE")"
+    if previous_config_digest="$("$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.validation.execution_receipt \
+        --run-manifest "$PREVIOUS_RUN_MANIFEST_FILE" \
+        --print-analysis-config-digest 2>/dev/null)" \
+        && [[ "$previous_source_digest" == "$ANALYSIS_SOURCE_DIGEST_START" \
+            && "$previous_config_digest" == "$ANALYSIS_CONFIG_DIGEST" ]]; then
+        SUMMARY_SHORTCUT_AUTHORIZED=1
+    fi
+fi
 
 echo "============================================================"
 echo "EqBench all-sample matrix"
@@ -904,6 +928,7 @@ echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
 echo "Skip completed results: $SKIP_COMPLETED_RESULTS"
+echo "ERROR-only rerun: $ERROR_ONLY_RERUN"
 echo "Temporary directory: $EQBENCH_TMPDIR"
 echo "Run temporary directory: $EQBENCH_RUN_TMPDIR"
 echo "Target sources: ${#SAMPLE_SOURCES[@]}"
@@ -1138,23 +1163,14 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             continue
         fi
 
-        if [[ "$SKIP_COMPLETED_RESULTS" != "0" \
-            && -n "${COMPLETED_FUNCTION_SUMMARY_DIRS[$output_function_dir]:-}" ]]; then
-            function_skipped_pairs=0
-            for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
-                left_id="${IDS[$i]}"
-                for ((j = i + 1; j < ${#IDS[@]}; j++)); do
-                    right_id="${IDS[$j]}"
-                    pair_is_selected "${left_id}_${right_id}" || continue
-                    rerun_target_is_selected "$sample_label" "$function_name" "${left_id}_${right_id}" || continue
-                    pair_status_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
-                    printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" \
-                        >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
-                    function_skipped_pairs=$((function_skipped_pairs + 1))
-                done
-            done
-            TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + function_skipped_pairs))
-            echo "[$sample_label] [$function_name] Skipped completed function: results_summary.txt exists; pairs=$function_skipped_pairs/$total_pairs"
+        if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 1 ]] \
+            && [[ "$SKIP_COMPLETED_RESULTS" != "0" || "$ERROR_ONLY_RERUN" != "0" ]] \
+            && function_summary_all_pairs_reusable "$output_function_dir" "$total_pairs"; then
+            while IFS= read -r pair_status_file; do
+                printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
+            done < <(find "$output_function_dir" -maxdepth 1 -type f -name '*.pair-status.json' -print | sort)
+            TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + total_pairs))
+            echo "[$sample_label] [$function_name] Summary shortcut: skipped $total_pairs/$total_pairs pairs"
             continue
         fi
 
@@ -1186,7 +1202,8 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
                     --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
                     > "$pair_target_file"
-                if [[ "$SKIP_COMPLETED_RESULTS" != "0" ]] && signed_pair_status_is_terminal_result "$log_file" "$pair_target_file"; then
+                if [[ "$SKIP_COMPLETED_RESULTS" != "0" || "$ERROR_ONLY_RERUN" != "0" ]] \
+                    && pair_status_is_skippable_for_run_mode "$log_file" "$pair_target_file"; then
                     skipped_completed_pairs=$((skipped_completed_pairs + 1))
                     TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
                     printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
@@ -1303,6 +1320,7 @@ fi
     "EQBENCH_DEBUG=$EQBENCH_DEBUG" \
     "DRY_RUN=$DRY_RUN" \
     "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" \
+    "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" \
     "VALIDATION_SUMMARY_LEVEL=$VALIDATION_SUMMARY_LEVEL" \
     "EQUIV_TIMEOUT=$EQUIV_TIMEOUT" \
     "DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT" \

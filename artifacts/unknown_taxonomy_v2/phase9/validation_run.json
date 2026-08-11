@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "96f97bc41bad06b9261c2e9b5f4a61fe9ff47678ec9c9dcce3449f74cd796c3f",
+  "artifact_digest": "9957cf5a559952ac59ffc52c7733883f56d836cf000135f1c949a269e8b592e3",
   "artifact_kind": "phase9-validation-run-v1",
   "junit": [
     {
@@ -2746,7 +2746,7 @@
       "artifacts/refactor/phase10/contract.json"
     ],
     "contract_kind": "phase10-refactor-contract-green-v1",
-    "current_contract_digest": "0f0805d3cb7d36375723527428e825bb0c0a98a30fce3f1645460479473fc916",
+    "current_contract_digest": "c59419210fa88cc9437bc993887c804b5f5028ce7d00672ca391587e55b4176b",
     "current_dependency_cycles": [
       [
         "scripts.function_tracer_pcode.equivalence.formula.builder",
@@ -3932,19 +3932,19 @@
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase8_cutover",
         "scripts.function_tracer_pcode.equivalence.v2.canonical_result",
         "_semantic_projection",
-        558
+        573
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase8_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split",
         "_analysis",
-        505
+        520
       ],
       [
         "scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase8_cutover",
         "scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split",
         "_analysis",
-        680
+        695
       ],
       [
         "scripts.function_tracer_pcode.transform.expander",
@@ -5453,7 +5453,7 @@
         12
       ]
     ],
-    "current_source_tree_hash": "c0762ed5066767d548deb02c930d76623487505e1355cfb21c080ca087a62f84",
+    "current_source_tree_hash": "5a82c4728730d3c8e73c0698201672e9ba1739504784db2e6d9dfaff1c43c0c3",
     "delta_classifications": [],
     "exact_failures": [],
     "exit_code": 0,

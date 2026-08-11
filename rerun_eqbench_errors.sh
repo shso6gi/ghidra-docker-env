@@ -54,7 +54,8 @@ if (( eq_count > 0 )); then
         EQBENCH_PAIR_FILTER="$(pair_filter EQ)" \
         EQBENCH_RERUN_MANIFEST="$ERROR_RERUN_MANIFEST" \
         ERROR_RERUN_RUN_ID="$ERROR_RERUN_RUN_ID" \
-        SKIP_COMPLETED_RESULTS=0 \
+        SKIP_COMPLETED_RESULTS=1 \
+        ERROR_ONLY_RERUN=1 \
         PARALLEL_JOBS="$PARALLEL_JOBS" \
         "$SCRIPT_DIR/eqbench_run_all_32jobs.sh"
 fi
@@ -68,7 +69,8 @@ if (( neq_count > 0 )); then
         NEQ_PAIR_FILTER="$(pair_filter NEQ)" \
         NEQ_RERUN_MANIFEST="$ERROR_RERUN_MANIFEST" \
         ERROR_RERUN_RUN_ID="$ERROR_RERUN_RUN_ID" \
-        SKIP_COMPLETED_RESULTS=0 \
+        SKIP_COMPLETED_RESULTS=1 \
+        ERROR_ONLY_RERUN=1 \
         PARALLEL_JOBS="$PARALLEL_JOBS" \
         "$SCRIPT_DIR/neqbench_run_all_32jobs.sh"
 fi

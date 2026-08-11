@@ -162,6 +162,44 @@ def test_rerun_publication_requires_current_run_and_exact_scheduled_set():
         raise AssertionError("a stale rerun receipt was accepted")
 
 
+def test_error_only_publication_accepts_exact_pair_level_schedule_and_skip_partition():
+    rows = [
+        ("NEQ", "sample", "foo", "N_B1_O_B1"),
+        ("NEQ", "sample", "foo", "N_B1_O_B2"),
+    ]
+    paths = [
+        "sample/foo/foo_N_B1_O_B1.pair-status.json",
+        "sample/foo/foo_N_B1_O_B2.pair-status.json",
+    ]
+    publication = {
+        "analysis_source_digest_start": "source",
+        "analysis_source_digest_end": "source",
+        "analysis_config_digest": "config",
+        "total_pair_jobs": 2,
+        "total_scheduled_pair_jobs": 1,
+        "total_skipped_pair_jobs": 1,
+        "expected_pair_status_paths": paths,
+        "verified_skipped_pair_status_paths": [paths[0]],
+    }
+    execution = {
+        "execution_kind": "EQBENCH_MATRIX",
+        "exit_status": 0,
+        "source_tree_digest_start": "source",
+        "source_tree_digest_end": "source",
+        "analysis_config_digest": "config",
+        "command": [
+            "ERROR_RERUN_MANIFEST_SHA256=manifest",
+            "ERROR_RERUN_RUN_ID=run-current",
+            "SKIP_COMPLETED_RESULTS=1",
+            "ERROR_ONLY_RERUN=1",
+        ],
+    }
+    assert validate_rerun_publication_contract(
+        rows=rows, publication=publication, execution=execution,
+        manifest_digest="manifest", run_id="run-current",
+    ) == ("source", "config")
+
+
 def test_sample_filter_translates_manifest_identity_for_each_runner():
     rows = [
         ("EQ", "caldat/flmoon/Eq/newV", "flmoon", "B11_B12"),

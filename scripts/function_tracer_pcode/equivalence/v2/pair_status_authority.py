@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Mapping
 
@@ -406,6 +407,69 @@ def pair_status_resume_disposition(body: Mapping[str, Any]) -> str:
     return BATCH_RESUME_DISPOSITION_BY_OUTCOME[Outcome(body["canonical_outcome"])]
 
 
+def resume_disposition_should_skip(disposition: str, *, mode: str) -> bool:
+    """Decide pair-level reuse after the signed status and target validate."""
+
+    dispositions = frozenset(BATCH_RESUME_DISPOSITION_BY_OUTCOME.values())
+    if disposition not in dispositions or mode not in {"NORMAL_RESUME", "ERROR_ONLY"}:
+        raise ValueError("pair resume policy input is invalid")
+    return mode == "NORMAL_RESUME" or disposition != "FAILED_INFRASTRUCTURE"
+
+
+def pair_status_file_skip_decision(
+    pair_status_path: Path, *, log_path: Path, public_key_path: Path,
+    expected_pair_target_path: Path, mode: str,
+    compatible_analysis_config_digest: str | None = None,
+    compatible_analysis_source_digest: str | None = None,
+) -> str:
+    """Return SCHEDULE for every missing or unverifiable pair artifact."""
+
+    try:
+        if (
+            not log_path.is_file() or log_path.stat().st_size == 0
+            or not pair_status_path.is_file() or pair_status_path.stat().st_size == 0
+        ):
+            return "SCHEDULE"
+        payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
+        body = validate_signed_pair_status(payload, public_key_path=public_key_path)
+        expected_target = json.loads(
+            expected_pair_target_path.read_text(encoding="utf-8")
+        )
+        accepted_targets = [expected_target]
+        if ((compatible_analysis_config_digest is None)
+                != (compatible_analysis_source_digest is None)):
+            return "SCHEDULE"
+        if compatible_analysis_config_digest is not None:
+            if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (
+                compatible_analysis_config_digest,
+                compatible_analysis_source_digest,
+            )):
+                return "SCHEDULE"
+            compatible_target = {
+                key: value for key, value in expected_target.items()
+                if key != "target_digest"
+            }
+            compatible_target["analysis_config_digest"] = (
+                compatible_analysis_config_digest
+            )
+            compatible_target["analysis_source_digest"] = (
+                compatible_analysis_source_digest
+            )
+            accepted_targets.append({
+                **compatible_target,
+                "target_digest": authority_digest(compatible_target),
+            })
+        if body["pair_execution_target"] not in accepted_targets:
+            return "SCHEDULE"
+        disposition = pair_status_resume_disposition(body)
+        return (
+            "SKIP" if resume_disposition_should_skip(disposition, mode=mode)
+            else "SCHEDULE"
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return "SCHEDULE"
+
+
 def find_pair_status_public_key(pair_status_path: Path) -> Path:
     for directory in (pair_status_path.parent, *pair_status_path.parents):
         candidate = directory / PAIR_STATUS_PUBLIC_KEY_FILE
@@ -422,9 +486,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export-public-from-private")
     parser.add_argument("--public-key")
     parser.add_argument("--validate-pair-status")
+    parser.add_argument("--pair-log")
     parser.add_argument("--allow-operational-diagnostic", action="store_true")
     parser.add_argument("--resume-disposition", action="store_true")
+    parser.add_argument(
+        "--resume-skip-mode", choices=("NORMAL_RESUME", "ERROR_ONLY")
+    )
     parser.add_argument("--expected-pair-target")
+    parser.add_argument("--compatible-analysis-config-digest")
+    parser.add_argument("--compatible-analysis-source-digest")
     args = parser.parse_args(argv)
     if args.generate_private_key:
         if not args.generate_private_key or not args.write_public_key:
@@ -454,6 +524,25 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--write-public-key requires key generation or export")
     if args.validate_pair_status:
         pair_status_path = Path(args.validate_pair_status)
+        if args.resume_skip_mode:
+            if not args.public_key or not args.expected_pair_target or not args.pair_log:
+                parser.error(
+                    "resume skip mode requires public key, pair log and expected target"
+                )
+            print(pair_status_file_skip_decision(
+                pair_status_path,
+                log_path=Path(args.pair_log),
+                public_key_path=Path(args.public_key),
+                expected_pair_target_path=Path(args.expected_pair_target),
+                mode=args.resume_skip_mode,
+                compatible_analysis_config_digest=(
+                    args.compatible_analysis_config_digest
+                ),
+                compatible_analysis_source_digest=(
+                    args.compatible_analysis_source_digest
+                ),
+            ))
+            return 0
         payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
         diagnostic = pair_status_operational_diagnostic(payload)
         if args.allow_operational_diagnostic and diagnostic is not None:
@@ -473,10 +562,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             if body["pair_execution_target"] != expected_target:
                 raise ValueError("signed pair-status target differs from current execution target")
-        print(
-            pair_status_resume_disposition(body)
-            if args.resume_disposition else body["canonical_outcome"]
-        )
+        disposition = pair_status_resume_disposition(body)
+        print(disposition if args.resume_disposition else body["canonical_outcome"])
         return 0
     parser.error("one pair-status authority operation is required")
     return 0

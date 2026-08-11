@@ -6,7 +6,8 @@ import subprocess
 import pytest
 
 from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
-    PAIR_STATUS_PUBLIC_KEY_FILE, generate_pair_status_keypair, seal_pair_status,
+    PAIR_STATUS_PUBLIC_KEY_FILE, generate_pair_status_keypair,
+    pair_status_file_skip_decision, seal_pair_status,
 )
 from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
 from scripts.function_tracer_pcode.validation.eqbench_build_receipt import (
@@ -19,6 +20,7 @@ from scripts.function_tracer_pcode.validation.execution_identity import (
 from scripts.function_tracer_pcode.validation.execution_receipt import (
     MATRIX_EXECUTION_RECEIPT_FILE, MATRIX_PUBLICATION_MANIFEST_FILE,
     analysis_config_from_run, build_matrix_publication_manifest, main as receipt_main,
+    compatible_legacy_analysis_identity,
     seal_execution_receipt, validate_execution_receipt,
     validate_matrix_publication_manifest,
 )
@@ -81,7 +83,7 @@ def _fixture_repo(tmp_path, *, skipped=False):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     analysis_config = {
-        "schema": "eqbench-analysis-config-v1",
+        "schema": "eqbench-analysis-config-v2",
         "authority_kind": "EqBenchAnalysisConfig",
         "run_scope": "REPRESENTATIVE",
         "build_policy": "REUSE_OR_COMPILE",
@@ -89,7 +91,6 @@ def _fixture_repo(tmp_path, *, skipped=False):
         "sample_filter": "sample",
         "pair_filter": "B1_B2",
         "debug": False,
-        "skip_completed_results": skipped,
         "dry_run": False,
         "parallel_jobs": 1,
         "validation_summary_level": "compact",
@@ -222,7 +223,7 @@ def test_full_scope_rejects_max_samples_or_filters(tmp_path):
 
 
 def test_analysis_config_accepts_full_neq_scope():
-    config = analysis_config_from_run({
+    run = {
         "run_scope": "FULL_NEQ",
         "build_policy": "REUSE_OR_COMPILE",
         "max_samples": "0",
@@ -240,8 +241,154 @@ def test_analysis_config_accepts_full_neq_scope():
         "pair_process_timeout_seconds": "600",
         "pair_process_kill_after_seconds": "30",
         "prefilter_source_census_digest": "a" * 64,
-    })
+    }
+    config = analysis_config_from_run(run)
     assert config["run_scope"] == "FULL_NEQ"
+    assert config["schema"] == "eqbench-analysis-config-v2"
+    # Scheduling policy is receipt-bound but must not invalidate otherwise
+    # reusable pair targets from the same semantic analysis configuration.
+    assert analysis_config_from_run({**run, "skip_completed_results": "0"}) == config
+    assert analysis_config_from_run({**run, "error_only_rerun": "1"}) == config
+
+
+def test_v2_summary_shortcut_identity_requires_current_source(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    publication = json.loads(
+        (root / MATRIX_PUBLICATION_MANIFEST_FILE).read_text()
+    )
+    identity = compatible_legacy_analysis_identity(
+        root, current_config=publication["analysis_config"],
+        current_source_digest=publication["analysis_source_digest_start"],
+    )
+    assert identity == (
+        publication["analysis_config_digest"],
+        publication["analysis_source_digest_start"],
+    )
+    assert compatible_legacy_analysis_identity(
+        root, current_config=publication["analysis_config"],
+        current_source_digest="f" * 64,
+    ) is None
+
+
+def test_legacy_v1_resume_requires_sealed_config_and_source_identity(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    publication_path = root / MATRIX_PUBLICATION_MANIFEST_FILE
+    receipt_path = root / MATRIX_EXECUTION_RECEIPT_FILE
+    public = root / PAIR_STATUS_PUBLIC_KEY_FILE
+    private = tmp_path / "pair.key"
+    status_path = next(root.rglob("*.pair-status.json"))
+    status_payload = json.loads(status_path.read_text())
+    current_target = status_payload["pair_execution_target"]
+    current_config = json.loads(publication_path.read_text())["analysis_config"]
+    legacy_config = {
+        **current_config,
+        "schema": "eqbench-analysis-config-v1",
+        "skip_completed_results": False,
+    }
+    legacy_config_digest = authority_digest(legacy_config)
+    legacy_source_digest = "b" * 64
+
+    legacy_target_body = {
+        key: value for key, value in current_target.items() if key != "target_digest"
+    }
+    legacy_target_body.update({
+        "analysis_config_digest": legacy_config_digest,
+        "analysis_source_digest": legacy_source_digest,
+    })
+    legacy_target = {
+        **legacy_target_body, "target_digest": authority_digest(legacy_target_body),
+    }
+    status_body = {
+        key: value for key, value in status_payload.items()
+        if not key.startswith("pair_status_")
+    }
+    status_body["pair_execution_target"] = legacy_target
+    status_path.write_text(json.dumps(seal_pair_status(
+        status_body, private_key_path=private, public_key_path=public,
+    )))
+
+    publication = json.loads(publication_path.read_text())
+    publication.update({
+        "analysis_config": legacy_config,
+        "analysis_config_digest": legacy_config_digest,
+        "analysis_source_digest_start": legacy_source_digest,
+        "analysis_source_digest_end": legacy_source_digest,
+    })
+    publication_body = {
+        key: value for key, value in publication.items() if key != "artifact_digest"
+    }
+    publication["artifact_digest"] = authority_digest(publication_body)
+    publication_path.write_text(json.dumps(publication))
+    receipt_path.write_text(json.dumps(seal_execution_receipt(
+        execution_kind="EQBENCH_MATRIX", command=["./eqbench_run_all_32jobs.sh"],
+        source_digest_start=legacy_source_digest,
+        source_digest_end=legacy_source_digest,
+        analysis_config_digest=legacy_config_digest, exit_status=0,
+        artifacts={
+            MATRIX_PUBLICATION_MANIFEST_FILE: sha256_file(publication_path),
+            "run_health_summary.json": sha256_file(root / "run_health_summary.json"),
+        }, private_key_path=private, public_key_path=public,
+    )))
+
+    compatible = compatible_legacy_analysis_identity(
+        root, current_config=current_config, current_source_digest="d" * 64,
+    )
+    assert compatible == (legacy_config_digest, legacy_source_digest)
+    expected = tmp_path / "expected-target.json"
+    expected.write_text(json.dumps(current_target))
+    log = status_path.with_name(status_path.name.replace(".pair-status.json", ".log"))
+    assert pair_status_file_skip_decision(
+        status_path, log_path=log, public_key_path=public,
+        expected_pair_target_path=expected, mode="NORMAL_RESUME",
+        compatible_analysis_config_digest=compatible[0],
+        compatible_analysis_source_digest=compatible[1],
+    ) == "SKIP"
+    assert pair_status_file_skip_decision(
+        status_path, log_path=log, public_key_path=public,
+        expected_pair_target_path=expected, mode="NORMAL_RESUME",
+        compatible_analysis_config_digest=compatible[0],
+        compatible_analysis_source_digest="c" * 64,
+    ) == "SCHEDULE"
+
+
+def test_pair_resume_file_decision_schedules_missing_invalid_and_wrong_target(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    status = next(root.rglob("*.pair-status.json"))
+    log = status.with_name(status.name.replace(".pair-status.json", ".log"))
+    public = root / PAIR_STATUS_PUBLIC_KEY_FILE
+    payload = json.loads(status.read_text())
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(payload["pair_execution_target"]))
+
+    def decide(mode="NORMAL_RESUME"):
+        return pair_status_file_skip_decision(
+            status, log_path=log, public_key_path=public,
+            expected_pair_target_path=target, mode=mode,
+        )
+
+    assert decide() == "SKIP"
+    assert decide("ERROR_ONLY") == "SKIP"
+    original_status = status.read_bytes()
+    status.unlink()
+    assert decide() == "SCHEDULE"
+    status.write_bytes(b"not-json")
+    assert decide() == "SCHEDULE"
+    status.write_bytes(original_status)
+    tampered = json.loads(status.read_text())
+    tampered["pair_status_signature"] = "AAAA"
+    status.write_text(json.dumps(tampered))
+    assert decide() == "SCHEDULE"
+    status.write_bytes(original_status)
+    wrong_target = json.loads(target.read_text())
+    wrong_target["function_name"] = "different_function"
+    target.write_text(json.dumps(wrong_target))
+    assert decide() == "SCHEDULE"
+    target.write_text(json.dumps(payload["pair_execution_target"]))
+    log.unlink()
+    assert decide() == "SCHEDULE"
 
 
 def test_phase10_manifest_rejects_pair_status_copy_to_another_target(tmp_path):
@@ -423,6 +570,12 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert 'EQBENCH_MAX_SAMPLES=$EQBENCH_MAX_SAMPLES' in runner
     assert "stale-binaries" not in runner
     assert 'mv -- "$binary_path"' not in runner
+    assert 'ERROR_ONLY_RERUN="${ERROR_ONLY_RERUN:-0}"' in runner
+    assert "pair_status_is_skippable_for_run_mode" in runner
+    assert "function_summary_all_pairs_reusable" in runner
+    assert "Summary shortcut: skipped" in runner
+    assert '--resume-skip-mode "$mode"' in runner
+    assert '--compatible-analysis-source-digest "$compatible_source_digest"' in runner
 
 
 def test_neq_runner_emits_typed_matrix_receipt_inputs():
@@ -437,16 +590,22 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert 'planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS' in runner
     assert 'pair_selected "$pair"' in runner
     assert 'target="${10}"' in runner
-    assert 'pair_status_is_terminal_result' in runner
-    assert "^(EQUIVALENT|NOT_EQ|UNKNOWN|TIMEOUT|ERROR)$" in runner
+    assert 'default_value ERROR_ONLY_RERUN 0' in runner
+    assert 'pair_status_is_skippable_for_run_mode' in runner
+    assert '--resume-skip-mode "$mode"' in runner
+    assert '--pair-log "$log"' in runner
+    assert 'mode=ERROR_ONLY' in runner
+    assert 'mode=NORMAL_RESUME' in runner
+    assert '[[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]]' in runner
     assert "results_summary.txt" in runner
-    assert "function_summary_is_complete" in runner
-    assert 'dirname "$existing_status"' in runner
-    assert 'COMPLETED_FUNCTION_SUMMARY_DIRS[$function_dir]' in runner
-    assert "Skipped completed function: results_summary.txt exists" in runner
+    assert "function_summary_all_pairs_reusable" in runner
+    assert "summary shortcut" in runner
+    assert 'COMPLETED_FUNCTION_SUMMARY_DIRS' not in runner
+    assert 'while IFS= read -r existing_status' not in runner
     for field in (
         "max_samples", "sample_filter", "pair_filter", "debug",
-        "skip_completed_results", "validation_summary_level", "dry_run",
+        "skip_completed_results", "error_only_rerun",
+        "validation_summary_level", "dry_run",
         "prefilter_source_count", "prefilter_source_census_digest",
         "target_sources", "completed_samples", "total_functions",
         "expected_binary_count", "compiled_binary_count",

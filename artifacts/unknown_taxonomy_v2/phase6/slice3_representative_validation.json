@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "a095b128d18f3a125a8b36a5d6a92ab4fa40cc1cf5f97a027781cd218782694f",
+  "artifact_digest": "3896616e01f902dca481428ee8c4e51343448fefad1c5b30ad7b48aa3b47090b",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -16,7 +16,7 @@
   },
   "evidence_kind": "unknown_taxonomy_v2_phase6_slice3_representative_validation",
   "files": {
-    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "87679579645ac3c1799a907a9c7c99761d9ee5cd49c95ab45bcde307565ec7e0",
+    "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json": "6cc09e6619caea96857b1450d85d47aa740eb0f3da6d10c39363c3cf3b6f246f",
     "scripts/function_tracer_pcode/equivalence/call_effect_producer.py": "20c9a89aca2d1498515cb5c7df93bc3425d830aa276586bddb43033c21fceced",
     "scripts/function_tracer_pcode/equivalence/checker.py": "03f897a8a170831ed060c28bdf3d0fb28e846a441e61b7d5eb8fdee251fce95b",
     "scripts/function_tracer_pcode/equivalence/v2/call_effect.py": "31a6beee81822c1166bb0dde28327d0478b1363299a9e15e48f7c31a524dbe88",
@@ -35,7 +35,7 @@
     "elapsed_seconds": null,
     "result": "133 passed"
   },
-  "git_head": "6d580ebf4d39bced89b146d4963ba1943f32ff64",
+  "git_head": "52c55b5aa752d80573ac4198b784fb536cac5dee",
   "inventory": {
     "current_source": {
       "candidate_count": 597,
@@ -87,8 +87,8 @@
   "schema_version": 1,
   "source_inventory": {
     "current_source": {
-      "candidate_count": 632,
-      "candidate_set_digest": "781e7a2599dbe80ff27f42da6674d8632dcce99ecfd0ba7e423ba00e5c638448"
+      "candidate_count": 630,
+      "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
     },
     "live_delta": {
       "added": 0,
