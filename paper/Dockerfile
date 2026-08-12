@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-fonts-recommended \
     texlive-bibtex-extra \
     biber \
+    ghostscript \
     poppler-utils \
     make \
     git \

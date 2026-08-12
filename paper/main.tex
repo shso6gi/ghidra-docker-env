@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリを対象とするOSS/TPL検出では，対象バイナリと既知ライブラリから類似する関数を求め，その結果をライブラリ単位に集約する．しかし，類似度が高い関数の組が，同じ入力に対して同じ出力を返すとは限らない．そこで本研究では，TPL候補となった関数の組を集約前に意味的に再検証する．GhidraのHigh P-codeから，比較対象とする戻り値，メモリ，入出力および終了の振る舞いを表す式を構成し，SMTソルバで差の有無を調べる．比較対象を十分に表現できない場合はEQとせず，UNKNOWNとする．EqBenchのCコードを16条件でビルドし，4関数の全480ペアを調べた結果，257ペアがEQ，216ペアがUNKNOWN，7ペアがTIMEOUTとなった．実際のHigh P-codeと判定に必要な未確認事項を分析し，ループの前回値を受け取る\texttt{MULTIEQUAL}，戻り値格納場所および関数呼出しがUNKNOWNに至る過程を示した．
+バイナリレベルのOSS/TPL検出は，脆弱性・ライセンス・サプライチェーンリスク把握に重要である．既存検出手法は類似関数候補の生成と集約によりライブラリを判定する．しかし，構造が類似するだけで出力が異なる候補関数によりスコアが過大評価され，false positiveを招く．候補生成や集約の精度向上は進む一方，個々の候補の動作面での信頼性検証は不十分である．本研究では，関数対応候補の集約前に再検証する後段手法を提案する．GhidraのHigh P-codeから，戻り値，比較対象のメモリ，外部効果および終了挙動に関する情報を取得し，対応づけた同一入力における観測結果の差をSMTソルバで検査する．評価では，同一ソースを異なるコンパイラ・最適化・アーキテクチャで生成した等価カテゴリの4関数を比較し，最終分布は集計の確定後に報告する．また，異なる確認事項が残るUNKNOWNの3事例を分析する．以上により，後段検証器としての判定能力と適用限界を明らかにする．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,7 +32,9 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detectors find functions similar to known library functions and aggregate them at the library level. However, a highly similar candidate does not necessarily produce the same output for the same input. We therefore revalidate TPL function candidates before aggregation. From Ghidra High P-code, our implementation constructs expressions for the compared returns, memory effects, I/O, and termination behavior, and uses an SMT solver to search for differences. It returns UNKNOWN rather than EQ when these behaviors cannot be represented sufficiently. We compiled EqBench C programs under 16 build configurations and examined all 480 pairs of four functions: 257 were EQ, 216 were UNKNOWN, and seven timed out. Analysis of the High P-code and the remaining uncertainties shows how \texttt{MULTIEQUAL} nodes carrying values across loop iterations, differences in return-value storage, and incomplete correspondence between function calls lead to UNKNOWN.
+Binary-level OSS/TPL detection plays a critical role in identifying vulnerabilities, license compliance issues, and software supply chain risks. Existing detection approaches determine the presence of libraries by generating and aggregating candidate similar functions. However, candidates that are structurally similar but produce different outputs can lead to overestimated scores, resulting in false positives. While significant progress has been made in improving candidate generation and aggregation accuracy, the reliability of individual candidates in terms of their actual behavior remains insufficiently verified.
+
+In this work, we propose a post-analysis method that re-validates candidate function pairs before aggregation. Specifically, we extract information about return values, memory within the comparison scope, externally observable effects, and termination behavior from Ghidra's High P-code representation, and use an SMT solver to check for differences in observations under corresponding inputs. For evaluation, we compare four functions in the equivalent category compiled from the same source under different compilers, optimizations, and architectures; the final distribution will be reported after aggregation is finalized. We also analyze three inconclusive cases classified as UNKNOWN, each with distinct remaining confirmation items. Through this, we clarify the capability and limitations of the proposed method as a post-validation component.
 \end{eabstract}
 
 \begin{ekeyword}
@@ -92,11 +94,6 @@ Proc. OOPSLA, pp.391--406 (2013).
 Naus, N., Verbeek, F., Walker, D. and Ravindran, B.:
 A Formal Semantics for P-Code,
 Proc. VSTTE, LNCS 13800, pp.111--128 (2023).
-
-\bibitem{proof-cert-smt}
-Mebsout, A. and Tinelli, C.:
-Proof Certificates for SMT-based Model Checkers for Infinite-State Systems,
-Proc. FMCAD, pp.117--124 (2016).
 
 \bibitem{eqbench}
 Badihi, S., Li, Y. and Rubin, J.:
