@@ -24,7 +24,7 @@ Nagoya Institute of Technology}
 \author{齋藤 彰一}{Shoichi Saito}{AFFIL}
 
 \begin{abstract}
-バイナリレベルのOSS/TPL検出では，類似度の高い候補であっても，同一入力に対する観測可能な振る舞いの一致は保証されない．非等価な候補が一致の証拠として集約に用いられると，誤ったTPL・バージョン判定の一因となり得る．本研究は，TPL検出器等が生成した関数対応候補を，候補集約前に再検証する手法を提案する．GhidraのHigh P-codeとSMTソルバZ3を用い，対応づけた入力に対する戻り値や副作用などの観測結果を比較する．等価性の判定条件を満たす場合をEQ，到達可能な同一入力の反例を確認できた場合をNOT\_EQ，確認項目が残る場合をUNKNOWN，期限内に最終判定を確定できない場合をTIMEOUTとする．EqBenchを用い，異なる環境で生成した同一Cソースの関数間のEQ，非等価カテゴリから選定した関数対のNOT\_EQを評価し，4種類の結果の具体例から判定に至る過程を分析する．
+バイナリレベルのOSS/TPL検出では，特徴や構造が類似する候補であっても，同じ入力に対する戻り値や副作用が一致するとは限らない．非等価な候補が一致の証拠として集約に用いられると，誤ったTPL判定の一因となり得る．本研究は，TPL検出器等が生成した関数対応候補を，候補集約前に再検証する手法を提案する．GhidraのHigh P-codeとSMTソルバZ3を用い，対応づけた入力に対する戻り値と出力ポインタへの書き込みを比較する．判定条件を満たす場合をEQ，到達可能な同一入力の反例を確認できた場合をNOT\_EQ，判定に必要な情報を確認できない場合をUNKNOWN，制限時間内に最終判定を確定できない場合をTIMEOUTとする．EqBenchを用い，異なる環境で生成した同一Cソースの関数間のEQ，非等価カテゴリから選定した関数対のNOT\_EQを評価し，4種類の結果の具体例から判定に至る過程を分析する．
 \end{abstract}
 
 \begin{jkeyword}
@@ -32,7 +32,7 @@ Nagoya Institute of Technology}
 \end{jkeyword}
 
 \begin{eabstract}
-Binary-level OSS/TPL detection uses similarity to generate and aggregate candidate function correspondences. Even a highly similar candidate does not guarantee matching observable behavior for the same input. If a non-equivalent candidate contributes to aggregation as matching evidence, it may contribute to an incorrect TPL or version decision. We propose a method that re-validates function correspondences before candidate aggregation. Using Ghidra High P-code and the Z3 SMT solver, we compare observations such as return values and side effects under corresponding inputs. We classify a pair as EQ when the conditions for establishing equivalence are satisfied, NOT\_EQ when a valid counterexample on a reachable common input is confirmed, UNKNOWN when confirmation items remain, and TIMEOUT when the final decision cannot be established within the deadline. Using EqBench, we evaluate EQ across builds of the same C source and NOT\_EQ on selected pairs from the non-equivalent category, and analyze how the four outcomes are reached through concrete cases.
+Binary-level OSS/TPL detection generates and aggregates candidate function correspondences based on similarity. Even a highly similar candidate does not guarantee matching observable behavior, such as return values or side effects, for the same input. If a non-equivalent candidate contributes to aggregation as matching evidence, it may lead to an incorrect TPL decision. We propose a method that re-validates function correspondences before candidate aggregation. Using Ghidra High P-code and the Z3 SMT solver, we compare return values and output-pointer writes under corresponding inputs. We classify a pair as EQ when the judgment conditions are satisfied, NOT\_EQ when a valid counterexample on a reachable common input is confirmed, UNKNOWN when required information cannot be confirmed, and TIMEOUT when the final decision cannot be established within the deadline. Using EqBench, we evaluate EQ across builds of the same C source and NOT\_EQ on selected pairs from the non-equivalent category, and analyze how the four outcomes are reached through concrete cases.
 \end{eabstract}
 
 \begin{ekeyword}
