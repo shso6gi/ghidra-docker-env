@@ -724,6 +724,10 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
     assert "load_error_only_summary_pairs" in runner
     assert "--error-pairs --matrix EQ" in runner
+    assert "ERROR-only summary: selected" in runner
+    assert "summary_pair_files_reusable" in runner
+    assert "summary_force_schedule=1" in runner
+    assert "if (( ! summary_force_schedule ))" in runner
     assert "Summary shortcut: skipped" in runner
     assert '--resume-skip-mode "$mode"' in runner
     assert '--compatible-analysis-source-digest "$compatible_source_digest"' in runner
@@ -756,6 +760,10 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
     assert "load_error_only_summary_pairs" in runner
     assert "--error-pairs --matrix NEQ" in runner
+    assert "ERROR-only summary: selected" in runner
+    assert "summary_pair_files_reusable" in runner
+    assert "summary_force_schedule=1" in runner
+    assert "if (( ! summary_force_schedule ))" in runner
     assert 'COMPLETED_FUNCTION_SUMMARY_DIRS' not in runner
     assert 'while IFS= read -r existing_status' not in runner
     for field in (

@@ -270,6 +270,13 @@ function_summary_all_pairs_reusable() {
         && "$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)" -eq "$expected" ]]
 }
 
+summary_pair_files_reusable() {
+    local log_file="$1" pair_status_file="$2"
+    [[ -s "$log_file" && -s "$pair_status_file" ]] || return 1
+    "$PYTHON_BIN" -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if isinstance(value, dict) else 1)' \
+        "$pair_status_file" >/dev/null 2>&1
+}
+
 load_error_only_summary_pairs() {
     local function_dir="$1" summary="$1/results_summary.txt" error_count
     SUMMARY_ERROR_PAIRS_READY=0
@@ -1232,6 +1239,10 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
             continue
         fi
+        if (( SUMMARY_ERROR_PAIRS_READY )); then
+            error_pair_list="$(printf '%s\n' "${!SUMMARY_ERROR_PAIRS[@]}" | sort | paste -sd, -)"
+            echo "[$sample_label] [$function_name] ERROR-only summary: selected ${#SUMMARY_ERROR_PAIRS[@]}/$total_pairs ERROR pair(s): $error_pair_list"
+        fi
         for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
             left_id="${IDS[$i]}"
             left_name="$(binary_name_for_id "$source_base" "$left_id")"
@@ -1247,12 +1258,24 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 pair_count=$((pair_count + 1))
                 log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
                 pair_status_file="${log_file%.log}.pair-status.json"
+                summary_force_schedule=0
                 if (( SUMMARY_ERROR_PAIRS_READY )) \
-                    && [[ -z "${SUMMARY_ERROR_PAIRS[${left_id}_${right_id}]:-}" ]]; then
-                    skipped_completed_pairs=$((skipped_completed_pairs + 1))
-                    TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
-                    printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
-                    continue
+                    && [[ -n "${SUMMARY_ERROR_PAIRS[${left_id}_${right_id}]:-}" ]]; then
+                    # The historical function summary is the ERROR-only
+                    # scheduling authority.  Do not let a stale/valid
+                    # terminal status or a different analysis digest hide
+                    # a pair explicitly classified as ERROR there.
+                    summary_force_schedule=1
+                elif (( SUMMARY_ERROR_PAIRS_READY )); then
+                    if summary_pair_files_reusable "$log_file" "$pair_status_file"; then
+                        skipped_completed_pairs=$((skipped_completed_pairs + 1))
+                        TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                        printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
+                        continue
+                    fi
+                    # A summary non-ERROR pair with a missing or malformed
+                    # artifact is incomplete and must be repaired.
+                    summary_force_schedule=1
                 fi
                 pair_target_file="$EQBENCH_RUN_TMPDIR/${TOTAL_PAIR_JOBS}-${function_name}-${left_id}-${right_id}.pair-target.json"
                 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity \
@@ -1266,7 +1289,8 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
                     --analysis-config-digest "$ANALYSIS_CONFIG_DIGEST" \
                     > "$pair_target_file"
-                if [[ "$SKIP_COMPLETED_RESULTS" != "0" || "$ERROR_ONLY_RERUN" != "0" ]] \
+                if (( ! summary_force_schedule )) \
+                    && [[ "$SKIP_COMPLETED_RESULTS" != "0" || "$ERROR_ONLY_RERUN" != "0" ]] \
                     && pair_status_is_skippable_for_run_mode "$log_file" "$pair_target_file"; then
                     skipped_completed_pairs=$((skipped_completed_pairs + 1))
                     TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
