@@ -773,6 +773,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode.add_argument("--function-summary", action="store_true")
     mode.add_argument("--overall-summary", action="store_true")
     mode.add_argument("--classify-log", action="store_true")
+    parser.add_argument(
+        "--allow-legacy-log",
+        action="store_true",
+        help="classify terminal Result lines without requiring receipt-bound JSON",
+    )
     parser.add_argument("--function-name", default=None)
     parser.add_argument(
         "--canonical-only",
@@ -862,7 +867,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.classify_log:
         if len(logs) != 1:
             parser.error("--classify-log requires exactly one log")
-        print(read_validation_log_record(logs[0], canonical_only=True).status)
+        print(read_validation_log_record(
+            logs[0], canonical_only=not args.allow_legacy_log
+        ).status)
         return 0
 
     if args.function_summary:

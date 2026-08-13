@@ -376,16 +376,26 @@ pair_status_is_skippable_for_run_mode() {
     status="$(printf '%s' "$log" | sed 's/\.log$/.pair-status.json/')"
     [[ -s "$log" && -s "$status" ]] || return 1
     if [[ "$ERROR_ONLY_RERUN" == 1 ]]; then mode=ERROR_ONLY; else mode=NORMAL_RESUME; fi
-    if ! decision="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+    if decision="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
         --validate-pair-status "$status" \
         --pair-log "$log" \
         --public-key "$PAIR_PUBLIC_KEY" \
         --expected-pair-target "$target" \
         "${PAIR_STATUS_RESUME_COMPAT_ARGS[@]}" \
         --resume-skip-mode "$mode" 2>/dev/null)"; then
-        return 1
+        [[ "$decision" == SKIP ]] && return 0
     fi
-    [[ "$decision" == SKIP ]]
+    if [[ "$ERROR_ONLY_RERUN" == 1 ]] \
+        && [[ "$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            --legacy-pair-target-match "$status" --expected-pair-target "$target" \
+            2>/dev/null)" == MATCH ]] \
+        && legacy_outcome="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
+            --classify-log --allow-legacy-log "$log" 2>/dev/null)"; then
+        case "$legacy_outcome" in
+            EQ|NOT_EQ|UNKNOWN|TIMEOUT) return 0 ;;
+        esac
+    fi
+    return 1
 }
 function_summary_all_pairs_reusable() {
     local function_dir="$1" expected="$2" summary="$1/results_summary.txt"
@@ -644,7 +654,7 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         function_position=$((function_position + 1))
         TOTAL_FUNCTIONS=$((TOTAL_FUNCTIONS + 1))
         function_dir="$OUTPUT_SAMPLE/$function"; mkdir -p "$function_dir"; total="$(rerun_pair_count "$sample" "$function")"; count=0
-        if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 1 ]] \
+        if [[ ("$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1) ]] \
             && [[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]] \
             && function_summary_all_pairs_reusable "$function_dir" "$total"; then
             while IFS= read -r status_file; do

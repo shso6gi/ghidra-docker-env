@@ -470,6 +470,60 @@ def pair_status_file_skip_decision(
         return "SCHEDULE"
 
 
+def legacy_pair_status_target_matches(
+    pair_status_path: Path, *, expected_pair_target_path: Path,
+) -> bool:
+    """Compare concrete pair identity while ignoring analysis-code provenance.
+
+    This is intentionally a narrow compatibility path for ERROR-only reruns
+    of historical logs.  It does not validate the Ed25519 seal or the old
+    analysis source/config digests.  It does require a well-formed target
+    receipt, its own target digest, and equality of all concrete source,
+    binary, sample, function, and pair fields.
+    """
+
+    target_fields = {
+        "schema", "authority_kind", "sample_identity",
+        "output_sample_relative_path", "function_name", "left_binary_id",
+        "right_binary_id", "source_path", "source_sha256",
+        "left_binary_path", "left_binary_sha256", "right_binary_path",
+        "right_binary_sha256", "analysis_source_digest",
+        "analysis_config_digest", "target_digest",
+    }
+    ignored_provenance = {
+        "analysis_source_digest", "analysis_config_digest", "target_digest",
+    }
+    try:
+        payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
+        expected = json.loads(
+            expected_pair_target_path.read_text(encoding="utf-8")
+        )
+        actual = payload.get("pair_execution_target")
+        if (
+            not isinstance(actual, Mapping)
+            or not isinstance(expected, Mapping)
+            or set(actual) != target_fields
+            or set(expected) != target_fields
+            or any(type(actual[field]) is not str or not actual[field]
+                   for field in target_fields)
+            or any(type(expected[field]) is not str or not expected[field]
+                   for field in target_fields)
+            or actual["target_digest"] != authority_digest(
+                {key: actual[key] for key in actual if key != "target_digest"}
+            )
+            or expected["target_digest"] != authority_digest(
+                {key: expected[key] for key in expected if key != "target_digest"}
+            )
+        ):
+            return False
+        return all(
+            actual[field] == expected[field]
+            for field in target_fields - ignored_provenance
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+
+
 def find_pair_status_public_key(pair_status_path: Path) -> Path:
     for directory in (pair_status_path.parent, *pair_status_path.parents):
         candidate = directory / PAIR_STATUS_PUBLIC_KEY_FILE
@@ -486,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export-public-from-private")
     parser.add_argument("--public-key")
     parser.add_argument("--validate-pair-status")
+    parser.add_argument("--legacy-pair-target-match")
     parser.add_argument("--pair-log")
     parser.add_argument("--allow-operational-diagnostic", action="store_true")
     parser.add_argument("--resume-disposition", action="store_true")
@@ -564,6 +619,18 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("signed pair-status target differs from current execution target")
         disposition = pair_status_resume_disposition(body)
         print(disposition if args.resume_disposition else body["canonical_outcome"])
+        return 0
+    if args.legacy_pair_target_match:
+        if not args.expected_pair_target:
+            parser.error(
+                "legacy pair target matching requires --expected-pair-target"
+            )
+        print(
+            "MATCH" if legacy_pair_status_target_matches(
+                Path(args.legacy_pair_target_match),
+                expected_pair_target_path=Path(args.expected_pair_target),
+            ) else "MISMATCH"
+        )
         return 0
     parser.error("one pair-status authority operation is required")
     return 0

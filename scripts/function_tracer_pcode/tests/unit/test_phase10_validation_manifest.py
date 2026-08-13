@@ -7,7 +7,8 @@ import pytest
 
 from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
     PAIR_STATUS_PUBLIC_KEY_FILE, generate_pair_status_keypair,
-    pair_status_file_skip_decision, seal_pair_status,
+    legacy_pair_status_target_matches, pair_status_file_skip_decision,
+    seal_pair_status,
 )
 from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
 from scripts.function_tracer_pcode.validation.eqbench_build_receipt import (
@@ -502,6 +503,42 @@ def test_pair_resume_file_decision_schedules_missing_invalid_and_wrong_target(tm
     assert decide() == "SCHEDULE"
 
 
+def test_legacy_error_only_resume_ignores_analysis_code_provenance(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    status = next(root.rglob("*.pair-status.json"))
+    payload = json.loads(status.read_text())
+    current_target = payload["pair_execution_target"]
+    old_target_body = {
+        key: value for key, value in current_target.items()
+        if key != "target_digest"
+    }
+    old_target_body.update({
+        "analysis_source_digest": "b" * 64,
+        "analysis_config_digest": "c" * 64,
+    })
+    old_target = {
+        **old_target_body, "target_digest": authority_digest(old_target_body),
+    }
+    payload["pair_execution_target"] = old_target
+    status.write_text(json.dumps(payload))
+    expected = tmp_path / "expected-target.json"
+    expected.write_text(json.dumps(current_target))
+
+    assert legacy_pair_status_target_matches(
+        status, expected_pair_target_path=expected,
+    ) is True
+    old_target["function_name"] = "other_function"
+    old_target["target_digest"] = authority_digest({
+        key: value for key, value in old_target.items()
+        if key != "target_digest"
+    })
+    status.write_text(json.dumps({**payload, "pair_execution_target": old_target}))
+    assert legacy_pair_status_target_matches(
+        status, expected_pair_target_path=expected,
+    ) is False
+
+
 def test_phase10_manifest_rejects_pair_status_copy_to_another_target(tmp_path):
     repo, junit, receipt, matrix = _fixture_repo(tmp_path)
     root = repo / matrix
@@ -684,6 +721,7 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert 'ERROR_ONLY_RERUN="${ERROR_ONLY_RERUN:-0}"' in runner
     assert "pair_status_is_skippable_for_run_mode" in runner
     assert "function_summary_all_pairs_reusable" in runner
+    assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
     assert "Summary shortcut: skipped" in runner
     assert '--resume-skip-mode "$mode"' in runner
     assert '--compatible-analysis-source-digest "$compatible_source_digest"' in runner
@@ -713,6 +751,7 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert "results_summary.txt" in runner
     assert "function_summary_all_pairs_reusable" in runner
     assert "summary shortcut" in runner
+    assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
     assert 'COMPLETED_FUNCTION_SUMMARY_DIRS' not in runner
     assert 'while IFS= read -r existing_status' not in runner
     for field in (

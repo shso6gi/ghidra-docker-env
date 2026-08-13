@@ -228,6 +228,22 @@ def test_canonical_only_missing_pair_status_is_incomplete(tmp_path):
     assert record.pair_status_metadata is None
 
 
+def test_classify_log_cli_can_explicitly_reuse_legacy_terminal_line(tmp_path):
+    path = _write_log(tmp_path, "client_B1_B2.log", "Result: EQUIVALENT")
+    strict = subprocess.run(
+        [sys.executable, "-m", "scripts.function_tracer_pcode.validation.result_summary",
+         "--classify-log", str(path)],
+        check=True, text=True, capture_output=True,
+    )
+    legacy = subprocess.run(
+        [sys.executable, "-m", "scripts.function_tracer_pcode.validation.result_summary",
+         "--classify-log", "--allow-legacy-log", str(path)],
+        check=True, text=True, capture_output=True,
+    )
+    assert strict.stdout.strip() == STATUS_INCOMPLETE
+    assert legacy.stdout.strip() == STATUS_EQ
+
+
 def test_signed_pair_status_rejects_semantically_inconsistent_status(tmp_path):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
