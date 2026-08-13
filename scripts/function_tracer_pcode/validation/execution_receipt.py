@@ -136,6 +136,25 @@ def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str
     return normalized
 
 
+def _legacy_analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
+    """Reconstruct the v1 config sealed by pre-v2 matrix runs.
+
+    ``skip_completed_results`` was part of the v1 digest even though it is a
+    scheduling policy rather than semantic analysis configuration.  Keep this
+    parser private so new runs continue to use the v2 identity while old
+    manifests can still be published and then normalized by resume checks.
+    """
+
+    config = dict(analysis_config_from_run(run))
+    try:
+        config["schema"] = "eqbench-analysis-config-v1"
+        config["skip_completed_results"] = bool(int(run["skip_completed_results"]))
+    except (KeyError, ValueError) as exc:
+        raise ValueError("legacy matrix run manifest lacks typed analysis config") from exc
+    validate_analysis_config(config)
+    return config
+
+
 def _read_key_values(path: Path) -> Mapping[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -193,7 +212,12 @@ def build_matrix_publication_manifest(matrix_root: Path) -> Mapping[str, Any]:
         raise ValueError("matrix run manifest lacks canonical publication fields") from exc
     analysis_config = analysis_config_from_run(run)
     if run["analysis_config_digest"] != authority_digest(analysis_config):
-        raise ValueError("matrix analysis config digest differs")
+        # A v1 publication is still a valid authority artifact.  Accept it
+        # only when the stored digest exactly matches the reconstructed v1
+        # object; never silently replace a mismatched digest.
+        analysis_config = _legacy_analysis_config_from_run(run)
+        if run["analysis_config_digest"] != authority_digest(analysis_config):
+            raise ValueError("matrix analysis config digest differs")
     build_receipts = [
         json.loads(line) for line in
         (matrix_root / "used_build_receipts.jsonl").read_text(encoding="utf-8").splitlines()

@@ -195,6 +195,33 @@ def test_phase10_manifest_binds_current_source_and_accepts_verified_resume(tmp_p
     assert manifest["completion_eligible"] is False
 
 
+def test_matrix_publication_accepts_legacy_v1_config_digest(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    run_path = root / "run_manifest.txt"
+    run = run_path.read_text()
+    current = analysis_config_from_run(
+        dict(line.split("=", 1) for line in run.splitlines())
+    )
+    legacy = dict(current)
+    legacy["schema"] = "eqbench-analysis-config-v1"
+    legacy["skip_completed_results"] = False
+    legacy_digest = authority_digest(legacy)
+    current_digest = authority_digest(current)
+    run_path.write_text(
+        run.replace(
+            f"analysis_config_digest={current_digest}",
+            f"analysis_config_digest={legacy_digest}",
+        )
+    )
+
+    publication = build_matrix_publication_manifest(root)
+
+    assert publication["analysis_config"] == legacy
+    assert publication["analysis_config_digest"] == legacy_digest
+    validate_matrix_publication_manifest(publication)
+
+
 def test_phase10_completion_rejects_representative_matrix(tmp_path):
     repo, junit, receipt, matrix = _fixture_repo(tmp_path)
     with pytest.raises(ValueError, match="requires FULL_EQBENCH"):
