@@ -899,7 +899,9 @@ if compatible_identity="$("$PYTHON_BIN" -m \
         --compatible-analysis-config-digest "$compatible_config_digest"
         --compatible-analysis-source-digest "$compatible_source_digest"
     )
-    SUMMARY_SHORTCUT_AUTHORIZED=1
+    if [[ "$compatible_source_digest" == "$ANALYSIS_SOURCE_DIGEST_START" ]]; then
+        SUMMARY_SHORTCUT_AUTHORIZED=1
+    fi
 fi
 if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 0 && -s "$PREVIOUS_RUN_MANIFEST_FILE" ]]; then
     previous_source_digest="$(awk -F= '$1 == "analysis_source_digest_start" { print $2 }' "$PREVIOUS_RUN_MANIFEST_FILE")"
@@ -1339,7 +1341,4 @@ echo "Run manifest: $OUTPUT_BASE_DIR/run_manifest.txt"
 if (( FINAL_RUN_EXIT_STATUS > 0 )); then
     echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification or run-health checks." >&2
     if (( PROCESS_AUTHORITY_CLEANUP_FAILURES > 0 )); then
-        echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES process-authority cleanup run-health failure(s)." >&2
-    fi
-    exit "$FINAL_RUN_EXIT_STATUS"
-fi
+        echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES proce                                                                                             

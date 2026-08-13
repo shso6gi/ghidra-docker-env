@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "3896616e01f902dca481428ee8c4e51343448fefad1c5b30ad7b48aa3b47090b",
+  "artifact_digest": "87353890a9a27822aaf6bd60a8e3f160f8d3f4b0cd1991f020ad50141ddb3daf",
   "authority_contract": {
     "all_observed_solver_histories_materialized": true,
     "ambiguous_q_open_refusal_persisted": true,
@@ -88,7 +88,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 630,
-      "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
+      "candidate_set_digest": "daa0893500c5acbefd7bb89fa855b3e1c68f18281b5797fd4b941da190b3cf34"
     },
     "live_delta": {
       "added": 0,

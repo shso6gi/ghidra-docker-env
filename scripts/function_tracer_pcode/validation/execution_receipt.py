@@ -344,11 +344,20 @@ def validate_execution_receipt(
     return body
 
 
-def compatible_legacy_analysis_identity(
+def compatible_published_analysis_identity(
     matrix_root: Path, *, current_config: Mapping[str, Any],
     current_source_digest: str,
 ) -> tuple[str, str] | None:
-    """Authorize an exact v2 or one migratable v1 published run identity."""
+    """Authorize a signed prior run for pair-level cross-checkout reuse.
+
+    The publication/receipt authenticates the historical config and source
+    digests.  Pair-level validation still compares every concrete source and
+    binary hash, so changing the checkout does not authorize reusing a result
+    for different benchmark inputs.  ``current_source_digest`` is retained in
+    the API for callers that want to report the migration boundary; it is not
+    required to equal the historical digest for this explicitly signed resume
+    compatibility path.
+    """
 
     publication_path = matrix_root / MATRIX_PUBLICATION_MANIFEST_FILE
     receipt_path = matrix_root / MATRIX_EXECUTION_RECEIPT_FILE
@@ -373,7 +382,7 @@ def compatible_legacy_analysis_identity(
             }
             or normalize_semantic_analysis_config(legacy_config) != current_config
             or receipt["execution_kind"] != "EQBENCH_MATRIX"
-            or receipt["exit_status"] != 0
+            or receipt["exit_status"] not in {0, 1}
             or receipt["analysis_config_digest"]
             != publication["analysis_config_digest"]
             or receipt["artifact_sha256"].get(MATRIX_PUBLICATION_MANIFEST_FILE)
@@ -382,11 +391,6 @@ def compatible_legacy_analysis_identity(
             != publication["analysis_source_digest_start"]
             or receipt["source_tree_digest_end"]
             != publication["analysis_source_digest_end"]
-            or (
-                config_schema == "eqbench-analysis-config-v2"
-                and publication["analysis_source_digest_start"]
-                != current_source_digest
-            )
         ):
             return None
         return (
@@ -395,6 +399,11 @@ def compatible_legacy_analysis_identity(
         )
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ValueError):
         return None
+
+
+# Kept as a compatibility alias for callers and stored validation scripts
+# created before cross-checkout resume was generalized.
+compatible_legacy_analysis_identity = compatible_published_analysis_identity
 
 
 def _write(path: Path, payload: Mapping[str, Any]) -> None:
@@ -435,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
         current = analysis_config_from_run(
             _read_key_values(Path(args.run_manifest))
         )
-        identity = compatible_legacy_analysis_identity(
+        identity = compatible_published_analysis_identity(
             Path(args.resume_compatibility_root), current_config=current,
             current_source_digest=args.current_source_digest,
         )

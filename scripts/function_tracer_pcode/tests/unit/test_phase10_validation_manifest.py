@@ -20,7 +20,7 @@ from scripts.function_tracer_pcode.validation.execution_identity import (
 from scripts.function_tracer_pcode.validation.execution_receipt import (
     MATRIX_EXECUTION_RECEIPT_FILE, MATRIX_PUBLICATION_MANIFEST_FILE,
     analysis_config_from_run, build_matrix_publication_manifest, main as receipt_main,
-    compatible_legacy_analysis_identity,
+    compatible_published_analysis_identity,
     seal_execution_receipt, validate_execution_receipt,
     validate_matrix_publication_manifest,
 )
@@ -251,13 +251,13 @@ def test_analysis_config_accepts_full_neq_scope():
     assert analysis_config_from_run({**run, "error_only_rerun": "1"}) == config
 
 
-def test_v2_summary_shortcut_identity_requires_current_source(tmp_path):
+def test_v2_summary_shortcut_identity_allows_signed_cross_checkout_resume(tmp_path):
     repo, _, _, matrix = _fixture_repo(tmp_path)
     root = repo / matrix
     publication = json.loads(
         (root / MATRIX_PUBLICATION_MANIFEST_FILE).read_text()
     )
-    identity = compatible_legacy_analysis_identity(
+    identity = compatible_published_analysis_identity(
         root, current_config=publication["analysis_config"],
         current_source_digest=publication["analysis_source_digest_start"],
     )
@@ -265,10 +265,45 @@ def test_v2_summary_shortcut_identity_requires_current_source(tmp_path):
         publication["analysis_config_digest"],
         publication["analysis_source_digest_start"],
     )
-    assert compatible_legacy_analysis_identity(
+    assert compatible_published_analysis_identity(
         root, current_config=publication["analysis_config"],
         current_source_digest="f" * 64,
-    ) is None
+    ) == (
+        publication["analysis_config_digest"],
+        publication["analysis_source_digest_start"],
+    )
+
+    # A previous matrix can have a signed non-zero runner exit because one
+    # pair failed while other pair statuses were still valid and published.
+    # That receipt remains eligible for pair-level fail-closed reuse.
+    receipt = json.loads(
+        (root / MATRIX_EXECUTION_RECEIPT_FILE).read_text()
+    )
+    receipt_body = {
+        key: receipt[key] for key in receipt
+        if key not in {"body_digest", "signature"}
+    }
+    failed_receipt = seal_execution_receipt(
+        execution_kind=receipt_body["execution_kind"],
+        command=receipt_body["command"],
+        source_digest_start=receipt_body["source_tree_digest_start"],
+        source_digest_end=receipt_body["source_tree_digest_end"],
+        analysis_config_digest=receipt_body["analysis_config_digest"],
+        exit_status=1,
+        artifacts=receipt_body["artifact_sha256"],
+        private_key_path=tmp_path / "pair.key",
+        public_key_path=root / PAIR_STATUS_PUBLIC_KEY_FILE,
+    )
+    (root / MATRIX_EXECUTION_RECEIPT_FILE).write_text(
+        json.dumps(failed_receipt)
+    )
+    assert compatible_published_analysis_identity(
+        root, current_config=publication["analysis_config"],
+        current_source_digest="f" * 64,
+    ) == (
+        publication["analysis_config_digest"],
+        publication["analysis_source_digest_start"],
+    )
 
 
 def test_legacy_v1_resume_requires_sealed_config_and_source_identity(tmp_path):
@@ -332,7 +367,7 @@ def test_legacy_v1_resume_requires_sealed_config_and_source_identity(tmp_path):
         }, private_key_path=private, public_key_path=public,
     )))
 
-    compatible = compatible_legacy_analysis_identity(
+    compatible = compatible_published_analysis_identity(
         root, current_config=current_config, current_source_digest="d" * 64,
     )
     assert compatible == (legacy_config_digest, legacy_source_digest)
@@ -576,6 +611,7 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert "Summary shortcut: skipped" in runner
     assert '--resume-skip-mode "$mode"' in runner
     assert '--compatible-analysis-source-digest "$compatible_source_digest"' in runner
+    assert 'if [[ "$compatible_source_digest" == "$ANALYSIS_SOURCE_DIGEST_START" ]]; then' in runner
 
 
 def test_neq_runner_emits_typed_matrix_receipt_inputs():
@@ -596,6 +632,7 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert '--pair-log "$log"' in runner
     assert 'mode=ERROR_ONLY' in runner
     assert 'mode=NORMAL_RESUME' in runner
+    assert 'if [[ "$compatible_source_digest" == "$ANALYSIS_SOURCE_DIGEST" ]]; then' in runner
     assert '[[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]]' in runner
     assert "results_summary.txt" in runner
     assert "function_summary_all_pairs_reusable" in runner

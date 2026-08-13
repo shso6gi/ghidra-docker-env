@@ -536,7 +536,9 @@ if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validat
         --compatible-analysis-config-digest "$compatible_config_digest"
         --compatible-analysis-source-digest "$compatible_source_digest"
     )
-    SUMMARY_SHORTCUT_AUTHORIZED=1
+    if [[ "$compatible_source_digest" == "$ANALYSIS_SOURCE_DIGEST" ]]; then
+        SUMMARY_SHORTCUT_AUTHORIZED=1
+    fi
 fi
 if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 0 && -s "$PREVIOUS_RUN_MANIFEST" ]]; then
     previous_source_digest="$(awk -F= '$1 == "analysis_source_digest_start" { print $2 }' "$PREVIOUS_RUN_MANIFEST")"

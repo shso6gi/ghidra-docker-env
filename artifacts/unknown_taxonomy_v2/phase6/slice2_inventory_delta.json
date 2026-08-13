@@ -466,21 +466,21 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "28a1afc27df126f9959b8f81654a92289d3d56ebfd890101cc80c1c1e6256bca",
-      "line": 927,
+      "inventory_source_fingerprint": "7810f5dedced84dc37a88475ef9d2ffb02518d95548470b4e663495474299b80",
+      "line": 931,
       "path": "eqbench_run_all_32jobs.sh",
       "reason_resolution": "not_applicable",
       "resolution_basis": {
         "kind": "status_or_reporting_not_semantic_reason",
         "refs": [
-          "11642880df1f600d04d9aff43488b968d28e880b33e524ba3dadcc63d6f11bec"
+          "138bb921da6440e6026fa6e80219a327539250147b17ae436a56814e6fd7d59e"
         ]
       },
       "resolved_reason_ids": [],
       "review_status": "reviewed_by_main_pending_fixed_review",
       "shell_role": "reporting_only",
-      "site_id": "11642880df1f600d04d9aff43488b968d28e880b33e524ba3dadcc63d6f11bec",
-      "source": "echo \"Equiv timeout: $EQUIV_TIMEOUT\"",
+      "site_id": "138bb921da6440e6026fa6e80219a327539250147b17ae436a56814e6fd7d59e",
+      "source": "echo \"Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)\"",
       "symbol": "<shell>"
     },
     {
@@ -671,6 +671,27 @@
       "site_id": "1d4b4608e3980611672e58c3b7ef6940ca48aa6b7e01a75b702a9a7670264e2b",
       "source": "strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(",
       "symbol": "check"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "8e893e2fb1fabbcba38370583caf93df6b91715aa79ca1230c9cac044181d3da",
+      "line": 1327,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "1e1c802f753dca53f99e8a0cba21eb4391f257949ff9633775353abf337804e4"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "1e1c802f753dca53f99e8a0cba21eb4391f257949ff9633775353abf337804e4",
+      "source": "\"EQUIV_TIMEOUT=$EQUIV_TIMEOUT\" \\",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -2212,27 +2233,6 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "7810f5dedced84dc37a88475ef9d2ffb02518d95548470b4e663495474299b80",
-      "line": 929,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "5ef82a080c7160fe6c163c6c052859b25c177e289f2a02b6cfc1f7cd446ed62d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "5ef82a080c7160fe6c163c6c052859b25c177e289f2a02b6cfc1f7cd446ed62d",
-      "source": "echo \"Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "82e83200de58949ac46e82bf8476d663ed9f94f72ac0ff53819dc2bffa0b10b3",
       "line": 506,
       "path": "eqbench_run_all_32jobs.sh",
@@ -2680,6 +2680,27 @@
       "symbol": "_impl_check"
     },
     {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "28a1afc27df126f9959b8f81654a92289d3d56ebfd890101cc80c1c1e6256bca",
+      "line": 929,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "6ecc030eeb4d19f043d63ac96c11099cac131b8ba121e8220d916351561f0ffb"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "6ecc030eeb4d19f043d63ac96c11099cac131b8ba121e8220d916351561f0ffb",
+      "source": "echo \"Equiv timeout: $EQUIV_TIMEOUT\"",
+      "symbol": "<shell>"
+    },
+    {
       "authority_role": "production",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
@@ -2809,6 +2830,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "303a7250848fea96450f28d9b6a3e3622de95fe5b12476f733d57118d5a7b2b4",
+      "line": 1329,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "72aa3b371d4cd7b2f6b1b11aabd001a7b02668938a489b70c16e65222f775802"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "72aa3b371d4cd7b2f6b1b11aabd001a7b02668938a489b70c16e65222f775802",
+      "source": "\"PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "fallback_retry",
       "inventory_source_fingerprint": "2f0171a7d17e499fb90a4b3eab5df4f6d57bc381cd6fea869085d89ecdc655a6",
@@ -2916,6 +2958,27 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "8f35a4aa10f04461935c30abc41493de7ff6c13b74bc9a3ae8c40d6120c37387",
+      "line": 928,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "7ae76f745fb0515c32d16039ce9aed5082f030a40e8f8fb2cecb2a59432e7d31"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "7ae76f745fb0515c32d16039ce9aed5082f030a40e8f8fb2cecb2a59432e7d31",
+      "source": "echo \"Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "6e8620a5f039c8c0b89e90a4b2f9f5818a58699e4bd0b74ceb9262cb6dda29d0",
       "line": 35,
       "path": "eqbench_run_all_32jobs.sh",
@@ -2955,27 +3018,6 @@
       "site_id": "7b9b65e3ee41a78a8b90221fb6c03796041b5ef78821762709ed8b91d7fede6a",
       "source": "result.blocking_reason = \"solver_proven_rewrite_proof_failed\"",
       "symbol": "try_solver_proven_rewrite_equivalence"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "8e893e2fb1fabbcba38370583caf93df6b91715aa79ca1230c9cac044181d3da",
-      "line": 1325,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "7bb7f3492ec5238766d7f3dc4a19067b899580ac43b16ad7f8bbb69c57ff546d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "7bb7f3492ec5238766d7f3dc4a19067b899580ac43b16ad7f8bbb69c57ff546d",
-      "source": "\"EQUIV_TIMEOUT=$EQUIV_TIMEOUT\" \\",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -3853,27 +3895,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "42dec6e796044eabcab7cf45f4191aac286a785abaec972ac8b4158fe37edc7e",
-      "line": 1329,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "9be325b817eae8615cf90d6d5101dd681ed8dbd19d7fc3a23cfe77fba8bae2a0"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "9be325b817eae8615cf90d6d5101dd681ed8dbd19d7fc3a23cfe77fba8bae2a0",
-      "source": "\"PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\" \\",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_read",
       "consumer_class": "general",
       "inventory_source_fingerprint": "a1fbaac16aef779acdf539ece3ba9a7e40d0c98d37994535e9ec5a046c8cbce2",
@@ -4236,6 +4257,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "42dec6e796044eabcab7cf45f4191aac286a785abaec972ac8b4158fe37edc7e",
+      "line": 1331,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "a68e4834bffea783ac246ee8b5ba57f7a12e8d603d371cb0721c0434f2c54bd8"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "a68e4834bffea783ac246ee8b5ba57f7a12e8d603d371cb0721c0434f2c54bd8",
+      "source": "\"PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "general",
       "inventory_source_fingerprint": "03b9ade7ee43aae7ad6e4fe902c9be6ae003ee08f0075b667423e355f0b49727",
@@ -4441,6 +4483,27 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "916b9ad4da9bf2a4090f04fe0c5b34e0c3bd487b6cd5f4d4bcfc14bf845c86ef",
+      "line": 930,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "abca264ce8f6b148e6f39f6872ca8f27abf117f1b3fa87c66c416fd57065476b"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "reporting_only",
+      "site_id": "abca264ce8f6b148e6f39f6872ca8f27abf117f1b3fa87c66c416fd57065476b",
+      "source": "echo \"Decompile timeout: $DECOMPILE_TIMEOUT\"",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "9116ce09b127b747fe7540e5465adc225444b5aaeadb06e6cd123f8cdbca1b74",
       "line": 499,
       "path": "eqbench_run_all_32jobs.sh",
@@ -4606,27 +4669,6 @@
       "symbol": "_suggest_relation"
     },
     {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "bd39227b42145167bea517cc2a9d16d29f428ef9ab1bf858168c56532719eae0",
-      "line": 1326,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "b767e8598f286a8e0290aa538e3cb48fe0973bdd05a6743cfcb505c4d4fad77d"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "b767e8598f286a8e0290aa538e3cb48fe0973bdd05a6743cfcb505c4d4fad77d",
-      "source": "\"DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT\" \\",
-      "symbol": "<shell>"
-    },
-    {
       "authority_role": "production",
       "construct_kind": "reason_selection_assignment",
       "consumer_class": "fallback_retry",
@@ -4780,6 +4822,27 @@
     },
     {
       "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "77e5f87a127044cdd9a96e2b5b23d36161e3b2c31770cd0cb00de1ada7737e1f",
+      "line": 1330,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "bc6056433b8092849daf00fbf5b5b1d5eab43d10985175aadf0e370505f95b55"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "other_consumer",
+      "site_id": "bc6056433b8092849daf00fbf5b5b1d5eab43d10985175aadf0e370505f95b55",
+      "source": "\"PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD\" \\",
+      "symbol": "<shell>"
+    },
+    {
+      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "general",
       "inventory_source_fingerprint": "f6078085e64bab8d6203230ca63e6573839ab23b9136547b44d55fc6edf28aa4",
@@ -4887,27 +4950,6 @@
       "authority_role": "derived_projection",
       "construct_kind": "shell_status_or_reason",
       "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "916b9ad4da9bf2a4090f04fe0c5b34e0c3bd487b6cd5f4d4bcfc14bf845c86ef",
-      "line": 928,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "c162f0e28e48aeb04aa3998c7a61fa27edf39facdfdb243212adf50e4e15f2aa"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "c162f0e28e48aeb04aa3998c7a61fa27edf39facdfdb243212adf50e4e15f2aa",
-      "source": "echo \"Decompile timeout: $DECOMPILE_TIMEOUT\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
       "inventory_source_fingerprint": "d34cd3cb5f930a54b353e921dcb7b62272ab4d0fdf5dc45a4c5b0a348811cc22",
       "line": 326,
       "path": "Eq_new.sh",
@@ -4923,27 +4965,6 @@
       "shell_role": "other_consumer",
       "site_id": "c1fe7074146e44c7b22d92b027b3212ef697a55d3ccdff48237015f09f2f8042",
       "source": "/^[[:space:]]+attempts=[0-9]+, changed=[0-9]+, no_change=[0-9]+, unsat=[0-9]+, sat=[0-9]+, unknown=[0-9]+/ {",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "303a7250848fea96450f28d9b6a3e3622de95fe5b12476f733d57118d5a7b2b4",
-      "line": 1327,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "c3515530177ed9e2205c0b82a5166b5f2901eaeea7b5d20d2d84a63be11a31b5"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "execution_config",
-      "site_id": "c3515530177ed9e2205c0b82a5166b5f2901eaeea7b5d20d2d84a63be11a31b5",
-      "source": "\"PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT\" \\",
       "symbol": "<shell>"
     },
     {
@@ -5268,27 +5289,6 @@
     },
     {
       "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "8f35a4aa10f04461935c30abc41493de7ff6c13b74bc9a3ae8c40d6120c37387",
-      "line": 926,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "d7c7d3d1a439fc690e8ceefc434dd7c71a6d6968cc181dab1c0851ae712da762"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "reporting_only",
-      "site_id": "d7c7d3d1a439fc690e8ceefc434dd7c71a6d6968cc181dab1c0851ae712da762",
-      "source": "echo \"Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)\"",
-      "symbol": "<shell>"
-    },
-    {
-      "authority_role": "derived_projection",
       "construct_kind": "reason_collection_mutation",
       "consumer_class": "fallback_retry",
       "inventory_source_fingerprint": "28901d282b399a3b7da37b902ff2c4c572aef33573c616522de8777fcc8d9c44",
@@ -5349,27 +5349,6 @@
       "site_id": "da653518fe05ab3a1c693e6aa1df70fbe76b7b2fb3ffdf7ed55d6d373c1383c5",
       "source": "coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(",
       "symbol": "_impl_check"
-    },
-    {
-      "authority_role": "derived_projection",
-      "construct_kind": "shell_status_or_reason",
-      "consumer_class": "cli_batch_resume",
-      "inventory_source_fingerprint": "77e5f87a127044cdd9a96e2b5b23d36161e3b2c31770cd0cb00de1ada7737e1f",
-      "line": 1328,
-      "path": "eqbench_run_all_32jobs.sh",
-      "reason_resolution": "not_applicable",
-      "resolution_basis": {
-        "kind": "status_or_reporting_not_semantic_reason",
-        "refs": [
-          "da9660cbc4c2df109ac414f7eb6ab5c3d4244e8468d8e70b4574019993244991"
-        ]
-      },
-      "resolved_reason_ids": [],
-      "review_status": "reviewed_by_main_pending_fixed_review",
-      "shell_role": "other_consumer",
-      "site_id": "da9660cbc4c2df109ac414f7eb6ab5c3d4244e8468d8e70b4574019993244991",
-      "source": "\"PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD\" \\",
-      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -5690,6 +5669,27 @@
       "site_id": "ec42dcbe9d6d35dc7a32068c6f2ae1f4cb28131438fabe746599b1e0e0b73db0",
       "source": "make_production_unknown_reason(",
       "symbol": "finish"
+    },
+    {
+      "authority_role": "derived_projection",
+      "construct_kind": "shell_status_or_reason",
+      "consumer_class": "cli_batch_resume",
+      "inventory_source_fingerprint": "bd39227b42145167bea517cc2a9d16d29f428ef9ab1bf858168c56532719eae0",
+      "line": 1328,
+      "path": "eqbench_run_all_32jobs.sh",
+      "reason_resolution": "not_applicable",
+      "resolution_basis": {
+        "kind": "status_or_reporting_not_semantic_reason",
+        "refs": [
+          "f01656db0f85743fa18003458551512a8cace5d57b49796a71984d60ff041bac"
+        ]
+      },
+      "resolved_reason_ids": [],
+      "review_status": "reviewed_by_main_pending_fixed_review",
+      "shell_role": "execution_config",
+      "site_id": "f01656db0f85743fa18003458551512a8cace5d57b49796a71984d60ff041bac",
+      "source": "\"DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT\" \\",
+      "symbol": "<shell>"
     },
     {
       "authority_role": "derived_projection",
@@ -6162,7 +6162,7 @@
   ],
   "current_source": {
     "candidate_count": 630,
-    "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
+    "candidate_set_digest": "daa0893500c5acbefd7bb89fa855b3e1c68f18281b5797fd4b941da190b3cf34"
   },
   "delta_kind": "unknown-taxonomy-v2-phase6-slice2-current-source-delta",
   "frozen_phase0": {

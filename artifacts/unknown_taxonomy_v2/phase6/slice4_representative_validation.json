@@ -1,5 +1,5 @@
 {
-  "artifact_digest": "094b5fd23cc1680ce0ad784bcb3bd28cf41ae706335735b8843e35528be38998",
+  "artifact_digest": "7f20812a95e78e4bed1bffeec3f4b110271c41f3200a7a5db07e784bc84d6db9",
   "before_after": {
     "authority_note": "before is the legacy/default-off observation; after typed integration rows are reducer-derived lifecycle evidence, and EQUIVALENT_ELIGIBLE is not a final DecisionReceipt outcome",
     "default_off_current_head_runs": [
@@ -317,7 +317,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 630,
-      "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
+      "candidate_set_digest": "daa0893500c5acbefd7bb89fa855b3e1c68f18281b5797fd4b941da190b3cf34"
     },
     "live_delta": {
       "added": 0,

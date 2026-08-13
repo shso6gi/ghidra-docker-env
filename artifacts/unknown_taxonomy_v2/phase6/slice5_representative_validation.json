@@ -68,7 +68,7 @@
       "terminal_timeout_events": 1
     }
   },
-  "artifact_digest": "a9175caceabb6e5f53e44c0aefd0b296c9412547c6215a03923d3baca93c2e02",
+  "artifact_digest": "c15fb1592c56b9bbb566698ddc7021c2ba7e248f5b4a528776040188e7b9dc21",
   "binary_inputs": {
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O0": "a0989ca08abcf8ceee059deccbcd723ab6a5578471aad115d0e77496660cc3d5",
     "targets/EqBench/benchmarks/REVE/triangularMod/Eq/source/newV-mips64-clang-O1": "5d534171744920e7fdd85364a086593b9bcf188e32836d9b55aefde5b098fa2e",
@@ -403,7 +403,7 @@
   "source_inventory": {
     "current_source": {
       "candidate_count": 630,
-      "candidate_set_digest": "f6817b29ebd91d5f18b0606f4b5f57145dddb05cbec6f24de25b452ff44b708b"
+      "candidate_set_digest": "daa0893500c5acbefd7bb89fa855b3e1c68f18281b5797fd4b941da190b3cf34"
     },
     "live_delta": {
       "added": 0,
