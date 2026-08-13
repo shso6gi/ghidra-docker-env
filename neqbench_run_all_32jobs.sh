@@ -409,6 +409,28 @@ function_summary_all_pairs_reusable() {
     [[ "$(find "$function_dir" -maxdepth 1 -type f -name '*.log' | wc -l)" -eq "$expected" \
         && "$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)" -eq "$expected" ]]
 }
+load_error_only_summary_pairs() {
+    local function_dir="$1" summary="$1/results_summary.txt" error_count
+    SUMMARY_ERROR_PAIRS_READY=0
+    SUMMARY_ERROR_PAIRS=()
+    [[ -s "$summary" ]] || return 0
+    error_count="$(awk -F: '
+        /^[[:space:]]*Error[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }
+    ' "$summary")"
+    [[ "$error_count" =~ ^[0-9]+$ ]] || return 0
+    (( error_count > 0 )) || return 0
+    local -a error_pairs=()
+    mapfile -t error_pairs < <("$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.validation.result_summary \
+        --error-pairs --matrix NEQ "$summary")
+    if (( ${#error_pairs[@]} != error_count )); then
+        echo "ERROR-only summary census mismatch: $summary (count=$error_count parsed=${#error_pairs[@]})" >&2
+        return 1
+    fi
+    local pair
+    for pair in "${error_pairs[@]}"; do SUMMARY_ERROR_PAIRS["$pair"]=1; done
+    SUMMARY_ERROR_PAIRS_READY=1
+}
 progress_update() {
     local sample="$1" function="$2" left_id="$3" right_id="$4" status="$5"
     {
@@ -669,13 +691,25 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
                 "$function_position" "$function_total" "$total" "$total"
             continue
         fi
+        if [[ "$ERROR_ONLY_RERUN" == 1 ]] && ! load_error_only_summary_pairs "$function_dir"; then
+            RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
+            continue
+        fi
         for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
             pair_selected "$pair" || continue
             rerun_target_selected "$sample" "$function" "$pair" || continue
             left_id="${pair%%_O_*}"; right_id="O_${pair#*_O_}"
             left_binary_id="${left_id#N_}"; right_binary_id="${right_id#O_}"
             left="$source_dir/$(binary_name "$new" "$left_binary_id")"; right="$source_dir/$(binary_name "$old" "$right_binary_id")"; count=$((count + 1)); TOTAL_PAIR_JOBS=$((TOTAL_PAIR_JOBS + 1))
-            log="$function_dir/$function"_"$pair.log"; status_file="$function_dir/$function"_"$pair.pair-status.json"; target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
+            log="$function_dir/$function"_"$pair.log"; status_file="$function_dir/$function"_"$pair.pair-status.json"
+            if (( SUMMARY_ERROR_PAIRS_READY )) \
+                && [[ -z "${SUMMARY_ERROR_PAIRS[$pair]:-}" ]]; then
+                printf '%s\n' "${status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_STATUS"
+                TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
+                continue
+            fi
+            target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
             printf '%s\n' "$status_file" | sed "s#^$OUTPUT_BASE_DIR/##" >> "$EXPECTED_STATUS"
             "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
             if [[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]] \

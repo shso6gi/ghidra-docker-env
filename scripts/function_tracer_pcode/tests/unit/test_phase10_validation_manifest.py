@@ -722,6 +722,8 @@ def test_runner_full_scope_and_compile_freshness_contracts_are_explicit():
     assert "pair_status_is_skippable_for_run_mode" in runner
     assert "function_summary_all_pairs_reusable" in runner
     assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
+    assert "load_error_only_summary_pairs" in runner
+    assert "--error-pairs --matrix EQ" in runner
     assert "Summary shortcut: skipped" in runner
     assert '--resume-skip-mode "$mode"' in runner
     assert '--compatible-analysis-source-digest "$compatible_source_digest"' in runner
@@ -752,6 +754,8 @@ def test_neq_runner_emits_typed_matrix_receipt_inputs():
     assert "function_summary_all_pairs_reusable" in runner
     assert "summary shortcut" in runner
     assert '"$SUMMARY_SHORTCUT_AUTHORIZED" == 1 || "$ERROR_ONLY_RERUN" == 1' in runner
+    assert "load_error_only_summary_pairs" in runner
+    assert "--error-pairs --matrix NEQ" in runner
     assert 'COMPLETED_FUNCTION_SUMMARY_DIRS' not in runner
     assert 'while IFS= read -r existing_status' not in runner
     for field in (

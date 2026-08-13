@@ -368,6 +368,45 @@ def parse_log_identity(path: Path) -> Tuple[str, str]:
     return stem, stem
 
 
+def error_pairs_from_summary(path: Path, *, matrix: str) -> Tuple[str, ...]:
+    """Read only the ERROR pair section from a function summary.
+
+    ERROR-only reruns use this historical, human-readable census as the
+    scheduling authority.  ``matrix`` controls the pair key format emitted
+    for the Eq (``B1_B2``) and Neq (``N_B1_O_B2``) runners.
+    """
+
+    if matrix not in {"EQ", "NEQ"}:
+        raise ValueError("matrix must be EQ or NEQ")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    in_errors = False
+    pairs = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "ERROR pairs:":
+            in_errors = True
+            continue
+        if in_errors and (not stripped or stripped.endswith("pairs:")
+                          or stripped.endswith("logs:")):
+            break
+        if not in_errors:
+            continue
+        match = re.fullmatch(r"-\s+(?P<left>\S+)\s+↔\s+(?P<right>\S+)", stripped)
+        if match is None:
+            continue
+        left, right = match.group("left"), match.group("right")
+        if matrix == "EQ":
+            if not (re.fullmatch(r"B\d+", left) and re.fullmatch(r"B\d+", right)):
+                raise ValueError("Eq ERROR pair identity is malformed")
+            pairs.append(f"{left}_{right}")
+        else:
+            if not (re.fullmatch(r"N_B\d+", left)
+                    and re.fullmatch(r"O_B\d+", right)):
+                raise ValueError("Neq ERROR pair identity is malformed")
+            pairs.append(f"{left}_{right}")
+    return tuple(dict.fromkeys(pairs))
+
+
 def aggregate_validation_records(records: Iterable[ValidationLogRecord]) -> ValidationResultAggregate:
     record_tuple = tuple(records)
     counts = {status: 0 for status in STATUS_ORDER}
@@ -773,6 +812,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode.add_argument("--function-summary", action="store_true")
     mode.add_argument("--overall-summary", action="store_true")
     mode.add_argument("--classify-log", action="store_true")
+    mode.add_argument("--error-pairs", action="store_true")
+    parser.add_argument("--matrix", choices=("EQ", "NEQ"))
     parser.add_argument(
         "--allow-legacy-log",
         action="store_true",
@@ -870,6 +911,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(read_validation_log_record(
             logs[0], canonical_only=not args.allow_legacy_log
         ).status)
+        return 0
+
+    if args.error_pairs:
+        if len(logs) != 1 or args.matrix is None:
+            parser.error("--error-pairs requires one summary path and --matrix")
+        for pair in error_pairs_from_summary(Path(logs[0]), matrix=args.matrix):
+            print(pair)
         return 0
 
     if args.function_summary:

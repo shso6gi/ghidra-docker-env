@@ -270,6 +270,29 @@ function_summary_all_pairs_reusable() {
         && "$(find "$function_dir" -maxdepth 1 -type f -name '*.pair-status.json' | wc -l)" -eq "$expected" ]]
 }
 
+load_error_only_summary_pairs() {
+    local function_dir="$1" summary="$1/results_summary.txt" error_count
+    SUMMARY_ERROR_PAIRS_READY=0
+    SUMMARY_ERROR_PAIRS=()
+    [[ -s "$summary" ]] || return 0
+    error_count="$(awk -F: '
+        /^[[:space:]]*Error[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }
+    ' "$summary")"
+    [[ "$error_count" =~ ^[0-9]+$ ]] || return 0
+    (( error_count > 0 )) || return 0
+    local -a error_pairs=()
+    mapfile -t error_pairs < <("$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.validation.result_summary \
+        --error-pairs --matrix EQ "$summary")
+    if (( ${#error_pairs[@]} != error_count )); then
+        echo "ERROR-only summary census mismatch: $summary (count=$error_count parsed=${#error_pairs[@]})" >&2
+        return 1
+    fi
+    local pair
+    for pair in "${error_pairs[@]}"; do SUMMARY_ERROR_PAIRS["$pair"]=1; done
+    SUMMARY_ERROR_PAIRS_READY=1
+}
+
 validate_current_pair_status() {
     local pair_status_file="$1"
     local pair_target_file="$2"
@@ -327,6 +350,7 @@ pair_is_selected() {
 }
 
 declare -A EQBENCH_RERUN_TARGETS=()
+declare -A SUMMARY_ERROR_PAIRS=()
 ERROR_RERUN_MANIFEST_SHA256=""
 if [[ -n "$EQBENCH_RERUN_MANIFEST" ]]; then
     [[ -s "$EQBENCH_RERUN_MANIFEST" ]] || {
@@ -1204,6 +1228,10 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
         fi
 
         skipped_completed_pairs=0
+        if [[ "$ERROR_ONLY_RERUN" == 1 ]] && ! load_error_only_summary_pairs "$output_function_dir"; then
+            RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
+            continue
+        fi
         for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
             left_id="${IDS[$i]}"
             left_name="$(binary_name_for_id "$source_base" "$left_id")"
@@ -1219,6 +1247,13 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 pair_count=$((pair_count + 1))
                 log_file="${output_function_dir}/${function_name}_${left_id}_${right_id}.log"
                 pair_status_file="${log_file%.log}.pair-status.json"
+                if (( SUMMARY_ERROR_PAIRS_READY )) \
+                    && [[ -z "${SUMMARY_ERROR_PAIRS[${left_id}_${right_id}]:-}" ]]; then
+                    skipped_completed_pairs=$((skipped_completed_pairs + 1))
+                    TOTAL_SKIPPED_PAIR_JOBS=$((TOTAL_SKIPPED_PAIR_JOBS + 1))
+                    printf '%s\n' "${pair_status_file#$OUTPUT_BASE_DIR/}" >> "$VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE"
+                    continue
+                fi
                 pair_target_file="$EQBENCH_RUN_TMPDIR/${TOTAL_PAIR_JOBS}-${function_name}-${left_id}-${right_id}.pair-target.json"
                 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity \
                     --repo-root "$SCRIPT_DIR" --build-pair-target \

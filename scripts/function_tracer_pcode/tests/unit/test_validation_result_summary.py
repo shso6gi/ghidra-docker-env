@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     canonical_validation_surface_hash,
     classify_log_text,
     compare_validation_baseline_records,
+    error_pairs_from_summary,
     format_function_results_summary,
     format_overall_results_summary,
     format_run_health_summary,
@@ -242,6 +243,27 @@ def test_classify_log_cli_can_explicitly_reuse_legacy_terminal_line(tmp_path):
     )
     assert strict.stdout.strip() == STATUS_INCOMPLETE
     assert legacy.stdout.strip() == STATUS_EQ
+
+
+def test_error_pairs_from_summary_returns_only_error_pairs(tmp_path):
+    summary = tmp_path / "results_summary.txt"
+    summary.write_text("\n".join((
+        "  Error          : 2",
+        "  ERROR pairs:",
+        "    - B3 ↔ B9",
+        "    - B10 ↔ B11",
+        "",
+        "  TIMEOUT pairs:",
+        "    - B1 ↔ B2",
+    )))
+    assert error_pairs_from_summary(summary, matrix="EQ") == ("B3_B9", "B10_B11")
+
+    summary.write_text("\n".join((
+        "  Error          : 1",
+        "  ERROR pairs:",
+        "    - N_B3 ↔ O_B9",
+    )))
+    assert error_pairs_from_summary(summary, matrix="NEQ") == ("N_B3_O_B9",)
 
 
 def test_signed_pair_status_rejects_semantically_inconsistent_status(tmp_path):
