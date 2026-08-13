@@ -167,6 +167,57 @@ def _read_key_values(path: Path) -> Mapping[str, str]:
     return values
 
 
+def compatible_previous_run_manifest_analysis_identity(
+    previous_manifest: Path, *, current_config: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """Return a prior run's config/source identity without publication JSON.
+
+    A matrix runner writes ``run_manifest.txt`` before scheduling pairs and
+    appends its completion counters before issuing the publication receipt.
+    Therefore a receipt-generation failure can leave a complete prior
+    manifest while the signed pair-status files remain usable.  Treat that
+    manifest only as a compatibility hint: the caller still validates every
+    signed pair status against the concrete current target (including source
+    and binary hashes).  Accept both the scheduling-free v2 digest and the
+    historical v1 digest, but require the stored digest to match the
+    reconstructed typed config exactly.
+    """
+
+    try:
+        run = _read_key_values(previous_manifest)
+        stored_digest = run["analysis_config_digest"]
+        source_start = run["analysis_source_digest_start"]
+        source_end = run.get("analysis_source_digest_end")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", stored_digest)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_start)
+            or (
+                source_end is not None
+                and (
+                    not re.fullmatch(r"[0-9a-f]{64}", source_end)
+                    or source_start != source_end
+                )
+            )
+        ):
+            return None
+        current_semantic = normalize_semantic_analysis_config(current_config)
+        candidates: list[Mapping[str, Any]] = [analysis_config_from_run(run)]
+        try:
+            candidates.append(_legacy_analysis_config_from_run(run))
+        except (KeyError, ValueError):
+            pass
+        for candidate in candidates:
+            if (
+                authority_digest(candidate) == stored_digest
+                and normalize_semantic_analysis_config(candidate)
+                == current_semantic
+            ):
+                return stored_digest, source_start
+    except (OSError, UnicodeError, KeyError, ValueError):
+        return None
+    return None
+
+
 def _read_census(path: Path) -> list[str]:
     rows = path.read_text(encoding="utf-8").splitlines()
     if len(rows) != len(set(rows)) or any(
@@ -448,6 +499,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--print-compatible-analysis-config-digest", action="store_true"
     )
+    parser.add_argument("--resume-compatibility-manifest")
+    parser.add_argument(
+        "--print-compatible-manifest-analysis-identity", action="store_true"
+    )
     parser.add_argument("--matrix-root")
     parser.add_argument("--source-digest-start")
     parser.add_argument("--analysis-config-digest", default="full-unit-default")
@@ -471,6 +526,21 @@ def main(argv: list[str] | None = None) -> int:
         identity = compatible_published_analysis_identity(
             Path(args.resume_compatibility_root), current_config=current,
             current_source_digest=args.current_source_digest,
+        )
+        if identity is None:
+            return 1
+        print("\t".join(identity))
+        return 0
+    if args.print_compatible_manifest_analysis_identity:
+        if not args.run_manifest or not args.resume_compatibility_manifest:
+            parser.error(
+                "manifest resume compatibility requires current and previous manifests"
+            )
+        current = analysis_config_from_run(
+            _read_key_values(Path(args.run_manifest))
+        )
+        identity = compatible_previous_run_manifest_analysis_identity(
+            Path(args.resume_compatibility_manifest), current_config=current,
         )
         if identity is None:
             return 1

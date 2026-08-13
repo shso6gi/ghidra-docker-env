@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.validation.execution_receipt import (
     MATRIX_EXECUTION_RECEIPT_FILE, MATRIX_PUBLICATION_MANIFEST_FILE,
     analysis_config_from_run, build_matrix_publication_manifest, main as receipt_main,
     compatible_published_analysis_identity,
+    compatible_previous_run_manifest_analysis_identity,
     seal_execution_receipt, validate_execution_receipt,
     validate_matrix_publication_manifest,
 )
@@ -220,6 +221,54 @@ def test_matrix_publication_accepts_legacy_v1_config_digest(tmp_path):
     assert publication["analysis_config"] == legacy
     assert publication["analysis_config_digest"] == legacy_digest
     validate_matrix_publication_manifest(publication)
+
+
+def test_manifest_only_resume_compatibility_accepts_legacy_digest(tmp_path):
+    repo, _, _, matrix = _fixture_repo(tmp_path)
+    root = repo / matrix
+    current_text = (root / "run_manifest.txt").read_text()
+    current_values = dict(
+        line.split("=", 1) for line in current_text.splitlines()
+    )
+    current_config = analysis_config_from_run(current_values)
+    current_digest = authority_digest(current_config)
+    legacy_config = {
+        **current_config,
+        "schema": "eqbench-analysis-config-v1",
+        "skip_completed_results": False,
+    }
+    legacy_digest = authority_digest(legacy_config)
+    legacy_source = "b" * 64
+    previous_text = current_text.replace(
+        f"analysis_config_digest={current_digest}",
+        f"analysis_config_digest={legacy_digest}",
+    ).replace(
+        f"analysis_source_digest_start={current_values['analysis_source_digest_start']}",
+        f"analysis_source_digest_start={legacy_source}",
+    ).replace(
+        f"analysis_source_digest_end={current_values['analysis_source_digest_end']}",
+        f"analysis_source_digest_end={legacy_source}",
+    )
+    previous = tmp_path / "previous-run-manifest.txt"
+    previous.write_text(previous_text)
+
+    # The fallback is specifically for a completed run whose final
+    # publication/receipt step failed, so those files are not consulted.
+    (root / MATRIX_PUBLICATION_MANIFEST_FILE).unlink()
+    (root / MATRIX_EXECUTION_RECEIPT_FILE).unlink()
+    assert compatible_previous_run_manifest_analysis_identity(
+        previous, current_config=current_config,
+    ) == (legacy_digest, legacy_source)
+
+    # A second resume may start from a manifest written by an interrupted
+    # attempt, before its source_digest_end completion row was appended.
+    previous.write_text("\n".join(
+        line for line in previous_text.splitlines()
+        if not line.startswith("analysis_source_digest_end=")
+    ) + "\n")
+    assert compatible_previous_run_manifest_analysis_identity(
+        previous, current_config=current_config,
+    ) == (legacy_digest, legacy_source)
 
 
 def test_phase10_completion_rejects_representative_matrix(tmp_path):

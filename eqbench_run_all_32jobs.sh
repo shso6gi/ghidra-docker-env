@@ -903,15 +903,30 @@ if compatible_identity="$("$PYTHON_BIN" -m \
         SUMMARY_SHORTCUT_AUTHORIZED=1
     fi
 fi
-if [[ "$SUMMARY_SHORTCUT_AUTHORIZED" == 0 && -s "$PREVIOUS_RUN_MANIFEST_FILE" ]]; then
-    previous_source_digest="$(awk -F= '$1 == "analysis_source_digest_start" { print $2 }' "$PREVIOUS_RUN_MANIFEST_FILE")"
-    if previous_config_digest="$("$PYTHON_BIN" -m \
+if [[ -s "$PREVIOUS_RUN_MANIFEST_FILE" ]]; then
+    if previous_manifest_identity="$("$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.validation.execution_receipt \
-        --run-manifest "$PREVIOUS_RUN_MANIFEST_FILE" \
-        --print-analysis-config-digest 2>/dev/null)" \
-        && [[ "$previous_source_digest" == "$ANALYSIS_SOURCE_DIGEST_START" \
+        --run-manifest "$RUN_MANIFEST_FILE" \
+        --resume-compatibility-manifest "$PREVIOUS_RUN_MANIFEST_FILE" \
+        --print-compatible-manifest-analysis-identity 2>/dev/null)"; then
+        IFS=$'\t' read -r previous_config_digest previous_source_digest \
+            <<< "$previous_manifest_identity"
+        # A previous manifest is a compatibility hint for pair-level signed
+        # validation when publication/receipt JSON is absent.  Do not replace
+        # a stronger publication identity if one was already accepted.
+        if (( ${#PAIR_STATUS_RESUME_COMPAT_ARGS[@]} == 0 )); then
+            PAIR_STATUS_RESUME_COMPAT_ARGS=(
+                --compatible-analysis-config-digest "$previous_config_digest"
+                --compatible-analysis-source-digest "$previous_source_digest"
+            )
+        fi
+        previous_source_end="$(awk -F= '$1 == "analysis_source_digest_end" { print $2 }' \
+            "$PREVIOUS_RUN_MANIFEST_FILE")"
+        if [[ "$previous_source_digest" == "$ANALYSIS_SOURCE_DIGEST_START" \
+            && "$previous_source_end" == "$ANALYSIS_SOURCE_DIGEST_START" \
             && "$previous_config_digest" == "$ANALYSIS_CONFIG_DIGEST" ]]; then
-        SUMMARY_SHORTCUT_AUTHORIZED=1
+            SUMMARY_SHORTCUT_AUTHORIZED=1
+        fi
     fi
 fi
 
@@ -1341,4 +1356,7 @@ echo "Run manifest: $OUTPUT_BASE_DIR/run_manifest.txt"
 if (( FINAL_RUN_EXIT_STATUS > 0 )); then
     echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification or run-health checks." >&2
     if (( PROCESS_AUTHORITY_CLEANUP_FAILURES > 0 )); then
-        echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES proce                                                                                             
+        echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES process-authority cleanup run-health failure(s)." >&2
+    fi
+    exit "$FINAL_RUN_EXIT_STATUS"
+fi
