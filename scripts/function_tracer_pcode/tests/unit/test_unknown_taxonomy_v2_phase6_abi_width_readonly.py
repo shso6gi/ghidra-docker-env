@@ -1968,7 +1968,7 @@ def test_return_abi_facts_survive_views_and_serialization():
 
 
 def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
-    from scripts.function_tracer_pcode.analysis.returns.session_helpers_1 import (
+    from scripts.function_tracer_pcode.analysis.returns.parameters import (
         _sealed_return_abi_facts,
     )
     sealed_return_abi_facts = _sealed_return_abi_facts
@@ -2095,7 +2095,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
 
 
 def test_empty_and_explicit_missing_abi_facts_are_typed_unknown_not_invalid():
-    from scripts.function_tracer_pcode.analysis.returns import session_helpers_1
+    from scripts.function_tracer_pcode.analysis.returns import parameters as session_helpers_1
     sealed_return_abi_facts = getattr(session_helpers_1, "_sealed_return_abi_facts")
 
     analysis = FunctionReturnAnalysis("fn", "0x1000", [], [], binary_id="bin")

@@ -19,7 +19,7 @@ from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
     assess_return_abi_pair,
 )
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
-from scripts.function_tracer_pcode.analysis.returns import session_helpers_1
+from scripts.function_tracer_pcode.analysis.returns import parameters as session_helpers_1
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,

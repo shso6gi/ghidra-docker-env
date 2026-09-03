@@ -400,7 +400,7 @@ def _impl__try_pre_return_counted_loop_summary(
         return None
 
     anchor = self._make_pre_return_summary_anchor(function, return_ops)
-    from scripts.function_tracer_pcode.analysis.returns.session_helpers_1 import (
+    from scripts.function_tracer_pcode.analysis.returns.parameters import (
         _sealed_return_abi_facts,
     )
 

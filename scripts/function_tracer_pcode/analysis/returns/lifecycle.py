@@ -13,6 +13,15 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     ExpressionType,
     FunctionReturnAnalysis,
 )
+from ._shared import CallTargetRef
+from ._shared import ConditionNormalizer
+from ._shared import Dict
+from ._shared import EffectSummary
+from ._shared import List
+from ._api import PcodeTracer
+from ._shared import Set
+from ._shared import expression_key_safe
+from ._shared import summarize_expression
 
 def _impl__program_is_big_endian(self) -> Optional[bool]:
     language_getter = getattr(self.program, "getLanguage", None)
@@ -184,3 +193,341 @@ def _impl__find_function_by_name(self, function_name: str):
     except Exception:
         return None
     return None
+
+
+# ---- merged from session_helpers_1, session_helpers_2, session_helpers_3
+
+def _impl__debug_print(self, msg: str, indent: int = 0):
+    if self.debug:
+        prefix = "  " * indent
+        print(f"{prefix}[ReturnAnalyzer] {msg}")
+
+
+def _impl__current_function_entry_address(self):
+    if self._current_function_entry_address_value is not None:
+        return self._current_function_entry_address_value
+    prototype = self._current_function_prototype
+    for getter_name in ("getFunction", "getFunctionDefinition"):
+        getter = getattr(prototype, getter_name, None)
+        if not callable(getter):
+            continue
+        try:
+            function = getter()
+        except Exception:
+            function = None
+        entry_getter = getattr(function, "getEntryPoint", None)
+        if callable(entry_getter):
+            try:
+                return entry_getter()
+            except Exception:
+                return None
+    return None
+
+
+def _impl__function_entry_address(function):
+    entry_getter = getattr(function, "getEntryPoint", None)
+    if not callable(entry_getter):
+        return None
+    try:
+        return entry_getter()
+    except Exception:
+        return None
+
+
+def _impl__debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
+    return summarize_expression(expr, max_depth=max_depth)
+
+
+def _impl__debug_expr_identity_summary(
+    self,
+    expr: Optional[Expression],
+    max_depth: int = 3,
+) -> str:
+    if expr is None:
+        return "None"
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    read_order_key = getattr(expr, "read_order_key", None)
+    runtime_tag = type(runtime_ref).__name__ if runtime_ref is not None else "None"
+    try:
+        structural_key = expression_key_safe(
+            expr,
+            include_memory_read_order=True,
+        )
+    except Exception:
+        structural_key = None
+    return (
+        f"{summarize_expression(expr, max_depth=max_depth)} "
+        f"[type={expr.expr_type.name}, size={expr.size}, "
+        f"read_order={read_order_key}, runtime_ref={runtime_tag}:{runtime_ref}, "
+        f"structural={structural_key}]"
+    )
+
+
+def _impl__analysis_context(
+    self,
+    parameters: List[Dict],
+    effect_summary: Optional[EffectSummary],
+    function_prototype=None,
+    function_entry_address=None,
+):
+    """Temporarily bind per-analysis state and restore the parent context on exit."""
+    previous_parameters = self._current_parameters
+    previous_effect_summary = self._current_effect_summary
+    previous_deferred_calls = self._current_deferred_calls
+    previous_function_prototype = self._current_function_prototype
+    previous_function_entry_address = self._current_function_entry_address_value
+    previous_noreturn_observations = self._current_noreturn_terminal_observations
+    self._current_parameters = parameters
+    self._current_effect_summary = effect_summary
+    self._current_deferred_calls = {}
+    self._current_function_prototype = function_prototype
+    self._current_function_entry_address_value = function_entry_address
+    self._current_noreturn_terminal_observations = []
+    try:
+        yield
+    finally:
+        self._current_parameters = previous_parameters
+        self._current_effect_summary = previous_effect_summary
+        self._current_deferred_calls = previous_deferred_calls
+        self._current_function_prototype = previous_function_prototype
+        self._current_function_entry_address_value = previous_function_entry_address
+        self._current_noreturn_terminal_observations = previous_noreturn_observations
+
+
+def _impl_dispose(self):
+    if self._decompiler is not None:
+        try:
+            self._decompiler.dispose()
+        except Exception as exc:
+            exc_text = str(exc).lower()
+            if "jvm is not running" not in exc_text and "java virtual machine is not running" not in exc_text:
+                raise
+        finally:
+            self._decompiler = None
+
+
+def _impl__collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
+    if value is None:
+        return (), False
+    has_next = getattr(value, "hasNext", None)
+    next_item = getattr(value, "next", None)
+    items: List[Any] = []
+    if callable(has_next) and callable(next_item):
+        while True:
+            try:
+                has_item = has_next()
+                if not isinstance(has_item, bool):
+                    return tuple(items), False
+                if not has_item:
+                    break
+                items.append(next_item())
+            except Exception:
+                return tuple(items), False
+        return tuple(items), True
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return (), False
+    try:
+        for item in iterator:
+            items.append(item)
+    except Exception:
+        return tuple(items), False
+    return tuple(items), True
+
+
+def _impl__function_cache_key(self, function) -> Optional[Tuple[Any, ...]]:
+    if function is None:
+        return None
+    try:
+        return (str(function.getEntryPoint()),)
+    except Exception:
+        return None
+
+
+def _impl__analysis_scope_key(
+    self,
+    target,
+    bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
+) -> Tuple[Any, ...]:
+    target_ref = self._coerce_runtime_target_ref(target)
+    if target_ref is None and target is not None:
+        try:
+            if hasattr(target, "getEntryPoint"):
+                target_ref = CallTargetRef.from_function(target)
+        except Exception:
+            target_ref = None
+    target_key = (
+        self._target_active_key(target_ref)
+        if target_ref is not None
+        else self._function_cache_key(target)
+    ) or ("unknown_target",)
+    normalized_bound_parameter_values = self._normalize_bound_parameter_values(
+        bound_parameter_values,
+    )
+    bound_signature = tuple(
+        (
+            int(index),
+            ConditionNormalizer.expression_signature(
+                expr,
+                include_memory_read_order=False,
+            ),
+        )
+        for index, expr in sorted(normalized_bound_parameter_values.items())
+    )
+    normalized_bound_parameter_storage_values = self._normalize_bound_parameter_storage_values(
+        bound_parameter_storage_values,
+    )
+    storage_bound_signature = tuple(
+        (
+            tuple(key),
+            ConditionNormalizer.expression_signature(
+                expr,
+                include_memory_read_order=False,
+            ),
+        )
+        for key, expr in sorted(
+            normalized_bound_parameter_storage_values.items(),
+            key=lambda item: repr(item[0]),
+        )
+    )
+    return ("analysis_scope", target_key, bound_signature, storage_bound_signature)
+
+
+def _impl__extend_active_functions(
+    self,
+    active_functions: Optional[Set[Tuple[Any, ...]]],
+    target_ref: Optional[CallTargetRef],
+) -> Set[Tuple[Any, ...]]:
+    scoped = set(active_functions or set())
+    active_key = self._target_active_key(target_ref)
+    if active_key is not None:
+        scoped.add(active_key)
+    return scoped
+
+
+def _impl__make_tracer(
+    self,
+    high_function,
+    *,
+    bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
+) -> PcodeTracer:
+    try:
+        return PcodeTracer(
+            self.program,
+            high_function,
+            debug=self.debug,
+            bound_parameter_values=bound_parameter_values,
+            bound_parameter_storage_values=bound_parameter_storage_values,
+            binary_id=self._binary_id,
+        )
+    except TypeError:
+        return PcodeTracer(
+            self.program,
+            high_function,
+            debug=self.debug,
+        )
+
+
+def _impl__get_instruction_with_fallback(self, addr):
+    listing = self.program.getListing()
+    instruction = listing.getInstructionAt(addr)
+    if instruction is not None:
+        return instruction
+
+    containing_instruction = getattr(listing, "getInstructionContaining", None)
+    if callable(containing_instruction):
+        instruction = containing_instruction(addr)
+        if instruction is not None:
+            return instruction
+
+    if self._attempt_disassemble_at(addr):
+        instruction = listing.getInstructionAt(addr)
+        if instruction is not None:
+            return instruction
+        if callable(containing_instruction):
+            instruction = containing_instruction(addr)
+            if instruction is not None:
+                return instruction
+
+    return None
+
+
+def _impl__attempt_disassemble_at(self, addr) -> bool:
+    try:
+        from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import]
+    except Exception:
+        self._debug_print(f"Local target disassembly unavailable at {addr}: import failed")
+        return False
+
+    try:
+        command = DisassembleCommand(addr, None, True)
+    except TypeError:
+        try:
+            command = DisassembleCommand(addr, None)
+        except Exception as exc:
+            self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+            return False
+    except Exception as exc:
+        self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+        return False
+
+    try:
+        with self._program_transaction(f"Disassemble local target {addr}"):
+            applied = command.applyTo(self.program)
+    except Exception as exc:
+        self._debug_print(f"Local target disassembly failed at {addr}: {exc}")
+        return False
+
+    if applied:
+        self._debug_print(f"Local target disassembly materialized instructions at {addr}")
+    else:
+        self._debug_print(f"Local target disassembly produced no instructions at {addr}")
+    return bool(applied)
+
+
+def _impl__get_function_manager(self):
+    if self.program is None:
+        return None
+    try:
+        return self.program.getFunctionManager()
+    except Exception:
+        return None
+
+
+def _impl__resolve_function_from_address(self, address):
+    if address is None:
+        return None
+    try:
+        function_manager = self._get_function_manager()
+        if function_manager is None:
+            return None
+        get_function_at = getattr(function_manager, "getFunctionAt", None)
+        if callable(get_function_at):
+            function = get_function_at(address)
+            if function is not None:
+                return function
+        get_referenced_function = getattr(function_manager, "getReferencedFunction", None)
+        if callable(get_referenced_function):
+            function = get_referenced_function(address)
+            if function is not None:
+                return function
+    except Exception:
+        return None
+    return None
+
+
+def _impl_get_last_function_lookup_error(self) -> Optional[str]:
+    return self._last_function_lookup_error
+
+
+def _impl_get_last_analysis_failure(self) -> Optional[AnalysisFailure]:
+    return self._last_analysis_failure
+
+
+def _impl_get_last_analysis_failure_status(self) -> Optional[str]:
+    failure = self._last_analysis_failure
+    return failure.status if failure is not None else None

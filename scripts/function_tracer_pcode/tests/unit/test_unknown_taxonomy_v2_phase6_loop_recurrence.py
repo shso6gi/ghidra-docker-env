@@ -2066,7 +2066,7 @@ def _session(result_occurrence_id="result-loop-a"):
 def test_multiple_recurrence_proposals_refuse_unbound_subordinate_refresh(
     monkeypatch,
 ):
-    from scripts.function_tracer_pcode.analysis.returns.session_helpers_3 import (
+    from scripts.function_tracer_pcode.analysis.returns.analyze_function import (
         _impl_refresh_structural_recurrence_summary,
     )
     import scripts.function_tracer_pcode.ghidra.decompilation_broker as decompilation_broker
