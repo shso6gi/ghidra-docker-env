@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     EffectSummary,
     StoreEffect,
     canonicalize_location,
     substitute_condition,
     substitute_location,
 )
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
     Condition,
@@ -21,10 +21,10 @@ from scripts.function_tracer_pcode.model import (
     ReturnInfo,
     StorageInfo,
 )
-from scripts.function_tracer_pcode.model.render_smt import collect_unknown_smt_declarations
-from scripts.function_tracer_pcode.model.runtime_refs import PostStateReadRef
-from scripts.function_tracer_pcode.equivalence.recursive_abstraction import abstract_recursive_calls
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.core.render_smt import collect_unknown_smt_declarations
+from scripts.function_tracer_pcode.core.runtime_refs import PostStateReadRef
+from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_recursive_calls
+from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
 
 def _param(name, index=0, size=4, storage=None):

@@ -3,36 +3,27 @@ import pytest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from scripts.function_tracer_pcode.equivalence.obligations.cache import (
+from scripts.function_tracer_pcode.proof.obligations.cache import (
     ValidatedUnaryArtifactCache,
     ValidatedUnaryArtifactEntry,
 )
-from scripts.function_tracer_pcode.equivalence.obligations.model import (
-    ProofArtifact,
-    UnaryArtifactDomain,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.recurrence import (
-    recurrence_proof_requirement,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.snapshot import (
-    SnapshotFingerprintCodec,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.runtime import (
-    ObligationRuntimeSession,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.unary_premise import (
+from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact, UnaryArtifactDomain
+from scripts.function_tracer_pcode.proof.obligations.recurrence import recurrence_proof_requirement
+from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
+from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
+from scripts.function_tracer_pcode.proof.obligations.unary_premise import (
     build_function_unary_premise,
 )
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence import recurrence_promotion
-from scripts.function_tracer_pcode.equivalence.recurrence_promotion import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+import scripts.function_tracer_pcode.proof.recurrence_promotion as recurrence_promotion
+from scripts.function_tracer_pcode.proof.recurrence_promotion import (
     PairRecurrencePromotionAuthority,
 )
-from scripts.function_tracer_pcode.analysis.summary_returns import (
+from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     SummaryReturnAcceptanceResult,
 )
-from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.checker.unknown_reason import make_unknown_reason
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     CountedLoopSummaryRef,
     Condition,
@@ -40,11 +31,8 @@ from scripts.function_tracer_pcode.model import (
     LoopSideEffectProfileRef,
     StateTransitionLoopSummaryRef,
 )
-from scripts.function_tracer_pcode.model.analysis import (
-    ReturnInfo,
-    SummaryReturnCandidate,
-)
-from scripts.function_tracer_pcode.model.recurrence_contracts import (
+from scripts.function_tracer_pcode.core.analysis import ReturnInfo, SummaryReturnCandidate
+from scripts.function_tracer_pcode.core.recurrence_contracts import (
     ImmutableRecurrenceExpression,
     ImmutableRecurrenceCondition,
     QuarantinedRecurrenceReturn,

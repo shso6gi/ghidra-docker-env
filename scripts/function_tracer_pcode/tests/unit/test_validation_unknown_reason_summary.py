@@ -3,7 +3,7 @@
 import subprocess
 import sys
 
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
     UnknownDecisionEffect,
@@ -15,7 +15,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonScope,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
+from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
     UnknownValidationSummary,
@@ -698,7 +698,7 @@ def test_validation_summary_module_execution_has_no_runtime_warning():
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.unknown_reason_summary",
+            "scripts.function_tracer_pcode.reporting.unknown_reason_summary",
             "--summary",
         ],
         check=True,

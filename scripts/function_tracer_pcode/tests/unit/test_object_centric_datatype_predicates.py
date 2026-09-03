@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.equivalence.normalize.fact_helpers import (
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
+    StructuralRecurrenceSummarizer,
+)
+from scripts.function_tracer_pcode.semantics.normalize.fact_helpers import (
     get_integral_var_name,
     is_integral_expression,
 )
-from scripts.function_tracer_pcode.equivalence.param_semantics import _get_declared_signedness
-from scripts.function_tracer_pcode.model import Expression
-from scripts.function_tracer_pcode.model.signature import (
-    is_pointer_data_type,
-    is_void_data_type,
-)
+from scripts.function_tracer_pcode.semantics.param_semantics import _get_declared_signedness
+from scripts.function_tracer_pcode.core import Expression
+from scripts.function_tracer_pcode.core.signature import is_pointer_data_type, is_void_data_type
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 

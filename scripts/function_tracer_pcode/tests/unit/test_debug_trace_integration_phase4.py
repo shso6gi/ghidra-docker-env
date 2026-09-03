@@ -3,21 +3,31 @@
 
 import pytest
 from unittest.mock import Mock, patch
-from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+from scripts.function_tracer_pcode.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
-from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
+from scripts.function_tracer_pcode.core import (
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    Expression,
+    ExpressionType,
+)
 
 
 def test_debug_trace_phase4a_to_phase4b_transition(mock_program_mips64, mock_program_x86):
     """Phase 4-A SAT → Phase 4-B の transition_reason が SAT->Phase4B になることを確認"""
-    from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     from unittest.mock import Mock, patch
-    from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+    from scripts.function_tracer_pcode.core import (
+        FunctionReturnAnalysis,
+        ReturnInfo,
+        Expression,
+        ExpressionType,
+    )
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-    from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-    from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+    from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+    from scripts.function_tracer_pcode.checker.phases.handler import PhaseResult, PhaseID
     
     checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
     
@@ -242,13 +252,18 @@ def test_debug_trace_phase4a_to_phase4b_transition(mock_program_mips64, mock_pro
 
 def test_phase4b_final_smt_in_to_dict(mock_program_mips64, mock_program_x86):
     """Phase 4-B の final_smt が to_dict() にも含まれることを確認"""
-    from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     from unittest.mock import Mock, patch
-    from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+    from scripts.function_tracer_pcode.core import (
+        FunctionReturnAnalysis,
+        ReturnInfo,
+        Expression,
+        ExpressionType,
+    )
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-    from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-    from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+    from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+    from scripts.function_tracer_pcode.checker.phases.handler import PhaseResult, PhaseID
     import json
     
     checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
@@ -461,7 +476,7 @@ def test_phase4b_final_smt_in_to_dict(mock_program_mips64, mock_program_x86):
 
 def test_final_smt_excerpt_compatibility():
     """final_smt_excerpt 互換性が維持されていることを確認"""
-    from scripts.function_tracer_pcode.equivalence.debug_trace import Attempt
+    from scripts.function_tracer_pcode.checker.debug_trace import Attempt
     
     # final_smt_excerpt と final_smt の両方を持つ Attempt をシミュレート
     attempt = Attempt(

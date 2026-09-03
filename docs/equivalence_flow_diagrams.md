@@ -1,7 +1,7 @@
 # Equivalence Flow Diagrams
 
 リファクタリング後の実装に合わせて、等価性判定まわりの主要フローを mermaid で整理したものです。
-対象コードは主に [checker.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/equivalence/checker.py), [workflow.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/equivalence/workflow.py), [handler.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/equivalence/phases/handler.py), [pairwise.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/equivalence/strategies/pairwise.py), [analyzer.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/analysis/analyzer.py) です。
+対象コードは主に [checker.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/checker/checker.py), [workflow.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/checker/workflow.py), [handler.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/checker/phases/handler.py), [pairwise.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/proof/strategies/pairwise.py), [analyzer.py](/mnt/c/Users/saito/Git/ghidra-docker-env/scripts/function_tracer_pcode/analysis/returns/analyzer.py) です。
 
 ## 1. 全体フロー図（エンドツーエンド）
 

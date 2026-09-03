@@ -6,9 +6,9 @@ import hashlib
 
 import pytest
 
-import scripts.function_tracer_pcode.equivalence.call_effect_preflight as preflight_module
+import scripts.function_tracer_pcode.proof.call_effect.preflight as preflight_module
 
-from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     CallSemanticProjectionBinding,
     CallProofDecisionMode,
     PreparedDispatchFrame,
@@ -24,14 +24,14 @@ from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
     validate_call_resolution_projection,
     finalize_pairwise_comparison_receipt,
 )
-from scripts.function_tracer_pcode.equivalence.query_receipt_authority import (
+from scripts.function_tracer_pcode.proof.query_receipt_authority import (
     canonical_region_query_receipt_digest,
 )
-from scripts.function_tracer_pcode.equivalence.cause_identity import (
+from scripts.function_tracer_pcode.checker.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
-from scripts.function_tracer_pcode.equivalence.obligations import (
+from scripts.function_tracer_pcode.proof.obligations import (
     GuardOverlapGraph,
     GuardRegionSeed,
     GuardUnsatClosureArtifact,
@@ -41,13 +41,13 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     PairLedgerBinding,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared import StrategyResult
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import StrategyResult
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
     execute_canonical_guard_query,
 )
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.core import Expression, ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult, ParallelSolverRunner
 
 
@@ -273,9 +273,7 @@ def test_dispatch_frame_is_single_use_and_cleanup_revokes_copied_capability(monk
                 "error": 0,
             },
         )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services import (
-        orchestration_1,
-    )
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration_1
 
     def replacement_executor():
         return issue_builtin_comparison_receipt(

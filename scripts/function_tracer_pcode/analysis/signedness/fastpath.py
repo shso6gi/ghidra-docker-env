@@ -8,7 +8,7 @@ Fast-path unsigned 検出モジュール
 
 from typing import Optional, Set, FrozenSet
 
-from .varnode_analyzer import VarnodeAnalyzer
+from scripts.function_tracer_pcode.analysis.signedness.varnode_analyzer import VarnodeAnalyzer
 
 
 class FastPathDetector:

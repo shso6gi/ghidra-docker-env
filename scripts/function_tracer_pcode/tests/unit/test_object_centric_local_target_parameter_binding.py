@@ -2,17 +2,14 @@
 
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     _enumerate_constant_expression_branches,
     substitute_expression,
 )
-from scripts.function_tracer_pcode.analysis.tracer import (
-    ParameterStorageDescriptor,
-    PcodeTracer,
-)
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.analysis.tracer import ParameterStorageDescriptor, PcodeTracer
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,
@@ -20,9 +17,9 @@ from scripts.function_tracer_pcode.model import (
     LocationBaseRef,
     ReturnInfo,
 )
-from scripts.function_tracer_pcode.model.storage import StorageInfo
+from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
 
 class _EmptyLocalMap:

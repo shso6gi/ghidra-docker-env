@@ -2,10 +2,15 @@ from dataclasses import replace
 import hashlib
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.formula import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
-from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+from scripts.function_tracer_pcode.core import (
+    Condition,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
 
@@ -116,9 +121,7 @@ def test_structured_sat_keeps_the_exact_replay_formula_after_later_regions(
     assert hashlib.sha256(
         execution.sat_replay_formula.encode("utf-8")
     ).hexdigest() == execution.legacy_replay_receipt.contract.formula_digest
-    from scripts.function_tracer_pcode.equivalence.strategies import (
-        monolithic as monolithic_module,
-    )
+    from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
     with pytest.raises(
         ValueError, match="monolithic_counterexample_replay_formula_mismatch"
     ):
@@ -135,7 +138,7 @@ def test_structured_sat_keeps_the_exact_replay_formula_after_later_regions(
 def test_structured_sat_without_canonical_census_gets_typed_replay_receipts(
     monkeypatch,
 ) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
 
     monkeypatch.setattr(
         monolithic_authority, "reconstruct_canonical_census", lambda _frozen: None,
@@ -339,9 +342,7 @@ def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None
 def test_checker_boundary_classifies_typed_unknown_extension_width(
     monkeypatch,
 ) -> None:
-    from scripts.function_tracer_pcode.model.render_smt import (
-        UnknownSmtExtensionWidthError,
-    )
+    from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 
     analysis = _analysis("unknown_extension_boundary", 7)
     checker = EquivalenceChecker(
@@ -370,9 +371,7 @@ def test_checker_boundary_classifies_typed_unknown_extension_width(
 
 
 def test_checker_boundary_classifies_unsupported_smt_operator(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.model.render_smt import (
-        UnsupportedSmtOperatorError,
-    )
+    from scripts.function_tracer_pcode.core.render_smt import UnsupportedSmtOperatorError
 
     analysis = _analysis("unsupported_operator_boundary", 7)
     checker = EquivalenceChecker(
@@ -496,16 +495,10 @@ def test_production_split_does_not_trust_monkeypatched_strategy_planner(monkeypa
 
 
 def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
-        QueryExecutionRecord,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies import (
-        monolithic as monolithic_module,
-    )
-    from scripts.function_tracer_pcode.equivalence import (
-        monolithic_authority,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.comparison_closure import (
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import QueryExecutionRecord
+    from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
+    from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
         InconclusiveComparisonAuthority,
     )
     from scripts.function_tracer_pcode.smt import ParallelResult
@@ -615,7 +608,7 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
 
 
 def test_production_split_uses_import_pinned_query_builder(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence.strategies import pairwise_query_builder
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_query_builder
 
     monkeypatch.setattr(
         pairwise_query_builder,
@@ -632,7 +625,7 @@ def test_production_split_uses_import_pinned_query_builder(monkeypatch) -> None:
 def test_zero_query_inconclusive_authority_is_typed_without_fabricated_receipt() -> None:
     from types import SimpleNamespace
 
-    from scripts.function_tracer_pcode.equivalence.v2.comparison_closure import (
+    from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
         ComparisonClosureProductionSignal,
         InconclusiveComparisonAuthority,
     )
@@ -757,7 +750,7 @@ def test_production_region_queries_share_one_incremental_z3_context() -> None:
 
 
 def test_split_ignores_late_shared_z3_factory_monkeypatch(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     class FakeSession:
@@ -781,7 +774,7 @@ def test_split_ignores_late_shared_z3_factory_monkeypatch(monkeypatch) -> None:
 
 
 def test_split_ignores_late_strategy_module_factory_symbol(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence.strategies import monolithic
+    from scripts.function_tracer_pcode.proof.strategies import monolithic
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     class FakeSession:
@@ -807,7 +800,7 @@ def test_split_ignores_late_strategy_module_factory_symbol(monkeypatch) -> None:
 
 
 def test_split_ignores_late_shared_z3_execute_monkeypatch(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     monkeypatch.setattr(
@@ -824,7 +817,7 @@ def test_split_ignores_late_shared_z3_execute_monkeypatch(monkeypatch) -> None:
 
 
 def test_split_ignores_late_pinned_executor_symbol_monkeypatch(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     monkeypatch.setattr(
@@ -859,7 +852,7 @@ def test_split_ignores_strategy_executor_attribute(monkeypatch) -> None:
 
 
 def test_counterexample_gate_cannot_self_report_proven(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
 
     original = monolithic_authority.issue_gate_artifact_reference
     attempted = []
@@ -886,8 +879,8 @@ def test_counterexample_gate_cannot_self_report_proven(monkeypatch) -> None:
 
 
 def test_final_gate_verifier_is_pinned_and_rechecks_source(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -931,7 +924,7 @@ def test_final_gate_verifier_is_pinned_and_rechecks_source(monkeypatch) -> None:
 def test_final_verifier_rejects_forged_record_formula_despite_method_patch(
     monkeypatch,
 ) -> None:
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         QueryExecutionRecord,
         finalize_monolithic_comparison_receipt,
     )
@@ -959,8 +952,8 @@ def test_final_verifier_rejects_forged_record_formula_despite_method_patch(
 def test_final_verifier_does_not_dispatch_artifact_validation_methods(
     monkeypatch,
 ) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -1033,8 +1026,8 @@ def test_final_verifier_does_not_dispatch_artifact_validation_methods(
 
 
 def test_final_verifier_rejects_authority_artifact_subclasses() -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -1066,7 +1059,7 @@ def test_final_verifier_rejects_authority_artifact_subclasses() -> None:
 
 
 def test_proof_bundle_binds_session_to_backend_query_set_and_lease() -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
 
     result = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
@@ -1083,7 +1076,7 @@ def test_proof_bundle_binds_session_to_backend_query_set_and_lease() -> None:
 
 
 def test_frame_close_revokes_leases_and_rejects_post_close_issuance() -> None:
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         issue_inconclusive_monolithic_receipts,
     )
 
@@ -1102,7 +1095,7 @@ def test_frame_close_revokes_leases_and_rejects_post_close_issuance() -> None:
 
 
 def test_pinned_terminal_verifier_rejects_method_monkeypatch(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -1121,8 +1114,8 @@ def test_pinned_terminal_verifier_rejects_method_monkeypatch(monkeypatch) -> Non
 
 
 def test_import_pinned_verifiers_ignore_late_module_monkeypatch(monkeypatch) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -1141,7 +1134,7 @@ def test_import_pinned_verifiers_ignore_late_module_monkeypatch(monkeypatch) -> 
 
 
 def test_tampered_typed_counterexample_safety_receipt_is_rejected() -> None:
-    from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         finalize_monolithic_comparison_receipt,
     )
 
@@ -1165,7 +1158,7 @@ def test_tampered_typed_counterexample_safety_receipt_is_rejected() -> None:
 def test_direct_checker_revokes_parent_lease_when_child_derivation_fails(
     monkeypatch,
 ) -> None:
-    from scripts.function_tracer_pcode.equivalence import monolithic_authority
+    import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
 
     active_before = set(monolithic_authority._ACTIVE_BRANCHES)
     monkeypatch.setattr(

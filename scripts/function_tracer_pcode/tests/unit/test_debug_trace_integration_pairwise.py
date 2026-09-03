@@ -3,10 +3,15 @@
 
 import pytest
 from unittest.mock import Mock, patch
-from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+from scripts.function_tracer_pcode.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
-from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
+from scripts.function_tracer_pcode.core import (
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    Expression,
+    ExpressionType,
+)
 
 
 def test_debug_trace_sat_with_pairwise_decisive(mock_program_x86):
@@ -54,8 +59,8 @@ def test_debug_trace_sat_with_pairwise_decisive(mock_program_x86):
         mock_analyzer_class.return_value = mock_analyzer
         
         with patch.object(checker, 'check') as mock_check:
-            from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-            from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+            from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+            from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
             
             eq_result = EquivalenceResult(
                 is_equivalent=False,
@@ -164,15 +169,18 @@ def test_debug_trace_normalization_rules_end_to_end(mock_program_x86):
     - normalization_rulesが記録される
     - to_dict()にも含まれる
     """
-    from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     from unittest.mock import Mock, patch
-    from scripts.function_tracer_pcode.model import (
-        FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+    from scripts.function_tracer_pcode.core import (
+        FunctionReturnAnalysis,
+        ReturnInfo,
+        Expression,
+        ExpressionType,
     )
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-    from scripts.function_tracer_pcode.equivalence.debug_trace import NormalizationRuleApplication
-    from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+    from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+    from scripts.function_tracer_pcode.checker.debug_trace import NormalizationRuleApplication
+    from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
     import json
     
     checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)
@@ -368,12 +376,17 @@ def test_debug_trace_normalization_rules_end_to_end(mock_program_x86):
 
 def test_pairwise_decisive_final_query_structure(mock_program_x86):
     """pairwise_decisive.final_queryのSMT構造を詳細に検証"""
-    from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     from unittest.mock import Mock, patch
-    from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+    from scripts.function_tracer_pcode.core import (
+        FunctionReturnAnalysis,
+        ReturnInfo,
+        Expression,
+        ExpressionType,
+    )
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-    from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+    from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
     import re
     
     checker = EquivalenceChecker(debug=False, strategy="pairwise", canonical_decision_cutover=False)

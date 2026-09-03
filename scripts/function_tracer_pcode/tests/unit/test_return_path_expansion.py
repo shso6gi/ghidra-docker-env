@@ -3,9 +3,9 @@
 
 from unittest.mock import Mock, patch
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CanonicalLocation,
     Condition,
@@ -16,7 +16,10 @@ from scripts.function_tracer_pcode.model import (
     ReturnInfo,
     StorageInfo,
 )
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
+from scripts.function_tracer_pcode.semantics.transform.expander import (
+    ExpandedValue,
+    ExpressionExpander,
+)
 
 
 def _param(name: str, size: int = 4) -> Expression:
@@ -788,7 +791,7 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
             ]
 
     with patch.object(ReturnAnalyzer, "_contains_multiequal", return_value=False):
-        with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", FakeExpander):
+        with patch("scripts.function_tracer_pcode.semantics.transform.ExpressionExpander", FakeExpander):
             results = analyzer._analyze_return_value(
                 return_varnode=Mock(),
                 address="0x1000",
@@ -840,9 +843,9 @@ def test_return_analyzer_multiequal_return_does_not_bypass_phi_expansion_for_loo
             ]
 
     with patch.object(ReturnAnalyzer, "_contains_multiequal", return_value=True):
-        with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", FakeExpander):
+        with patch("scripts.function_tracer_pcode.semantics.transform.ExpressionExpander", FakeExpander):
             with patch(
-                "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer._extract_counted_scalar_loop_model",
+                "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer._extract_counted_scalar_loop_model",
                 side_effect=AssertionError("MULTIEQUAL returns must be expanded directly"),
             ):
                 results = analyzer._analyze_return_value(

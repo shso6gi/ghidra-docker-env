@@ -4,8 +4,8 @@
 from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
 
 def _param(name: str, index: int, size: int = 4) -> Expression:
@@ -74,7 +74,7 @@ def test_condition_tracker_refines_unknown_branch_condition_via_call_summary():
             assert base_conditions == []
             return expanded_values
 
-    with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", _FakeExpander):
+    with patch("scripts.function_tracer_pcode.semantics.transform.ExpressionExpander", _FakeExpander):
         changed = tracker.refine_branch_conditions(call_resolver=Mock(), parameters=[])
 
     assert changed == 1
@@ -154,7 +154,7 @@ def test_condition_tracker_refines_phi_branch_condition_via_expander():
             assert base_conditions == []
             return expanded_values
 
-    with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", _FakeExpander):
+    with patch("scripts.function_tracer_pcode.semantics.transform.ExpressionExpander", _FakeExpander):
         changed = tracker.refine_branch_conditions(call_resolver=Mock(), parameters=[])
 
     assert changed == 1

@@ -1,9 +1,9 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence_summary``."""
+"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence.summarizer``."""
 
 from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
-from ._shared import (
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     Condition,
     Expression,
     ExpressionType,
@@ -11,7 +11,7 @@ from ._shared import (
     UnknownValueRef,
     _expressions_equivalent_under_conditions,
 )
-from ...model.recurrence_contracts import (
+from scripts.function_tracer_pcode.core.recurrence_contracts import (
     ImmutableRecurrenceCondition,
     ImmutableRecurrenceExpression,
 )

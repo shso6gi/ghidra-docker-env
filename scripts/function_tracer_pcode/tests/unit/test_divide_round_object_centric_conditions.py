@@ -9,10 +9,12 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
+    extract_return_cases,
+)
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,

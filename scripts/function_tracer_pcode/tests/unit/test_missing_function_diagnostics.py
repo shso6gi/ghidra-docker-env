@@ -2,24 +2,21 @@
 
 import pytest
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.failure import (
     ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
 )
-from scripts.function_tracer_pcode.model import Expression, FunctionReturnAnalysis, ReturnInfo
-from scripts.function_tracer_pcode.model.call_target import CallTargetRef
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseContext
-from scripts.function_tracer_pcode.equivalence.result_factory import create_context_unknown_result
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
-    UnknownReasonClass,
-    UnknownReasonId,
-)
-from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
+from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
+from scripts.function_tracer_pcode.checker.result_factory import create_context_unknown_result
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixer
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+from scripts.function_tracer_pcode.checker.unknown_reason import UnknownReasonClass, UnknownReasonId
+from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     summarize_validation_unknowns,
 )
 

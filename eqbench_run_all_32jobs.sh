@@ -56,7 +56,7 @@ EQBENCH_PRIVATE_AUTHORITY_ROOT="${EQBENCH_PRIVATE_AUTHORITY_ROOT:-$EQBENCH_TMPDI
 
 COMPILE_TEMPLATE="$SCRIPT_DIR/scripts/eqbench/compile_all_arm_mips.sh"
 FUNCTION_LISTER="$SCRIPT_DIR/scripts/eqbench/list_c_functions.py"
-FULL_SCOPE_EXPECTATION="$SCRIPT_DIR/scripts/function_tracer_pcode/validation/eqbench_full_scope.json"
+FULL_SCOPE_EXPECTATION="$SCRIPT_DIR/scripts/function_tracer_pcode/reporting/eqbench_full_scope.json"
 
 if [[ ! -f "$COMPILE_TEMPLATE" ]]; then
     echo "Error: compile template not found: $COMPILE_TEMPLATE" >&2
@@ -231,7 +231,7 @@ pair_status_is_skippable_for_run_mode() {
     [[ -s "$log_file" && -s "$pair_status_file" ]] || return 1
     if [[ "$ERROR_ONLY_RERUN" == 1 ]]; then mode=ERROR_ONLY; else mode=NORMAL_RESUME; fi
     if decision="$("$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        scripts.function_tracer_pcode.authority.decision.pair_status_authority \
         --validate-pair-status "$pair_status_file" \
         --pair-log "$log_file" \
         --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
@@ -242,11 +242,11 @@ pair_status_is_skippable_for_run_mode() {
     fi
     if [[ "$ERROR_ONLY_RERUN" == 1 ]] \
         && [[ "$("$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
             --legacy-pair-target-match "$pair_status_file" \
             --expected-pair-target "$pair_target_file" 2>/dev/null)" == MATCH ]] \
         && legacy_outcome="$("$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.validation.result_summary \
+            scripts.function_tracer_pcode.reporting.result_summary \
             --classify-log --allow-legacy-log "$log_file" 2>/dev/null)"; then
         case "$legacy_outcome" in
             EQ|NOT_EQ|UNKNOWN|TIMEOUT) return 0 ;;
@@ -289,7 +289,7 @@ load_error_only_summary_pairs() {
     (( error_count > 0 )) || return 0
     local -a error_pairs=()
     mapfile -t error_pairs < <("$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.validation.result_summary \
+        scripts.function_tracer_pcode.reporting.result_summary \
         --error-pairs --matrix EQ "$summary")
     if (( ${#error_pairs[@]} != error_count )); then
         echo "ERROR-only summary census mismatch: $summary (count=$error_count parsed=${#error_pairs[@]})" >&2
@@ -304,7 +304,7 @@ validate_current_pair_status() {
     local pair_status_file="$1"
     local pair_target_file="$2"
     "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        scripts.function_tracer_pcode.authority.decision.pair_status_authority \
         --validate-pair-status "$pair_status_file" \
         --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
         --expected-pair-target "$pair_target_file" --allow-operational-diagnostic
@@ -314,7 +314,7 @@ remove_pair_process_authority() {
     local checkpoint_root="$1"
     local execution_nonce="$2"
     "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.validation.process_authority_cleanup \
+        scripts.function_tracer_pcode.reporting.process_authority_cleanup \
         --tmp-root "$EQBENCH_TMPDIR" \
         --run-tmpdir "$EQBENCH_RUN_TMPDIR" \
         --checkpoint-root "$checkpoint_root" \
@@ -523,7 +523,7 @@ run_pair() {
         'import secrets; print(secrets.token_hex(24))')"
     local identity_line result_occurrence_id source_snapshot_fingerprint stream_id
     identity_line="$(PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+        scripts.function_tracer_pcode.authority.decision.production_cutover \
         --print-production-execution-identity \
         --binary1-path "$left_bin" --binary2-path "$right_bin" \
         --binary1-id "$left_id" --binary2-id "$right_id" \
@@ -555,7 +555,7 @@ run_pair() {
 
     local -a supervisor_cmd=(
         "$PYTHON_BIN" -m
-        scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command
+        scripts.function_tracer_pcode.authority.process.supervisor_command
         --checkpoint-root "$checkpoint_root"
         --authority-output "$authority_output"
         --working-directory "$SCRIPT_DIR"
@@ -621,7 +621,7 @@ run_pair() {
     local cleanup_ec run_pair_ec
     pair_status_file="${output_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.equivalence.v2.canonical_result \
+        scripts.function_tracer_pcode.authority.decision.canonical_result \
         --classify-pair-log "$log_file" \
         --supervisor-projection "$authority_output" \
         --checkpoint-root "$checkpoint_root" \
@@ -840,18 +840,18 @@ if [[ -z "$existing_authority_evidence" ]]; then
     [[ -s "$PROCESS_WORKER_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
     if [[ ! -s "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" ]]; then
         "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
             --generate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
             --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
     elif [[ ! -s "$PAIR_STATUS_VERIFICATION_KEY_FILE" ]]; then
         "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
             --export-public-from-private "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
             --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
     fi
 fi
 "$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+    scripts.function_tracer_pcode.authority.decision.pair_status_authority \
     --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
     --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
 EXPECTED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"
@@ -870,7 +870,7 @@ PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE="$OUTPUT_BASE_DIR/process_authority_clea
 USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
 : > "$USED_BUILD_RECEIPTS_FILE"
 ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.validation.execution_identity \
+    scripts.function_tracer_pcode.reporting.execution_identity \
     --repo-root "$SCRIPT_DIR" --print-source-digest)"
 PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
     "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
@@ -926,13 +926,13 @@ analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
 dry_run=$DRY_RUN
 EOF
 ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.validation.execution_receipt \
+    scripts.function_tracer_pcode.reporting.execution_receipt \
     --run-manifest "$RUN_MANIFEST_FILE" --print-analysis-config-digest)"
 printf 'analysis_config_digest=%s\n' "$ANALYSIS_CONFIG_DIGEST" >> "$RUN_MANIFEST_FILE"
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.validation.execution_receipt \
+    scripts.function_tracer_pcode.reporting.execution_receipt \
     --run-manifest "$RUN_MANIFEST_FILE" \
     --resume-compatibility-root "$OUTPUT_BASE_DIR" \
     --current-source-digest "$ANALYSIS_SOURCE_DIGEST_START" \
@@ -948,7 +948,7 @@ if compatible_identity="$("$PYTHON_BIN" -m \
 fi
 if [[ -s "$PREVIOUS_RUN_MANIFEST_FILE" ]]; then
     if previous_manifest_identity="$("$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.validation.execution_receipt \
+        scripts.function_tracer_pcode.reporting.execution_receipt \
         --run-manifest "$RUN_MANIFEST_FILE" \
         --resume-compatibility-manifest "$PREVIOUS_RUN_MANIFEST_FILE" \
         --print-compatible-manifest-analysis-identity 2>/dev/null)"; then
@@ -1095,7 +1095,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
 
     if [[ "$EQBENCH_BUILD_POLICY" != "FRESH_ONLY" && -s "$build_receipt_file" ]]; then
         if receipt_json="$("$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+            scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
             --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --validate \
             "${require_fresh_args[@]}" "${build_receipt_args[@]}" 2>/dev/null)"; then
             build_ready=1
@@ -1112,7 +1112,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
         done
         if (( adopted_inputs_complete != 0 )); then
             if receipt_json="$("$PYTHON_BIN" -m \
-                scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
                 --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --materialize \
                 --provenance-kind ADOPTED_PREBUILT --sample-identity "$sample_label" \
                 --source "$source_path" --compile-script "$COMPILE_TEMPLATE" \
@@ -1138,7 +1138,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 fresh_receipt_args+=(--binary-id "$binary_id")
             done
             if "$PYTHON_BIN" -m \
-                scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
                 --repo-root "$SCRIPT_DIR" --receipt "$fresh_receipt" --materialize \
                 --provenance-kind FRESH_COMPILE --sample-identity "$sample_label" \
                 --source "$source_path" --compile-script "$COMPILE_TEMPLATE" \
@@ -1158,7 +1158,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     && cp "$fresh_receipt" "${build_receipt_file}.new" \
                     && mv -f -- "${build_receipt_file}.new" "$build_receipt_file"; then
                     if receipt_json="$("$PYTHON_BIN" -m \
-                        scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+                        scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
                         --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --validate \
                         "${require_fresh_args[@]}" "${build_receipt_args[@]}")"; then
                         build_ready=1
@@ -1280,7 +1280,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     summary_force_schedule=1
                 fi
                 pair_target_file="$EQBENCH_RUN_TMPDIR/${TOTAL_PAIR_JOBS}-${function_name}-${left_id}-${right_id}.pair-target.json"
-                "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity \
+                "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity \
                     --repo-root "$SCRIPT_DIR" --build-pair-target \
                     --sample-identity "$sample_label" \
                     --output-sample-relative-path "$rel_eq_dir/$source_base" \
@@ -1326,7 +1326,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             function_log_list="$output_function_dir/.summary-log-paths.list0"
             write_log_list0 "$function_log_list" "${function_logs[@]}"
             write_summary_file "$output_function_dir/results_summary.txt" \
-                "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
+                "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
                     --function-summary \
                     --canonical-only \
                     --function-name "$function_name" \
@@ -1353,7 +1353,7 @@ if (( ${#ALL_LOG_FILES[@]} > 0 )); then
     overall_log_list="$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0"
     write_log_list0 "$overall_log_list" "${ALL_LOG_FILES[@]}"
     write_summary_file "$OUTPUT_BASE_DIR/overall_summary.txt" \
-        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
             --overall-summary \
             --canonical-only \
             --summary-level "$VALIDATION_SUMMARY_LEVEL" \
@@ -1377,7 +1377,7 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 process_authority_cleanup_failure_count=$PROCESS_AUTHORITY_CLEANUP_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
-analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
+analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
 
 FINAL_RUN_EXIT_STATUS=0
@@ -1385,7 +1385,7 @@ if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT 
     FINAL_RUN_EXIT_STATUS=1
 fi
 
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt \
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt \
     --repo-root "$SCRIPT_DIR" \
     --private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
     --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \

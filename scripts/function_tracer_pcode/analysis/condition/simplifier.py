@@ -3,18 +3,31 @@
 
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Dict, Set, Optional, Tuple
-from ...model import Expression, Condition, ExpressionType, condition_key, key_contains_placeholder
-from ...model.structural import expression_provenance_key
-from ..debug import summarize_expression, summarize_condition
-from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
-from ...model.render_smt import (
+from scripts.function_tracer_pcode.core import (
+    Expression,
+    Condition,
+    ExpressionType,
+    condition_key,
+    key_contains_placeholder,
+)
+from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
+from scripts.function_tracer_pcode.analysis.condition.bitvector import (
+    eval_constant_raw,
+    normalize_raw_value,
+    to_signed_value,
+)
+from scripts.function_tracer_pcode.core.render_smt import (
     expression_contains_unsupported_smt_ops,
     expression_returns_bool,
     expression_smt_bit_width,
 )
-from .normalizer import ConditionNormalizer
-from .scalar import ScalarConstraint, extract_scalar_constraint
-from .smt_oracle import ConditionSMTOracle
+from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.condition.scalar import (
+    ScalarConstraint,
+    extract_scalar_constraint,
+)
+from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 
 
 BooleanAtom = Tuple[object, str, object]

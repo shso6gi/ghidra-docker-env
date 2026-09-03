@@ -3,7 +3,7 @@
 
 from typing import Dict, Optional, Set, Tuple
 
-from ...model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 
 _EVAL_CACHE_LIMIT = 4096

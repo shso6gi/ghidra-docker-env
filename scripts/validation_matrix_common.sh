@@ -82,7 +82,7 @@ validation_batch_resume_policy() {
         return 0
     fi
     PYTHONWARNINGS="ignore::RuntimeWarning" "${PYTHON_BIN:-python3}" -m \
-        scripts.function_tracer_pcode.equivalence.v2.phase8_cutover \
+        scripts.function_tracer_pcode.authority.decision.production_cutover \
         --print-batch-resume-policy --outcome "$outcome"
 }
 
@@ -95,7 +95,7 @@ validation_result_log_has_final_authority() {
 validation_classify_log_result() {
     local log_file="$1"
     "${PYTHON_BIN:-python3}" -m \
-        scripts.function_tracer_pcode.validation.result_summary \
+        scripts.function_tracer_pcode.reporting.result_summary \
         --classify-log "$log_file"
 }
 

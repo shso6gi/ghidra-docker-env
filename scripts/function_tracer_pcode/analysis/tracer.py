@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Any, TYPE_CHECKING
-from ..model import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Expression,
     ExpressionType,
@@ -22,16 +22,22 @@ from ..model import (
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
 )
-from ..model.intrinsics import resolve_pcode_intrinsic
-from ..model.signature import get_data_type_display_name, is_unsigned_data_type
-from ..config.settings import MAX_TRACE_DEPTH
-from .debug.unknown_trace import (
-    UnknownTracker, UnknownEvent, UnknownReason,
-    VarnodeInfo, PcodeOpInfo
+from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
+from scripts.function_tracer_pcode.core.signature import (
+    get_data_type_display_name,
+    is_unsigned_data_type,
+)
+from scripts.function_tracer_pcode.config.settings import MAX_TRACE_DEPTH
+from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
+    UnknownTracker,
+    UnknownEvent,
+    UnknownReason,
+    VarnodeInfo,
+    PcodeOpInfo,
 )
 
 if TYPE_CHECKING:
-    from .phi_resolver import PhiHandler
+    from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler
 
 
 def _callable_accepts_positional_args(fn: Callable, count: int) -> bool:
@@ -767,7 +773,9 @@ class PcodeTracer:
         if not caller_parameters or len(callee_parameters) != len(parameters):
             return []
         try:
-            from .effect_summary import _recover_call_argument_expressions as recover_call_args
+            from scripts.function_tracer_pcode.analysis.effects.summary import (
+                _recover_call_argument_expressions as recover_call_args,
+            )
 
             recovered = recover_call_args(
                 pcode_op,

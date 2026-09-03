@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.analysis.memory_resolver import concretize_readonly_loads
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.normalize import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.semantics.normalize import (
     NormalizationContext,
     normalize_expression,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     Condition,
     Expression,

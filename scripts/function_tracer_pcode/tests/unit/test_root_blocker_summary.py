@@ -1,15 +1,15 @@
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.cause_identity import (
+from scripts.function_tracer_pcode.checker.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
     RelationalCauseKey,
 )
-from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.unknown_reason import make_unknown_reason
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.smt import ParallelResult
-from scripts.function_tracer_pcode.validation.root_blocker_summary import (
+from scripts.function_tracer_pcode.reporting.root_blocker_summary import (
     AggregationSnapshot,
     summarize_root_blockers,
     compare_root_blocker_summaries,
@@ -697,7 +697,7 @@ def test_missing_function_identity_is_not_replaced_by_display_name():
 
 
 def test_check_from_binaries_preserves_supplied_content_identities(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.checker as checker_module
+    import scripts.function_tracer_pcode.checker.checker as checker_module
 
     result = EquivalenceResult(
         is_equivalent=None,

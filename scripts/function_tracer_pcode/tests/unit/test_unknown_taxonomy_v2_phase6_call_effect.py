@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
+from scripts.function_tracer_pcode.authority.domains.call_effect import (
     CALL_EFFECT_ARTIFACT_CAPABILITY_REGISTRY,
     CALL_EFFECT_FAILURE_RULES,
     CALL_EFFECT_REASON_REGISTRY,
@@ -22,20 +22,18 @@ from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
     FailureDisposition,
     classify_failure,
 )
-from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
-    ArtifactObjectIdentity,
-)
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.proof.call_effect.obligations import ArtifactObjectIdentity
+from scripts.function_tracer_pcode.authority.contracts import (
     CensusMode,
     IdentityScope,
     ProofRequirement,
 )
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+from scripts.function_tracer_pcode.authority.census_contract import (
     CensusManifest,
     join_outcome_relations,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import FinalizationAuthority
-from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+from scripts.function_tracer_pcode.authority.decision.decision import FinalizationAuthority
+from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
     ExecutionAuthorityDeploymentPolicy,
     GenericSolverExecutionReceipt,
     ModelBoundRelationalRefutationArtifact,
@@ -52,17 +50,19 @@ from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
     install_execution_authority_signing_key,
 )
 from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
-from scripts.function_tracer_pcode.equivalence.v2.frontier import evaluate_live_frontier
-from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
-from scripts.function_tracer_pcode.equivalence.v2.registry import SatisfactionBindingFactory
-from scripts.function_tracer_pcode.equivalence.v2.codecs import StrictV2JsonCodec
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.frontier import evaluate_live_frontier
+from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.registry import SatisfactionBindingFactory
+from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CallEffectBlockerProductionSignal,
     CompositeProductionSignalEncoder,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.pilot import ProductionDualWritePilotConnector
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
+    ProductionDualWritePilotConnector,
+)
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     EventIntent,
     EventRecorder,
     EventType,
@@ -322,10 +322,10 @@ def test_every_failure_rule_is_exactly_classified_with_declared_scope():
 
 def test_current_source_failure_inventory_has_zero_unclassified_values():
     obligations = Path(
-        "scripts/function_tracer_pcode/equivalence/call_effect_obligations.py"
+        "scripts/function_tracer_pcode/proof/call_effect/obligations.py"
     )
     preflight = Path(
-        "scripts/function_tracer_pcode/equivalence/call_effect_preflight.py"
+        "scripts/function_tracer_pcode/proof/call_effect/preflight.py"
     )
     primary = _function_string_outputs(obligations, "_primary_proof_stage")
     assert primary == {
@@ -364,7 +364,7 @@ def test_current_source_failure_inventory_has_zero_unclassified_values():
 
 def test_call_effect_producer_outputs_and_exceptions_have_exact_inventory():
     outputs, exceptions = _producer_patterns(
-        "scripts/function_tracer_pcode/equivalence/call_effect_producer.py"
+        "scripts/function_tracer_pcode/proof/call_effect/producer.py"
     )
     assert outputs == CALL_EFFECT_PRODUCER_OUTPUT_PATTERNS
     assert exceptions == CALL_EFFECT_PRODUCER_EXCEPTION_PATTERNS

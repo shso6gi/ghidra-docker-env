@@ -4,7 +4,7 @@ from typing import Optional
 
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.analysis.recurrence_summary import (
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
     CountedLoopAccumulator,
     CountedLoopGuard,
     CountedLoopInduction,
@@ -19,20 +19,20 @@ from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 
-from scripts.function_tracer_pcode.analysis.summary_returns import (
+from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     _summary_transition_evidence_key,
     _transition_evidence_has_required_parts,
 )
 
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
 )
 
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
@@ -61,9 +61,9 @@ from scripts.function_tracer_pcode.model import (
     loop_summary_method_b_key,
 )
 
-from scripts.function_tracer_pcode.equivalence.formula.returns import expression_has_unresolved_value
+from scripts.function_tracer_pcode.proof.formula.returns import expression_has_unresolved_value
 
-from scripts.function_tracer_pcode.model.render_smt import expression_to_smt
+from scripts.function_tracer_pcode.core.render_smt import expression_to_smt
 
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 

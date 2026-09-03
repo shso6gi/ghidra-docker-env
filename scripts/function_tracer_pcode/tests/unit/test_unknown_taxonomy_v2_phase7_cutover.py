@@ -9,11 +9,9 @@ from enum import Enum
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
-    make_production_unknown_reason,
-)
+from scripts.function_tracer_pcode.checker.unknown_reason import make_production_unknown_reason
 
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
     IdentityScope,
@@ -27,7 +25,7 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     canonical_value,
     requirement_slot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
+from scripts.function_tracer_pcode.authority.sites.activation import (
     ActivationDisposition,
     ExpectedActivationContract,
     ExpectedActivationLedgerFactory,
@@ -44,49 +42,41 @@ from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
     VerifiedFinalizationBundleFactory,
     typed_cause_coverage,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+from scripts.function_tracer_pcode.authority.sites.runtime import (
     Phase7ProductionRuntime,
     runtime_from_audited_manifest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotConnector,
     ProductionPilotExecutionIdentity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_REASON_REGISTRY,
     PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     SatSafetyBlockerProductionSignal,
     emit_sat_safety_signal,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2 import production_boundary
-from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
-    SatSafetyPilotEncoder,
-)
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.codecs import StrictV2JsonCodec
-from scripts.function_tracer_pcode.equivalence.strategies.proof_gates.sat_safety import (
+import scripts.function_tracer_pcode.authority.lifecycle.production_boundary as production_boundary
+from scripts.function_tracer_pcode.authority.domains.sat_safety import SatSafetyPilotEncoder
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.proof.strategies.proof_gates.sat_safety import (
     _v2_observe_sat_unsafety_reason,
 )
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
-    make_internal_v2_reason_diagnostic,
-)
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.model import (
-    Expression,
-    FunctionReturnAnalysis,
-    ReturnInfo,
-)
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.authority.registry import (
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
     SatisfactionBindingFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     EventIntent,
     EventRecorder,
@@ -339,7 +329,7 @@ def test_retired_reason_set_is_exact_and_does_not_include_typed_domain_reasons()
 def test_real_sat_producer_activation_issues_factory_owned_projection():
     root = Path(__file__).resolve().parents[4]
     source_path = (
-        root / "scripts/function_tracer_pcode/equivalence/strategies/"
+        root / "scripts/function_tracer_pcode/proof/strategies/"
         "proof_gates/sat_safety.py"
     )
     site_registry = SealedProducerSiteRegistry((ProducerSiteContract(
@@ -837,7 +827,7 @@ def test_legacy_error_uses_typed_boundary_kind_not_arbitrary_status(monkeypatch)
 
 
 def test_supervisor_nonce_prebinds_production_identity(monkeypatch):
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         RESULT_ENTRY_OCCURRENCE_NONCE_ENV,
     )
 

@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+from scripts.function_tracer_pcode.authority.census_contract import (
     ActiveOccurrenceMaterialization,
     CoverageInputs,
     CensusEntry,
@@ -15,7 +15,7 @@ from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
     join_outcome_relations,
     materialization_metrics,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     BoundSatisfactionContract,
     BlockerEligibilityBaseRow,
     CActiveBaseRow,
@@ -43,14 +43,14 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     authority_digest,
     requirement_slot,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import (
+from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
     DecisiveProofReceipt,
     ErrorReceipt,
@@ -59,12 +59,12 @@ from scripts.function_tracer_pcode.equivalence.v2.decision import (
     DecisionReceipt,
     finalize_decision,
 )
-from scripts.function_tracer_pcode.equivalence.v2.frontier import (
+from scripts.function_tracer_pcode.authority.lifecycle.frontier import (
     FrontierBudgetExceeded,
     FrontierEvaluationBudget,
     evaluate_live_frontier,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     ErrorEventAuthority,
     EventIntent,
     EventRecorder,
@@ -553,9 +553,7 @@ def _entry(receipt, kind=ResultKind.V2_NATIVE):
 
 
 def _candidate_census_fixture(outcome=Outcome.UNKNOWN, *, nonterminal_timeout_count=0):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase4 import (
-        _candidate,
-    )
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase4 import _candidate
 
     candidate, reduction, stream = _candidate(
         outcome,

@@ -6,7 +6,7 @@ import importlib
 import re
 from typing import Optional, Dict, Any, Tuple, Callable, cast
 
-from ..interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 
 
 _DECLARATION_RE = re.compile(

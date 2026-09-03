@@ -13,18 +13,18 @@ import pytest
 from unittest.mock import Mock, patch
 
 # 完全なパッケージパスでインポート
-from scripts.function_tracer_pcode.model import Expression, ExpressionType, ReturnInfo
-from scripts.function_tracer_pcode.equivalence.normalize.structural import (
-    are_structurally_equivalent, 
-    get_structural_summary
+from scripts.function_tracer_pcode.core import Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.semantics.normalize.structural import (
+    are_structurally_equivalent,
+    get_structural_summary,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
-    PairwiseStrategy, 
-    ReturnCase, 
-    QueryResult
+from scripts.function_tracer_pcode.proof.strategies.pairwise import (
+    PairwiseStrategy,
+    ReturnCase,
+    QueryResult,
 )
 
-_P = 'scripts.function_tracer_pcode.equivalence.strategies.pairwise'
+_P = 'scripts.function_tracer_pcode.proof.strategies.pairwise'
 
 
 class TestStructuralShortcutSafety:
@@ -170,9 +170,9 @@ class TestStructuralShortcutSafety:
         
         このテストは、正規化ルールが適用されるケースを検証
         """
-        from scripts.function_tracer_pcode.equivalence.normalize import (
+        from scripts.function_tracer_pcode.semantics.normalize import (
             normalize_expression,
-            NormalizationContext
+            NormalizationContext,
         )
         
         # ★ 正規化が適用されるケース: INT_SDIV(x, 1) -> x
@@ -311,7 +311,7 @@ class TestStructuralMatchSolverInvocation:
         normalized_expr
     ):
         """正規化モックの共通セットアップ"""
-        from scripts.function_tracer_pcode.equivalence.normalize import SignFacts
+        from scripts.function_tracer_pcode.semantics.normalize import SignFacts
         mock_extract_min.return_value = set()
         mock_extract_facts.return_value = SignFacts()
         mock_contains_udiv.return_value = False
@@ -491,7 +491,7 @@ class TestStructuralMatchSolverInvocation:
         mock_contains_udiv
     ):
         """構造不一致でも正規化変化ありなら solver を呼ぶ"""
-        from scripts.function_tracer_pcode.equivalence.normalize import SignFacts
+        from scripts.function_tracer_pcode.semantics.normalize import SignFacts
         mock_extract_min.return_value = set()
         mock_extract_facts.return_value = SignFacts()
         mock_contains_udiv.return_value = False

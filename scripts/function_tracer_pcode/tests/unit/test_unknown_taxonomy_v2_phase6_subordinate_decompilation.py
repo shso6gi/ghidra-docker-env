@@ -2,34 +2,34 @@ from dataclasses import replace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
+from scripts.function_tracer_pcode.authority.domains.call_effect import (
     CALL_EFFECT_REASON_REGISTRY,
     CALL_EFFECT_REASON_SPECS,
     CALL_EFFECT_RECOVERY_REGISTRY,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
     ProofRequirement,
     authority_digest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
+from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
     LOOP_REASON_REGISTRY,
     LOOP_REASON_SPECS,
     LOOP_RECOVERY_REGISTRY,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SemanticCauseIdentityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     EventIntent,
     EventRecorder,
     EventType,
 )
-from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation import (
+from scripts.function_tracer_pcode.authority.process.subordinate_decompilation import (
     EXPECTED_SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST,
     SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY,
     SUBORDINATE_DECOMPILATION_ADAPTER_REGISTRY_DIGEST,
@@ -41,22 +41,22 @@ from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation impo
     SubordinateProcessAssignmentFactory,
     validate_subordinate_adapter_registry,
 )
-from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
+from scripts.function_tracer_pcode.authority.process.operational_extraction import (
     OPERATIONAL_REASON_REGISTRY,
     OPERATIONAL_RECOVERY_REGISTRY,
     OperationalBlockerSignal,
     OperationalCompletionSignal,
     OperationalExtractionPilotEncoder,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotSession,
     ProductionPilotExecutionIdentity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.analysis.decompilation_broker import (
+from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
     LIFECYCLE_HELPER_SOURCE_CONTRACT,
     decompile_function,
 )
@@ -75,7 +75,7 @@ def _prefix_for(
         recovery = LOOP_RECOVERY_REGISTRY
         spec = LOOP_REASON_SPECS[row.parent_reason_id]
     if domain is not None:
-        from scripts.function_tracer_pcode.equivalence.v2.registry import SealedReasonRegistry
+        from scripts.function_tracer_pcode.authority.registry import SealedReasonRegistry
         reasons = SealedReasonRegistry.build((
             replace(reasons.get(row.parent_reason_id), domain=domain),
         ))
@@ -148,7 +148,7 @@ def _prefix_for(
 
 
 def test_subordinate_adapter_registry_is_exact_and_digest_pinned():
-    from scripts.function_tracer_pcode.equivalence.v2 import execution_authority
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_authority
 
     validate_subordinate_adapter_registry()
     assert not hasattr(
@@ -328,22 +328,24 @@ def test_adapter_reports_typed_not_live_parent_diagnostic():
 
 
 def _broker_session_with_parent(row):
-    from scripts.function_tracer_pcode.equivalence.v2.registry import (
+    from scripts.function_tracer_pcode.authority.registry import (
         SealedReasonRegistry,
         SealedRecoveryRegistry,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
-        RETURN_OUTCOME_REASON_REGISTRY, RETURN_OUTCOME_RECOVERY_REGISTRY,
+    from scripts.function_tracer_pcode.authority.domains.return_outcome import (
+        RETURN_OUTCOME_REASON_REGISTRY,
+        RETURN_OUTCOME_RECOVERY_REGISTRY,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
-        SAT_SAFETY_REASON_REGISTRY, SAT_SAFETY_RECOVERY_REGISTRY,
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
+        SAT_SAFETY_REASON_REGISTRY,
+        SAT_SAFETY_RECOVERY_REGISTRY,
         SatSafetyPilotEncoder,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
         ABI_WIDTH_READONLY_REASON_REGISTRY,
         ABI_WIDTH_READONLY_RECOVERY_REGISTRY,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SatSafetyBlockerProductionSignal,
     )
 
@@ -395,7 +397,11 @@ def _broker_session_with_parent(row):
 @pytest.mark.parametrize("row", SUBORDINATE_DECOMPILATION_ADAPTER_ROWS)
 def test_subordinate_broker_binds_live_parent_without_completing_it(row):
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
+        Result,
     )
 
     session, _ = _broker_session_with_parent(row)
@@ -444,10 +450,14 @@ def test_subordinate_broker_binds_live_parent_without_completing_it(row):
 
 
 def test_subordinate_broker_parent_authority_failure_blocks_raw_decompile_and_projects_unknown():
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import run_dual_write_pilot
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
+        Result,
     )
 
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
@@ -505,10 +515,14 @@ def test_subordinate_broker_parent_authority_failure_blocks_raw_decompile_and_pr
 def test_subordinate_broker_contract_authority_failure_projects_error_without_raw_decompile(
     monkeypatch,
 ):
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import run_dual_write_pilot
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
+        Result,
     )
 
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
@@ -561,7 +575,11 @@ def test_subordinate_broker_contract_authority_failure_projects_error_without_ra
 
 def test_subordinate_broker_without_live_parent_uses_standalone_operational_owner():
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
+        Result,
     )
 
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
@@ -569,8 +587,10 @@ def test_subordinate_broker_without_live_parent_uses_standalone_operational_owne
     # Complete the only parent Q before the subordinate invocation.
     authority = session.recorder.prefix_view().events[0].authority_payload.occurrence_authority
     requirement = authority.bound_contract.slot_bindings[0][1]
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import RequirementCompletionReceipt
-    from scripts.function_tracer_pcode.equivalence.v2.stream import RequirementCompletedEventAuthority
+    from scripts.function_tracer_pcode.authority.contracts import RequirementCompletionReceipt
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        RequirementCompletedEventAuthority,
+    )
     completion = RequirementCompletionReceipt(
         authority.occurrence.cause_id.value,
         authority.occurrence.occurrence_id,
@@ -610,7 +630,11 @@ def test_subordinate_broker_without_live_parent_uses_standalone_operational_owne
 
 def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_event():
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program, Result,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
+        Result,
     )
 
     row = SUBORDINATE_DECOMPILATION_ADAPTER_ROWS[0]
@@ -647,10 +671,14 @@ def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_eve
 @pytest.mark.parametrize("parent_live", (True, False))
 def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_live):
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, Function, Program,
+        BrokerAnalyzer,
+        Function,
+        Program,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import RequirementCompletionReceipt
-    from scripts.function_tracer_pcode.equivalence.v2.stream import RequirementCompletedEventAuthority
+    from scripts.function_tracer_pcode.authority.contracts import RequirementCompletionReceipt
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        RequirementCompletedEventAuthority,
+    )
 
     class RaisingDecompiler:
         def __init__(self, error):
@@ -717,15 +745,16 @@ def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_
 def _subordinate_runtime_case(tmp_path, row, result, *, extra_signal=None):
     import os
 
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
         DurableCheckpointStore,
         ProcessSupervisorAuthorityFactory,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.process_worker_runtime import (
-        ProcessWorkerRuntime,
-    )
+    from scripts.function_tracer_pcode.authority.process.worker_runtime import ProcessWorkerRuntime
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer, BrokerDecompiler, Function, Program,
+        BrokerAnalyzer,
+        BrokerDecompiler,
+        Function,
+        Program,
     )
 
     session, _ = _broker_session_with_parent(row)
@@ -771,13 +800,11 @@ def _subordinate_runtime_case(tmp_path, row, result, *, extra_signal=None):
 
 
 def _consume_subordinate_resolved(session, store, *, process_factory=None):
-    from scripts.function_tracer_pcode.equivalence.v2.process_census import (
+    from scripts.function_tracer_pcode.authority.process.census import (
         ProcessAttemptCensusFactory,
         consume_durable_supervisor_projection,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command import (
-        COMMAND_SCHEMA,
-    )
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import COMMAND_SCHEMA
 
     active = session.domain_signal_state["process_worker_checkpoint_records"][0]
     if process_factory is None:

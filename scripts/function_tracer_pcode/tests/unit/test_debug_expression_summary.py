@@ -3,9 +3,9 @@
 
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
-from scripts.function_tracer_pcode.model import Expression
-from scripts.function_tracer_pcode.transform.expander import ExpressionExpander
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.core import Expression
+from scripts.function_tracer_pcode.semantics.transform.expander import ExpressionExpander
 
 
 def test_expander_debug_expr_summary_does_not_require_full_to_string(monkeypatch):

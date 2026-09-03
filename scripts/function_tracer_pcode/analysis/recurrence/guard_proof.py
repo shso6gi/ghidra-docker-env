@@ -1,9 +1,9 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence_summary``."""
+"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence.summarizer``."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from ._shared import (
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     Condition,
     ConditionConstraintSet,
     ConditionNormalizer,
@@ -999,7 +999,7 @@ def _impl__build_block_edge_condition(
     *,
     placeholders: Dict[object, Expression],
 ) -> Optional[Condition]:
-    from .proof_utils import (
+    from scripts.function_tracer_pcode.analysis.recurrence.proof_utils import (
         _PcodeExpressionTraversalContext,
         _build_block_edge_condition_with_context,
     )

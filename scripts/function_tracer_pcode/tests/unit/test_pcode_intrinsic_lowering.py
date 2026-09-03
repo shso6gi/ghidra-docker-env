@@ -6,15 +6,15 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies import pairwise_models as pairwise_models_module
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.expression_safety import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies import pairwise_models as pairwise_models_module
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.expression_safety import (
     ConditionBinding,
     ExpressionSafetyChecker,
 )
-from scripts.function_tracer_pcode.equivalence.normalize.guard_prover import prove_guard_condition
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.semantics.normalize.guard_prover import prove_guard_condition
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     COUNTED_LOOP_SUM_OPCODE,
     Condition,
@@ -32,14 +32,17 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
-from scripts.function_tracer_pcode.model.render_smt import (
+from scripts.function_tracer_pcode.core.render_smt import (
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
     expression_to_smt,
 )
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
+from scripts.function_tracer_pcode.semantics.transform.expander import (
+    ExpandedValue,
+    ExpressionExpander,
+)
 
 
 def _param(name: str, size: int = 8) -> Expression:

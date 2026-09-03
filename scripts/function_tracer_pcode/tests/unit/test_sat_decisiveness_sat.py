@@ -116,7 +116,7 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("ambiguous-model validation should not run for SAT-unsafe analyses")
         ),
@@ -577,7 +577,7 @@ def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(mon
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
@@ -669,7 +669,7 @@ def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
     sat_result = (
@@ -765,7 +765,7 @@ def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexamp
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
@@ -830,7 +830,7 @@ def test_pairwise_same_function_sat_without_model_still_requires_counterexample_
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(
@@ -893,7 +893,7 @@ def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexa
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: True,
     )
     strategy._solve_query_after_guard = Mock(

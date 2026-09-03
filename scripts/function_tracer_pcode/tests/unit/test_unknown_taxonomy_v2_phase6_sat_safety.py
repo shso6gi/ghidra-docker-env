@@ -7,21 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.obligations.pair_disposition import (
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
     CounterexampleSafetyReceipt,
     emit_safe_counterexample_production_signal,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome
-from scripts.function_tracer_pcode.model import (
-    Expression,
-    FunctionReturnAnalysis,
-    ReturnInfo,
-)
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.authority.contracts import Outcome
+from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotConnector,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     SafeCounterexampleProductionSignal,
     SatCounterexampleEvidenceBinding,
     SatSafetyBlockerProductionSignal,
@@ -30,15 +26,15 @@ from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     emit_sat_safety_signal,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.domains.sat_safety import (
     SAT_SAFETY_REASON_REGISTRY,
     SAT_SAFETY_RECOVERY_REGISTRY,
     SatSafetyPilotEncoder,
 )
-from scripts.function_tracer_pcode.model import Condition
-from scripts.function_tracer_pcode.model import PcodeOpRef
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.core import Condition
+from scripts.function_tracer_pcode.core import PcodeOpRef
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
 
 
 def _param(name: str, index: int = 0, size: int = 4):
@@ -127,13 +123,11 @@ def _connector():
 
 
 def _manifest_connector():
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
     )
-    from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
+    from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
         build_phase7_producer_manifest,
     )
 
@@ -422,7 +416,7 @@ def test_safe_counterexample_rejects_raw_digests_and_tampered_typed_receipt():
 
 
 def test_monolithic_strategy_publishes_safe_counterexample_to_v2():
-    from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 
     connector = _connector()
     session = connector.begin({"phase": "monolithic", "case": "strategy-sat"})
@@ -670,10 +664,10 @@ def test_manifest_bound_multiple_sat_case_pairs_deduplicate_per_occurrence():
 
 
 def test_phase7_rejects_explicit_invalid_sat_completion_producer():
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         emit_sat_safety_completion_if_observed,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety_sites import (
+    from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
         SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
     )
 
@@ -787,10 +781,8 @@ def test_sat_safety_completion_commits_only_after_stream_append(monkeypatch):
 def test_sat_safety_phase7_execution_buffer_failure_rolls_back_before_stream(
     monkeypatch,
 ):
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         emit_sat_safety_completion_if_observed,
     )

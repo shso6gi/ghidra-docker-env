@@ -6,9 +6,9 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ...model import Condition
-from ...model.structural import condition_key, key_contains_placeholder
-from ...model.render_smt import (
+from scripts.function_tracer_pcode.core import Condition
+from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
+from scripts.function_tracer_pcode.core.render_smt import (
     collect_float_predicate_smt_declarations,
     collect_unknown_smt_declarations,
     expression_uses_smt_float_theory,

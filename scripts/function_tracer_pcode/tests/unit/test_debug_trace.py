@@ -4,13 +4,18 @@
 import pytest
 import json
 from types import SimpleNamespace
-from scripts.function_tracer_pcode.equivalence.debug_trace import (
-    DebugTrace, Attempt, AttemptIdentity, CompletionApplicabilityStatus,
-    ReasonCompletionEvent, TransitionReason, PairwiseDecisiveInfo,
+from scripts.function_tracer_pcode.checker.debug_trace import (
+    DebugTrace,
+    Attempt,
+    AttemptIdentity,
+    CompletionApplicabilityStatus,
+    ReasonCompletionEvent,
+    TransitionReason,
+    PairwiseDecisiveInfo,
     NormalizationRuleApplication,
 )
-from scripts.function_tracer_pcode.equivalence.attempts import _record_explicit_proof_completions
-from scripts.function_tracer_pcode.equivalence.unknown_reason import make_unknown_reason
+from scripts.function_tracer_pcode.checker.attempts import _record_explicit_proof_completions
+from scripts.function_tracer_pcode.checker.unknown_reason import make_unknown_reason
 
 
 def test_normalization_rule_application():

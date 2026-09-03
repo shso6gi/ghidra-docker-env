@@ -6,17 +6,22 @@ from dataclasses import replace
 import pytest
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
-from scripts.function_tracer_pcode.analysis.analyzer_services.return_extraction_1 import (
+from scripts.function_tracer_pcode.analysis.returns.return_extraction_1 import (
     _build_function_outcome_seed,
     _produce_standard_termination_path_effect_evidence,
 )
-from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage import (
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
+    StructuralRecurrenceSummarizer,
+)
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.proof_gates.return_coverage import (
     _prove_unary_outcome_for_analysis,
 )
-from scripts.function_tracer_pcode.equivalence.obligations import AnalysisSnapshot, ObligationRuntimeSession
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.obligations import (
+    AnalysisSnapshot,
+    ObligationRuntimeSession,
+)
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,

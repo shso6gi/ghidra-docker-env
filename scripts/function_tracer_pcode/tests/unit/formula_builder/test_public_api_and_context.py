@@ -3,15 +3,15 @@
 
 from unittest.mock import patch
 
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.returns import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.returns import (
     _order_return_defs_by_specificity,
     compare_readonly_summary_values_by_priority,
 )
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,

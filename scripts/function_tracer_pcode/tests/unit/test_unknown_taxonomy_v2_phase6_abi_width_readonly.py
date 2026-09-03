@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
+from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
     ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY,
     ABI_WIDTH_READONLY_PRODUCER_STAGE_REGISTRY_DIGEST,
     ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS,
@@ -47,13 +47,13 @@ from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
     summary_abi_width_signals_from_acceptance,
     assess_return_abi_pair,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     IdentityScope,
     Outcome,
     authority_digest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import EventType
-from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+from scripts.function_tracer_pcode.proof.return_width.surface import (
     ExtensionEvidenceSource,
     FunctionReturnWidthSeed,
     FunctionReturnWidthTargetId,
@@ -63,11 +63,11 @@ from scripts.function_tracer_pcode.equivalence.return_width_surface import (
     PairReturnObservationTargetId,
     build_top_level_observation_contract,
 )
-from scripts.function_tracer_pcode.equivalence.return_width_pipeline import (
+from scripts.function_tracer_pcode.proof.return_width.pipeline import (
     PreparedFunctionReturnWidths,
     prepare_pair_return_observation,
 )
-from scripts.function_tracer_pcode.model import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 
 
 def _session(result_id="result-1"):
@@ -217,7 +217,7 @@ def _readonly_seed(
     right_term_offset_delta=0, right_reduction_kind="memory_sum",
     pointer_kind="parameter", owner_specific_parameter=False,
 ):
-    from scripts.function_tracer_pcode.model import (
+    from scripts.function_tracer_pcode.core import (
         Expression,
         LocationBaseRef,
         ReadonlyReductionRef,
@@ -226,9 +226,7 @@ def _readonly_seed(
         ReductionAccumulatorProof,
         ReturnInfo,
     )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import (
-        ReturnCase,
-    )
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
 
     analyses = []
     cases = []
@@ -300,23 +298,21 @@ def _readonly_seed(
 
 
 def _run_readonly_solver_fixture(monkeypatch, case_id, statuses):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         execute_abi_width_readonly_solver_query,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
     from scripts.function_tracer_pcode.smt.interface import SolverResult
     from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 
@@ -458,12 +454,10 @@ def _abi_relation_artifact(
 
 
 def _rematerialize_slice5_lifecycle_matrix():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     rows = {}
     for reason_id in ABI_WIDTH_READONLY_REASON_SPECS:
@@ -599,24 +593,24 @@ def _rematerialize_slice5_lifecycle_matrix():
 
 
 def _rematerialize_slice5_aggregation_gates(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.census_contract import (
         ActiveOccurrenceMaterialization,
         CensusEntry,
         CensusManifest,
         CensusStatus,
         CoverageInputs,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+    from scripts.function_tracer_pcode.authority.contracts import (
         CensusMode,
         RecoveryAddressability,
         ResultKind,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.shadow_compare import (
+    from scripts.function_tracer_pcode.authority.decision.shadow_compare import (
         build_shadow_census_preview,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverStatus
-    from scripts.function_tracer_pcode.equivalence.v2.stream import (
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
         DecisiveProofEventAuthority,
         EventIntent,
     )
@@ -900,12 +894,10 @@ def test_slice5_solver_batch_transaction_is_semantic_and_idempotent():
 def test_slice5_pilot_suppresses_post_commit_and_concurrent_resends():
     from concurrent.futures import ThreadPoolExecutor
 
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     bootstrap_encoder = AbiWidthReadonlyPilotEncoder()
     connector = ProductionDualWritePilotConnector(
@@ -972,10 +964,8 @@ def test_slice5_phase7_runtime_replay_rolls_back_activation_and_finalizes():
     from concurrent.futures import ThreadPoolExecutor
     from dataclasses import dataclass
 
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
         ErrorEventAuthority,
         EventIntent,
     )
@@ -1033,12 +1023,10 @@ def test_slice5_phase7_runtime_replay_rolls_back_activation_and_finalizes():
     def runtime_factory(identity):
         return runtime_from_audited_manifest(manifest, identity)
 
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     connector = ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(
@@ -1171,15 +1159,13 @@ def test_projection_seed_is_factory_only_nonproof_authority():
 
 
 def test_need_seed_without_common_positive_width_conserves_unknown_frontier():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     left = _width_seed("left")
     right = replace(
@@ -1345,16 +1331,14 @@ def test_encoder_emits_only_exact_cause_observation():
 
 
 def test_return_width_production_source_dual_writes_exact_unary_c_and_q():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     encoder = AbiWidthReadonlyPilotEncoder()
     composite = CompositeProductionSignalEncoder({
@@ -1384,17 +1368,15 @@ def test_return_width_production_source_dual_writes_exact_unary_c_and_q():
 
 
 def test_exact_abi_width_blocker_retransmission_is_producer_idempotent():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         emit_abi_width_readonly_signal,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     signal = AbiWidthReadonlyBlockerSignal.from_width_seed(
         _width_seed("left", missing=("return_storage_fact",)),
@@ -1424,20 +1406,16 @@ def test_exact_abi_width_blocker_retransmission_is_producer_idempotent():
 def test_actual_abi_width_wrapper_replay_and_concurrent_replay_are_phase7_safe():
     from concurrent.futures import ThreadPoolExecutor
 
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         emit_abi_width_readonly_signal,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     root = Path(__file__).resolve().parents[4]
     complete_manifest = json.loads((root / (
@@ -1541,20 +1519,16 @@ def test_actual_abi_width_wrapper_replay_and_concurrent_replay_are_phase7_safe()
 
 
 def test_conflicting_abi_width_blocker_retransmission_is_rejected(monkeypatch):
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
-        CauseOccurrenceAuthority,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.contracts import CauseOccurrenceAuthority
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         emit_abi_width_readonly_signal,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     signal = AbiWidthReadonlyBlockerSignal.from_width_seed(
         _width_seed("left", missing=("return_storage_fact",)),
@@ -1620,12 +1594,14 @@ def test_conflicting_abi_width_blocker_retransmission_is_rejected(monkeypatch):
 def test_return_width_pair_sources_dual_write_disjoint_relational_causes(
     left, right, expected_reasons
 ):
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import ProductionDualWritePilotConnector
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     encoder = AbiWidthReadonlyPilotEncoder()
     session = ProductionDualWritePilotConnector(
@@ -1657,16 +1633,14 @@ def test_return_width_pair_sources_dual_write_disjoint_relational_causes(
 
 
 def test_unformable_projection_seed_is_typed_unknown_not_shadow_error():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     left = replace(
         _width_seed("left"),
@@ -1722,11 +1696,11 @@ def test_unformable_projection_seed_is_typed_unknown_not_shadow_error():
 
 
 def test_summary_width_deferred_occurrences_expand_to_exact_slice5_signals():
-    from scripts.function_tracer_pcode.analysis.summary_returns import (
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
         _summary_blocker_occurrence,
         accept_summary_return_candidates,
     )
-    from scripts.function_tracer_pcode.model import ReturnInfo
+    from scripts.function_tracer_pcode.core import ReturnInfo
     from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
         _analysis_with_exact_returns,
         _empty_effect_summary,
@@ -1868,16 +1842,14 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
     right_calling_status, right_storage, expected_reasons, expected_errors
 ):
     malformed = right_calling_status == "MALFORMED"
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     def analysis_and_seed(side, *, calling_status="PRESENT", storage="same"):
         analysis = FunctionReturnAnalysis(
@@ -1996,7 +1968,7 @@ def test_return_abi_facts_survive_views_and_serialization():
 
 
 def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
-    from scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_1 import (
+    from scripts.function_tracer_pcode.analysis.returns.session_helpers_1 import (
         _sealed_return_abi_facts,
     )
     sealed_return_abi_facts = _sealed_return_abi_facts
@@ -2123,7 +2095,7 @@ def test_ghidra_abi_fact_extractor_seals_present_missing_and_malformed():
 
 
 def test_empty_and_explicit_missing_abi_facts_are_typed_unknown_not_invalid():
-    from scripts.function_tracer_pcode.analysis.analyzer_services import session_helpers_1
+    from scripts.function_tracer_pcode.analysis.returns import session_helpers_1
     sealed_return_abi_facts = getattr(session_helpers_1, "_sealed_return_abi_facts")
 
     analysis = FunctionReturnAnalysis("fn", "0x1000", [], [], binary_id="bin")
@@ -2256,12 +2228,10 @@ def test_abi_projection_only_catches_typed_nonformability():
 
 
 def test_readonly_theorem_uses_real_solver_for_nontrivial_unsat_and_near_miss_sat():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
     from scripts.function_tracer_pcode.smt.interface import SolverStatus
     from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
@@ -2324,21 +2294,19 @@ def test_readonly_correspondence_fact_factory_rejects_wrong_operator_role_and_fo
 def test_dependency_ready_production_scheduler_executes_registered_readonly_query(
     monkeypatch,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
     from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 
@@ -2401,30 +2369,28 @@ def _run_fixture_bound_high_bit_sat_authority(
     monkeypatch, high_bit, case_id, *, inject_transaction_failure=False,
     inject_commit_failure=False, inject_partial_commit_failure=False,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         ModelBoundRelationalRefutationArtifact,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         SatSafetyBlockerProductionSignal,
         execute_abi_width_readonly_solver_query,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.registry import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.registry import (
         SealedReasonRegistry,
         SealedRecoveryRegistry,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
         SAT_SAFETY_REASON_REGISTRY,
         SAT_SAFETY_RECOVERY_REGISTRY,
         SatSafetyPilotEncoder,

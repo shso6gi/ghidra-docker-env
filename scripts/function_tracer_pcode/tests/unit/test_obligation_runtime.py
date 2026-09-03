@@ -3,11 +3,11 @@ from dataclasses import fields
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.cause_identity import (
+from scripts.function_tracer_pcode.checker.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
-from scripts.function_tracer_pcode.equivalence.obligations import (
+from scripts.function_tracer_pcode.proof.obligations import (
     ActivationState,
     AnalysisSnapshot,
     AttemptCache,
@@ -36,7 +36,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     UnaryProducerResult,
     prove_unary_partition,
 )
-from scripts.function_tracer_pcode.equivalence.obligations.snapshot import (
+from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     FUNCTION_ANALYSIS_FIELD_CLASSIFICATION,
 )
 
@@ -110,7 +110,7 @@ def test_snapshot_fingerprint_canonicalizes_stable_mapping_keys():
 
 
 def test_function_analysis_snapshot_ignores_later_completed_proof_mutation():
-    from scripts.function_tracer_pcode.model.analysis import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 
     analysis = FunctionReturnAnalysis("f", "0x1000", [], [], binary_id="B1")
     before = AnalysisSnapshot.from_function_analysis(analysis)
@@ -122,8 +122,8 @@ def test_function_analysis_snapshot_ignores_later_completed_proof_mutation():
 
 
 def test_function_analysis_snapshot_includes_semantic_notes_and_effect_summary():
-    from scripts.function_tracer_pcode.analysis.effect_models import EffectSummary
-    from scripts.function_tracer_pcode.model.analysis import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary
+    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 
     analysis = FunctionReturnAnalysis("f", "0x1000", [], [], binary_id="B1")
     base = AnalysisSnapshot.from_function_analysis(analysis)
@@ -146,7 +146,7 @@ def test_snapshot_semantic_fields_are_deeply_immutable():
 
 
 def test_function_analysis_snapshot_field_inventory_is_complete():
-    from scripts.function_tracer_pcode.model.analysis import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 
     assert {item.name for item in fields(FunctionReturnAnalysis)} == set(
         FUNCTION_ANALYSIS_FIELD_CLASSIFICATION
@@ -761,9 +761,9 @@ def test_decision_aggregator_does_not_reclassify_proof_closed_reason_as_pair_uns
 def test_typed_query_reuse_reexecutes_only_changed_semantic_pair():
     from unittest.mock import Mock
 
-    from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-    from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.core import Expression, ReturnInfo
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
     from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
@@ -813,7 +813,7 @@ def test_typed_query_reuse_reexecutes_only_changed_semantic_pair():
 
 
 def test_gate_completion_requires_real_replanned_query_outcome():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
 
     runtime = ObligationRuntimeSession.create(
         SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
@@ -864,7 +864,7 @@ def test_gate_completion_requires_real_replanned_query_outcome():
 
 
 def test_replanned_sat_value_query_stays_unknown_until_counterexample_is_safe():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
 
     runtime = ObligationRuntimeSession.create(
         SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
@@ -949,7 +949,7 @@ def test_replanned_sat_value_query_stays_unknown_until_counterexample_is_safe():
 
 
 def test_replanned_sat_becomes_not_eq_after_counterexample_safety_completes():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
 
     runtime = ObligationRuntimeSession.create(
         SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
@@ -1025,7 +1025,7 @@ def test_replanned_sat_becomes_not_eq_after_counterexample_safety_completes():
 
 
 def test_pairwise_solver_attempt_cache_reuses_identical_query(monkeypatch):
-    from scripts.function_tracer_pcode.equivalence.strategies import pairwise_query_executor as executor
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor as executor
 
     calls = []
     parallel = SimpleNamespace(

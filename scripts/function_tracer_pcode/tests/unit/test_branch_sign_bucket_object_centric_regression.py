@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """branch_sign_bucket 系の object-centric return-region 回帰テスト"""
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionNormalizer
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.analysis.effect_summary import CanonicalLocation, EffectSummary, StoreEffect
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
+    CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
+)
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,
@@ -14,7 +18,7 @@ from scripts.function_tracer_pcode.model import (
     READONLY_SUM_OPCODE,
     ReturnInfo,
 )
-from scripts.function_tracer_pcode.model.runtime_refs import (
+from scripts.function_tracer_pcode.core.runtime_refs import (
     LocationBaseRef,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from ...model import Condition, Expression, LoopSideEffectProfileRef
+from scripts.function_tracer_pcode.core import Condition, Expression, LoopSideEffectProfileRef
 
 @dataclass(frozen=True)
 class CountedLoopInduction:

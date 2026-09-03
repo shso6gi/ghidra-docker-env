@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Optional, Set
 
-from ...model import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 
 
 def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:

@@ -11,12 +11,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .._pyghidra_support import load_pyghidra, start_headless_pyghidra
-from ...config import apply_runtime_environment
-from ...equivalence.result import EquivalenceResult
-from ...io import output_result
-from ...smt import ParallelResult
-from .analyze import get_target_functions
+from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
+    load_pyghidra,
+    start_headless_pyghidra,
+)
+from scripts.function_tracer_pcode.config import apply_runtime_environment
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.reporting import output_result
+from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.cli.commands.analyze import get_target_functions
 
 
 class ProgramImportError(RuntimeError):
@@ -198,8 +201,8 @@ def _emit_import_error_result(
         total_time=time.time() - start_time,
         error_message=error_message,
     )
-    from ...equivalence.v2.contracts import authority_digest
-    from ...equivalence.v2.phase8_cutover import (
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         attach_canonical_decision,
         issue_infrastructure_error_decision,
     )
@@ -223,7 +226,7 @@ def _emit_import_error_result(
             }),
         ),
     )
-    from ...equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         attach_durable_error_finalization,
         build_canonical_result_finalization_bundle,
         persist_canonical_result_envelope,
@@ -275,8 +278,8 @@ def _emit_import_error_result(
         args.output,
         args.quiet,
     )
-    from ...equivalence.v2.contracts import Outcome
-    from ...equivalence.v2.phase8_cutover import CLI_EXIT_MATRIX
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
 
     sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
 
@@ -314,8 +317,10 @@ def run_equivalence_check(args):
             binary2_content_identity=binary2_content_identity,
         )
 
-    from ...equivalence import EquivalenceChecker, TypeFixerConfig
-    from ...equivalence.source_declarations import infer_adjacent_c_return_type
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker, TypeFixerConfig
+    from scripts.function_tracer_pcode.checker.source_declarations import (
+        infer_adjacent_c_return_type,
+    )
 
     function_names = get_target_functions(args)
 
@@ -523,7 +528,7 @@ def run_equivalence_check(args):
 
     if _get_bool_arg("emit_result_json", False):
         result_payload = result.to_dict()
-        from ...equivalence.v2.canonical_result import (
+        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             build_canonical_result_finalization_bundle,
             persist_canonical_result_envelope,
         )
@@ -566,7 +571,7 @@ def run_equivalence_check(args):
             print(f"SMT formula saved to: {smt_output}")
 
     if getattr(result, "decision_receipt", None) is not None:
-        from ...equivalence.v2.phase8_cutover import (
+        from scripts.function_tracer_pcode.authority.decision.production_cutover import (
             CLI_EXIT_MATRIX,
             outcome_from_result,
         )

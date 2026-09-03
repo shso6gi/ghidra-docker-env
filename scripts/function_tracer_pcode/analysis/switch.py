@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
-from ..model import Condition, Expression, ExpressionType
-from ..model.structural import expression_key_safe
-from .condition.simplifier import ConditionSimplifier
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import expression_key_safe
+from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 
 _INDIRECT_DISPATCH_MNEMONICS = {"BRANCHIND", "CALLIND"}
 _VALUE_PASSTHROUGH_UNARY_OPS = {"INT_ZEXT", "INT_SEXT", "CAST", "COPY"}

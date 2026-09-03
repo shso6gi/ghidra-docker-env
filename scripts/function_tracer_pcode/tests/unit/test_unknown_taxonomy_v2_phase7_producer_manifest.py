@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.call_effect_sites import (
+from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
-from scripts.function_tracer_pcode.validation.phase7_producer_manifest import (
+from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
     build_phase7_producer_manifest,
     validate_phase7_producer_manifest,
 )

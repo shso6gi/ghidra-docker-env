@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Condition 等価性とシンボル置換のリグレッションテスト."""
 
-from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.model import CanonicalLocation, Condition, Expression
+from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.core import CanonicalLocation, Condition, Expression
 
 
 class _DummyRuntimeRef:

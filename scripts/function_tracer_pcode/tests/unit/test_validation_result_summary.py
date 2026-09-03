@@ -10,21 +10,21 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
     PAIR_STATUS_PUBLIC_KEY_FILE,
     generate_pair_status_keypair,
     pair_status_operational_diagnostic,
     seal_pair_status,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.contracts import authority_digest
 
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownReasonId,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.validation.result_summary import (
+from scripts.function_tracer_pcode.reporting.result_summary import (
     STATUS_EQ,
     STATUS_ERROR,
     STATUS_INCOMPLETE,
@@ -47,10 +47,8 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     parse_log_identity,
     read_validation_log_record,
 )
-from scripts.function_tracer_pcode.validation.run_health_summary import (
-    parse_overall_summary_health,
-)
-from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
+from scripts.function_tracer_pcode.reporting.run_health_summary import parse_overall_summary_health
+from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
 )
@@ -224,12 +222,12 @@ def test_canonical_only_missing_pair_status_is_incomplete(tmp_path):
 def test_classify_log_cli_can_explicitly_reuse_legacy_terminal_line(tmp_path):
     path = _write_log(tmp_path, "client_B1_B2.log", "Result: EQUIVALENT")
     strict = subprocess.run(
-        [sys.executable, "-m", "scripts.function_tracer_pcode.validation.result_summary",
+        [sys.executable, "-m", "scripts.function_tracer_pcode.reporting.result_summary",
          "--classify-log", str(path)],
         check=True, text=True, capture_output=True,
     )
     legacy = subprocess.run(
-        [sys.executable, "-m", "scripts.function_tracer_pcode.validation.result_summary",
+        [sys.executable, "-m", "scripts.function_tracer_pcode.reporting.result_summary",
          "--classify-log", "--allow-legacy-log", str(path)],
         check=True, text=True, capture_output=True,
     )
@@ -348,7 +346,7 @@ def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_p
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.equivalence.v2.pair_status_authority",
+            "scripts.function_tracer_pcode.authority.decision.pair_status_authority",
             "--validate-pair-status",
             str(status_path),
             "--allow-operational-diagnostic",
@@ -371,7 +369,7 @@ def test_operational_diagnostic_mode_still_verifies_signed_status(tmp_path):
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.equivalence.v2.pair_status_authority",
+            "scripts.function_tracer_pcode.authority.decision.pair_status_authority",
             "--validate-pair-status",
             str(status_path),
             "--public-key",
@@ -395,7 +393,7 @@ def test_runner_canonical_result_subprocess_persists_primary_classification_erro
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.equivalence.v2.canonical_result",
+            "scripts.function_tracer_pcode.authority.decision.canonical_result",
             "--classify-pair-log", str(paths[0]),
             "--supervisor-projection", str(paths[1]),
             "--checkpoint-root", str(paths[2]),
@@ -759,7 +757,7 @@ def test_result_summary_cli_writes_health_summary_artifacts(tmp_path):
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--overall-summary",
             "--summary-level",
             "compact",
@@ -824,7 +822,7 @@ def test_result_summary_module_accepts_function_wall_time_option():
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--overall-summary",
             "--function-wall-time",
             "fc_read_after_void=1.25",
@@ -843,7 +841,7 @@ def test_result_summary_require_before_dir_rejects_unavailable_baseline():
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--overall-summary",
             "--require-before-dir",
         ],
@@ -890,7 +888,7 @@ def test_result_summary_require_before_dir_emits_real_delta(tmp_path):
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_read_after_void",
@@ -1082,7 +1080,7 @@ def test_result_summary_require_baseline_match_rejects_canonical_mismatch(tmp_pa
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_apply_indirect",
@@ -1147,7 +1145,7 @@ def test_result_summary_baseline_match_after_pairs_scope_ignores_unrun_pairs(tmp
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_apply_indirect",
@@ -1189,7 +1187,7 @@ def test_result_summary_after_pairs_scope_still_rejects_empty_after_set(tmp_path
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_apply_indirect",
@@ -1257,7 +1255,7 @@ def test_result_summary_final_result_match_level_allows_reason_only_movement(tmp
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_recursive_sum",
@@ -1304,7 +1302,7 @@ def test_result_summary_final_result_match_level_rejects_unknown_to_eq(tmp_path)
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--function-summary",
             "--function-name",
             "fc_recursive_sum",
@@ -1340,7 +1338,7 @@ def test_result_summary_reads_large_nul_delimited_log_manifest(tmp_path):
         [
             sys.executable,
             "-m",
-            "scripts.function_tracer_pcode.validation.result_summary",
+            "scripts.function_tracer_pcode.reporting.result_summary",
             "--overall-summary",
             "--summary-level",
             "compact",
@@ -1382,12 +1380,12 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "Summary shortcut: skipped" in script
     assert "validate_current_pair_status" in script
     assert "remove_pair_process_authority" in script
-    assert "validation.process_authority_cleanup" in script
+    assert "reporting.process_authority_cleanup" in script
     assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
     assert "--validate-private-key" in script
     assert "expected_pair_status_paths.txt" in script
     failure_decision = script.index("FINAL_RUN_EXIT_STATUS=0")
-    receipt_issue = script.rindex("validation.execution_receipt")
+    receipt_issue = script.rindex("reporting.execution_receipt")
     assert failure_decision < receipt_issue
     assert 'FINAL_RUN_EXIT_STATUS=1' in script[failure_decision:receipt_issue]
     assert '--exit-status "$FINAL_RUN_EXIT_STATUS"' in script
@@ -1512,7 +1510,7 @@ def test_eqbench_runner_reports_primary_diagnostic_before_signature_validation()
     assert "--allow-operational-diagnostic" in validation_block
     assert '--classification-diagnostic-log "$log_file"' in script
     assert "Primary pair classification error:" in Path(
-        "scripts/function_tracer_pcode/equivalence/v2/canonical_result.py"
+        "scripts/function_tracer_pcode/authority/decision/canonical_result.py"
     ).read_text()
 
 

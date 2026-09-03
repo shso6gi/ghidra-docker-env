@@ -266,9 +266,9 @@ mkdir -p "$AUTHORITY_ROOT"; chmod 700 "$AUTHORITY_ROOT"
 [[ -s "$SUPERVISOR_KEY" ]] || { umask 077; head -c 32 /dev/urandom > "$SUPERVISOR_KEY"; }
 [[ -s "$WORKER_KEY" ]] || { umask 077; head -c 32 /dev/urandom > "$WORKER_KEY"; }
 if [[ ! -s "$PAIR_PRIVATE_KEY" ]]; then
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --generate-private-key "$PAIR_PRIVATE_KEY" --write-public-key "$PAIR_PUBLIC_KEY" >/dev/null
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --generate-private-key "$PAIR_PRIVATE_KEY" --write-public-key "$PAIR_PUBLIC_KEY" >/dev/null
 fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
 
 PROCESS_CLEANUP_FAILURES="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"; : > "$PROCESS_CLEANUP_FAILURES"
 EXPECTED_STATUS="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"; : > "$EXPECTED_STATUS"
@@ -317,7 +317,7 @@ prepare_variant() {
     fi
 
     if [[ "$NEQ_BUILD_POLICY" != FRESH_ONLY && -s "$build_receipt_file" ]]; then
-        if receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+        if receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
             --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --validate \
             "${require_fresh_args[@]}" "${BINARY_ID_ARGS[@]}" 2>/dev/null)"; then
             VARIANT_BUILD_RECEIPT_JSON="$receipt_json"
@@ -333,7 +333,7 @@ prepare_variant() {
             [[ -f "$source_dir/$name" ]] || { install_failed=1; break; }
         done
         if (( install_failed == 0 )); then
-            if receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+            if receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
                 --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --materialize \
                 --provenance-kind ADOPTED_PREBUILT --sample-identity "$sample/$variant" \
                 --source "$source" --compile-script "$COMPILE_TEMPLATE" \
@@ -359,7 +359,7 @@ prepare_variant() {
         cp "$build_dir/$name" "$source_dir/.$name.new"
         mv -f "$source_dir/.$name.new" "$source_dir/$name"
     done
-    if ! receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.eqbench_build_receipt \
+    if ! receipt_json="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.eqbench_build_receipt \
         --repo-root "$SCRIPT_DIR" --receipt "$build_receipt_file" --materialize \
         --provenance-kind FRESH_COMPILE --sample-identity "$sample/$variant" \
         --source "$source" --compile-script "$COMPILE_TEMPLATE" \
@@ -376,7 +376,7 @@ pair_status_is_skippable_for_run_mode() {
     status="$(printf '%s' "$log" | sed 's/\.log$/.pair-status.json/')"
     [[ -s "$log" && -s "$status" ]] || return 1
     if [[ "$ERROR_ONLY_RERUN" == 1 ]]; then mode=ERROR_ONLY; else mode=NORMAL_RESUME; fi
-    if decision="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+    if decision="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority \
         --validate-pair-status "$status" \
         --pair-log "$log" \
         --public-key "$PAIR_PUBLIC_KEY" \
@@ -386,10 +386,10 @@ pair_status_is_skippable_for_run_mode() {
         [[ "$decision" == SKIP ]] && return 0
     fi
     if [[ "$ERROR_ONLY_RERUN" == 1 ]] \
-        && [[ "$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority \
+        && [[ "$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority \
             --legacy-pair-target-match "$status" --expected-pair-target "$target" \
             2>/dev/null)" == MATCH ]] \
-        && legacy_outcome="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
+        && legacy_outcome="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
             --classify-log --allow-legacy-log "$log" 2>/dev/null)"; then
         case "$legacy_outcome" in
             EQ|NOT_EQ|UNKNOWN|TIMEOUT) return 0 ;;
@@ -431,7 +431,7 @@ load_error_only_summary_pairs() {
     (( error_count > 0 )) || return 0
     local -a error_pairs=()
     mapfile -t error_pairs < <("$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.validation.result_summary \
+        scripts.function_tracer_pcode.reporting.result_summary \
         --error-pairs --matrix NEQ "$summary")
     if (( ${#error_pairs[@]} != error_count )); then
         echo "ERROR-only summary census mismatch: $summary (count=$error_count parsed=${#error_pairs[@]})" >&2
@@ -474,25 +474,25 @@ run_pair() {
     local log="$out/$function"_"$left_id"_"$right_id.log" pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
-    identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.phase8_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
+    identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
     IFS=$'\t' read -r result_id source_fp stream <<< "$identity"
     exec_nonce="$(printf '%s' "$result_id" | sed 's/^production-pilot-//')"; checkpoint="$RUN_TMP/process-authority"; authority="$checkpoint/$exec_nonce/supervisor-projection.json"; mkdir -p "$checkpoint"
-    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD")
+    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD")
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" >> "$log"
         if "${supervisor_cmd[@]}" >> "$log" 2>&1; then ec=0; else ec=$?; fi
     fi
     status_file="$out/$function"_"$left_id"_"$right_id.pair-status.json"
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" > "$status_file" || ec=1
-    if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.equivalence.v2.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" > "$status_file" || ec=1
+    if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
         status="$detail"
         ec=0
     else
         status=ERROR
         ec=1
     fi
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
     rm -rf "$pair_tmp"
     progress_update "$sample" "$function" "$left_id" "$right_id" "$status"
     printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : %s\n' \
@@ -514,7 +514,7 @@ wait_all() {
     done
 }
 
-ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
+ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
 PREVIOUS_RUN_MANIFEST="$RUN_TMP/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST" ]]; then cp "$RUN_MANIFEST" "$PREVIOUS_RUN_MANIFEST"; fi
@@ -565,11 +565,11 @@ source_pair_census_digest=$CENSUS_DIGEST
 runner_script_sha256=$(sha256sum "$SCRIPT_DIR/neqbench_run_all_32jobs.sh" | awk '{print $1}')
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
 EOF
-CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
+CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
 printf 'analysis_config_digest=%s\n' "$CONFIG_DIGEST" >> "$RUN_MANIFEST"
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
-if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt \
+if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt \
     --run-manifest "$RUN_MANIFEST" --resume-compatibility-root "$OUTPUT_BASE_DIR" \
     --current-source-digest "$ANALYSIS_SOURCE_DIGEST" \
     --print-compatible-analysis-config-digest 2>/dev/null)"; then
@@ -584,7 +584,7 @@ if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validat
 fi
 if [[ -s "$PREVIOUS_RUN_MANIFEST" ]]; then
     if previous_manifest_identity="$("$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.validation.execution_receipt \
+        scripts.function_tracer_pcode.reporting.execution_receipt \
         --run-manifest "$RUN_MANIFEST" \
         --resume-compatibility-manifest "$PREVIOUS_RUN_MANIFEST" \
         --print-compatible-manifest-analysis-identity 2>/dev/null)"; then
@@ -740,7 +740,7 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
             fi
             target="$RUN_TMP/$TOTAL_PAIR_JOBS.target.json"
             printf '%s\n' "$status_file" | sed "s#^$OUTPUT_BASE_DIR/##" >> "$EXPECTED_STATUS"
-            "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
+            "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --build-pair-target --sample-identity "$sample" --output-sample-relative-path "$sample" --function-name "$function" --left-binary-id "$left_id" --right-binary-id "$right_id" --source-path "$manifest" --left-binary-path "$left" --right-binary-path "$right" --analysis-source-digest "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" > "$target"
             if (( ! summary_force_schedule )) \
                 && [[ "$SKIP_COMPLETED_RESULTS" != 0 || "$ERROR_ONLY_RERUN" != 0 ]] \
                 && pair_status_is_skippable_for_run_mode "$log" "$target"; then
@@ -757,12 +757,12 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
         done
         wait_all
         find "$function_dir" -maxdepth 1 -type f -name '*.log' -print0 > "$function_dir/.summary-log-paths.list0"
-        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary --function-summary --canonical-only --function-name "$function" --summary-level compact --log-list0 "$function_dir/.summary-log-paths.list0" > "$function_dir/results_summary.txt" || true
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary --function-summary --canonical-only --function-name "$function" --summary-level compact --log-list0 "$function_dir/.summary-log-paths.list0" > "$function_dir/results_summary.txt" || true
     done < "$functions_file"
 done < "$CENSUS"
 wait_all
 find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'run_stdout.log' -print0 > "$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0"
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.result_summary \
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
     --overall-summary --canonical-only --summary-level "$VALIDATION_SUMMARY_LEVEL" \
     --health-summary-json "$OUTPUT_BASE_DIR/run_health_summary.json" \
     --health-summary-text "$OUTPUT_BASE_DIR/run_health_summary.txt" \
@@ -784,12 +784,12 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
 run_failures=$RUN_PAIR_FAILURES
-analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
+analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
 exit_status=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 )); then
     exit_status=1
 fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "./neqbench_run_all_32jobs.sh"
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "./neqbench_run_all_32jobs.sh"
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
 exit "$exit_status"

@@ -4,9 +4,9 @@
 import pytest
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.core import Expression, ReturnInfo
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 # ★ [P3] sys.path操作はconftest.pyで一元化されているため不要

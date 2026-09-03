@@ -3,31 +3,29 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.analysis.decompilation_broker import (
+from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
     TOP_LEVEL_SOURCE_CONTRACT,
     decompile_function,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import authority_digest
-from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
+from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.process.operational_extraction import (
     OPERATIONAL_REASON_REGISTRY,
     OPERATIONAL_RECOVERY_REGISTRY,
     OperationalBlockerSignal,
     OperationalCompletionSignal,
     OperationalExtractionPilotEncoder,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotSession,
     ProductionPilotExecutionIdentity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+from scripts.function_tracer_pcode.authority.process.supervisor import (
     CheckpointState,
     DurableCheckpointStore,
     ProcessSupervisorAuthorityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_census import (
-    ProcessAttemptCensusFactory,
-)
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command import (
+from scripts.function_tracer_pcode.authority.process.census import ProcessAttemptCensusFactory
+from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     CHILD_ENV_LAUNCH,
     CHILD_ENV_NONCE,
     CHILD_ENV_ROOT,
@@ -38,18 +36,16 @@ from scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command imp
     COMMAND_SCHEMA,
     read_process_start_token,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_worker_runtime import (
+from scripts.function_tracer_pcode.authority.process.worker_runtime import (
     CanonicalCensusInvalid,
     ProcessWorkerRuntime,
     require_canonical_supervisor_projection,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-    ShadowLifecycleReducer,
-)
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
     BrokerAnalyzer,
     BrokerDecompiler,

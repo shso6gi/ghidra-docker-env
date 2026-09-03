@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """設定層"""
 
-from .settings import (
+from scripts.function_tracer_pcode.config.settings import (
     IN_GHIDRA,
     GHIDRA_INSTALL_DIR,
     JAVA_HOME,

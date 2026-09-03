@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.equivalence.loop_template_abstraction import (
-    prove_template_equivalence,
-)
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.strategies.loop_template import (
+from scripts.function_tracer_pcode.proof.loop_template_abstraction import prove_template_equivalence
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.proof.strategies.loop_template import (
     LoopTemplatePairwiseStrategy,
     _normalize_values_under_exact_conditions,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.model import Condition, Expression
-from scripts.function_tracer_pcode.model.analysis import ReturnInfo
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.core import Condition, Expression
+from scripts.function_tracer_pcode.core.analysis import ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult
 
 

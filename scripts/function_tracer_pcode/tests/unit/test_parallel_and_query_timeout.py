@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Timeout 伝播の回帰テスト."""
 
-from scripts.function_tracer_pcode.equivalence.strategies import pairwise_query_executor
+from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
 from scripts.function_tracer_pcode.smt.parallel import SolverResult as RunnerSolverResult

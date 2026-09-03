@@ -5,12 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.candidate import (
-    build_candidate_projection,
-)
-from scripts.function_tracer_pcode.equivalence.v2.decision import ErrorReceipt, Outcome
+from scripts.function_tracer_pcode.authority.decision.candidate import build_candidate_projection
+from scripts.function_tracer_pcode.authority.decision.decision import ErrorReceipt, Outcome
 
-from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
+from scripts.function_tracer_pcode.authority.process.operational_extraction import (
     OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST,
     OPERATIONAL_REASON_REGISTRY,
     OPERATIONAL_RECOVERY_REGISTRY,
@@ -18,27 +16,23 @@ from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import 
     OperationalCompletionSignal,
     OperationalExtractionPilotEncoder,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotSession,
     ProductionPilotExecutionIdentity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
-    ActivationDisposition,
-)
-from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-    runtime_from_audited_manifest,
-)
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+from scripts.function_tracer_pcode.authority.sites.activation import ActivationDisposition
+from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+from scripts.function_tracer_pcode.authority.process.supervisor import (
     CheckpointState,
     DurableCheckpointStore,
     ProcessSupervisorAuthorityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     DecisiveProofEventAuthority,
     EventIntent,
     EventType,
@@ -62,7 +56,8 @@ def _active_process_authority(case="supervisor"):
     )
     operational_factory = operational.authority_factory_for_session(session)
     from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        Function, Program,
+        Function,
+        Program,
     )
 
     manager = type("Manager", (), {
@@ -83,7 +78,7 @@ def _active_process_authority(case="supervisor"):
         "function-decompilation-artifact-producer-v2",
     )
     if os.environ.get("PHASE7_TIMEOUT_EVIDENCE_PATH"):
-        from scripts.function_tracer_pcode.analysis.decompilation_broker import _emit
+        from scripts.function_tracer_pcode.ghidra.decompilation_broker import _emit
 
         root = Path(__file__).resolve().parents[4]
         producer_manifest = json.loads((root / (
@@ -146,7 +141,9 @@ def _active_process_authority(case="supervisor"):
 
 
 def _completed_continuation(authority, *, supervisor=None, checkpoint=None):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import Result
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+        Result,
+    )
 
     operational_factory = authority["operational_factory"]
     result = Result(completed=True, function=authority["function"])

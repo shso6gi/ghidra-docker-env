@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.model import Expression
-from scripts.function_tracer_pcode.transform.rewrite.rules.normalization import (
+from scripts.function_tracer_pcode.core import Expression
+from scripts.function_tracer_pcode.semantics.transform.rewrite.rules.normalization import (
     CommutativeNormalizationRule,
 )
 

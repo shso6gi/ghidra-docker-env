@@ -3,14 +3,12 @@
 
 from pathlib import Path
 
-from scripts.function_tracer_pcode.equivalence.reanalysis import (
-    _apply_declared_return_type_hypothesis,
-)
-from scripts.function_tracer_pcode.equivalence.source_declarations import (
+from scripts.function_tracer_pcode.checker.reanalysis import _apply_declared_return_type_hypothesis
+from scripts.function_tracer_pcode.checker.source_declarations import (
     extract_c_return_type,
     infer_adjacent_c_return_type,
 )
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.core import Expression, ReturnInfo
 
 from conftest import create_mock_analysis
 

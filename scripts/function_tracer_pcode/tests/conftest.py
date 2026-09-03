@@ -17,17 +17,17 @@ from dataclasses import dataclass, field
 from unittest.mock import Mock
 
 # 完全なパッケージパスでインポート
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
-    FunctionReturnAnalysis, 
-    ReturnInfo, 
-    Expression, 
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    Expression,
     ExpressionType,
 )
-from scripts.function_tracer_pcode.model.analysis import SignednessResult
+from scripts.function_tracer_pcode.core.analysis import SignednessResult
 
 
 # ============================================================================
@@ -388,7 +388,7 @@ def create_mock_result(
     
     # ★ [P1] 追加: counterexampleがあればFormattedCounterexampleも設定
     if counterexample:
-        from scripts.function_tracer_pcode.equivalence.counterexample import FormattedCounterexample
+        from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
         result.counterexample = FormattedCounterexample(
             parameters={k: hex(v) if isinstance(v, int) else str(v) for k, v in counterexample.items()},
             return_value1=None,

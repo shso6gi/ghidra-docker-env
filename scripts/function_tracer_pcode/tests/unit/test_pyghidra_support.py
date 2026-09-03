@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.cli._pyghidra_support import (
+from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
     _ensure_headless_ghidra_user_dirs,
     start_headless_pyghidra,
 )
@@ -11,16 +11,16 @@ from scripts.function_tracer_pcode.cli._pyghidra_support import (
 def test_ensure_headless_ghidra_user_dirs_uses_per_process_paths(monkeypatch, tmp_path):
     registered_cleanups = []
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.cli._pyghidra_support.tempfile.gettempdir",
+        "scripts.function_tracer_pcode.ghidra.pyghidra_support.tempfile.gettempdir",
         lambda: str(tmp_path),
     )
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.cli._pyghidra_support.atexit.register",
+        "scripts.function_tracer_pcode.ghidra.pyghidra_support.atexit.register",
         lambda function, *args, **kwargs: registered_cleanups.append(
             (function, args, kwargs)
         ),
     )
-    monkeypatch.setattr("scripts.function_tracer_pcode.cli._pyghidra_support.os.getpid", lambda: 4242)
+    monkeypatch.setattr("scripts.function_tracer_pcode.ghidra.pyghidra_support.os.getpid", lambda: 4242)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
@@ -40,10 +40,10 @@ def test_ensure_headless_ghidra_user_dirs_uses_per_process_paths(monkeypatch, tm
 
 def test_ensure_headless_ghidra_user_dirs_overrides_shared_environment(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.cli._pyghidra_support.tempfile.gettempdir",
+        "scripts.function_tracer_pcode.ghidra.pyghidra_support.tempfile.gettempdir",
         lambda: str(tmp_path),
     )
-    monkeypatch.setattr("scripts.function_tracer_pcode.cli._pyghidra_support.os.getpid", lambda: 17)
+    monkeypatch.setattr("scripts.function_tracer_pcode.ghidra.pyghidra_support.os.getpid", lambda: 17)
     monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/shared-ghidra-config")
     monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/shared-ghidra-cache")
 

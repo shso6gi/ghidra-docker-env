@@ -4,8 +4,8 @@
 import pytest
 from conftest import load_golden_cases, create_mock_result, create_mock_analysis, MockProgram
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
 
 
 class TestYAMLGoldenCases:
@@ -151,8 +151,8 @@ class TestYAMLGoldenCases:
     ], indirect=False)
     def test_required_stage_path(self, case, solver_status_map, is_equiv_map):
         """★ [P1/P2修正] Stage経路の実行時検証（本物のParallelResultを使用）"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-        from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
         from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
         from unittest.mock import Mock, patch
         
@@ -293,8 +293,8 @@ class TestMonolithicStrategyBackwardCompatibility:
     
     def test_monolithic_strategy_skips_pairwise(self):
         """★ [P2] strategy="monolithic" なら pairwise が呼ばれない"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-        from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
         from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
         from unittest.mock import Mock, patch
         
@@ -367,8 +367,8 @@ class TestMonolithicStrategyBackwardCompatibility:
 
     def test_monolithic_strategy_uses_extended_formula_result(self):
         """monolithic 戦略は FormulaBuilderResult を使って詳細情報を受け取る"""
-        from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
-        from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilderResult
+        from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+        from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilderResult
         from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
         from unittest.mock import Mock
 
@@ -410,7 +410,7 @@ class TestMonolithicStrategyBackwardCompatibility:
     
     def test_pairwise_strategy_defaults_to_three_stages(self):
         """strategy="pairwise" の既定は pairwise -> abstraction -> monolithic"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         
         # pairwise strategy で初期化
         checker = EquivalenceChecker(
@@ -429,7 +429,7 @@ class TestMonolithicStrategyBackwardCompatibility:
 
     def test_pairwise_strategy_can_enable_loop_template_stage(self):
         """template abstraction は opt-in でだけ stage plan に入る"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 
         checker = EquivalenceChecker(
             strategy="pairwise",

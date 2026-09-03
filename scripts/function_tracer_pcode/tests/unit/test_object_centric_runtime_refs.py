@@ -3,13 +3,13 @@
 from unittest.mock import Mock
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     summarize_store_effects,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     CallTargetRef,
     Condition,
@@ -42,18 +42,18 @@ from scripts.function_tracer_pcode.model import (
     compare_loop_summaries,
     loop_summary_method_b_key,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies import pairwise as pairwise_module
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import build_pair_query
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies import pairwise as pairwise_module
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import build_pair_query
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonId,
     build_unknown_recovery_actions,
     get_unknown_recovery_plan,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 
 
 def _typed_method_b_reason(target):
@@ -67,8 +67,8 @@ def _typed_method_b_reason(target):
         ).proof_obligations,
         object_target_key=target,
     )
-from scripts.function_tracer_pcode.equivalence.formula.returns import _readonly_refs_share_surface
-from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
+from scripts.function_tracer_pcode.proof.formula.returns import _readonly_refs_share_surface
+from scripts.function_tracer_pcode.core.render_smt import _runtime_ref_smt_identity
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+from scripts.function_tracer_pcode.authority.census_contract import (
     ActiveOccurrenceMaterialization,
     CensusEntry,
     CensusManifest,
@@ -13,7 +13,7 @@ from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
     CensusStatus,
     CoverageInputs,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
     CauseTransformationEvent,
@@ -32,7 +32,7 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     any_of,
     requirement_slot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     PILOT_TYPED_CAUSE_KINDS,
     PilotDifferenceEntry,
     PilotDifferenceManifest,
@@ -41,7 +41,7 @@ from scripts.function_tracer_pcode.equivalence.v2.pilot import (
     TerminalizationIntent,
     run_dual_write_pilot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     ComparisonClosureProductionSignal,
     ComparisonClosurePilotEncoder,
     CompositeProductionSignalEncoder,
@@ -49,25 +49,25 @@ from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     emit_comparison_closure_signal,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_REASON_REGISTRY,
     PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
-from scripts.function_tracer_pcode.equivalence.obligations.outcome_partition import (
+from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
     UnaryProducerResult,
     prove_unary_partition,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.smt import ParallelResult
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     CauseTransformedEventAuthority,
     DecisiveProofEventAuthority,
@@ -884,7 +884,7 @@ def test_production_binary_boundary_legacy_opt_out_and_cutover_fail_closed(monke
         )
 
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.v2.production_boundary._run_legacy_check_from_binaries",
+        "scripts.function_tracer_pcode.authority.lifecycle.production_boundary._run_legacy_check_from_binaries",
         fake_run,
     )
     default_checker = EquivalenceChecker(canonical_decision_cutover=False)
@@ -928,7 +928,7 @@ def test_production_binary_boundary_legacy_opt_out_and_cutover_fail_closed(monke
         )
 
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.v2.production_boundary._run_legacy_check_from_binaries",
+        "scripts.function_tracer_pcode.authority.lifecycle.production_boundary._run_legacy_check_from_binaries",
         no_emission,
     )
     incomplete_checker = EquivalenceChecker()

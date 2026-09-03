@@ -5,12 +5,16 @@
 #@runtime PyGhidra
 """Return Tracer CLI entrypoint."""
 
-from ..config import IN_GHIDRA
-from .args import parse_arguments
-from .commands.analyze import analyze_and_output, get_target_functions, list_all_functions
-from .commands.equivalence import run_equivalence_check
-from .runtime.ghidra import run_ghidra_mode
-from .runtime.pyghidra import run_pyghidra_mode
+from scripts.function_tracer_pcode.config import IN_GHIDRA
+from scripts.function_tracer_pcode.cli.args import parse_arguments
+from scripts.function_tracer_pcode.cli.commands.analyze import (
+    analyze_and_output,
+    get_target_functions,
+    list_all_functions,
+)
+from scripts.function_tracer_pcode.cli.commands.equivalence import run_equivalence_check
+from scripts.function_tracer_pcode.ghidra.ghidra_runtime import run_ghidra_mode
+from scripts.function_tracer_pcode.ghidra.pyghidra_runtime import run_pyghidra_mode
 
 __all__ = [
     "analyze_and_output",

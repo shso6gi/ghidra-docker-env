@@ -3,7 +3,7 @@
 
 from typing import Optional, Set, Any, List
 
-from .evidence import (
+from scripts.function_tracer_pcode.analysis.signedness.evidence import (
     SignednessType,
     EvidenceCategory,
     PcodeEvidence,
@@ -11,7 +11,7 @@ from .evidence import (
     OPCODE_EVIDENCE_MAP,
     FASTPATH_UNSIGNED_OPCODES,
 )
-from .fastpath import FastPathDetector
+from scripts.function_tracer_pcode.analysis.signedness.fastpath import FastPathDetector
 
 
 class SignednessDetector:

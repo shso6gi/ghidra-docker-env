@@ -2,12 +2,18 @@
 
 from unittest.mock import Mock, patch
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.switch import build_switch_dispatch_summaries
-from scripts.function_tracer_pcode.model import AddressValueRef, Condition, Expression, FunctionReturnAnalysis, ReturnInfo
-from scripts.function_tracer_pcode.model.storage import StorageInfo
-from scripts.function_tracer_pcode.model.structural import expression_key_safe
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.core import (
+    AddressValueRef,
+    Condition,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.structural import expression_key_safe
+from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
 
 def _resolve_concrete_address_offset(expr):

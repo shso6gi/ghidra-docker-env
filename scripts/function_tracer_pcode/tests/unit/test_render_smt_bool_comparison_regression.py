@@ -5,10 +5,10 @@ from typing import Optional
 import pytest
 
 from conftest import resolve_mock_data_type
-from scripts.function_tracer_pcode.model import Condition, Expression
-from scripts.function_tracer_pcode.equivalence.formula.returns import coerce_return_value_to_bitvec
-from scripts.function_tracer_pcode.model.intrinsics import COUNTED_STATE_TRANSITION_VALUE_OPCODE
-from scripts.function_tracer_pcode.model.render_smt import (
+from scripts.function_tracer_pcode.core import Condition, Expression
+from scripts.function_tracer_pcode.proof.formula.returns import coerce_return_value_to_bitvec
+from scripts.function_tracer_pcode.core.intrinsics import COUNTED_STATE_TRANSITION_VALUE_OPCODE
+from scripts.function_tracer_pcode.core.render_smt import (
     UnsupportedSmtOperatorError,
     collect_float_predicate_smt_declarations,
     expression_contains_unsupported_smt_ops,
@@ -18,7 +18,7 @@ from scripts.function_tracer_pcode.model.render_smt import (
     expression_to_smt,
     smt_logic_name,
 )
-from scripts.function_tracer_pcode.model.runtime_refs import (
+from scripts.function_tracer_pcode.core.runtime_refs import (
     CountedStateTransitionLoopSummaryRef,
     LoopSideEffectProfileRef,
 )

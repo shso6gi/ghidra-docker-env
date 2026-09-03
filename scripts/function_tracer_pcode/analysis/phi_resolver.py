@@ -3,14 +3,17 @@
 
 from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
-from ..model import Expression, Condition, PcodeOpRef, UnknownValueRef
-from ..model.intrinsics import resolve_pcode_intrinsic
-from .debug import summarize_expression
-from .condition import ConditionSimplifier, ConditionNormalizer
+from scripts.function_tracer_pcode.core import Expression, Condition, PcodeOpRef, UnknownValueRef
+from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
+from scripts.function_tracer_pcode.analysis.condition import (
+    ConditionSimplifier,
+    ConditionNormalizer,
+)
 
 
 # Re-exports kept for callers that import these names from this module.
-from ..model import ExpressionType  # noqa: F401
+from scripts.function_tracer_pcode.core import ExpressionType
 
 
 class _PhiExpansionBudgetOrigin:

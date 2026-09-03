@@ -6,7 +6,7 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionSimplifier,
     ConditionSMTOracle,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Condition,
     Expression,
@@ -14,9 +14,9 @@ from scripts.function_tracer_pcode.model import (
     LocationBaseRef,
     PostStateReadRef,
 )
-from scripts.function_tracer_pcode.model.storage import StorageInfo
-from scripts.function_tracer_pcode.model.render_smt import normalize_call_symbol_name
-from scripts.function_tracer_pcode.model.render_smt import expression_contains_unsupported_smt_ops
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.render_smt import normalize_call_symbol_name
+from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
 
 
 def _const(value: int, size: int = 4) -> Expression:

@@ -29,7 +29,7 @@
 
 Planned implementation files:
 
-- `scripts/function_tracer_pcode/validation/unknown_taxonomy_audit.py`
+- `scripts/function_tracer_pcode/reporting/unknown_taxonomy_audit.py`
 - `scripts/function_tracer_pcode/tests/unit/test_unknown_taxonomy_audit.py`
 
 Required generated evidence directory:

@@ -142,9 +142,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
     assert reason.object_evidence == query_result.object_evidence
 
 def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_exception():
-    from scripts.function_tracer_pcode.model.render_smt import (
-        UnsupportedSmtIntrinsicError,
-    )
+    from scripts.function_tracer_pcode.core.render_smt import UnsupportedSmtIntrinsicError
 
     formula_builder = Mock()
     formula_builder.build_equivalence_formula_extended.side_effect = (

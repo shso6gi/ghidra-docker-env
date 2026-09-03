@@ -3,9 +3,9 @@
 
 from unittest.mock import Mock, patch
 
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 from conftest import create_mock_analysis, create_mock_result

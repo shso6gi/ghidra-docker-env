@@ -2951,7 +2951,7 @@ Validation order is mandatory:
    counting;
 2. the Phase-8 decision/cutover and Phase-6 ABI/width suites;
 3. `compileall`, `env PYTHONPATH=. ./.venv-pyghidra/bin/python
-   scripts/function_tracer_pcode/validation/refactor_contract.py`, and
+   scripts/function_tracer_pcode/reporting/refactor_contract.py`, and
    `git diff --check`;
 4. the full unit suite;
 5. current-head supervisor-backed real binaries using

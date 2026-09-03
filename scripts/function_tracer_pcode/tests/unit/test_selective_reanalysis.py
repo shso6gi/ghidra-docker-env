@@ -4,10 +4,10 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseResult, PhaseID
-from scripts.function_tracer_pcode.model import Expression, ReturnInfo, SignatureHypothesis
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixer
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseResult, PhaseID
+from scripts.function_tracer_pcode.core import Expression, ReturnInfo, SignatureHypothesis
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 # ★ conftest から MockProgram、create_mock_analysis、create_mock_result をインポート
@@ -62,7 +62,7 @@ class TestSelectiveReanalysis:
         
         # ReturnAnalyzer.analyze_function_by_name をパッチ
         with patch(
-            'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.analyze_function_by_name',
+            'scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer.analyze_function_by_name',
             mock_analyze_function_by_name
         ):
             # PhaseHandler のモック
@@ -89,7 +89,7 @@ class TestSelectiveReanalysis:
             checker.phase_handler = phase_handler
             
             # ★ 修正: pairwise と monolithic の両方をモック
-            from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+            from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
             from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
             
             strategy_result_unknown = StrategyResult(
@@ -195,7 +195,7 @@ class TestSelectiveReanalysis:
         
         # ReturnAnalyzer.analyze_function_by_name をパッチ
         with patch(
-            'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.analyze_function_by_name',
+            'scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer.analyze_function_by_name',
             mock_analyze_function_by_name
         ):
             # PhaseHandler のモック
@@ -221,7 +221,7 @@ class TestSelectiveReanalysis:
             checker.phase_handler = phase_handler
             
             # ★ 修正: pairwise と monolithic の両方をモック
-            from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+            from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
             from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
             
             strategy_result_unknown = StrategyResult(
@@ -280,7 +280,7 @@ class TestSelectiveReanalysis:
             return create_mock_analysis(function_name)
         
         with patch(
-            'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.analyze_function_by_name',
+            'scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer.analyze_function_by_name',
             mock_analyze_function_by_name
         ):
             # PhaseHandler のモック
@@ -302,7 +302,7 @@ class TestSelectiveReanalysis:
             
             checker.phase_handler = phase_handler
             
-            from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+            from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
             from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
             
             strategy_result_unknown = StrategyResult(
@@ -411,7 +411,7 @@ class TestSelectiveReanalysisIntegration:
             captured_analyses.append((analysis1, analysis2, retry_count))
             
             # UNKNOWN を返す
-            from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+            from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
             from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
             
             return create_mock_result(
@@ -441,15 +441,15 @@ class TestSelectiveReanalysisIntegration:
             return (analysis, False, False)
         
         with patch(
-            'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.analyze_function_by_name',
+            'scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer.analyze_function_by_name',
             mock_analyze_function_by_name
         ):
             with patch(
-                'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.refresh_structural_recurrence_summary',
+                'scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer.refresh_structural_recurrence_summary',
                 mock_refresh_structural_recurrence_summary
             ):
                 with patch.object(checker, '_run_stage_plan', side_effect=mock_run_stage_plan):
-                    with patch('scripts.function_tracer_pcode.equivalence.checker.TypeFixer') as MockTypeFixer:
+                    with patch('scripts.function_tracer_pcode.checker.checker.TypeFixer') as MockTypeFixer:
                         # TypeFixer インスタンスを作成
                         mock_type_fixer1 = Mock()
                         mock_type_fixer2 = Mock()

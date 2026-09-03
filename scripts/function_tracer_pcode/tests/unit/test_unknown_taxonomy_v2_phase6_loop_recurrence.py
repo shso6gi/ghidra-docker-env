@@ -7,9 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.contracts import IdentityScope, authority_digest
-from scripts.function_tracer_pcode.equivalence.v2.execution_authority import ProducerStageRegistry
-from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
+from scripts.function_tracer_pcode.authority.contracts import IdentityScope, authority_digest
+from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+    ProducerStageRegistry,
+)
+from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
     EXPECTED_LOOP_COMMON_REGISTRY_DIGEST,
     EXPECTED_LOOP_PRODUCER_STAGE_REGISTRY_DIGEST,
     LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
@@ -40,40 +42,32 @@ from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
     summary_signals_from_acceptance,
     _issue_loop_solver_query_authority,
 )
-from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
     issue_loop_requirement_assignment,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import EventType
-from scripts.function_tracer_pcode.model.analysis import FunctionReturnAnalysis
-from scripts.function_tracer_pcode.model.analysis import ReturnInfo
-from scripts.function_tracer_pcode.model import Condition, Expression
-from scripts.function_tracer_pcode.model.recurrence_contracts import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+from scripts.function_tracer_pcode.core import Condition, Expression
+from scripts.function_tracer_pcode.core.recurrence_contracts import (
     QuarantinedRecurrenceProposal,
     RecurrenceSeedCore,
     function_recurrence_binding_digest,
 )
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.authority.domains.call_effect import (
     CallEffectPilotEncoder,
     SummaryEffectPrerequisiteProductionSignal,
     summary_effect_prerequisite_signals_from_acceptance,
 )
-from scripts.function_tracer_pcode.equivalence.obligations.cache import (
-    ValidatedUnaryArtifactEntry,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.model import (
-    UnaryArtifactDomain,
-)
-from scripts.function_tracer_pcode.equivalence.obligations.snapshot import (
-    AnalysisSnapshot,
-)
-from scripts.function_tracer_pcode.equivalence.recurrence_promotion import (
-    RecurrenceSidePromotion,
-)
+from scripts.function_tracer_pcode.proof.obligations.cache import ValidatedUnaryArtifactEntry
+from scripts.function_tracer_pcode.proof.obligations.model import UnaryArtifactDomain
+from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+from scripts.function_tracer_pcode.proof.recurrence_promotion import RecurrenceSidePromotion
 
 
 def test_phi_return_authority_serialization_is_recursive_and_canonical():
@@ -327,13 +321,9 @@ def test_method_b_is_not_a_reason_or_proof_identity():
 def _loop_exact_fixture():
     from unittest.mock import Mock
 
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import (
-        ReturnCase,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
-        PairwiseStrategy,
-    )
-    from scripts.function_tracer_pcode.model import Condition, Expression, ReturnInfo
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.core import Condition, Expression, ReturnInfo
     from scripts.function_tracer_pcode.tests.unit.test_object_centric_runtime_refs import (
         _readonly_loop_summary,
         _readonly_sum_expr,
@@ -404,7 +394,7 @@ def _typed_loop_query(
     blocker, requirement, left, right, exact_case, summary_case,
     execution_identity_digest, *, pair_id="(0,1)",
 ):
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
 
@@ -422,10 +412,10 @@ def _typed_loop_query(
 
 
 def _loop_query_preflight_fixture(return_size1, return_size2):
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         preflight_loop_v2_solver_query,
     )
-    from scripts.function_tracer_pcode.model import ComparisonSurface
+    from scripts.function_tracer_pcode.core import ComparisonSurface
 
     _, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
     left = replace(
@@ -482,7 +472,7 @@ def _loop_query_preflight_fixture(return_size1, return_size2):
 def test_loop_v2_return_width_gap_is_typed_query_not_formable(
     return_size1, return_size2,
 ):
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         LoopV2QueryNotFormable,
     )
 
@@ -519,10 +509,8 @@ def test_loop_v2_return_width_gap_is_typed_query_not_formable(
 def test_loop_v2_invalid_return_width_failure_is_not_suppressed(
     monkeypatch, return_size1, return_size2, reason_id,
 ):
-    from scripts.function_tracer_pcode.equivalence.formula.returns import (
-        ReturnWidthMismatchError,
-    )
-    import scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor as query_executor
+    from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
+    import scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor as query_executor
 
     failure = ReturnWidthMismatchError(
         "invalid loop-v2 return width",
@@ -556,7 +544,7 @@ def test_loop_v2_invalid_return_width_failure_is_not_suppressed(
 def test_loop_v2_query_not_formable_rejects_invalid_variant_state(
     return_size1, return_size2,
 ):
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         LoopV2QueryNotFormable,
     )
 
@@ -572,7 +560,7 @@ def test_loop_v2_query_not_formable_rejects_invalid_variant_state(
 
 
 def test_loop_v2_same_width_preflight_still_renders_query():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         RenderedLoopV2SolverQuery,
     )
 
@@ -583,7 +571,7 @@ def test_loop_v2_same_width_preflight_still_renders_query():
 
 
 def test_loop_v2_preflight_does_not_hide_renderer_invariant_failure():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         preflight_loop_v2_solver_query,
     )
 
@@ -671,11 +659,9 @@ def test_loop_exact_term_and_guard_issue_separate_ordered_authorities():
 
 
 def test_loop_exact_factories_ignore_mutated_producer_instance_methods():
-    import scripts.function_tracer_pcode.equivalence.v2.loop_recurrence as loop_module
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
-        PairwiseStrategy,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services import (
+    import scripts.function_tracer_pcode.authority.domains.loop_recurrence as loop_module
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
         orchestration_1,
         readonly_reduction_1,
     )
@@ -746,7 +732,7 @@ def test_loop_exact_guard_joins_the_exact_prior_term_artifact():
 
 
 def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services._shared import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
         make_internal_v2_reason_diagnostic,
     )
 
@@ -790,7 +776,7 @@ def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
 
     session = _Session()
     with production_signal_scope(session):
-        from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
             emit_loop_recurrence_signal,
         )
 
@@ -810,10 +796,8 @@ def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
     ]
     assert analysis1.completed_recovery_proof_evidence == ()
     assert len(session.domain_signal_state["loop_recurrence_completed_requirements"]) == 2
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
 
     recorder = EventRecorder(
         stream_id="real-method-b-stream",
@@ -831,10 +815,8 @@ def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
 
 
 def test_loop_solver_query_and_assignment_bind_exact_live_q():
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
 
     blocker, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
     encoder = LoopRecurrencePilotEncoder()
@@ -915,10 +897,10 @@ def test_loop_solver_query_rejects_direct_construction_and_wrong_live_q():
         exact_case, summary_case, session.identity.execution_identity_digest,
     )
     assert query.proof_kind != requirements["loop_exact_guard_partition"].proof_kind
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
-    import scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor as query_executor_module
+    import scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor as query_executor_module
 
     rendered = render_loop_v2_solver_query(
         blocker=blocker,
@@ -977,10 +959,8 @@ def test_loop_solver_query_rejects_direct_construction_and_wrong_live_q():
 
 
 def _loop_solver_runtime_fixture(result_id):
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
 
     blocker, _, _, _, exact_case, summary_case, left, right = _loop_exact_fixture()
     encoder = LoopRecurrencePilotEncoder()
@@ -1023,8 +1003,8 @@ def _loop_solver_runtime_fixture(result_id):
 
 
 def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
@@ -1072,10 +1052,10 @@ def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(mon
     ) == ()
     assert "loop_solver_unsat_completion_receipts" not in session.domain_signal_state
     assert len(session.domain_signal_state["loop_sat_safety_handoffs"]) == 1
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ModelBoundRelationalRefutationArtifact,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SatSafetyBlockerProductionSignal,
     )
 
@@ -1099,8 +1079,8 @@ def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(mon
 def test_loop_sat_refutation_fails_closed_when_fixed_model_replay_is_not_sat(
     monkeypatch,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
@@ -1162,24 +1142,22 @@ def test_loop_sat_refutation_fails_closed_when_fixed_model_replay_is_not_sat(
 def test_loop_solver_batch_commit_failure_rolls_back_stream_and_all_ledgers(
     monkeypatch,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         active_loop_requirement_for_signal,
         execute_loop_solver_rendered_query,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -1266,27 +1244,23 @@ def test_loop_solver_batch_commit_failure_rolls_back_stream_and_all_ledgers(
 def test_loop_solver_phase7_execution_buffer_failure_precedes_stream_and_ledgers(
     monkeypatch,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         active_loop_requirement_for_signal,
         execute_loop_solver_rendered_query,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -1374,7 +1348,7 @@ def test_loop_solver_phase7_execution_buffer_failure_precedes_stream_and_ledgers
 
 
 def _loop_sat_safety_handoff(label):
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SatSafetyBlockerProductionSignal,
     )
 
@@ -1394,7 +1368,7 @@ class _LoopSatHandoffRoute:
 
     @staticmethod
     def accepts_signal_type(signal_type):
-        from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+        from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
             SatSafetyBlockerProductionSignal,
         )
 
@@ -1405,7 +1379,7 @@ class _LoopSatHandoffRoute:
 
 
 def test_loop_sat_handoff_is_retained_when_encoder_returns_zero(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+    import scripts.function_tracer_pcode.authority.lifecycle.production_signals as module
 
     handoff = _loop_sat_safety_handoff("encoder-zero")
     session = SimpleNamespace(
@@ -1419,7 +1393,7 @@ def test_loop_sat_handoff_is_retained_when_encoder_returns_zero(monkeypatch):
 
 
 def test_loop_sat_handoff_is_retained_when_phase7_activation_fails(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+    import scripts.function_tracer_pcode.authority.lifecycle.production_signals as module
 
     handoff = _loop_sat_safety_handoff("phase7-failure")
     session = SimpleNamespace(
@@ -1437,7 +1411,7 @@ def test_loop_sat_handoff_is_retained_when_phase7_activation_fails(monkeypatch):
 
 
 def test_loop_sat_handoff_consumes_only_successful_prefix(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+    import scripts.function_tracer_pcode.authority.lifecycle.production_signals as module
 
     first = _loop_sat_safety_handoff("first")
     second = _loop_sat_safety_handoff("second")
@@ -1455,7 +1429,7 @@ def test_loop_sat_handoff_consumes_only_successful_prefix(monkeypatch):
 
 
 def test_loop_sat_handoff_consumes_typed_duplicate_without_emit(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
+    import scripts.function_tracer_pcode.authority.lifecycle.production_signals as module
 
     handoff = _loop_sat_safety_handoff("typed-duplicate")
     session = SimpleNamespace(
@@ -1474,17 +1448,13 @@ def test_loop_sat_handoff_consumes_typed_duplicate_without_emit(monkeypatch):
 def test_loop_sat_handoff_append_failure_allows_reemit_but_keeps_failure_authority(
     monkeypatch,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.production_signals as module
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    import scripts.function_tracer_pcode.authority.lifecycle.production_signals as module
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
         SAT_SAFETY_REASON_REGISTRY,
         SAT_SAFETY_RECOVERY_REGISTRY,
         SatSafetyPilotEncoder,
@@ -1591,8 +1561,8 @@ def test_loop_sat_handoff_append_failure_allows_reemit_but_keeps_failure_authori
 def test_loop_solver_nonproof_statuses_never_complete_q(
     monkeypatch, status, event_type
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
@@ -1662,8 +1632,8 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
     expected_open_requirements,
     reverse_batch_receipts,
 ):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         TerminalLifecycleProjectionAuthority,
@@ -1671,10 +1641,8 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
         CauseObservedEventAuthority,
         EventIntent,
         EventRecorder,
@@ -1766,24 +1734,22 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
 
 
 def test_loop_connector_finalizes_open_ledger_and_selects_terminal_timeout(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         active_loop_requirement_for_signal,
         execute_loop_solver_rendered_query,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -1861,23 +1827,21 @@ def test_loop_connector_finalizes_open_ledger_and_selects_terminal_timeout(monke
 
 
 def test_loop_connector_materializes_unemitted_receipt_before_sealing(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         PINNED_SOLVER_EXECUTION_ISSUER,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
+    from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
         _issue_loop_solver_query_authority,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -1961,34 +1925,32 @@ def test_loop_connector_materializes_unemitted_receipt_before_sealing(monkeypatc
 
 
 def test_loop_sat_refutation_enters_phase6_1_safety_backlog(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         ExecutionAuthorityDeploymentPolicy,
         ModelBoundRelationalRefutationArtifact,
         activate_execution_authority_deployment,
         install_execution_authority_signing_key,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SatSafetyBlockerProductionSignal,
         active_loop_requirement_for_signal,
         execute_loop_solver_rendered_query,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.registry import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.registry import (
         SealedReasonRegistry,
         SealedRecoveryRegistry,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
         SAT_SAFETY_REASON_REGISTRY,
         SAT_SAFETY_RECOVERY_REGISTRY,
         SatSafetyPilotEncoder,
     )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
     from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -2104,11 +2066,11 @@ def _session(result_occurrence_id="result-loop-a"):
 def test_multiple_recurrence_proposals_refuse_unbound_subordinate_refresh(
     monkeypatch,
 ):
-    from scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_3 import (
+    from scripts.function_tracer_pcode.analysis.returns.session_helpers_3 import (
         _impl_refresh_structural_recurrence_summary,
     )
-    from scripts.function_tracer_pcode.analysis import decompilation_broker
-    from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation import (
+    import scripts.function_tracer_pcode.ghidra.decompilation_broker as decompilation_broker
+    from scripts.function_tracer_pcode.authority.process.subordinate_decompilation import (
         SubordinateParentBindingRequiredDiagnostic,
     )
 
@@ -2163,10 +2125,8 @@ def _duplicate_loop_signal_for_site(site_id):
     }:
         return _loop_exact_fixture()[0]
     if site_id == "recurrence-summary-loop":
-        from scripts.function_tracer_pcode.model import Expression, ReturnInfo
-        from scripts.function_tracer_pcode.model.analysis import (
-            SummaryReturnCandidate,
-        )
+        from scripts.function_tracer_pcode.core import Expression, ReturnInfo
+        from scripts.function_tracer_pcode.core.analysis import SummaryReturnCandidate
 
         analysis = _analysis("duplicate-summary")
         candidate = SummaryReturnCandidate(
@@ -2191,16 +2151,12 @@ def _duplicate_loop_signal_for_site(site_id):
 
 
 def _loop_production_session(*signal_types, phase7_manifest=None, case_id="loop"):
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotSession,
         ProductionPilotExecutionIdentity,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
 
     encoder = LoopRecurrencePilotEncoder()
     composite = CompositeProductionSignalEncoder({
@@ -2228,7 +2184,7 @@ def _loop_production_session(*signal_types, phase7_manifest=None, case_id="loop"
 def test_loop_blocker_failed_first_emit_rolls_back_and_can_be_reemitted(
     monkeypatch, failure_stage,
 ):
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         emit_loop_recurrence_signal,
     )
 
@@ -2324,7 +2280,7 @@ def test_recurrence_completion_state_commits_only_after_stream_append(
 
 
 def test_nonempty_loop_intent_without_pending_plan_is_rejected_before_append():
-    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
 
     signal = LoopBlockerProductionSignal.from_recurrence_proposal(
         _analysis("missing-plan"), _proposal("missing-plan-seed")
@@ -2615,7 +2571,7 @@ def test_recurrence_completion_signal_requires_exact_validated_promotion():
 
 
 def test_recurrence_completion_uses_manifest_sealed_completion_producer():
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         emit_loop_recurrence_signal,
     )
 
@@ -2676,7 +2632,7 @@ def test_recurrence_completion_rejects_inner_target_in_production_payload():
 
 
 def test_pairwise_loop_signal_contract_is_dispatch_certificate_bound():
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services.orchestration_1 import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration_1 import (
         dispatch_bound_observation_contract_digest,
     )
 
@@ -2755,10 +2711,10 @@ def test_recurrence_completion_rejects_stale_source_or_successor_lineage():
 
 
 def test_summary_overlap_signals_are_unary_and_bind_exact_same_function_peers():
-    from scripts.function_tracer_pcode.analysis.summary_returns import (
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
         accept_summary_return_candidates,
     )
-    from scripts.function_tracer_pcode.model import ReturnInfo
+    from scripts.function_tracer_pcode.core import ReturnInfo
     from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
         _analysis_with_exact_returns,
         _cond,
@@ -2803,10 +2759,10 @@ def test_summary_overlap_signals_are_unary_and_bind_exact_same_function_peers():
 
 
 def test_slice3_effect_prerequisite_suppresses_candidate_local_slice4_effect_cause():
-    from scripts.function_tracer_pcode.analysis.summary_returns import (
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
         accept_summary_return_candidates,
     )
-    from scripts.function_tracer_pcode.model import ReturnInfo
+    from scripts.function_tracer_pcode.core import ReturnInfo
     from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
         _analysis_with_exact_returns,
         _cond,

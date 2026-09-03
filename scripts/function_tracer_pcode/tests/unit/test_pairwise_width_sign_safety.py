@@ -3,13 +3,16 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
-from scripts.function_tracer_pcode.equivalence.obligations import (
-    SolverQueryExecutionReceipt,
+from scripts.function_tracer_pcode.semantics.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
+from scripts.function_tracer_pcode.proof.obligations import SolverQueryExecutionReceipt
+from scripts.function_tracer_pcode.core import (
+    ComparisonSurface,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
 )
-from scripts.function_tracer_pcode.model import ComparisonSurface, Expression, FunctionReturnAnalysis, ReturnInfo
 
 
 _CROSS_SIDE_EXTENSION_SURFACE_EVIDENCE = {

@@ -7,21 +7,21 @@ import pytest
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary, StoreEffect
-from scripts.function_tracer_pcode.equivalence.formula import builder as formula_builder_module
+from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary, StoreEffect
+from scripts.function_tracer_pcode.proof.formula import builder as formula_builder_module
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo, ParameterInfo
-from scripts.function_tracer_pcode.equivalence.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
-from scripts.function_tracer_pcode.equivalence.strategies import monolithic as monolithic_module
-from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo, ParameterInfo
+from scripts.function_tracer_pcode.semantics.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
+from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
+from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     _ParameterMetadataRewriter,
     build_pair_query,
     extract_return_cases,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     CallTargetRef,
     Condition,
@@ -42,7 +42,7 @@ from scripts.function_tracer_pcode.model import (
     StorageInfo,
     UnknownValueRef,
 )
-from scripts.function_tracer_pcode.model.render_smt import (
+from scripts.function_tracer_pcode.core.render_smt import (
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
 )

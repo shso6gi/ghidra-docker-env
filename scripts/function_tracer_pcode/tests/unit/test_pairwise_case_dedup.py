@@ -12,31 +12,33 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     _build_object_centric_condition_signature,
     build_normalized_inequality_query,
     build_pair_query,
     extract_return_cases,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+    solve_query_twostage,
+)
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonId,
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
     lower_post_state_expression_for_smt,
     post_state_read_expression_for_location,
 )
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,

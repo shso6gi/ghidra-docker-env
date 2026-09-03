@@ -5,12 +5,9 @@ from dataclasses import replace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
-    CensusEntry,
-    CensusManifest,
-)
-from scripts.function_tracer_pcode.equivalence.v2.codecs import StrictV2JsonCodec
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.census_contract import CensusEntry, CensusManifest
+from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.authority.contracts import (
     BlockerEligibilityBaseRow,
     CActiveBaseRow,
     CauseOccurrence,
@@ -35,7 +32,7 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     bind_satisfaction_contract,
     requirement_slot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import (
+from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
     DecisiveProofReceipt,
     ErrorReceipt,
@@ -43,18 +40,18 @@ from scripts.function_tracer_pcode.equivalence.v2.decision import (
     TerminalTimeoutReceipt,
     finalize_decision,
 )
-from scripts.function_tracer_pcode.equivalence.v2.legacy_codec import (
+from scripts.function_tracer_pcode.authority.legacy_codec import (
     LegacyMappingCertainty,
     LegacyRecord,
     SealedLegacyMappingRegistry,
 )
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     CauseTransformedEventAuthority,
     DecisiveProofEventAuthority,

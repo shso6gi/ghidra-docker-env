@@ -1,11 +1,11 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence_summary``."""
+"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence.summarizer``."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from ._shared import (
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     Condition,
     ConditionSMTOracle,
     Expression,
@@ -441,7 +441,7 @@ def _impl__expression_equivalence_target_bits(
     left_bits = int(getattr(left, "get_bit_width", lambda: 0)() or 0)
     right_bits = int(getattr(right, "get_bit_width", lambda: 0)() or 0)
     try:
-        from ...model.render_smt import expression_smt_bit_width
+        from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 
         left_bits = max(left_bits, int(expression_smt_bit_width(left) or 0))
         right_bits = max(right_bits, int(expression_smt_bit_width(right) or 0))
@@ -454,7 +454,7 @@ def _impl__render_summary_auxiliary_smt(
     node,
     symbol_specs: Sequence[dict],
 ) -> Optional[str]:
-    from ...model.render_smt import UnsupportedSmtSemanticsError
+    from scripts.function_tracer_pcode.core.render_smt import UnsupportedSmtSemanticsError
 
     identity_to_spec = {
         spec.get("identity"): spec

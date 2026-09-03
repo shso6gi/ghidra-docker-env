@@ -3,30 +3,30 @@
 
 from dataclasses import replace
 
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo
-from scripts.function_tracer_pcode.equivalence.formula.variable import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo
+from scripts.function_tracer_pcode.proof.formula.variable import (
     ExtensionType,
     ExtraVariableAnalysis,
     ParameterFragmentInfo,
     VariableClassification,
 )
-from scripts.function_tracer_pcode.equivalence.semantic_width import (
+from scripts.function_tracer_pcode.semantics.semantic_width import (
     align_return_value_extension_surfaces,
     normalize_analysis_semantic_width,
 )
-from scripts.function_tracer_pcode.equivalence.param_semantics import (
+from scripts.function_tracer_pcode.semantics.param_semantics import (
     ParameterSemanticHint,
     infer_parameter_semantics,
 )
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
     lower_post_state_expression_for_smt_if_needed,
     post_state_read_expression_for_location,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     ComparisonSurface,
     Expression,

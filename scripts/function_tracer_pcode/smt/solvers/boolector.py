@@ -8,7 +8,7 @@ import tempfile
 import os
 from typing import Optional, Dict, Any, Tuple
 
-from ..interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 
 
 class BoolectorSolver(SMTSolver):

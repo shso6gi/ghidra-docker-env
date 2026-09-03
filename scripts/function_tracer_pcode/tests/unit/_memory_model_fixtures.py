@@ -7,9 +7,9 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
     concretize_readonly_loads,
 )
 
-from scripts.function_tracer_pcode.analysis import effect_summary as effect_summary_module
+import scripts.function_tracer_pcode.analysis.effects.summary as effect_summary_module
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CallArgumentEvidence,
     CallArgumentWidthEvidence,
     CanonicalLocation,
@@ -62,7 +62,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     EffectSummary,
 )
 
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CallTargetRef,
     DeferredCallRef,
@@ -75,27 +75,39 @@ from scripts.function_tracer_pcode.model import (
     PcodeOpRef,
 )
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 
-from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
+from scripts.function_tracer_pcode.analysis.phi_resolver import (
+    ExpandedBranch as PhiExpandedBranch,
+    PhiHandler,
+)
 
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixer, TypeFixerConfig
 
-from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
+from scripts.function_tracer_pcode.checker.arch.mips64 import MIPS64Handler
 
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 
-from scripts.function_tracer_pcode.equivalence.param_semantics import ParameterSemanticHint
+from scripts.function_tracer_pcode.semantics.param_semantics import ParameterSemanticHint
 
-from scripts.function_tracer_pcode.equivalence.normalize.core import normalize_expression
+from scripts.function_tracer_pcode.semantics.normalize.core import normalize_expression
 
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core import (
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 
-from scripts.function_tracer_pcode.model.storage import StorageInfo
+from scripts.function_tracer_pcode.core.storage import StorageInfo
 
-from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
+from scripts.function_tracer_pcode.semantics.transform.expander import (
+    ExpressionExpander,
+    ExpandedValue,
+)
 
 def _param(
     name: str,

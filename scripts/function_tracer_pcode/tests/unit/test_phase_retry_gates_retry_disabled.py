@@ -4,10 +4,10 @@
 import pytest
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 # ★ [P3] conftest からhelper関数をインポート（fixture化されているのでOK）
 from conftest import create_mock_result, create_mock_analysis, MockProgram
@@ -17,7 +17,7 @@ class TestRetryDisabledEarlyExit:
     
     def test_retry_disabled_exits_at_phase0_unknown(self, mock_program_mips64, mock_program_x86):
         """retry_with_type_fix=False では Phase 0 UNKNOWN で即終了し、recovery に入らない"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -67,7 +67,7 @@ class TestRetryDisabledEarlyExit:
     
     def test_retry_disabled_exits_at_phase0_sat(self, mock_program_mips64, mock_program_x86):
         """retry_with_type_fix=False では Phase 0 SAT で即終了し、Phase 4-B も実行しない"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)

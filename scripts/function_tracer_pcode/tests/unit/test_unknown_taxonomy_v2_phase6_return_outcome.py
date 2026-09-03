@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
+from scripts.function_tracer_pcode.authority.domains.return_outcome import (
     OUTCOME_STAGE_REASON_MATRIX,
     RETURN_OUTCOME_REASON_REGISTRY,
     RETURN_OUTCOME_RECOVERY_REGISTRY,
@@ -17,16 +17,16 @@ from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
     UnaryOutcomeWitnessArtifact,
     reason_for_stage_status,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     OutcomePartitionProductionSignal,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
+from scripts.function_tracer_pcode.authority.sites.runtime import (
     Phase7ProductionRuntime,
     runtime_from_audited_manifest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     EventRecorder,
     EventIntent,
     EventType,
@@ -34,25 +34,25 @@ from scripts.function_tracer_pcode.equivalence.v2.stream import (
 )
 from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.parallel import ParallelResult
-from scripts.function_tracer_pcode.equivalence.v2.contracts import Outcome, authority_digest
-from scripts.function_tracer_pcode.equivalence.v2.codecs import StrictV2JsonCodec
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.contracts import Outcome, authority_digest
+from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotConnector,
     TerminalCandidateView,
     TerminalizationIntent,
     run_dual_write_pilot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase7_cutover import (
+from scripts.function_tracer_pcode.authority.sites.activation import (
     TerminalTimeoutCandidateSelectionReceipt,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.obligations.outcome_partition import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
     UnaryProducerResult,
     outcome_seed_digest,
     prove_unary_partition,
     requirement_for_stage,
 )
-from scripts.function_tracer_pcode.equivalence.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
 
 
 _WITNESSES = (
@@ -220,7 +220,7 @@ def _completion_artifact(receipt):
 
 
 def _run_actual_timeout_attempt(session, seed_key):
-    from scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage import (
+    from scripts.function_tracer_pcode.proof.strategies.proof_gates.return_coverage import (
         _unary_solver_status,
     )
 
@@ -623,7 +623,7 @@ def test_return_outcome_completion_requires_same_observed_requirement_and_digest
 
 
 def test_timeout_capture_uses_solver_status_not_aggregate_error_text():
-    from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
+    from scripts.function_tracer_pcode.authority.domains.return_outcome import (
         outcome_stage_capture_scope,
         capture_active_outcome_solver_result,
     )
@@ -648,10 +648,10 @@ def test_timeout_capture_uses_solver_status_not_aggregate_error_text():
 
 
 def test_unary_solver_status_propagates_raw_timeout_to_producer_status():
-    from scripts.function_tracer_pcode.equivalence.strategies.proof_gates.return_coverage import (
+    from scripts.function_tracer_pcode.proof.strategies.proof_gates.return_coverage import (
         _unary_solver_status,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
+    from scripts.function_tracer_pcode.authority.domains.return_outcome import (
         outcome_stage_capture_scope,
     )
 
@@ -724,7 +724,7 @@ def test_production_session_terminalizes_blocking_solver_timeout_as_timeout():
 
 
 def test_recovered_solver_timeout_stays_historical_and_nonterminal():
-    from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
 
     encoder = ReturnOutcomePilotEncoder()
     session = _session()
@@ -1117,8 +1117,8 @@ def test_receiptless_unknown_attempt_supersedes_prior_timeout_attempt():
 
 
 def test_default_off_never_enters_v2_capture_or_signal_authority(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.obligations.outcome_partition as module
-    import scripts.function_tracer_pcode.equivalence.v2.return_outcome as return_module
+    import scripts.function_tracer_pcode.proof.obligations.outcome_partition as module
+    import scripts.function_tracer_pcode.authority.domains.return_outcome as return_module
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("default-off production path entered v2 authority")
@@ -1168,7 +1168,7 @@ def test_active_shadow_validation_failure_does_not_change_v1_producer_result():
 
 
 def test_retry_invocations_bind_session_identity_and_monotonic_ordinal():
-    from scripts.function_tracer_pcode.equivalence.v2.return_outcome import (
+    from scripts.function_tracer_pcode.authority.domains.return_outcome import (
         capture_active_outcome_solver_result,
         outcome_stage_capture_scope,
     )

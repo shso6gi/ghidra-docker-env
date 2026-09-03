@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.candidate import (
+from scripts.function_tracer_pcode.authority.decision.candidate import (
     CandidateDecisionProjection,
     build_candidate_projection,
 )
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+from scripts.function_tracer_pcode.authority.census_contract import (
     ActiveOccurrenceMaterialization,
     CensusEntry,
     CensusManifest,
@@ -17,23 +17,23 @@ from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
     CensusStatus,
     CoverageInputs,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     RecoveryAddressability,
     ResultKind,
     authority_digest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import (
+from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
     DecisiveProofReceipt,
     ErrorReceipt,
     TerminalTimeoutReceipt,
 )
-from scripts.function_tracer_pcode.equivalence.v2.shadow_compare import (
+from scripts.function_tracer_pcode.authority.decision.shadow_compare import (
     LegacyExpectedProjection,
     ShadowComparisonKind,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     DecisiveProofEventAuthority,
     ErrorEventAuthority,
@@ -353,7 +353,7 @@ def test_candidate_projection_cannot_be_forged_outside_builder():
 
 def test_candidate_module_has_no_legacy_or_census_dependency():
     source = Path(
-        "scripts/function_tracer_pcode/equivalence/v2/candidate.py"
+        "scripts/function_tracer_pcode/authority/decision/candidate.py"
     ).read_text(encoding="utf-8")
     for forbidden in (
         "LegacyExpectedProjection", "from .shadow_compare",

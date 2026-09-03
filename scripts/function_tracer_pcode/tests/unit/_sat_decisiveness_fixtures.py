@@ -6,7 +6,7 @@ from typing import Tuple
 
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     CallArgumentEvidence,
     CallTargetResolutionEvidence,
@@ -16,22 +16,19 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     post_state_read_expression_for_location,
 )
 
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilderResult
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilderResult
 
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 
-from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
+from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
-from scripts.function_tracer_pcode.equivalence.strategies.base import ReturnCoverageCheckResult
+from scripts.function_tracer_pcode.proof.strategies.base import ReturnCoverageCheckResult
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import (
-    QueryResult,
-    ReturnCase,
-)
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
 
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofObligation,
     UnknownRecoveryProofKind,
@@ -44,7 +41,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     make_unknown_reason,
 )
 
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,
@@ -57,14 +54,12 @@ from scripts.function_tracer_pcode.model import (
     expression_provenance_key,
 )
 
-from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
+from scripts.function_tracer_pcode.core.runtime_refs import LocationBaseRef
 
-from scripts.function_tracer_pcode.model.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
 
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.equivalence.obligations import (
-    SolverQueryExecutionReceipt,
-)
+from scripts.function_tracer_pcode.proof.obligations import SolverQueryExecutionReceipt
 
 from scripts.function_tracer_pcode.tests.unit._object_target_key_specificity import (
     _object_target_key_is_specific,

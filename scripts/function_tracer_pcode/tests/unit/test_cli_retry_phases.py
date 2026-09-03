@@ -9,7 +9,7 @@ import io
 
 
 def _attach_canonical_mock_decision(result):
-    from function_tracer_pcode.equivalence.v2.phase8_cutover import (
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         attach_canonical_decision, issue_infrastructure_error_decision,
     )
 
@@ -22,7 +22,7 @@ def _attach_canonical_mock_decision(result):
 
 def test_default_retry_phases_enabled():
     """デフォルトでは recovery phases が有効"""
-    from function_tracer_pcode.cli.main import parse_arguments
+    from scripts.function_tracer_pcode.cli.main import parse_arguments
     
     # 最小限の引数でパース
     test_args = ['--equiv', 'binary1', 'binary2', '-f', 'test_func']
@@ -40,7 +40,7 @@ def test_default_retry_phases_enabled():
 
 def test_no_retry_phases_option():
     """--no-retry-phases が指定されたときは recovery phases が無効"""
-    from function_tracer_pcode.cli.main import parse_arguments
+    from scripts.function_tracer_pcode.cli.main import parse_arguments
     
     test_args = ['--equiv', 'binary1', 'binary2', '-f', 'test_func', '--no-retry-phases']
     
@@ -57,7 +57,7 @@ def test_no_retry_phases_option():
 
 def test_emit_result_json_option_defaults_off_and_can_be_enabled():
     """--emit-result-json は通常ログ互換のため opt-in。"""
-    from function_tracer_pcode.cli.main import parse_arguments
+    from scripts.function_tracer_pcode.cli.main import parse_arguments
 
     base_args = ['--equiv', 'binary1', 'binary2', '-f', 'test_func']
 
@@ -72,7 +72,7 @@ def test_emit_result_json_option_defaults_off_and_can_be_enabled():
 
 def test_help_does_not_contain_retry_with_int():
     """help メッセージに --retry-with-int が含まれていないことを確認"""
-    from function_tracer_pcode.cli.main import parse_arguments
+    from scripts.function_tracer_pcode.cli.main import parse_arguments
     
     # ヘルプメッセージをキャプチャ
     test_args = ['--help']
@@ -103,7 +103,7 @@ def test_help_does_not_contain_retry_with_int():
 
 def test_binary_ids_arg_ignores_mock_attribute_placeholders():
     """Mock args の未定義 binary_ids 属性は canonical binary ID として扱わない。"""
-    from function_tracer_pcode.cli.commands.equivalence import _get_binary_ids_arg
+    from scripts.function_tracer_pcode.cli.commands.equivalence import _get_binary_ids_arg
 
     mock_args = Mock()
     assert _get_binary_ids_arg(mock_args) == (None, None)
@@ -120,8 +120,8 @@ def test_binary_ids_arg_ignores_mock_attribute_placeholders():
 
 def test_equiv_check_propagates_retry_flag():
     """run_equivalence_check() が retry_with_type_fix を正しく伝播することを確認"""
-    from function_tracer_pcode.cli.main import run_equivalence_check
-    from function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.cli.main import run_equivalence_check
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     
     # Mock args
     mock_args = Mock()
@@ -202,8 +202,8 @@ def test_equiv_check_propagates_retry_flag():
 
 def test_equiv_check_propagates_no_retry_flag():
     """run_equivalence_check() が --no-retry-phases を正しく伝播することを確認"""
-    from function_tracer_pcode.cli.main import run_equivalence_check
-    from function_tracer_pcode.equivalence import EquivalenceChecker
+    from scripts.function_tracer_pcode.cli.main import run_equivalence_check
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
     
     # Mock args
     mock_args = Mock()
@@ -281,7 +281,7 @@ def test_equiv_check_propagates_no_retry_flag():
 
 def test_cli_output_shows_retry_phases_status():
     """★ [最終修正] CLI 出力に recovery phases の状態が表示されることを確認"""
-    from function_tracer_pcode.cli.main import run_equivalence_check
+    from scripts.function_tracer_pcode.cli.main import run_equivalence_check
     
     mock_args = Mock()
     mock_args.equiv = ('binary1', 'binary2')
@@ -334,8 +334,8 @@ def test_cli_output_shows_retry_phases_status():
     mock_pyghidra.analyze = Mock()
     
     with patch.dict('sys.modules', {'pyghidra': mock_pyghidra}):
-        # ★ [修正] 正しいpatch先: function_tracer_pcode.equivalence.EquivalenceChecker
-        with patch('function_tracer_pcode.equivalence.EquivalenceChecker') as MockEquivChecker:
+        # ★ [修正] 正しいpatch先: scripts.function_tracer_pcode.checker.EquivalenceChecker
+        with patch('scripts.function_tracer_pcode.checker.EquivalenceChecker') as MockEquivChecker:
             # EquivalenceChecker のインスタンスをモック化
             mock_checker = Mock()
             mock_checker.solver_runner = Mock()
@@ -367,7 +367,7 @@ def test_cli_output_shows_retry_phases_status():
 
 def test_cli_output_shows_retry_phases_disabled():
     """★ [最終修正] CLI 出力に recovery phases が無効であることが表示されることを確認"""
-    from function_tracer_pcode.cli.main import run_equivalence_check
+    from scripts.function_tracer_pcode.cli.main import run_equivalence_check
     
     mock_args = Mock()
     mock_args.equiv = ('binary1', 'binary2')
@@ -420,8 +420,8 @@ def test_cli_output_shows_retry_phases_disabled():
     mock_pyghidra.analyze = Mock()
     
     with patch.dict('sys.modules', {'pyghidra': mock_pyghidra}):
-        # ★ [修正] 正しいpatch先: function_tracer_pcode.equivalence.EquivalenceChecker
-        with patch('function_tracer_pcode.equivalence.EquivalenceChecker') as MockEquivChecker:
+        # ★ [修正] 正しいpatch先: scripts.function_tracer_pcode.checker.EquivalenceChecker
+        with patch('scripts.function_tracer_pcode.checker.EquivalenceChecker') as MockEquivChecker:
             mock_checker = Mock()
             mock_checker.solver_runner = Mock()
             mock_checker.solver_runner.get_available_solvers.return_value = ['z3']
@@ -452,7 +452,7 @@ def test_cli_output_shows_retry_phases_disabled():
 
 def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
     """--debug 時に phase usage summary 表示フラグが to_string() に渡ることを確認"""
-    from function_tracer_pcode.cli.main import run_equivalence_check
+    from scripts.function_tracer_pcode.cli.main import run_equivalence_check
 
     mock_args = Mock()
     mock_args.equiv = ('binary1', 'binary2')
@@ -502,7 +502,7 @@ def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
     mock_pyghidra.open_project.return_value.__exit__ = Mock(return_value=False)
 
     with patch.dict('sys.modules', {'pyghidra': mock_pyghidra}):
-        with patch('function_tracer_pcode.equivalence.EquivalenceChecker') as MockEquivChecker:
+        with patch('scripts.function_tracer_pcode.checker.EquivalenceChecker') as MockEquivChecker:
             mock_checker = Mock()
             mock_checker.solver_runner = Mock()
             mock_checker.solver_runner.get_available_solvers.return_value = ['z3']

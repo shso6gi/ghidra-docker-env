@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.validation.process_authority_cleanup import (
+from scripts.function_tracer_pcode.reporting.process_authority_cleanup import (
     ProcessAuthorityCleanupError,
     remove_process_authority_nonce,
 )

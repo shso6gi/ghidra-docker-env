@@ -3,8 +3,8 @@
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Any
-from ...model import Expression, Condition
-from .normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.core import Expression, Condition
+from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
 
 
 class BasicBlockInfo:
@@ -208,9 +208,9 @@ class ConditionTracker:
         image_base: Optional[int] = None,
     ) -> int:
         """CALL を含む分岐条件を、安全な要約が得られる場合のみ再構築する。"""
-        from ...transform import ExpressionExpander
-        from ...analysis.condition.simplifier import ConditionSimplifier
-        from ...model.render_smt import expression_returns_bool
+        from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
+        from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
+        from scripts.function_tracer_pcode.core.render_smt import expression_returns_bool
 
         expander = ExpressionExpander(
             self.tracer,
@@ -361,7 +361,7 @@ class ConditionTracker:
         有効なパスの中で最も条件が少ないものを返す。
         複数パスが必要な場合は get_all_valid_paths_to_block() を使用すること。
         """
-        from .simplifier import ConditionSimplifier
+        from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
         
         if self.entry_block is None:
             return []
@@ -497,7 +497,7 @@ class ConditionTracker:
         not be established, e.g. CFG metadata is absent or path expansion hit a
         resource limit.
         """
-        from .simplifier import ConditionSimplifier
+        from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 
         if limit_paths is None:
             limit_paths = self.MAX_VALID_PATHS
@@ -643,7 +643,7 @@ class ConditionTracker:
         target_index: int,
         limit_paths: int,
     ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
-        from .simplifier import ConditionSimplifier
+        from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 
         self._debug_print(f"get_all_valid_block_paths_to_block for block {target_index}:")
         self._debug_print(f"  Found {len(all_paths)} total paths", 1)

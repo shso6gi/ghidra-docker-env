@@ -11,24 +11,30 @@ through legacy shortcuts.
 from dataclasses import replace
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.equivalence.obligations import (
-    SolverQueryExecutionReceipt,
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.proof.obligations import SolverQueryExecutionReceipt
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
+    extract_return_cases,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
 from scripts.function_tracer_pcode.analysis.condition import ConditionNormalizer
-from scripts.function_tracer_pcode.analysis.recurrence_summary import ResidueLoopCase, StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
+    ResidueLoopCase,
+    StructuralRecurrenceSummarizer,
+)
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonId,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
 )
 from scripts.function_tracer_pcode.smt import (
-    ParallelResult, ParallelSolverRunner, SolverResult, SolverStatus,
+    ParallelResult,
+    ParallelSolverRunner,
+    SolverResult,
+    SolverStatus,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
@@ -53,7 +59,7 @@ from scripts.function_tracer_pcode.model import (
     StorageInfo,
     loop_summary_method_b_key,
 )
-from scripts.function_tracer_pcode.model.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
 
 
 def _base_param() -> Expression:
@@ -1294,7 +1300,7 @@ def _pairwise_strategy() -> PairwiseStrategy:
 
 
 def _stub_pair_solver_unsat(strategy: PairwiseStrategy) -> None:
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
     def solve(*args, **_kwargs):
         pair_id = str(args[-1])
         query = "(assert false)\n(check-sat)"

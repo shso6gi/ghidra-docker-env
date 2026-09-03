@@ -2,7 +2,7 @@
 """PhiHandler caching regressions."""
 
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
-from scripts.function_tracer_pcode.model import Condition, Expression, PcodeOpRef
+from scripts.function_tracer_pcode.core import Condition, Expression, PcodeOpRef
 
 
 class _FakeAddressSpace:

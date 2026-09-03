@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CallArgumentEvidence,
     CallSiteEffectSummaryEvidence,
     EffectSummary,
@@ -19,8 +19,8 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     StoreEffectProvenance,
     UnsupportedCallEffectRef,
 )
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
-from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     ArtifactObjectIdentity,
     EquivalenceObservationContract,
     InternalSolverProofArtifact,
@@ -35,28 +35,28 @@ from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     evaluate_obligation_proof_readiness,
     condition_key,
 )
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     CallProofDecisionMode,
     StrategySourceAnalysisPair,
     prepare_solver_surface,
     validate_call_resolution_projection,
 )
-from scripts.function_tracer_pcode.equivalence.call_effect_producer import (
+from scripts.function_tracer_pcode.proof.call_effect.producer import (
     _RenderedStage,
     _execute_rendered_stage,
     V2CallEffectExecutionContext,
     produce_pure_direct_call_proofs,
     produce_v2_pure_direct_call_proofs,
 )
-from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
+from scripts.function_tracer_pcode.authority.domains.call_effect import (
     CALL_EFFECT_ARTIFACT_CAPABILITY_REGISTRY,
     CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
     CALL_EFFECT_REASON_REGISTRY,
     CALL_EFFECT_RECOVERY_REGISTRY,
     CallEffectPilotEncoder,
 )
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     BlockerEligibilityBaseRow,
     CActiveBaseRow,
     IdentityScope,
@@ -65,12 +65,12 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     CensusMode,
     authority_digest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.census_contract import (
+from scripts.function_tracer_pcode.authority.census_contract import (
     CensusManifest,
     join_outcome_relations,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import FinalizationAuthority
-from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+from scripts.function_tracer_pcode.authority.decision.decision import FinalizationAuthority
+from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
     ExecutionAuthorityDeploymentPolicy,
     ProducerStageContract,
     ProducerStageRegistry,
@@ -81,21 +81,21 @@ from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
     install_execution_authority_signing_key,
     issue_call_effect_requirement_assignment,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CallEffectBlockerProductionSignal,
     CallEffectPrerequisiteProductionSignal,
     CallEffectProofBatchProductionSignal,
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotConnector,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     _cross_binary_expression_shape,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     CallTargetRef,
     ComparisonSurface,
@@ -1418,7 +1418,7 @@ def test_prepared_use_domain_mapping_rebuild_rejects_manifest_tampering(tamper_k
 
 def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkeypatch):
     pytest.importorskip("z3")
-    import scripts.function_tracer_pcode.equivalence.checker as checker_module
+    import scripts.function_tracer_pcode.checker.checker as checker_module
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
@@ -2037,7 +2037,7 @@ def test_preflight_preserves_source_arguments_for_pairwise_override(monkeypatch)
 
 
 def test_preflight_rejects_override_eq_without_consumption_receipt(monkeypatch):
-    from scripts.function_tracer_pcode.equivalence.strategies.proof_gates._shared import StrategyResult
+    from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import StrategyResult
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
@@ -2063,8 +2063,8 @@ def test_preflight_rejects_override_eq_without_consumption_receipt(monkeypatch):
 
 def test_preflight_monolithic_branch_consumes_prepared_surface_and_emits_receipt(monkeypatch):
     pytest.importorskip("z3")
-    import scripts.function_tracer_pcode.equivalence.call_effect_preflight as preflight_module
-    from scripts.function_tracer_pcode.equivalence.strategies import monolithic as monolithic_module
+    import scripts.function_tracer_pcode.proof.call_effect.preflight as preflight_module
+    from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
@@ -2658,7 +2658,7 @@ def test_v2_call_effect_persists_nonselected_timeout_history(monkeypatch):
             "v2-call-history-key", (), 3600, "test-revocation",
         )
     )
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as authority_module
 
     monkeypatch.setattr(
         authority_module,
@@ -2732,7 +2732,7 @@ def test_v2_call_effect_live_solver_timeout_finalizes_as_timeout(monkeypatch):
             "v2-call-terminal-timeout-key", (), 3600, "test-revocation",
         )
     )
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as authority_module
 
     monkeypatch.setattr(
         authority_module,
@@ -2820,7 +2820,7 @@ def test_v2_call_effect_partial_stage_prefix_is_not_replayed(monkeypatch):
             "test-revocation",
         )
     )
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as authority_module
 
     monkeypatch.setattr(
         authority_module,
@@ -2908,7 +2908,7 @@ def test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences(monke
         "v2-call-repeat-policy", 1, "test-owner", "test-source",
         "v2-call-repeat-key", (), 3600, "test-revocation",
     ))
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as authority_module
 
     monkeypatch.setattr(
         authority_module,
@@ -2990,7 +2990,7 @@ def test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger(monk
         "v2-call-prebatch-policy", 1, "test-owner", "test-source",
         "v2-call-prebatch-key", (), 3600, "test-revocation",
     ))
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as authority_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as authority_module
 
     monkeypatch.setattr(
         authority_module,
@@ -3102,9 +3102,7 @@ def test_totality_ineligible_call_obligation_emits_pure_semantics_frontier():
     phase7_manifest = json.loads((root / (
         "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
     )).read_text(encoding="utf-8"))
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
     connector = ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(
             reason_registry=CALL_EFFECT_REASON_REGISTRY,

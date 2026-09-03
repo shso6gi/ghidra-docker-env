@@ -9,17 +9,13 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.normalize.context import (
-    NormalizationContext,
-)
-from scripts.function_tracer_pcode.equivalence.normalize.facts import (
-    extract_sign_facts,
-)
-from scripts.function_tracer_pcode.equivalence.normalize.policy import (
+from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.semantics.normalize.facts import extract_sign_facts
+from scripts.function_tracer_pcode.semantics.normalize.policy import (
     extract_min_excluded_params,
     extract_upper_bound_facts,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from normalization_helpers import make_const, make_param
 
 

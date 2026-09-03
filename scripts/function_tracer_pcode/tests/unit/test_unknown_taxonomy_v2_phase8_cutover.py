@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.authority.contracts import (
     BlockerEligibilityBaseRow,
     CActiveBaseRow,
     Outcome,
@@ -14,7 +14,7 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     VerifiedLifecycleProjection,
     authority_digest,
 )
-from scripts.function_tracer_pcode.equivalence.v2.decision import (
+from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
     DecisiveProofReceipt,
     ErrorReceipt,
@@ -22,7 +22,7 @@ from scripts.function_tracer_pcode.equivalence.v2.decision import (
     TerminalTimeoutReceipt,
     finalize_decision,
 )
-from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
+from scripts.function_tracer_pcode.authority.decision.production_cutover import (
     BATCH_RESUME_MATRIX,
     CLI_EXIT_MATRIX,
     RETRY_FALLBACK_MATRIX,
@@ -30,13 +30,13 @@ from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
     attach_canonical_relations,
     outcome_from_payload,
 )
-from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
     PAIR_STATUS_PUBLIC_KEY_FILE,
     generate_pair_status_keypair,
     seal_pair_status,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
-from scripts.function_tracer_pcode.validation.result_summary import (
+from scripts.function_tracer_pcode.reporting.result_summary import (
     aggregate_validation_logs_by_function,
     build_run_health_summary,
     classify_result_payload,
@@ -163,9 +163,7 @@ def test_all_five_outcomes_have_explicit_retry_batch_and_cli_policy():
 
 @pytest.mark.parametrize("outcome", tuple(Outcome))
 def test_stage_fallback_consumes_the_all_five_policy(outcome):
-    from scripts.function_tracer_pcode.equivalence.obligations.stage_runner import (
-        _cutover_branch_policy,
-    )
+    from scripts.function_tracer_pcode.proof.obligations.stage_runner import _cutover_branch_policy
 
     result = SimpleNamespace(
         is_equivalent={
@@ -284,15 +282,12 @@ def _write_signed_unknown_pair_status(log: Path) -> None:
 
 
 def test_pair_status_resume_policy_keeps_unknown_and_timeout_resumable():
-    from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
-        pair_status_resume_disposition, resume_disposition_should_skip,
+    from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+        pair_status_resume_disposition,
+        resume_disposition_should_skip,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
-        CLI_EXIT_MATRIX,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
-        CLI_EXIT_CODE_BY_OUTCOME,
-    )
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
+    from scripts.function_tracer_pcode.authority.contracts import CLI_EXIT_CODE_BY_OUTCOME
 
     assert CLI_EXIT_MATRIX is CLI_EXIT_CODE_BY_OUTCOME
     assert pair_status_resume_disposition.__name__ == "pair_status_resume_disposition"
@@ -361,27 +356,23 @@ def test_canonical_summary_keeps_only_final_receipt_bound_payload(tmp_path):
 def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     tmp_path, monkeypatch,
 ):
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
         PROCESS_DURABLE_REASON_REGISTRY,
         PROCESS_DURABLE_RECOVERY_REGISTRY,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         PendingEqClosureAuthority,
         SatSafetyBlockerProductionSignal,
         issue_pending_eq_closure_authority,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
-        SatSafetyPilotEncoder,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import SatSafetyPilotEncoder
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         PINNED_SOLVER_EXECUTION_ISSUER,
     )
     occurrence_nonce = "phase8-eq-closure-occurrence"
@@ -399,10 +390,8 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         }),
     )
     session = connector.begin({"case": "phase8-eq-closure"})
-    from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import (
-        _analysis,
-    )
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import _analysis
 
     with production_signal_scope(session):
         trusted_result = EquivalenceChecker(
@@ -453,7 +442,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.EQUIVALENT
     assert session.phase7_runtime_result is None
 
-    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         RESULT_ENVELOPE_FILE,
         _semantic_projection,
         build_canonical_result_finalization_bundle,
@@ -560,24 +549,20 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
 
 
 def test_pending_eq_revalidates_from_immutable_post_cleanup_receipt_only():
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
         PROCESS_DURABLE_REASON_REGISTRY,
         PROCESS_DURABLE_RECOVERY_REGISTRY,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         issue_pending_eq_closure_authority,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import (
-        _analysis,
-    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import _analysis
 
     connector = ProductionDualWritePilotConnector(ShadowLifecycleReducer(
         reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
@@ -609,25 +594,25 @@ def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
     import hashlib
     import hmac
 
-    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         build_canonical_result_finalization_bundle,
         validate_canonical_result_finalization_bundle,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         PINNED_SOLVER_EXECUTION_ISSUER,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
         PROCESS_DURABLE_REASON_REGISTRY,
         PROCESS_DURABLE_RECOVERY_REGISTRY,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import (
-        DecisiveProofEventAuthority, EventIntent, EventType,
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        DecisiveProofEventAuthority,
+        EventIntent,
+        EventType,
     )
 
     nonce = "canonical-occurrence-nonce"
@@ -701,7 +686,7 @@ def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
     import hashlib
     import hmac
 
-    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         attach_durable_error_finalization,
         build_canonical_result_finalization_bundle,
         validate_canonical_result_finalization_bundle,

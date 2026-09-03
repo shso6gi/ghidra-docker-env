@@ -4,32 +4,26 @@ import json
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.cause_identity import (
+from scripts.function_tracer_pcode.checker.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
-from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     TypedProjectionAssertionBundle,
     projection_binding_evidence_from_query,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     _build_pairwise_extra_assertions,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
-    PairwiseStrategy,
-)
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
     execute_canonical_guard_query,
     solve_query_after_guard,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.smt import (
-    ParallelResult,
-    SolverResult,
-    SolverStatus,
-)
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
-from scripts.function_tracer_pcode.equivalence.obligations import (
+from scripts.function_tracer_pcode.proof.obligations import (
     GuardDisjointArtifact,
     GuardOverlapAttempt,
     GuardOverlapExecutionResult,
@@ -52,7 +46,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     StructuralEqualityReceipt,
     issue_structural_equality_receipt,
 )
-from scripts.function_tracer_pcode.model import Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.core import Expression, ExpressionType, ReturnInfo
 
 
 _UNSAT_QUERY = "(set-logic QF_BV)\n(assert false)\n(check-sat)"
@@ -178,7 +172,7 @@ def test_guard_disjoint_direct_issue_has_no_authority():
 
 
 def test_guard_query_artifact_direct_issue_is_rejected():
-    from scripts.function_tracer_pcode.equivalence.obligations.guard_overlap import (
+    from scripts.function_tracer_pcode.proof.obligations.guard_overlap import (
         issue_guard_query_execution_artifact,
     )
 
@@ -215,7 +209,7 @@ def test_canonical_guard_executor_rejects_spoofed_strategy_identity():
         (),
         {
             "__module__": (
-                "scripts.function_tracer_pcode.equivalence.strategies.pairwise"
+                "scripts.function_tracer_pcode.proof.strategies.pairwise"
             )
         },
     )
@@ -496,7 +490,7 @@ def test_duplicate_terminal_query_is_rejected():
 
 
 def test_fabricated_aggregate_partition_candidate_has_no_authority():
-    from scripts.function_tracer_pcode.equivalence.obligations.pair_closure_producers import (
+    from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers import (
         AggregatePartitionCandidate,
         validate_aggregate_partition_candidate,
     )
@@ -524,10 +518,10 @@ def test_fabricated_aggregate_partition_candidate_has_no_authority():
 
 
 def test_pinned_proof_registry_is_immutable():
-    from scripts.function_tracer_pcode.equivalence.obligations import (
+    from scripts.function_tracer_pcode.proof.obligations import (
         pair_closure_producers as producer_module,
     )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
         orchestration_1 as _sealed_orchestration,
     )
 
@@ -541,20 +535,18 @@ def test_pinned_proof_registry_is_immutable():
 def test_other_producer_execution_namespace_mutation_fails_closed(
     monkeypatch,
 ):
-    from scripts.function_tracer_pcode.equivalence.obligations.pair_closure_producers import (
+    from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers import (
         RuntimeReductionCandidate,
         validate_runtime_reduction_candidate,
     )
-    from scripts.function_tracer_pcode.equivalence.obligations import (
+    from scripts.function_tracer_pcode.proof.obligations import (
         pair_closure_producers as producer_module,
     )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise import (
-        PairwiseStrategy,
-    )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_services import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
         orchestration_1 as _sealed_orchestration,
     )
-    from scripts.function_tracer_pcode.model import Expression
+    from scripts.function_tracer_pcode.core import Expression
 
     fake_oracle = SimpleNamespace(
         conjunction_is_unsat=lambda *_args, **_kwargs: True
@@ -606,7 +598,7 @@ def test_directly_constructed_artifacts_have_no_closure_authority():
         _binding().graph_generation,
     )
     requirement = graph.requirement(_seed("left"), _seed("right"), "(check-sat)")
-    from scripts.function_tracer_pcode.equivalence.obligations import GuardDisjointArtifact
+    from scripts.function_tracer_pcode.proof.obligations import GuardDisjointArtifact
     forged_guard = GuardUnsatClosureArtifact(GuardDisjointArtifact(
         requirement.stable_key(), requirement.canonical_query_digest,
         _binding().derived_view_id, _binding().premise_digest,
@@ -620,7 +612,7 @@ def test_directly_constructed_artifacts_have_no_closure_authority():
 
 
 def test_producer_closure_cannot_be_issued_outside_registered_validator():
-    from scripts.function_tracer_pcode.equivalence.obligations.pair_disposition import (
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
         RuntimeReductionClosureArtifact,
         issue_producer_validated_closure,
     )

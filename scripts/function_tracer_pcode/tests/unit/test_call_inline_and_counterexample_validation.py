@@ -6,18 +6,18 @@ import pytest
 
 from conftest import resolve_mock_data_type
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
-from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
-from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
     _build_model_validation_query,
     solve_query_twostage,
     validate_counterexample_globally,
     validate_counterexample_across_cases,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CallTargetRef,
     CanonicalLocation,
@@ -31,7 +31,10 @@ from scripts.function_tracer_pcode.model import (
     UnknownValueRef,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
+from scripts.function_tracer_pcode.semantics.transform.expander import (
+    ExpandedValue,
+    ExpressionExpander,
+)
 
 
 def _param_expr(name: str, index: int = 0, size: int = 4) -> Expression:
@@ -3302,7 +3305,7 @@ def test_return_analyzer_detects_noreturn_target_from_object_centric_resolved_co
     call_op.getInput.return_value = target_varnode
 
     with patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.resolve_call_targets",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.resolve_call_targets",
         return_value=[(CallTargetRef.from_code_address(0x401234), [])],
     ):
         with patch.object(
@@ -4307,8 +4310,8 @@ def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
             observed["after_child_effect_summary"] = analyzer._current_effect_summary
         return Mock(synthetic_expr=None, has_unsupported_call=False, unsupported_call_sites=())
 
-    with patch("scripts.function_tracer_pcode.analysis.analyzer.PcodeTracer", _FakeTracer), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+    with patch("scripts.function_tracer_pcode.analysis.returns.analyzer.PcodeTracer", _FakeTracer), patch(
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.ConditionTracker",
         _FakeConditionTracker,
     ), patch(
         "scripts.function_tracer_pcode.analysis.phi_resolver.PhiHandler",

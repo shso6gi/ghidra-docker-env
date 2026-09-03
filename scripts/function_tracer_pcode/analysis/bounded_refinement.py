@@ -7,7 +7,7 @@ import inspect
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from ..model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,
@@ -17,8 +17,11 @@ from ..model import (
     ReturnInfo,
     ReturnPathEvidence,
 )
-from .condition import ConditionSimplifier, ConditionNormalizer
-from .effect_summary import (
+from scripts.function_tracer_pcode.analysis.condition import (
+    ConditionSimplifier,
+    ConditionNormalizer,
+)
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     StoreEffect,
     _build_parameter_replacements,
     _call_arguments_width_safe_for_callee_analysis,
@@ -31,7 +34,7 @@ from .effect_summary import (
     substitute_condition,
     substitute_expression,
 )
-from .summary_returns import (
+from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     _return_region_summary_proof_id_from_evidence,
     summary_return_acceptance_proof_id_from_evidence,
 )

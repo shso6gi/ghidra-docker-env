@@ -3,9 +3,9 @@
 
 from typing import List, Optional
 
-from ...analysis import ReturnAnalyzer
-from ...config import TARGET_FUNCTIONS
-from ...io import OutputFormatter, output_result
+from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
+from scripts.function_tracer_pcode.config import TARGET_FUNCTIONS
+from scripts.function_tracer_pcode.reporting import OutputFormatter, output_result
 
 
 def get_target_functions(args) -> List[str]:
@@ -55,7 +55,7 @@ def analyze_and_output(
     const_format: str = "dec",
 ):
     """関数を解析して結果を出力する。"""
-    from ...model import Expression
+    from scripts.function_tracer_pcode.core import Expression
 
     Expression.set_constant_format(const_format)
 

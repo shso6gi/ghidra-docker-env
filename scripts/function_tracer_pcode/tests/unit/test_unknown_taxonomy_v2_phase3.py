@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
+from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
     CauseTransformationEvent,
@@ -22,18 +22,18 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     any_of,
     requirement_slot,
 )
-from scripts.function_tracer_pcode.equivalence.v2.frontier import FrontierEvaluationBudget
-from scripts.function_tracer_pcode.equivalence.v2.reducer import (
+from scripts.function_tracer_pcode.authority.lifecycle.frontier import FrontierEvaluationBudget
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import (
     ShadowEvidenceIncomplete,
     ShadowLifecycleReducer,
 )
-from scripts.function_tracer_pcode.equivalence.v2.registry import (
+from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
 )
-from scripts.function_tracer_pcode.equivalence.v2.stream import (
+from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     CauseObservedEventAuthority,
     CauseTransformedEventAuthority,
     EventIntent,
@@ -515,7 +515,7 @@ def test_snapshot_and_projection_tamper_are_rejected_and_reducer_has_no_outcome_
             result.projection, lifecycle_projection_digest="forged"
         ).validate()
     source = Path(
-        "scripts/function_tracer_pcode/equivalence/v2/reducer.py"
+        "scripts/function_tracer_pcode/authority/lifecycle/reducer.py"
     ).read_text(encoding="utf-8")
     for forbidden in (
         "from .decision", "from .census_contract", "from .legacy_codec",

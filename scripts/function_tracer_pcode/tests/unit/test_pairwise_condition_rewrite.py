@@ -10,12 +10,12 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,
@@ -24,17 +24,20 @@ from scripts.function_tracer_pcode.model import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
 )
-from scripts.function_tracer_pcode.transform.rewrite import (
+from scripts.function_tracer_pcode.semantics.transform.rewrite import (
     ExpressionRewriter,
     rewrite_analysis_returns,
 )
 from scripts.function_tracer_pcode.smt import (
-    ParallelResult, ParallelSolverRunner, SolverResult, SolverStatus,
+    ParallelResult,
+    ParallelSolverRunner,
+    SolverResult,
+    SolverStatus,
 )
 
 

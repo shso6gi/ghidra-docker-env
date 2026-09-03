@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.function_tracer_pcode.cli._pyghidra_support import (
+from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
     load_pyghidra,
     start_headless_pyghidra,
 )

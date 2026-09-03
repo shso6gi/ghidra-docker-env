@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """branch_signed_compare 系の MIPS64 偽反例検出に関する回帰テスト"""
 
-from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.checker.arch.mips64 import MIPS64Handler
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, ReturnInfo
 
 from conftest import MockDataType, create_mock_analysis
 

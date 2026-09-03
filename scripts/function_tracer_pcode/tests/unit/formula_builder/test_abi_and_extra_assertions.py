@@ -3,19 +3,19 @@
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
-from scripts.function_tracer_pcode.equivalence.formula.params import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
+from scripts.function_tracer_pcode.proof.formula.params import (
     build_fragment_backed_parameter_constraint,
     build_parameter_pairs,
     collect_param_info,
 )
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo, ParameterPair
-from scripts.function_tracer_pcode.equivalence.formula.variable import (
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo, ParameterPair
+from scripts.function_tracer_pcode.proof.formula.variable import (
     ExtensionType,
     ParameterFragmentInfo,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,

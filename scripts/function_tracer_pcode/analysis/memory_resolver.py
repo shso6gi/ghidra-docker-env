@@ -6,8 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .condition.normalizer import ConditionNormalizer
-from ..model import (
+from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     Condition,
     Expression,

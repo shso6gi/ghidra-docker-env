@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """符号性推定サブモジュール"""
 
-from .evidence import SignednessEvidence
-from .detector import SignednessDetector
-from .fastpath import FastPathDetector
-from .varnode_analyzer import VarnodeAnalyzer
+from scripts.function_tracer_pcode.analysis.signedness.evidence import SignednessEvidence
+from scripts.function_tracer_pcode.analysis.signedness.detector import SignednessDetector
+from scripts.function_tracer_pcode.analysis.signedness.fastpath import FastPathDetector
+from scripts.function_tracer_pcode.analysis.signedness.varnode_analyzer import VarnodeAnalyzer
 
 __all__ = [
     'SignednessEvidence',

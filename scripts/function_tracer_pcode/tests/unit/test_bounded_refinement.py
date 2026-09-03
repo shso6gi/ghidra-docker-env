@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
     expression_contains_post_state_reads,
     post_state_read_expression_for_location,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallRef,

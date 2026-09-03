@@ -2,9 +2,11 @@
 
 from dataclasses import replace
 
-from scripts.function_tracer_pcode.analysis.effect_summary import EffectSummary
-from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.analysis.summary_returns import (
+from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
+    StructuralRecurrenceSummarizer,
+)
+from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     _canonicalize_conditions_for_analysis_parameters,
     _conditions_unsat,
     _conditions_imply_count_value,
@@ -17,12 +19,12 @@ from scripts.function_tracer_pcode.analysis.summary_returns import (
     _readonly_reduction_exact_overlap_is_proved,
     accept_summary_return_candidates,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.proof.strategies.base import CheckStrategy
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonId,
     get_unknown_reason_definition,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallRef,

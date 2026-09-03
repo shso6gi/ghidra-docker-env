@@ -10,27 +10,31 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
-from scripts.function_tracer_pcode.equivalence.strategies import pairwise_solver_proven_rewrite as rewrite_module
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_solver_proven_rewrite import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+    solve_query_twostage,
+)
+from scripts.function_tracer_pcode.proof.strategies import (
+    pairwise_solver_proven_rewrite as rewrite_module,
+)
+from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import (
     _build_rewrite_proof_query,
     _build_rewrite_candidate,
     try_solver_proven_rewrite_equivalence,
 )
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.equivalence.call_effect_preflight import (
+from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     projection_binding_evidence_from_query,
 )
-from scripts.function_tracer_pcode.equivalence.normalize import NormalizationSettings
-from scripts.function_tracer_pcode.equivalence.obligations import (
+from scripts.function_tracer_pcode.semantics.normalize import NormalizationSettings
+from scripts.function_tracer_pcode.proof.obligations import (
     SolverQueryExecutionReceipt,
     StructuralEqualityReceipt,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 

@@ -4,15 +4,19 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from ...model import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,
     StructuralKey,
     expression_key_safe,
 )
-from ...model.render_smt import expression_smt_bit_width
-from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.analysis.condition.bitvector import (
+    eval_constant_raw,
+    normalize_raw_value,
+    to_signed_value,
+)
 
 
 @dataclass(frozen=True)

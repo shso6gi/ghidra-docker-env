@@ -10,7 +10,7 @@ import re
 import importlib
 from typing import Optional, Dict, Any, Tuple, cast
 
-from ..interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 
 
 class Yices2Solver(SMTSolver):

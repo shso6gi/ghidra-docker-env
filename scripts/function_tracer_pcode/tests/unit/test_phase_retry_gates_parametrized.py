@@ -4,10 +4,10 @@
 import pytest
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 # ★ [P3] conftest からhelper関数をインポート（fixture化されているのでOK）
 from conftest import create_mock_result, create_mock_analysis, MockProgram
@@ -50,7 +50,7 @@ class TestPhaseRetryGatesParametrized:
         self, mock_program_mips64, mock_program_x86, phase_name, phase_mocks
     ):
         """★ 各recovery phase後のSAT（偽反例）でPhase 4-Bが呼ばれることを確認"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -177,7 +177,7 @@ class TestPhaseRetryGatesParametrized:
         self, mock_program_mips64, mock_program_x86, phase_name, phase_mocks
     ):
         """★ 各recovery phase後のSAT（真性反例）でNOT EQUIVALENTで停止することを確認"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)

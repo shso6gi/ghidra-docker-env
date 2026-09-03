@@ -10,8 +10,8 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace, Attempt, TransitionReason
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace, Attempt, TransitionReason
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 

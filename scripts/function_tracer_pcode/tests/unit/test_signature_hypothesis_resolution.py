@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """型仮説 overlay の datatype 解決と結果可視化の回帰テスト"""
 
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     FunctionReturnAnalysis,
     FunctionSignature,
@@ -16,14 +16,18 @@ from scripts.function_tracer_pcode.model import (
     resolve_signed_counterpart_spec,
     resolve_type_spec,
 )
-from scripts.function_tracer_pcode.model.analysis import ReturnInfo
-from scripts.function_tracer_pcode.model.expression import Expression, ExpressionType
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseContext, PhaseHandler
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
-from scripts.function_tracer_pcode.equivalence.typing.signedness_param_fix import ParamSignednessFixer
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
-from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
+from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseHandler
+from scripts.function_tracer_pcode.semantics.typing.fixer import (
+    TypeFixer,
+    TypeFixerConfig,
+    TypeFixResult,
+)
+from scripts.function_tracer_pcode.semantics.typing.signedness_param_fix import ParamSignednessFixer
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+from scripts.function_tracer_pcode.checker.attempts import record_attempt_from_result
 from scripts.function_tracer_pcode.smt import ParallelResult
 
 

@@ -8,32 +8,28 @@ from enum import Enum
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.v2.contracts import (
-    authority_digest,
-)
-from scripts.function_tracer_pcode.equivalence.v2.decision import (
+from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.decision.decision import (
     FinalizationAuthority,
     TerminalTimeoutReceipt,
     finalize_decision,
 )
-from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
+from scripts.function_tracer_pcode.authority.process.operational_extraction import (
     OPERATIONAL_REASON_REGISTRY,
     OPERATIONAL_RECOVERY_REGISTRY,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.stream import EventIntent
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor_command import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.lifecycle.stream import EventIntent
+from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     ProcessSupervisorCommand,
     SupervisorCommandConfig,
     read_process_start_token,
 )
-from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+from scripts.function_tracer_pcode.authority.process.supervisor import (
     CHECKPOINT_AUTHORITY_FILENAMES,
     CheckpointState,
 )
-from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
-    classify_pair_status,
-)
+from scripts.function_tracer_pcode.authority.decision.canonical_result import classify_pair_status
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor import (
     _active_process_authority,
     _completed_continuation,
@@ -135,7 +131,7 @@ def _child_persist_active(*, sleep_seconds, ignore_sigterm=False):
     """Subprocess entry used to exercise the real launch/checkpoint boundary."""
     import signal
     import time
-    from scripts.function_tracer_pcode.equivalence.v2.process_supervisor import (
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
         DurableCheckpointStore,
         ProcessSupervisorAuthorityFactory,
     )
@@ -183,42 +179,37 @@ def _child_persist_canonical_production_loop_timeout():
     """Emit deployment-signed loop TIMEOUT receipts through the child boundary."""
     from types import SimpleNamespace
 
-    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         build_canonical_result_finalization_bundle,
         persist_canonical_result_envelope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
         activate_process_worker_execution_authority_deployment,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
+    from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
         LOOP_REASON_REGISTRY,
         LOOP_RECOVERY_REGISTRY,
         LoopBlockerProductionSignal,
         LoopRecurrencePilotEncoder,
         LoopSolverExecutionBatchSignal,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.phase7_runtime import (
-        runtime_from_audited_manifest,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         ProductionDualWritePilotConnector,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
         active_loop_requirement_for_signal,
         execute_loop_solver_rendered_query,
         emit_loop_recurrence_signal,
         production_signal_scope,
     )
-    from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
-    from scripts.function_tracer_pcode.smt.interface import (
-        SolverResult,
-        SolverStatus,
-    )
+    from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
     from scripts.function_tracer_pcode.smt.parallel import ParallelResult
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
+    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
     import scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence as loop_fixture
 
     worker_key_file = Path(os.environ[
@@ -306,30 +297,26 @@ def _child_persist_canonical_return_abi_authority_error():
     """Cross the real child/supervisor boundary with a typed ABI ERROR."""
     import time
 
-    from scripts.function_tracer_pcode.equivalence.result_factory import (
-        create_error_result,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import (
+    from scripts.function_tracer_pcode.checker.result_factory import create_error_result
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
         ReturnAbiAuthorityInvalid,
         assess_return_abi_pair,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.canonical_result import (
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         attach_durable_error_finalization,
         build_canonical_result_finalization_bundle,
         persist_canonical_result_envelope,
     )
-    from scripts.function_tracer_pcode.equivalence.v2.contracts import (
-        authority_digest,
-    )
-    from scripts.function_tracer_pcode.model import FunctionReturnAnalysis
-    from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+    from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.proof.return_width.surface import (
         ExtensionEvidenceSource,
         FunctionReturnWidthSeed,
         FunctionReturnWidthTargetId,
         GuardRegionFact,
         GuardRegionTargetId,
     )
-    from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+    from scripts.function_tracer_pcode.proof.return_width.surface import (
         PairReturnObservationSeed,
         PairReturnObservationTargetId,
     )

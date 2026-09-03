@@ -1,4 +1,4 @@
-from scripts.function_tracer_pcode.model.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 
 import pytest
 

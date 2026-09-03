@@ -3,17 +3,17 @@
 from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
-from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.formula.variable import (
+from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.proof.formula.variable import (
     ExtensionType,
     ExtraVariableAnalysis,
     ParameterFragmentInfo,
     VariableClassification,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     FunctionReturnAnalysis,
@@ -290,7 +290,7 @@ def test_pairwise_extracts_cases_from_solver_view_consistently():
     }
 
     with patch(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.normalize_analysis_semantic_width",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.normalize_analysis_semantic_width",
         side_effect=[solver_left, solver_right],
     ), patch.object(strategy, "_extract_return_cases", side_effect=[[], []]) as extract_cases:
         result = strategy.check(raw_left, raw_right)

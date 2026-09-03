@@ -4,10 +4,10 @@
 import pytest
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 # ★ [P3] conftest からhelper関数をインポート（fixture化されているのでOK）
 from conftest import create_mock_result, create_mock_analysis, MockProgram
@@ -17,7 +17,7 @@ class TestPhaseRetryGates:
 
     def test_sat_mips64_skip_phase4b_when_retry_disabled(self, mock_program_mips64, mock_program_x86):
         """★ [新規] retry_with_type_fix=False なら MIPS64 SAT でも Phase 4-B をスキップ"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
         from unittest.mock import Mock, patch
         
@@ -66,7 +66,7 @@ class TestPhaseRetryGates:
     
     def test_sat_after_recovery_evaluates_phase4b_gate(self, mock_program_mips64, mock_program_x86):
         """★ [修正版] Phase 1 recovery 後の SAT で Phase 4-B ゲートが評価されることを確認"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -136,7 +136,7 @@ class TestPhaseRetryGates:
         mock_program_x86,
     ):
         """Phase 4-B 後も SAT なら、undefined系戻り値に限って戻り値型修正を試す"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -231,7 +231,7 @@ class TestPhaseRetryGates:
         mock_program_x86,
     ):
         """Phase 4-B が不要でも、undefined系戻り値なら Phase 4-C で再試行する"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -316,7 +316,7 @@ class TestPhaseRetryGates:
         mock_program_x86,
     ):
         """Phase 4-B 後 SAT でも、戻り値型が怪しくないなら追加の戻り値修正はしない"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
 
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -386,8 +386,8 @@ class TestPhaseRetryGates:
         mock_program_x86,
     ):
         """SAT 停止直前に Phase 4-A を試し、MIPS64 引数型修正で解決できるようにする"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-        from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.phases.handler import PhaseResult, PhaseID
         from unittest.mock import Mock, patch
 
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -511,7 +511,7 @@ class TestPhaseRetryGates:
 
     def test_phase4b_retry_on_successful_spurious_detection(self, mock_program_mips64, mock_program_x86):
         """★ [新規] 偽反例検出成功時に _retry_with_abi_constraints が呼ばれることを確認"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -599,7 +599,7 @@ class TestPhaseRetryGates:
 
     def test_sat_after_recovery_skips_phase4b_when_retry_disabled(self, mock_program_mips64, mock_program_x86):
         """★ [修正] retry_with_type_fix=False では Phase 0 内の stage fallback は許可、recovery 後の SAT でも Phase 4-B をスキップ"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -627,8 +627,12 @@ class TestPhaseRetryGates:
                 patch.object(checker.monolithic_strategy, 'check') as mock_monolithic:
                 
                 # pairwise: UNKNOWN
-                from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
-                from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+                from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
+                from scripts.function_tracer_pcode.smt import (
+                    ParallelResult,
+                    SolverResult,
+                    SolverStatus,
+                )
                 
                 pairwise_result = StrategyResult(
                     is_equivalent=None,
@@ -705,7 +709,7 @@ class TestPhaseRetryGates:
 
     def test_sat_after_recovery_genuine_counterexample_stops(self, mock_program_mips64, mock_program_x86):
         """★ [新規] recovery 後 SAT で偽反例ではない場合は NOT EQUIVALENT で終了"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)
@@ -787,7 +791,7 @@ class TestPhaseRetryGates:
 
     def test_phase4b_after_phase2_recovery_sat(self, mock_program_mips64, mock_program_x86):
         """★ [新規] Phase 2 (pattern-based fix) 後の SAT でも Phase 4-B ゲートを評価"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
         checker = EquivalenceChecker(debug=True, canonical_decision_cutover=False)

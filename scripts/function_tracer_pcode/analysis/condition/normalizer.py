@@ -3,7 +3,7 @@
 
 from typing import Dict, Optional, Tuple
 from weakref import WeakKeyDictionary
-from ...model import (
+from scripts.function_tracer_pcode.core import (
     Expression,
     Condition,
     ExpressionType,

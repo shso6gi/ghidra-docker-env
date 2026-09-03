@@ -3,10 +3,10 @@
 from types import MethodType
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker, StageID
-from scripts.function_tracer_pcode.equivalence.recursive_abstraction import abstract_recursive_calls
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker, StageID
+from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_recursive_calls
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.proof.return_width.surface import (
     ExtensionKind,
     ExtensionEvidenceSource,
     FunctionReturnWidthSeed,
@@ -15,10 +15,12 @@ from scripts.function_tracer_pcode.equivalence.return_width_surface import (
     GuardRegionTargetId,
     build_pair_return_observation_seed,
 )
-from scripts.function_tracer_pcode.equivalence.v2.abi_width_readonly import assess_return_abi_pair
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-from scripts.function_tracer_pcode.analysis.analyzer_services import session_helpers_1
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
+    assess_return_abi_pair,
+)
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+from scripts.function_tracer_pcode.analysis.returns import session_helpers_1
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
     DeferredCallInfo,

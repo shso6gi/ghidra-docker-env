@@ -2,14 +2,14 @@
 
 from unittest.mock import Mock, patch
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
-from scripts.function_tracer_pcode.analysis.recurrence_summary import (
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
     CountedLoopGuard,
     CountedLoopUpdateCase,
     ResidueLoopCase,
     StructuralRecurrenceSummarizer,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     Condition,
     CountedLoopSummaryRef,
@@ -398,8 +398,8 @@ def test_analyze_function_skips_effect_summary_when_control_region_recovery_succ
         )
     ]
 
-    with patch("scripts.function_tracer_pcode.analysis.analyzer.PcodeTracer", _FakeTracer), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+    with patch("scripts.function_tracer_pcode.analysis.returns.analyzer.PcodeTracer", _FakeTracer), patch(
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.ConditionTracker",
         _FakeConditionTracker,
     ), patch(
         "scripts.function_tracer_pcode.analysis.phi_resolver.PhiHandler",
@@ -474,7 +474,7 @@ def test_apply_structural_recurrence_summary_skips_resolved_plain_memory_return_
     )
 
     with patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         side_effect=AssertionError("resolved plain memory returns should not trigger structural summary"),
     ):
         result = analyzer._apply_structural_recurrence_summary(
@@ -575,10 +575,10 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
     ]
 
     with patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
     ) as summary_mock, patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.accept_summary_return_candidates",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.accept_summary_return_candidates",
     ) as accept_mock:
         accept_mock.return_value = Mock(
             accepted_returns=tuple(summary_returns),
@@ -634,10 +634,10 @@ def test_apply_structural_recurrence_summary_keeps_rejected_candidate_diagnostic
     }
 
     with patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
     ), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.accept_summary_return_candidates",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.accept_summary_return_candidates",
     ) as accept_mock:
         accept_mock.return_value = Mock(
             accepted_returns=(),
@@ -737,7 +737,7 @@ def test_apply_structural_recurrence_summary_uses_real_acceptance_gate():
     ]
 
     with patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
     ) as summary_mock:
         result = analyzer._apply_structural_recurrence_summary(
@@ -830,7 +830,7 @@ def test_analyze_function_applies_counted_loop_summary_after_return_analysis():
         "_make_tracer",
         return_value=_FakeTracer(),
     ), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.ConditionTracker",
         _FakeConditionTracker,
     ), patch.object(
         analyzer,
@@ -849,7 +849,7 @@ def test_analyze_function_applies_counted_loop_summary_after_return_analysis():
         "_detect_signedness",
         return_value=None,
     ), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        "scripts.function_tracer_pcode.analysis.returns.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
     ) as summary_mock, patch.object(
         analyzer,

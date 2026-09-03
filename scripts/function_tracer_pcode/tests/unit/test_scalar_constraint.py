@@ -3,7 +3,7 @@
 
 from scripts.function_tracer_pcode.analysis.condition.scalar import extract_scalar_constraint
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 
 
 def test_extract_scalar_constraint_rejects_affine_parameter_inequality_without_overflow_proof():

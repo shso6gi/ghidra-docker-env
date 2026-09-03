@@ -10,15 +10,15 @@ import re
 import subprocess
 from pathlib import Path
 
-from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
     find_pair_status_public_key,
     validate_signed_pair_status,
 )
-from scripts.function_tracer_pcode.validation.result_summary import (
+from scripts.function_tracer_pcode.reporting.result_summary import (
     classify_canonical_log_text,
     classify_log_text,
 )
-from scripts.function_tracer_pcode.validation.execution_receipt import (
+from scripts.function_tracer_pcode.reporting.execution_receipt import (
     MATRIX_EXECUTION_RECEIPT_FILE,
     MATRIX_PUBLICATION_MANIFEST_FILE,
     validate_execution_receipt,

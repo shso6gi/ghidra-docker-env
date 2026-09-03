@@ -5,13 +5,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
-from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
-from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
-from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
-from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+from scripts.function_tracer_pcode.checker.attempts import record_attempt_from_result
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
+from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+from scripts.function_tracer_pcode.checker.unknown_reason import (
     _UNKNOWN_REASON_REGISTRY,
     _UNKNOWN_RECOVERY_PLAN_REGISTRY,
     UnknownCountKind,
@@ -50,12 +50,12 @@ def test_internal_v2_reason_diagnostic_accepts_only_exact_v2_reason_ids():
 
     with pytest.raises(TypeError, match="exact issuer"):
         make_production_unknown_reason("expression_semantics_unsupported", projection_factory=None)
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
     solve_query_internal,
     solve_query_twostage,
 )
-from scripts.function_tracer_pcode.model import Expression
+from scripts.function_tracer_pcode.core import Expression
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from conftest import create_mock_analysis
 

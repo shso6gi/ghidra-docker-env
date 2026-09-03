@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """Composite signedness inference regressions."""
 
-from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.param_semantics import (
+from scripts.function_tracer_pcode.checker.arch.mips64 import MIPS64Handler
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.semantics.param_semantics import (
     infer_parameter_semantics,
     infer_parameter_semantics_by_identity,
 )
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig
-from scripts.function_tracer_pcode.equivalence.typing.signedness_param_fix import ParamSignednessFixer
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig
+from scripts.function_tracer_pcode.semantics.typing.signedness_param_fix import ParamSignednessFixer
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,

@@ -4,7 +4,7 @@
 import argparse
 from typing import Optional, Sequence
 
-from ..config import OUTPUT_FORMAT
+from scripts.function_tracer_pcode.config import OUTPUT_FORMAT
 
 
 CLI_EPILOG = """

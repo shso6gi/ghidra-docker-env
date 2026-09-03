@@ -4,18 +4,16 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 
-from scripts.function_tracer_pcode.equivalence.obligations.return_width import (
-    prove_function_return_width,
-)
-from scripts.function_tracer_pcode.equivalence.return_width_pipeline import (
+from scripts.function_tracer_pcode.proof.obligations.return_width import prove_function_return_width
+from scripts.function_tracer_pcode.proof.return_width.pipeline import (
     prepare_function_return_widths,
     prepare_pair_return_observation,
     return_coverage_artifact_ids,
     _width_completion_evidence,
 )
-from scripts.function_tracer_pcode.equivalence.return_width_surface import (
+from scripts.function_tracer_pcode.proof.return_width.surface import (
     BlockedObservation,
     CorrespondenceValidationStatus,
     build_observation_view,
@@ -26,16 +24,16 @@ from scripts.function_tracer_pcode.equivalence.return_width_surface import (
     prove_object_query_input_correspondence,
     _declared_observation_width,
 )
-from scripts.function_tracer_pcode.equivalence.call_effect_preflight import QueryExecutionRecord
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+from scripts.function_tracer_pcode.proof.call_effect.preflight import QueryExecutionRecord
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     build_canonical_return_observation_query,
     extract_return_cases,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
     _build_model_validation_query,
 )
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     ComparisonSurface,
     Expression,
@@ -46,7 +44,7 @@ from scripts.function_tracer_pcode.model import (
     ReturnValueFlowStep,
     VarnodeFlowRef,
 )
-from scripts.function_tracer_pcode.model.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 
 
 def _analysis(binary_id, entry, storage_bits, *, extension=None):
@@ -792,7 +790,7 @@ def test_canonical_query_and_replay_consume_exact_binding_receipt():
 
 
 def test_monolithic_replay_reuses_original_query_bundle_and_fails_closed(monkeypatch):
-    from scripts.function_tracer_pcode.equivalence.strategies import monolithic as module
+    from scripts.function_tracer_pcode.proof.strategies import monolithic as module
 
     left = _analysis("B-monolithic-left", 0x7500, 32)
     right = _analysis("B-monolithic-right", 0x7600, 64, extension="INT_SEXT")

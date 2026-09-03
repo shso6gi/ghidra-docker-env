@@ -2,8 +2,8 @@
 """FormulaBuilder のユニットテスト（統合系・リトライ連携中心）。"""
 
 import pytest
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     ReturnInfo,
     Expression,
@@ -310,12 +310,8 @@ class TestCheckerABIRetryIntegration:
 
     @staticmethod
     def _phase_context(analysis1, analysis2):
-        from scripts.function_tracer_pcode.equivalence.phases.handler import (
-            PhaseContext,
-        )
-        from scripts.function_tracer_pcode.equivalence.typing.fixer import (
-            TypeFixResult,
-        )
+        from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
+        from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
         from unittest.mock import Mock
 
         return PhaseContext(
@@ -336,9 +332,9 @@ class TestCheckerABIRetryIntegration:
     
     def test_retry_with_abi_constraints_integration(self):
         """_retry_with_abi_constraints が FormulaBuilder の正しい経路を使うことを確認"""
-        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
-        from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseContext
-        from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
+        from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
         from unittest.mock import Mock, patch, call
         
         # ★ 修正: debug=False にして run_parallel() のみを patch
@@ -451,9 +447,7 @@ class TestCheckerABIRetryIntegration:
         print(f"  - run_parallel blocked until a return-width bridge proof exists")
 
     def test_retry_with_abi_constraints_unknown_extension_width_is_unknown(self):
-        from scripts.function_tracer_pcode.equivalence.checker import (
-            EquivalenceChecker,
-        )
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 
         unknown = Expression.unknown("phi_no_valid_branch")
         unknown.size = 4
@@ -492,12 +486,8 @@ class TestCheckerABIRetryIntegration:
         )
 
     def test_retry_with_abi_constraints_unsupported_operator_is_unknown(self):
-        from scripts.function_tracer_pcode.equivalence.checker import (
-            EquivalenceChecker,
-        )
-        from scripts.function_tracer_pcode.model.render_smt import (
-            UnsupportedSmtOperatorError,
-        )
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.core.render_smt import UnsupportedSmtOperatorError
         from unittest.mock import patch
 
         analysis = FunctionReturnAnalysis(
@@ -543,14 +533,8 @@ class TestCheckerABIRetryIntegration:
         )
 
     def test_retry_with_abi_constraints_unsat_has_no_counterexample_raw(self):
-        from scripts.function_tracer_pcode.equivalence.checker import (
-            EquivalenceChecker,
-        )
-        from scripts.function_tracer_pcode.smt import (
-            ParallelResult,
-            SolverResult,
-            SolverStatus,
-        )
+        from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
         from unittest.mock import patch
 
         analysis1 = FunctionReturnAnalysis(

@@ -1,12 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.checker import (
-    EquivalenceChecker,
-    StageID,
-    StageSpec,
-)
-from scripts.function_tracer_pcode.equivalence.obligations import (
+from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker, StageID, StageSpec
+from scripts.function_tracer_pcode.proof.obligations import (
     ActivationState,
     ShadowComparisonReport,
     SolverOutcomeClass,
@@ -14,11 +10,11 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     project_proof_gates,
     PairLedgerBinding,
 )
-from scripts.function_tracer_pcode.equivalence.cause_identity import (
+from scripts.function_tracer_pcode.checker.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
-from scripts.function_tracer_pcode.equivalence.obligations.stage_runner import (
+from scripts.function_tracer_pcode.proof.obligations.stage_runner import (
     merge_stage_debug_statistics,
 )
 

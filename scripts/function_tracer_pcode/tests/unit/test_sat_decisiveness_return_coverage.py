@@ -65,7 +65,7 @@ def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(m
     monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("pairwise counterexample validation should not run when coverage is incomplete")
         ),

@@ -6,14 +6,22 @@ from unittest.mock import Mock
 import pytest
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
-from scripts.function_tracer_pcode.model import CanonicalLocation, Expression, LocationBaseRef, UnknownValueRef
-from scripts.function_tracer_pcode.model.render_smt import (
+from scripts.function_tracer_pcode.core import (
+    CanonicalLocation,
+    Expression,
+    LocationBaseRef,
+    UnknownValueRef,
+)
+from scripts.function_tracer_pcode.core.render_smt import (
     UnknownSmtExtensionWidthError,
     expression_contains_unsupported_smt_ops,
     expression_smt_bit_width,
 )
-from scripts.function_tracer_pcode.model.runtime_refs import PostStateReadRef
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
+from scripts.function_tracer_pcode.core.runtime_refs import PostStateReadRef
+from scripts.function_tracer_pcode.semantics.transform.expander import (
+    ExpandedValue,
+    ExpressionExpander,
+)
 
 
 def test_combine_input_expansions_deduplicates_duplicate_pairs_before_simplify(monkeypatch):

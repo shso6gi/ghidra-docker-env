@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """デバッグユーティリティ"""
 
-from .unknown_trace import (
+from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
     UnknownTracker,
     UnknownEvent,
     UnknownReason,
     VarnodeInfo,
     PcodeOpInfo,
 )
-from .render import summarize_expression, summarize_condition
+from scripts.function_tracer_pcode.analysis.debug.render import (
+    summarize_expression,
+    summarize_condition,
+)
 
 __all__ = [
     'UnknownTracker',

@@ -3,9 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-import scripts.function_tracer_pcode.equivalence.v2.operational_extraction as operational_extraction
+import scripts.function_tracer_pcode.authority.process.operational_extraction as operational_extraction
 
-from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import (
+from scripts.function_tracer_pcode.authority.process.operational_extraction import (
     EXPECTED_OPERATIONAL_COMMON_REGISTRY_DIGEST,
     EXPECTED_OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST,
     EXPECTED_OPERATIONAL_REASON_REGISTRY_DIGEST,
@@ -36,17 +36,17 @@ from scripts.function_tracer_pcode.equivalence.v2.operational_extraction import 
     canonical_high_function_projection,
     completed_result_structural_identity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.equivalence.v2.stream import EventRecorder, EventType
-from scripts.function_tracer_pcode.equivalence.v2.pilot import (
+from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder, EventType
+from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
     ProductionDualWritePilotSession,
     ProductionPilotExecutionIdentity,
 )
-from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CompositeProductionSignalEncoder,
     production_signal_scope,
 )
-from scripts.function_tracer_pcode.analysis.decompilation_broker import (
+from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
     TOP_LEVEL_SOURCE_CONTRACT,
     decompile_function,
 )

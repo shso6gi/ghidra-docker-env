@@ -2,7 +2,7 @@
 """Bit-vector constant evaluation regressions."""
 
 from scripts.function_tracer_pcode.analysis.condition.bitvector import eval_constant_raw
-from scripts.function_tracer_pcode.model import Expression
+from scripts.function_tracer_pcode.core import Expression
 
 
 def test_eval_constant_raw_short_circuits_large_nonconstant_expression(monkeypatch):

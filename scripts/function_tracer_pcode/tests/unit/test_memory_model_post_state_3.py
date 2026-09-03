@@ -337,7 +337,7 @@ def test_rewrite_observed_loads_uses_runtime_ref_provenance_when_read_order_key_
     assert rewritten.to_string() == "(MEM[param_2] - MEM[param_1])"
 
 def test_expression_expander_prefers_observed_rewrite_over_flat_raw_normalization(monkeypatch):
-    import scripts.function_tracer_pcode.transform.expander as expander_module
+    import scripts.function_tracer_pcode.semantics.transform.expander as expander_module
 
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -651,7 +651,7 @@ def test_expression_expander_expands_observed_load_phi_difference_into_cases():
     assert "(MEM[b] < MEM[a])" in rendered["(MEM[b] - MEM[a])"]
 
 def test_expression_expander_multiequal_shortcut_defers_flattened_observed_load_rewrite(monkeypatch):
-    import scripts.function_tracer_pcode.transform.expander as expander_module
+    import scripts.function_tracer_pcode.semantics.transform.expander as expander_module
 
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)

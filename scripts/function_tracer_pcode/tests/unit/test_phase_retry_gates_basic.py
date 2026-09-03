@@ -4,10 +4,10 @@
 import pytest
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 # ★ [P3] conftest からhelper関数をインポート（fixture化されているのでOK）
 from conftest import create_mock_result, create_mock_analysis, MockProgram
@@ -87,7 +87,7 @@ class TestPhaseRetryGates:
         )
         
         # 反例をFormattedCounterexampleとして設定
-        from scripts.function_tracer_pcode.equivalence.counterexample import FormattedCounterexample
+        from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
         result.counterexample = FormattedCounterexample(
             parameters={
                 "param_1_1": "0xffffffff80000001",
@@ -126,7 +126,7 @@ class TestPhaseRetryGates:
         )
         
         # デバッグ: アーキテクチャ検出を確認
-        from scripts.function_tracer_pcode.equivalence.arch.detector import ArchitectureDetector
+        from scripts.function_tracer_pcode.checker.arch.detector import ArchitectureDetector
         detector = ArchitectureDetector()
         is_mips64_1 = detector.is_mips64(ctx.program1)
         is_mips64_2 = detector.is_mips64(ctx.program2)

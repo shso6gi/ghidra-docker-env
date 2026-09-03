@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..model import Condition
-from ..model.analysis import DeferredCallInfo
+from scripts.function_tracer_pcode.core import Condition
+from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo
 
 
 @dataclass

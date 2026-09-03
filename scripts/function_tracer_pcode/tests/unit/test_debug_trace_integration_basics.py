@@ -3,10 +3,15 @@
 
 import pytest
 from unittest.mock import Mock, patch
-from scripts.function_tracer_pcode.equivalence import EquivalenceChecker
+from scripts.function_tracer_pcode.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
-from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from scripts.function_tracer_pcode.proof.strategies.base import StrategyResult
+from scripts.function_tracer_pcode.core import (
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    Expression,
+    ExpressionType,
+)
 
 
 def test_stage_path_still_recorded(mock_program_x86):
@@ -64,8 +69,8 @@ def test_stage_path_still_recorded(mock_program_x86):
             
             # StrategyResult を EquivalenceResult に変換する処理をスキップして、
             # check の戻り値として EquivalenceResult を直接返す
-            from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-            from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+            from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+            from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
             
             eq_result = EquivalenceResult(
                 is_equivalent=True,
@@ -134,7 +139,7 @@ def test_debug_trace_multiple_attempts_on_unknown(mock_program_x86):
     mock_analysis.return_type = "unsigned int"
     
     # signedness情報を追加（Phase 1 を有効化）
-    from scripts.function_tracer_pcode.model.analysis import SignednessResult
+    from scripts.function_tracer_pcode.core.analysis import SignednessResult
     mock_analysis.signedness_result = SignednessResult(signedness="signed")
     
     with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
@@ -147,8 +152,8 @@ def test_debug_trace_multiple_attempts_on_unknown(mock_program_x86):
         
         # ★ _run_stage_plan をモック（Phase 単位で結果を返す）
         def mock_run_stage_plan_side_effect(*args, **kwargs):
-            from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-            from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+            from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+            from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
             
             call_count[0] += 1
             
@@ -199,7 +204,10 @@ def test_debug_trace_multiple_attempts_on_unknown(mock_program_x86):
         with patch.object(checker, '_run_stage_plan', side_effect=mock_run_stage_plan_side_effect):
             # ★ Phase 1 で signedness fix が適用されるようにモック
             with patch.object(checker.phase_handler, 'execute_phase') as mock_execute_phase:
-                from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
+                from scripts.function_tracer_pcode.checker.phases.handler import (
+                    PhaseResult,
+                    PhaseID,
+                )
                 
                 def execute_phase_side_effect(phase_spec, *args, **kwargs):
                     if phase_spec.phase_id == PhaseID.P0_BASE:
@@ -297,8 +305,8 @@ def test_debug_trace_to_dict_machine_readable(mock_program_x86):
         call_count = [0]
         
         def mock_check_side_effect(*args, **kwargs):
-            from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
-            from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
+            from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+            from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
             
             call_count[0] += 1
             

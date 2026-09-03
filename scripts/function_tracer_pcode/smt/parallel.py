@@ -7,8 +7,8 @@ import inspect
 from typing import List, Optional, Dict, Any, Type
 from dataclasses import dataclass
 
-from .interface import SMTSolver, SolverResult, SolverStatus
-from .solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
 
 @dataclass

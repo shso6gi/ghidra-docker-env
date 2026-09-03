@@ -3,7 +3,7 @@
 
 from typing import Optional, Tuple
 
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
 
 
 def make_param(name: str, data_type: Optional[str] = None, size: int = 8) -> Expression:

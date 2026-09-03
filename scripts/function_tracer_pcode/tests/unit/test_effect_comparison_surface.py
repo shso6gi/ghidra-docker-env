@@ -9,24 +9,20 @@ import subprocess
 import pytest
 
 from conftest import resolve_mock_data_type
-from scripts.function_tracer_pcode.analysis.effect_summary import (
+from scripts.function_tracer_pcode.analysis.effects.summary import (
     EffectSummary,
     StoreEffect,
     build_void_effect_summary_expr,
 )
-from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import (
-    build_symbol_replacer,
-)
-from scripts.function_tracer_pcode.equivalence.formula.returns import get_return_size
-from scripts.function_tracer_pcode.equivalence.semantic_width import (
-    normalize_analysis_semantic_width,
-)
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.proof.formula.returns import get_return_size
+from scripts.function_tracer_pcode.semantics.semantic_width import normalize_analysis_semantic_width
+from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     build_pair_query,
     extract_return_cases,
 )
-from scripts.function_tracer_pcode.model import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     ComparisonSurface,
     Condition,
