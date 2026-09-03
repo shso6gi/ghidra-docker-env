@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
 
-from .contracts import CActiveBaseRow, QOpenBaseRow, authority_digest
+from .contracts import CActiveBaseRow, authority_digest
 from .reducer import CauseLifecycleSnapshot, ShadowLifecycleReducer
 from .registry import SealedReasonRegistry, SealedRecoveryRegistry
 from .stream import (

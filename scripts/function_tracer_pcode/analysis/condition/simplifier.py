@@ -207,26 +207,6 @@ class ConditionSimplifier:
         return tuple(keys)
 
     @classmethod
-    def _safe_condition_set_signature(
-        cls,
-        conditions: Iterable[Condition],
-        *,
-        budget: int = 96,
-    ) -> Tuple[Tuple[object, ...], ...]:
-        signatures: List[Tuple[object, ...]] = []
-        for condition in (conditions or []):
-            if condition is None:
-                signatures.append(("none",))
-                continue
-            try:
-                signature = condition.structural_key(budget=budget)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                signature = ("unsafe", cls._safe_condition_id(condition))
-            signatures.append(signature)
-        signatures.sort()
-        return tuple(signatures)
-
-    @classmethod
     def _debug_condition_event(
         cls,
         event: str,
@@ -730,17 +710,6 @@ class ConditionSimplifier:
         return left.expression.equals(right.expression)
     
     @classmethod
-    def normalize_to_canonical(
-        cls, condition: Condition
-    ) -> Tuple[object, str, object, bool]:
-        """
-        条件を正規形に変換（normalizer に委譲、表示用）
-        
-        Returns: (left_operand, operator, right_operand, is_positive)
-        """
-        return ConditionNormalizer.normalize(condition)
-
-    @classmethod
     def _normalize_raw_value(cls, value: int, bits: int) -> int:
         return normalize_raw_value(value, bits)
 
@@ -880,162 +849,6 @@ class ConditionSimplifier:
         return candidate if candidate[2] < current[2] else current
 
     @classmethod
-    def _has_scalar_contradiction(cls, conditions: List[Condition]) -> bool:
-        grouped: Dict[Tuple[str, int], Dict[str, Any]] = {}
-
-        for index, cond in enumerate(conditions):
-            fact = cls._extract_scalar_constraint(cond)
-            if fact is None:
-                continue
-
-            group = grouped.setdefault(
-                fact.key,
-                {
-                    "eq_raw_values": set(),
-                    "ne_raw_values": set(),
-                    "lower": {False: None, True: None},
-                    "upper": {False: None, True: None},
-                },
-            )
-
-            if fact.kind == "eq":
-                group["eq_raw_values"].add(fact.raw_value)
-            elif fact.kind == "ne":
-                group["ne_raw_values"].add(fact.raw_value)
-            elif fact.kind == "lower":
-                signed = fact.signed
-                current = group["lower"][signed]
-                if fact.value is None or fact.inclusive is None:
-                    continue
-                candidate = (fact.value, fact.inclusive, index)
-                if current is None:
-                    group["lower"][signed] = candidate
-                else:
-                    current_effective = cls._effective_lower_bound(
-                        current[0],
-                        current[1],
-                        signed=signed,
-                        bits=fact.key[1],
-                    )
-                    candidate_effective = cls._effective_lower_bound(
-                        candidate[0],
-                        candidate[1],
-                        signed=signed,
-                        bits=fact.key[1],
-                    )
-                    if (
-                        candidate_effective > current_effective
-                        or (
-                            candidate_effective == current_effective
-                            and candidate[2] < current[2]
-                        )
-                    ):
-                        group["lower"][signed] = candidate
-            elif fact.kind == "upper":
-                signed = fact.signed
-                current = group["upper"][signed]
-                if fact.value is None or fact.inclusive is None:
-                    continue
-                candidate = (fact.value, fact.inclusive, index)
-                if current is None:
-                    group["upper"][signed] = candidate
-                else:
-                    current_effective = cls._effective_upper_bound(
-                        current[0],
-                        current[1],
-                        signed=signed,
-                        bits=fact.key[1],
-                    )
-                    candidate_effective = cls._effective_upper_bound(
-                        candidate[0],
-                        candidate[1],
-                        signed=signed,
-                        bits=fact.key[1],
-                    )
-                    if (
-                        candidate_effective < current_effective
-                        or (
-                            candidate_effective == current_effective
-                            and candidate[2] < current[2]
-                        )
-                    ):
-                        group["upper"][signed] = candidate
-
-        for key, group in grouped.items():
-            bits = key[1]
-            eq_raw_values = group["eq_raw_values"]
-            ne_raw_values = group["ne_raw_values"]
-
-            if len(eq_raw_values) > 1:
-                cls._debug_print(
-                    f"  CONTRADICTION DETECTED: multiple equality constants for {key[0]} -> {sorted(eq_raw_values)}",
-                    1,
-                )
-                return True
-
-            if eq_raw_values:
-                eq_raw_value = next(iter(eq_raw_values))
-                if eq_raw_value in ne_raw_values:
-                    cls._debug_print(
-                        f"  CONTRADICTION DETECTED: {key[0]} == {eq_raw_value} and != {eq_raw_value}",
-                        1,
-                    )
-                    return True
-            for signed in (False, True):
-                lower = group["lower"][signed]
-                upper = group["upper"][signed]
-
-                if cls._bounds_contradict(
-                    (lower[0], lower[1]) if lower is not None else None,
-                    (upper[0], upper[1]) if upper is not None else None,
-                    signed,
-                    bits,
-                ):
-                    cls._debug_print(
-                        f"  CONTRADICTION DETECTED: incompatible bounds for {key[0]}",
-                        1,
-                    )
-                    return True
-
-                if eq_raw_values:
-                    eq_value = (
-                        cls._to_signed_value(eq_raw_value, bits)
-                        if signed
-                        else eq_raw_value
-                    )
-                    if lower is not None:
-                        lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
-                        if eq_value < lower_effective:
-                            cls._debug_print(
-                                f"  CONTRADICTION DETECTED: {key[0]} == {eq_value} violates lower bound",
-                                1,
-                            )
-                            return True
-                    if upper is not None:
-                        upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
-                        if eq_value > upper_effective:
-                            cls._debug_print(
-                                f"  CONTRADICTION DETECTED: {key[0]} == {eq_value} violates upper bound",
-                                1,
-                            )
-                            return True
-                    continue
-
-                if lower is not None and upper is not None:
-                    lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
-                    upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
-                    if lower_effective == upper_effective:
-                        collapsed_raw = cls._normalize_raw_value(lower_effective, bits)
-                        if collapsed_raw in ne_raw_values:
-                            cls._debug_print(
-                                f"  CONTRADICTION DETECTED: {key[0]} forced to excluded value {lower_effective}",
-                                1,
-                            )
-                            return True
-
-        return False
-    
-    @classmethod
     def flatten_condition(cls, condition: Condition) -> List[Condition]:
         """
         条件を平坦化（論理演算を展開）
@@ -1063,7 +876,7 @@ class ConditionSimplifier:
         
         # not (A or B) -> (not A) and (not B)（ド・モルガンの法則）
         if negated and expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "BOOL_OR":
-            cls._debug_print(f"  Detected: not (A or B)", 2)
+            cls._debug_print("  Detected: not (A or B)", 2)
             results = []
             for operand in expr.operands:
                 # 各オペランドを否定
@@ -1074,12 +887,12 @@ class ConditionSimplifier:
         # not (A and B) -> (not A) or (not B)
         # これはCNF化が必要なので、ここでは扱わず元のまま返す
         if negated and expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "BOOL_AND":
-            cls._debug_print(f"  Detected: not (A and B) - keeping as-is", 2)
+            cls._debug_print("  Detected: not (A and B) - keeping as-is", 2)
             return [Condition(expr, negated=True)]
         
         # A and B -> [A, B]
         if not negated and expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "BOOL_AND":
-            cls._debug_print(f"  Detected: A and B", 2)
+            cls._debug_print("  Detected: A and B", 2)
             results = []
             for operand in expr.operands:
                 results.append(Condition(operand, negated=False))
@@ -1087,7 +900,7 @@ class ConditionSimplifier:
             return results
         
         # それ以外はそのまま
-        cls._debug_print(f"  -> No flattening", 2)
+        cls._debug_print("  -> No flattening", 2)
         return [Condition(expr, negated=negated)]
 
     @classmethod
@@ -1919,18 +1732,6 @@ class ConditionSimplifier:
         }
 
     @classmethod
-    def _condition_cache_key(
-        cls,
-        conditions: Iterable[Condition],
-    ) -> Tuple[object, ...]:
-        try:
-            keys = list(cls._safe_condition_cache_key((conditions or []), budget=96))
-        except _CONDITION_RECOVERABLE_ERRORS:
-            keys = [("unsafe",)]
-        keys.sort(key=lambda value: repr(value))
-        return tuple(keys)
-
-    @classmethod
     def _condition_object_cache_key(
         cls,
         conditions: Iterable[Condition],
@@ -1960,46 +1761,6 @@ class ConditionSimplifier:
                 return True
             if metrics["phi_depth"] > 0 and metrics["node_count"] > 96:
                 return True
-        return False
-
-    @classmethod
-    def _has_boolean_connective_structure(cls, conditions: Iterable[Condition]) -> bool:
-        visited: Set[int] = set()
-        visit_count = 0
-        for cond in conditions or []:
-            expr = cond.expression
-            if expr is None:
-                continue
-            pending = [expr]
-            while pending:
-                current = pending.pop()
-                if current is None:
-                    continue
-                current_id = id(current)
-                if current_id in visited:
-                    continue
-                visited.add(current_id)
-
-                visit_count += 1
-                if visit_count > 72:
-                    break
-                expr_type = current.expr_type
-                if expr_type == ExpressionType.BINARY_OP and current.operator in {
-                    "BOOL_AND",
-                    "BOOL_OR",
-                }:
-                    return True
-                if expr_type == ExpressionType.UNARY_OP and current.operator == "BOOL_NEGATE":
-                    return True
-                if expr_type == ExpressionType.PHI and current.value:
-                    for branch_cond, branch_value in current.value:
-                        if branch_cond is not None:
-                            pending.append(branch_cond.expression)
-                        if branch_value is not None:
-                            pending.append(branch_value)
-                    continue
-                for operand in current.operands or []:
-                    pending.append(operand)
         return False
 
     @classmethod
@@ -2227,13 +1988,6 @@ class ConditionSimplifier:
         2つの条件が等価かチェック（normalizer に委譲）
         """
         return ConditionNormalizer.are_equivalent(cond1, cond2)
-    
-    @classmethod
-    def are_contradictory_conditions(cls, cond1: Condition, cond2: Condition) -> bool:
-        """
-        2つの条件が矛盾するかチェック（normalizer に委譲）
-        """
-        return ConditionNormalizer.are_contradictory(cond1, cond2)
     
     @classmethod
     def simplify_conditions(cls, conditions: List[Condition]) -> List[Condition]:

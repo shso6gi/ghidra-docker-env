@@ -681,24 +681,6 @@ class DeferredCallInfo:
         )
         self.call_argument_recovery_reason = reason
 
-    def call_argument_recovery_is_complete(self) -> bool:
-        return (
-            self.call_argument_recovery_status
-            == "complete"
-        )
-
-    def call_argument_recovery_is_recoverable_partial(self) -> bool:
-        return (
-            self.call_argument_recovery_status
-            == "recoverable_partial"
-        )
-
-    def call_argument_recovery_is_incomplete(self) -> bool:
-        return (
-            self.call_argument_recovery_status
-            == "inconclusive"
-        )
-
     @property
     def sequence(self) -> Optional[int]:
         return self.deferred_call_ref.sequence
@@ -1583,12 +1565,6 @@ class FunctionReturnAnalysis:
             result["comparison_surface"] = self.comparison_surface.to_dict()
         
         return result
-    
-    def get_inferred_signedness(self) -> str:
-        """推定された符号性を取得"""
-        if self.signedness_result:
-            return self.signedness_result.signedness
-        return "unknown"
     
     def should_fix_return_to_signed(self) -> bool:
         """

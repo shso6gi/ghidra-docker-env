@@ -13,11 +13,7 @@ from ..model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    DivergenceOutcome,
     ReadonlyReductionRef,
-    ReturnInfo,
-    ReturnOutcome,
-    UnknownOutcome,
     StorageInfo,
 )
 from ..model.render_smt import expression_smt_bit_width
@@ -1494,14 +1490,6 @@ def _rewrite_parameter_expression_metadata(
         read_order_key=expr.read_order_key,
         runtime_ref=getattr(expr, "runtime_ref", None),
         opcode=getattr(expr, "opcode", None),
-    )
-
-
-def _rewrite_effect_summary(effect_summary, normalizer: SemanticWidthNormalizer):
-    return _rewrite_effect_summary_expressions(
-        effect_summary,
-        normalizer.rewrite_expression,
-        simplify_conditions=True,
     )
 
 

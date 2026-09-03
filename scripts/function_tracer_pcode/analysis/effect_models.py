@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from ..model import (
     CallTargetRef,
@@ -13,8 +13,6 @@ from ..model import (
     LocationBaseRef,
     PcodeBlockRef,
     PcodeOpRef,
-    PostStateSnapshotRef,
-    StorageInfo,
     expression_provenance_key,
 )
 from .effect_services._api import (
@@ -658,9 +656,6 @@ class CallArgumentEvidence:
             and _callee_param_identities_are_object_proven(self.callee_param_identities)
             and 0 < len(self.arguments) <= len(self.callee_param_identities)
         )
-
-    def is_incomplete_blocker(self) -> bool:
-        return not self.is_usable() and not self.is_recoverable_partial()
 
     def target_matches(self, target_ref: Optional[CallTargetRef]) -> bool:
         if not _call_target_ref_is_resolved(self.target_ref) or not _call_target_ref_is_resolved(target_ref):

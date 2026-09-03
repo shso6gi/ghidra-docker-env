@@ -591,22 +591,6 @@ class ProcessSupervisorAuthorityFactory:
         }, signer_role="supervisor")
         return checkpoint, prefix
 
-    def issue_child_exit_resolution(
-        self, *, launch: SignedProcessAuthorityReceipt, child_returncode: int,
-    ) -> SignedProcessAuthorityReceipt:
-        self.validate(launch)
-        if type(child_returncode) is not int:
-            raise TypeError("supervisor child exit code must be an exact integer")
-        return self._issue("SupervisorChildExitReceipt", {
-            "result_occurrence_id": launch.payload["result_occurrence_id"],
-            "launch_receipt_digest": launch.receipt_digest,
-            "child_pid": launch.payload["child_pid"],
-            "child_start_token": launch.payload["child_start_token"],
-            "child_returncode": child_returncode,
-            "deadline_policy_digest": launch.payload["deadline_policy_digest"],
-            "issuer_id": PROCESS_SUPERVISOR_ISSUER_ID,
-        }, signer_role="supervisor")
-
     def issue_live_assignment(
         self, *, prefix: EventStreamPrefixView,
         projection: VerifiedLifecyclePrefixProjection,
@@ -2001,23 +1985,6 @@ class DurableCheckpointStore:
             raise ValueError("launch execution nonce differs from checkpoint directory")
         with self._locked():
             self._atomic_write(self.directory / "launch.json", self._bytes(receipt))
-
-    def persist_child_exit_resolution(
-        self, receipt: SignedProcessAuthorityReceipt,
-    ) -> None:
-        self.factory.validate(receipt)
-        if receipt.receipt_kind != "SupervisorChildExitReceipt":
-            raise ValueError("child exit store requires SupervisorChildExitReceipt")
-        with self._locked():
-            launch = self.factory.decode(json.loads(
-                (self.directory / "launch.json").read_text(encoding="utf-8")
-            ))
-            if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
-                raise ValueError("child exit resolution differs from durable launch")
-            self._atomic_write(
-                self.directory / "child-exit.json", self._bytes(receipt),
-                identical_ok=True,
-            )
 
     def resolved_predecessor(self) -> Optional[SignedProcessAuthorityReceipt]:
         """Return the exact completed checkpoint that a new ACTIVE must extend."""

@@ -7,7 +7,7 @@ import math
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .census_contract import CensusEntry, CensusManifest
 from .contracts import (

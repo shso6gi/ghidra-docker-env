@@ -9,9 +9,6 @@ from dataclasses import dataclass
 
 from .interface import SMTSolver, SolverResult, SolverStatus
 from .solvers.z3 import Z3Solver
-from .solvers.boolector import BoolectorSolver
-from .solvers.yices2 import Yices2Solver
-from .solvers.cvc5 import CVC5Solver
 
 
 @dataclass
@@ -31,11 +28,6 @@ class ParallelResult:
 
         if self.is_equivalent is None and self.first_definitive is not None:
             self.is_equivalent = self.first_definitive.status == SolverStatus.UNSAT
-    
-    def get_successful_results(self) -> List[SolverResult]:
-        """成功した結果のみ返す"""
-        return [r for r in self.results 
-                if r.status in (SolverStatus.SAT, SolverStatus.UNSAT)]
     
     def get_counterexample(self) -> Optional[Dict[str, Any]]:
         """反例を取得（最初のSAT結果から）"""

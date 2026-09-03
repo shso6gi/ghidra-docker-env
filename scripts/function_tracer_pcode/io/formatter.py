@@ -2,8 +2,8 @@
 """出力フォーマッタ（SMT修正版 v2）"""
 
 import json
-from typing import List, Optional, Dict
-from ..model import FunctionReturnAnalysis, ReturnInfo
+from typing import List, Optional
+from ..model import FunctionReturnAnalysis
 
 
 class OutputFormatter:
@@ -33,7 +33,7 @@ class OutputFormatter:
         elif format_type == "detailed":
             lines = [
                 "#" * 70,
-                f"# BINARY ANALYSIS REPORT",
+                "# BINARY ANALYSIS REPORT",
                 f"# Program: {program_name}",
                 "#" * 70,
                 ""
@@ -140,7 +140,7 @@ class OutputFormatter:
         
         return_defs = []
         for i, ret in enumerate(analysis.returns):
-            lines.append(f"")
+            lines.append("")
             lines.append(f"; Return #{i + 1} at {ret.address}")
             
             # 条件をSMT形式で取得
@@ -249,70 +249,11 @@ class OutputFormatter:
         return result
     
     @staticmethod
-    def format_smt_standalone(analysis: FunctionReturnAnalysis) -> str:
-        """
-        スタンドアロンで実行可能なSMT式を生成
-        （check-satとget-modelを含む完全な形式）
-        """
-        lines = []
-        func_name = analysis.function_name
-        
-        lines.append("; " + "=" * 60)
-        lines.append(f"; Standalone SMT verification for function: {func_name}")
-        lines.append("; " + "=" * 60)
-        lines.append("")
-        lines.append("(set-logic QF_BV)")
-        lines.append("")
-        
-        # パラメータの宣言
-        for param in analysis.parameters:
-            name = param.get("name", "param")
-            size = param.get("size", 4) * 8
-            lines.append(f"(declare-const {name} (_ BitVec {size}))")
-        
-        lines.append("")
-        
-        # 戻り値サイズ
-        return_size = 32
-        if analysis.returns and hasattr(analysis.returns[0].value, 'size'):
-            if analysis.returns[0].value.size:
-                return_size = analysis.returns[0].value.size * 8
-        
-        # return値の収集
-        return_defs = []
-        for i, ret in enumerate(analysis.returns):
-            if ret.conditions:
-                cond_parts = [c.to_smt() for c in ret.conditions]
-                cond_str = f"(and {' '.join(cond_parts)})" if len(cond_parts) > 1 else cond_parts[0]
-            else:
-                cond_str = "true"
-            
-            return_defs.append({
-                "condition": cond_str,
-                "value": ret.value.to_smt()
-            })
-        
-        # 統合return値
-        unified = OutputFormatter._build_ite_expression(return_defs) if return_defs else f"(_ bv0 {return_size})"
-        lines.append(f"(define-fun return_{func_name} () (_ BitVec {return_size})")
-        lines.append(f"  {unified})")
-        lines.append("")
-        
-        # 検証
-        lines.append("; Satisfiability check")
-        # 修正: 括弧なしで関数を参照
-        lines.append(f"(assert (not (= return_{func_name} (_ bv0 {return_size}))))")
-        lines.append("(check-sat)")
-        lines.append("(get-model)")
-        
-        return "\n".join(lines)
-    
-    @staticmethod
     def format_detailed(analysis: FunctionReturnAnalysis) -> str:
         """詳細形式でフォーマット"""
         lines = []
         lines.append("#" * 70)
-        lines.append(f"# DETAILED RETURN ANALYSIS")
+        lines.append("# DETAILED RETURN ANALYSIS")
         lines.append(f"# Function: {analysis.function_name}")
         lines.append("#" * 70)
         
@@ -331,24 +272,24 @@ class OutputFormatter:
         for i, ret in enumerate(analysis.returns):
             lines.append(f"\n### Return #{i + 1}")
             lines.append(f"Address: {ret.address}")
-            lines.append(f"")
-            lines.append(f"Expression (readable):")
+            lines.append("")
+            lines.append("Expression (readable):")
             lines.append(f"  {ret.value.to_string()}")
-            lines.append(f"")
-            lines.append(f"Expression (SMT):")
+            lines.append("")
+            lines.append("Expression (SMT):")
             lines.append(f"  {ret.value.to_smt()}")
-            lines.append(f"")
-            lines.append(f"Expression (AST):")
+            lines.append("")
+            lines.append("Expression (AST):")
             lines.append(f"  {json.dumps(ret.value.to_dict(), indent=4)}")
-            lines.append(f"")
+            lines.append("")
             
             if ret.conditions:
-                lines.append(f"Conditions:")
+                lines.append("Conditions:")
                 for j, cond in enumerate(ret.conditions):
                     lines.append(f"  [{j + 1}] {cond.to_string()}")
                     lines.append(f"      SMT: {cond.to_smt()}")
             else:
-                lines.append(f"Conditions: (unconditional)")
+                lines.append("Conditions: (unconditional)")
             
             lines.append("-" * 40)
         

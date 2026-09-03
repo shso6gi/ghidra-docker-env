@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 import threading
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional
 
 from .contracts import (
     CauseOccurrence,
@@ -618,8 +618,6 @@ class ReturnAbiCompatibilityAssessment:
         else:
             left_cc = left.fact("calling_convention")[1]
             right_cc = right.fact("calling_convention")[1]
-            left_storage = left.fact("return_storage_descriptor")[1]
-            right_storage = right.fact("return_storage_descriptor")[1]
             # Binary equivalence intentionally spans architectures and ABIs.
             # Physical calling-convention names and return registers therefore
             # must not be compared for literal equality.  Each unary seed has

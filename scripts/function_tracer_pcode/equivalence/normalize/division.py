@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """除算関連の正規化ルール（安全性チェック付き）"""
 
-from typing import Optional
 from ...model import Expression, ExpressionType
 from .context import NormalizationContext
+
+
+# Re-exports kept for callers that import these names from this module.
+from typing import Optional  # noqa: F401
 
 
 def normalize_division_signs(
@@ -114,9 +117,9 @@ def _normalize_negated_division(
     # 安全性条件を満たさない場合はスキップ
     if context.debug:
         if _is_negation(dividend):
-            print(f"[Division] Skipped NEG_DIV_NEG: dividend is not safe param")
+            print("[Division] Skipped NEG_DIV_NEG: dividend is not safe param")
         if _is_negation(divisor):
-            print(f"[Division] Skipped NEG_DIV_PARAM_NEG: divisor is not safe param")
+            print("[Division] Skipped NEG_DIV_PARAM_NEG: divisor is not safe param")
     
     return expr
 
@@ -162,7 +165,7 @@ def _normalize_double_negated_division(
     # 安全性条件を満たさない場合はスキップ
     if context.debug:
         if _is_negation(dividend) and _is_negation(divisor):
-            print(f"[Division] Skipped DIV_BOTH_NEG: operands are not safe params")
+            print("[Division] Skipped DIV_BOTH_NEG: operands are not safe params")
     
     return expr
 

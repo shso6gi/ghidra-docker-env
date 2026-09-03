@@ -23,7 +23,6 @@ from ..equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownReasonClass,
     UnknownReasonId,
-    UnknownRecoveryProofKind,
     UnknownReasonRecord,
     build_unknown_recovery_actions,
     coerce_unknown_reason_records,

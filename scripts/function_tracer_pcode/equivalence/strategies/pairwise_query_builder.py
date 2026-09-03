@@ -4,10 +4,9 @@
 import hashlib
 import os
 from functools import cmp_to_key
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo, StorageInfo
-from ...model.render_smt import expression_smt_bit_width
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ..param_semantics import hint_objects_by_identity

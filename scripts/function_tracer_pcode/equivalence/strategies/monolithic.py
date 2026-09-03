@@ -30,11 +30,7 @@ from ..v2.abi_width_readonly import ReturnAbiAuthorityInvalid
 from ..query_receipt_authority import (
     canonical_region_query_receipt_digests,
 )
-from ..unknown_reason import (
-    UnknownReasonId,
-    make_internal_v2_reason_diagnostic,
-    make_unknown_reason,
-)
+from ..unknown_reason import make_internal_v2_reason_diagnostic, make_unknown_reason
 from ..monolithic_authority import (
     build_expected_region_query_set as _PINNED_BUILD_EXPECTED_REGION_QUERY_SET,
     create_shared_z3_region_session as _PINNED_CREATE_SHARED_Z3_REGION_SESSION,
@@ -1346,7 +1342,7 @@ class MonolithicStrategy(CheckStrategy):
                         analysis2,
                         **build_kwargs,
                     )
-                except ReturnWidthMismatchError as width_mismatch:
+                except ReturnWidthMismatchError:
                     canonical_width_observation = (
                         self._canonical_return_width_observation_for_analyses(
                             analysis1, analysis2
@@ -2421,6 +2417,10 @@ class MonolithicStrategy(CheckStrategy):
             return blocked_result
 from ..call_effect_preflight import register_builtin_receipt_executor
 from .pairwise_query_executor import register_canonical_guard_strategy_type
+
+
+# Re-exports kept for callers that import these names from this module.
+from ..unknown_reason import UnknownReasonId  # noqa: F401
 
 register_canonical_guard_strategy_type(MonolithicStrategy)
 register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)

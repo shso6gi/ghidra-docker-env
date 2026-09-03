@@ -2024,13 +2024,6 @@ def _impl__readonly_reduction_replaceable_positive_returns(
                 count_value=int(exact_count),
             )
         )
-        has_exact_witness = has_exact_count_proof or self._readonly_positive_return_matches_accumulator_proof(
-            analysis,
-            pointer_param,
-            count_param,
-            ret,
-            accumulator_proof,
-        )
         if has_exact_count_proof:
             replaceable_returns.append(ret)
             if self._readonly_region_value_proof_allows_broadened_positive_coverage(

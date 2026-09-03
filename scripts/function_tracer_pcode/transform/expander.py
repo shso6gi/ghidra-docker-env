@@ -389,7 +389,7 @@ class ExpressionExpander:
             return [ExpandedValue(Expression.unknown("null"), base_conditions)]
         
         if depth > 30:
-            self._debug_print(f"Max depth reached", depth)
+            self._debug_print("Max depth reached", depth)
             return [ExpandedValue(Expression.unknown("max_depth"), base_conditions)]
         
         def_op = varnode.getDef()
@@ -484,12 +484,12 @@ class ExpressionExpander:
             
             in_block = phi_parent.getIn(i)
             if not in_block:
-                self._debug_print(f"  in_block is None", depth + 1)
+                self._debug_print("  in_block is None", depth + 1)
                 continue
             
             in_block_info = self.condition_tracker.get_block_by_hash(in_block)
             if not in_block_info:
-                self._debug_print(f"  in_block_info not found", depth + 1)
+                self._debug_print("  in_block_info not found", depth + 1)
                 continue
             
             self._debug_print(f"  pred_block: index={in_block_info.index}", depth + 1)
@@ -592,7 +592,7 @@ class ExpressionExpander:
             return merged
         
         self._debug_print("=" * 50, depth)
-        self._debug_print(f"MULTIEQUAL -> 0 branches (no valid branches)", depth)
+        self._debug_print("MULTIEQUAL -> 0 branches (no valid branches)", depth)
         self._debug_print("=" * 50, depth)
         return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
 
@@ -834,7 +834,7 @@ class ExpressionExpander:
             return [ExpandedValue(Expression.unknown("null"), conditions)]
         
         if depth > 30:
-            self._debug_print(f"Max depth in input varnode", depth)
+            self._debug_print("Max depth in input varnode", depth)
             value = self.tracer.trace_varnode(varnode, depth, use_cache=False)
             return [ExpandedValue(value, conditions)]
         
@@ -857,7 +857,7 @@ class ExpressionExpander:
             if collapsed is not None:
                 return [ExpandedValue(collapsed, conditions)]
             # ネストされたMULTIEQUALを展開し、条件を組み合わせる
-            self._debug_print(f"Nested MULTIEQUAL found", depth)
+            self._debug_print("Nested MULTIEQUAL found", depth)
             nested_expanded = self._expand_multiequal(def_op, conditions, depth)
             result = []
             for ev in nested_expanded:
@@ -1799,7 +1799,7 @@ class ExpressionExpander:
                 return [ExpandedValue(traced_value, conditions)]
             else:
                 # 特別な展開が不要なら単純にトレース
-                self._debug_print(f"  No recursive expansion target in inputs, simple trace", depth)
+                self._debug_print("  No recursive expansion target in inputs, simple trace", depth)
                 value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
                 value = self._canonicalize_traced_expression(value, conditions)
                 # 出力サイズを設定
@@ -1807,7 +1807,7 @@ class ExpressionExpander:
                     value.size = output_size
                 return [ExpandedValue(value, conditions)]
 
-        self._debug_print(f"  Recursive expansion target found in inputs, expanding recursively", depth)
+        self._debug_print("  Recursive expansion target found in inputs, expanding recursively", depth)
         
         # MULTIEQUALがあれば各入力を再帰的に展開
         input_expansions: List[List[ExpandedValue]] = []
@@ -2630,7 +2630,7 @@ class ExpressionExpander:
                         ConditionSimplifier.object_centric_is_contradiction(combined_conds)
                         or ConditionSimplifier.is_contradiction(combined_conds)
                     ):
-                        self._debug_print(f"  Combination contradictory, skip", depth)
+                        self._debug_print("  Combination contradictory, skip", depth)
                         continue
                     
                     if mnemonic == "LOAD":

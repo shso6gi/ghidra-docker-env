@@ -56,18 +56,6 @@ def get_data_type_manager_for_reference(
     return None
 
 
-def has_runtime_data_type_info(
-    data_type_obj: Any = None,
-    *,
-    program: Any = None,
-) -> bool:
-    """解析に使える DataType/DTM 情報があるか。"""
-    return data_type_obj is not None or get_data_type_manager_for_reference(
-        data_type_obj,
-        program=program,
-    ) is not None
-
-
 def _resolve_runtime_data_type_obj(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
@@ -400,25 +388,6 @@ def get_declared_type_size_bits(
     if size_bytes is None:
         return None
     return size_bytes * 8
-
-
-def type_matches_patterns(
-    data_type_obj: Any = None,
-    fallback_name: Optional[str] = None,
-    patterns: Optional[List[str]] = None,
-    *,
-    program: Any = None,
-) -> bool:
-    """型が対象パターンに一致するか判定する。"""
-    patterns = list(patterns or [])
-    if not patterns:
-        return False
-    if data_type_obj is None:
-        return False
-    if is_undefined_data_type(data_type_obj, fallback_name, program=program):
-        if any(pattern.startswith("undefined") for pattern in patterns):
-            return True
-    return False
 
 
 def are_types_equivalent(

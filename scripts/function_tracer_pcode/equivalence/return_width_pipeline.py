@@ -379,16 +379,6 @@ def prepare_pair_return_observation(
     )
 
 
-def observation_audit_digest(prepared: PreparedPairReturnObservation) -> str:
-    return SnapshotFingerprintCodec.digest((
-        prepared.status,
-        prepared.view.digest if prepared.view is not None else None,
-        prepared.binding_receipt.binding_digest if prepared.binding_receipt is not None else None,
-        tuple((item.blocker_kind, item.target_key, item.missing_slot) for item in prepared.blockers),
-        prepared.observation_seed.stable_key() if prepared.observation_seed else None,
-    ))
-
-
 def _inc(stats: Optional[Dict[str, int]], key: str) -> None:
     if stats is not None:
         stats[key] = int(stats.get(key, 0)) + 1

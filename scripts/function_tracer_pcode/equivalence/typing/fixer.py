@@ -14,7 +14,6 @@ from ...model import FunctionReturnAnalysis, FunctionSignature, SignatureHypothe
 from ...model.signature import (
     ResolvedTypeSpec,
     are_types_equivalent,
-    get_data_type_display_name,
     get_declared_type_size_bytes,
     is_suspicious_undefined_data_type,
     is_unsigned_data_type,
@@ -24,7 +23,7 @@ from ...model.signature import (
 )
 
 if TYPE_CHECKING:
-    from ...model.analysis import SignednessResult
+    pass
 
 
 @dataclass
@@ -52,26 +51,6 @@ class TypeFixerConfig:
         "uchar": "char",
         "unsigned char": "char",
     })
-
-    def add_pattern(self, pattern: str) -> None:
-        size = self._legacy_pattern_to_size(pattern)
-        if size is not None:
-            self.suspicious_undefined_sizes.add(size)
-
-    def remove_pattern(self, pattern: str) -> None:
-        size = self._legacy_pattern_to_size(pattern)
-        if size is not None:
-            self.suspicious_undefined_sizes.discard(size)
-
-    def set_patterns(self, patterns: Set[str]) -> None:
-        resolved_sizes = {
-            size
-            for pattern in patterns
-            for size in [self._legacy_pattern_to_size(pattern)]
-            if size is not None
-        }
-        if resolved_sizes:
-            self.suspicious_undefined_sizes = resolved_sizes
 
     def _legacy_pattern_to_size(self, pattern: Optional[str]) -> Optional[int]:
         normalized = (pattern or "").strip().lower()
@@ -118,25 +97,6 @@ class TypeFixerConfig:
             program=program,
             fallback_size=fallback_size,
         )
-
-    def get_signed_type_for(
-        self,
-        unsigned_type: Optional[str],
-        *,
-        data_type_obj: Any = None,
-        program: Any = None,
-        fallback_size: Optional[int] = None,
-    ) -> Optional[str]:
-        spec = self.resolve_signed_type_spec(
-            unsigned_type,
-            data_type_obj=data_type_obj,
-            program=program,
-            fallback_size=fallback_size,
-        )
-        if spec is None:
-            return None
-        return spec.type_name
-
 
 class TypeFixer:
     """FunctionReturnAnalysis 上に型仮説を適用するクラス。"""
@@ -188,35 +148,6 @@ class TypeFixer:
         )
         return needs_fix
 
-    def check_return_type_needs_signedness_fix(
-        self,
-        return_type_str: Optional[str],
-        return_type_obj: Any = None,
-        signedness_result: Optional["SignednessResult"] = None,
-    ) -> Tuple[bool, Optional[ResolvedTypeSpec]]:
-        if signedness_result is None or not signedness_result.is_signed():
-            return False, None
-        if (return_type_str is None and return_type_obj is None) or not self._is_unsigned_type(
-            return_type_obj,
-            return_type_str,
-        ):
-            return False, None
-
-        signed_spec = self.config.resolve_signed_type_spec(
-            return_type_str,
-            data_type_obj=return_type_obj,
-            program=self.program,
-        )
-        if signed_spec is None:
-            self._debug_print(f"No signed type mapping for '{return_type_str}'")
-            return False, None
-
-        self._debug_print(
-            f"Return type '{return_type_str}' needs signedness fix -> '{signed_spec.type_name}' "
-            f"(evidence: {signedness_result.opcode_counts})"
-        )
-        return True, signed_spec
-
     def check_param_types_need_fix(self, function) -> List[int]:
         indices = []
         for i, param in enumerate(function.getParameters()):
@@ -225,36 +156,6 @@ class TypeFixer:
             if self._should_fix_type(data_type, type_str):
                 indices.append(i)
         return indices
-
-    def check_needs_fix(self, function_name: str) -> Tuple[bool, bool]:
-        function = self._find_function_by_name(function_name)
-        if function is None:
-            self._debug_print(f"Function '{function_name}' not found")
-            return (False, False)
-
-        return_needs_fix = self.check_return_type_needs_fix(function)
-        param_indices = self.check_param_types_need_fix(function)
-        return (return_needs_fix, len(param_indices) > 0)
-
-    def check_needs_fix_with_params(
-        self,
-        function_name: str,
-        param_info: List[Dict[str, Any]],
-    ) -> Tuple[bool, bool]:
-        function = self._find_function_by_name(function_name)
-        if function is None:
-            self._debug_print(f"Function '{function_name}' not found")
-            return (False, False)
-
-        return_needs_fix = self.check_return_type_needs_fix(function)
-        param_needs_fix = False
-        for info in param_info:
-            type_str = info.get("data_type", "")
-            if self._should_fix_type(info.get("data_type_obj"), type_str):
-                param_needs_fix = True
-                break
-
-        return (return_needs_fix, param_needs_fix)
 
     def build_signature_hypothesis(
         self,
@@ -580,15 +481,6 @@ class TypeFixResult:
             or self.mips64_abi_fixed_binary1
             or self.mips64_abi_fixed_binary2
         )
-
-    def any_signedness_fix_applied(self) -> bool:
-        return self.signedness_fixed_binary1 or self.signedness_fixed_binary2
-
-    def any_param_signedness_fix_applied(self) -> bool:
-        return self.param_signedness_fixed_binary1 or self.param_signedness_fixed_binary2
-
-    def any_mips64_abi_fix_applied(self) -> bool:
-        return self.mips64_abi_fixed_binary1 or self.mips64_abi_fixed_binary2
 
     def to_dict(self) -> dict:
         result = {

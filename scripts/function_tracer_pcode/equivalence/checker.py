@@ -4,7 +4,6 @@
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass, replace
-import hashlib
 import time
 from uuid import uuid4
 
@@ -13,16 +12,15 @@ from ..model.render_smt import (
     UnknownSmtExtensionWidthError,
     UnsupportedSmtOperatorError,
 )
-from ..smt import ParallelSolverRunner, ParallelResult, SolverResult
+from ..smt import ParallelSolverRunner, ParallelResult
 from .formula import FormulaBuilder
 from .formula.returns import ReturnWidthMismatchError
 from .counterexample import CounterexampleFormatter
 from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
-from .result_factory import create_error_result, create_reanalysis_error
+from .result_factory import create_error_result
 from .phases.handler import PhaseHandler, PhaseContext, PhaseResult
 from .reanalysis import analyze_and_check_with_analysis, selective_reanalysis_and_check
-from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies.pairwise import PairwiseStrategy
 from .strategies.loop_template import LoopTemplatePairwiseStrategy
 from .strategies.monolithic import MonolithicStrategy
@@ -42,7 +40,6 @@ from .cause_identity import (
     ProofRequirementId,
     UnaryCauseKey,
     RelationalCauseKey,
-    ExecutionCauseKey,
     canonical_cause_tuple,
 )
 from .call_effect_obligations import (
@@ -82,6 +79,10 @@ from .recurrence_promotion import (
     promote_recurrence_pair,
 )
 from ..model.recurrence_contracts import RecurrenceDigestCodec
+
+
+# Re-exports kept for callers that import these names from this module.
+from ..smt import SolverResult  # noqa: F401
 
 
 # ============================================================================
@@ -334,43 +335,6 @@ class EquivalenceChecker:
         finally:
             analyzer.dispose()
     
-    def _try_phase4b_if_applicable(
-        self,
-        result: EquivalenceResult,
-        ctx: PhaseContext,
-        retry_count: int,
-        retry_with_type_fix: bool
-    ) -> Optional[EquivalenceResult]:
-        """SAT時にPhase 4-Bを試行すべきかチェックし、必要なら実行
-        
-        Args:
-            result: 現在の判定結果
-            ctx: Phaseコンテキスト
-            retry_count: リトライカウント（Phase 4-B実行時に使用）
-            retry_with_type_fix: 型修正リトライが有効か
-        
-        Returns:
-            - Phase 4-B実行した場合: 新しいEquivalenceResult
-            - Phase 4-B不要な場合: None
-        """
-        if not retry_with_type_fix:
-            return None
-        
-        if result.is_equivalent is not False:  # SAT でない
-            return None
-        
-        abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
-        
-        if not abi_constraints:
-            return None
-        
-        self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
-        ctx.type_fix_result.retry_phase = "mips64_abi_retry"
-        
-        return self._retry_with_iterative_abi_constraints(
-            ctx, abi_constraints, retry_count=retry_count
-        )
-    
     def check_from_binaries(
         self,
         program1,
@@ -516,15 +480,6 @@ class EquivalenceChecker:
             self, ctx, phase_result, retry_count
         )
 
-    def _create_reanalysis_error(
-        self,
-        ctx: PhaseContext,
-        error_message: str,
-        retry_count: int
-    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
-        """再解析エラー結果作成の互換ラッパー"""
-        return create_reanalysis_error(ctx, error_message, retry_count)
-    
     def _retry_with_abi_constraints(
         self,
         ctx: PhaseContext,

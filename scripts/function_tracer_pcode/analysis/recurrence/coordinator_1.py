@@ -499,36 +499,6 @@ def _impl__safe_pcode_input_varnode(self, op, index: int):
     except Exception:
         return None
 
-def _impl__varnode_constant_value(self, varnode) -> Optional[int]:
-    if varnode is None:
-        return None
-    try:
-        if not bool(getattr(varnode, "isConstant", lambda: False)()):
-            return None
-    except Exception:
-        return None
-    for attr in ("getOffset", "getAddress"):
-        value_fn = getattr(varnode, attr, None)
-        if not callable(value_fn):
-            continue
-        try:
-            value = value_fn()
-        except Exception:
-            continue
-        if attr == "getAddress":
-            offset_fn = getattr(value, "getOffset", None)
-            if not callable(offset_fn):
-                continue
-            try:
-                value = offset_fn()
-            except Exception:
-                continue
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
 def _impl__unique_parameters_by_name(parameters: Optional[Sequence[dict]]) -> Dict[str, dict]:
     by_name: Dict[str, dict] = {}
     name_counts: Dict[str, int] = {}

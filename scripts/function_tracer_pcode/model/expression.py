@@ -5,12 +5,7 @@ from typing import List, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
 
 from .storage import StorageInfo
-from .render_python import (
-    expression_to_string,
-    format_piece_expression,
-    format_subpiece_expression,
-    get_python_operator,
-)
+from .render_python import expression_to_string, get_python_operator
 from .render_smt import expression_to_smt, get_smt_operator
 from .runtime_refs import UnknownValueRef
 from .variable_collection import (
@@ -365,12 +360,6 @@ class Expression:
     def _to_string_internal(self, simplify: bool) -> str:
         return expression_to_string(self, simplify)
     
-    def _format_piece(self, high: 'Expression', low: 'Expression', simplify: bool) -> str:
-        return format_piece_expression(self, high, low, simplify)
-    
-    def _format_subpiece(self, source: 'Expression', offset: 'Expression', simplify: bool) -> str:
-        return format_subpiece_expression(self, source, offset, simplify)
-    
     def _get_python_operator(self, operator: Optional[str]) -> str:
         return get_python_operator(operator)
 
@@ -607,4 +596,7 @@ class Expression:
         collect_variables_with_storage_into(self, variables)
 
 
-from .condition import Condition
+
+
+# Re-exported for callers that import Condition from model.expression.
+from .condition import Condition  # noqa: E402,F401

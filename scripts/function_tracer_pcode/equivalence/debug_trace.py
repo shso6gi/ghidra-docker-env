@@ -353,9 +353,6 @@ class DebugTrace:
             )
         )
 
-    def add_causal_transition(self, transition: ReasonCausalTransition) -> None:
-        self.causal_transitions.append(transition)
-
     def add_proof_completion(self, completion: ProofCompletionEvent) -> None:
         self.proof_completion_events.append(completion)
 

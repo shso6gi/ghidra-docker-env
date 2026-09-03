@@ -447,7 +447,7 @@ class EquivalenceResult:
         if self.constrained_fragments:
             vars_str = ", ".join(self.constrained_fragments)
             lines.append(f"Derived fragments: {vars_str}")
-            lines.append(f"  (upper-bits variables constrained via sign/zero extension from parameters)")
+            lines.append("  (upper-bits variables constrained via sign/zero extension from parameters)")
         
         if self.type_fix_result and self.type_fix_result.any_fix_applied():
             lines.append(f"Type fix applied: {self.type_fix_result}")

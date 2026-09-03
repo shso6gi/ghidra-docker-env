@@ -104,21 +104,6 @@ def project_proof_gates(result: Any) -> Tuple[ProofGateProjection, ...]:
     return tuple(projections)
 
 
-def _view_identity(analysis1: Any, analysis2: Any, branch_id: str) -> Tuple[Any, ...]:
-    def side(analysis: Any) -> Tuple[Any, ...]:
-        function_ref = getattr(analysis, "function_ref", None)
-        stable_key = getattr(function_ref, "stable_key", None)
-        function_key = stable_key() if callable(stable_key) else (
-            getattr(analysis, "function_name", None), getattr(analysis, "entry_point", None)
-        )
-        return (
-            getattr(analysis, "binary_id", None), function_key,
-            getattr(analysis, "analysis_view_identity", None),
-            int(getattr(analysis, "partition_revision", 0) or 0),
-        )
-    return ("obligation_branch_view", branch_id, side(analysis1), side(analysis2))
-
-
 def _outcome(result: Any) -> FunctionProofOutcome:
     is_timeout = getattr(result, "is_timeout", None)
     if callable(is_timeout) and is_timeout():

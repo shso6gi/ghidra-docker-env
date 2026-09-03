@@ -10,7 +10,6 @@ from typing import Any, Dict, Generic, Iterable, Mapping, Optional, Tuple, TypeV
 from .model import AttemptKey, ProofArtifact, UnaryArtifactDomain
 from .proof import (
     ArtifactApplicabilityRecord,
-    ValidatedProofClosure,
     ViewPremiseRecord,
     validate_artifact_applicability,
     validate_proof_closure,

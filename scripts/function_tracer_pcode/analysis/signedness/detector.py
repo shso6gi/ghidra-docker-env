@@ -237,31 +237,6 @@ class SignednessDetector:
     # 後方互換性メソッド（Phase 1互換）
     # ================================================================
     
-    def detect_full_scan(self) -> SignednessEvidence:
-        """
-        全P-codeスキャンで証拠収集（Phase 1互換、非推奨）
-        
-        Returns:
-            SignednessEvidence: 収集した証拠と判定結果
-        """
-        evidence = SignednessEvidence()
-        self._visited_ops.clear()
-        
-        try:
-            self._debug_print("Starting full P-code scan (Phase 1 compatible)")
-            self._scan_all_pcode_ops(evidence)
-            evidence.determine_signedness()
-            
-            if self.debug:
-                self._debug_print(f"Detection complete: {evidence.result.value}")
-                self._debug_print(f"Summary: {evidence.get_summary()}")
-        
-        except Exception as e:
-            self._debug_print(f"Error during detection: {e}")
-            evidence.result = SignednessType.UNKNOWN
-        
-        return evidence
-    
     def _scan_all_pcode_ops(self, evidence: SignednessEvidence) -> None:
         """全てのPcodeOpをスキャンして証拠を収集（fast-pathチェックなし）"""
         basic_blocks = self.high_function.getBasicBlocks()
@@ -308,35 +283,3 @@ class SignednessDetector:
         except Exception as e:
             self._debug_print(f"Error scanning basic block: {e}")
     
-    def detect_from_return_chain(
-        self, 
-        return_varnode,
-        max_depth: int = 50
-    ) -> SignednessEvidence:
-        """
-        戻り値のデータフローチェーンのみをトレースして証拠を収集
-        
-        Args:
-            return_varnode: 戻り値のVarnode
-            max_depth: 最大トレース深度
-        
-        Returns:
-            SignednessEvidence: 収集した証拠と判定結果
-        """
-        evidence = SignednessEvidence()
-        self._visited_ops.clear()
-        
-        try:
-            # fast-path検出の準備
-            self.fastpath_detector.collect_upper_zero_checks()
-            
-            visited: Set[str] = set()
-            self._trace_and_collect(
-                return_varnode, evidence, visited, 0, max_depth
-            )
-            evidence.determine_signedness()
-        except Exception as e:
-            self._debug_print(f"Error in return chain detection: {e}")
-            evidence.result = SignednessType.UNKNOWN
-        
-        return evidence

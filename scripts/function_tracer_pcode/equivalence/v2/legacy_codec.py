@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -65,35 +64,6 @@ class LegacyDiagnosticByteEnvelope:
             raise ValueError("legacy byte envelopes are issued only by the lossless decoder")
         for name, value in zip(tuple(self.__dataclass_fields__), values):
             object.__setattr__(self, name, value)
-
-    def encode_lossless(self) -> bytes:
-        return self.raw_payload
-
-
-class LosslessLegacyByteDecoder:
-    """Decode manifest-bound bytes without interpreting or normalizing them."""
-
-    @staticmethod
-    def decode(
-        *, entry_id: str, ordinal: int, source_path: str,
-        raw_length: int, raw_sha256: str, raw_payload: bytes,
-    ) -> LegacyDiagnosticByteEnvelope:
-        if type(entry_id) is not str or not entry_id:
-            raise TypeError("legacy manifest entry ID is invalid")
-        if type(ordinal) is not int or ordinal < 0:
-            raise TypeError("legacy manifest ordinal is invalid")
-        if type(source_path) is not str or not source_path:
-            raise TypeError("legacy manifest source path is invalid")
-        if type(raw_payload) is not bytes:
-            raise TypeError("lossless legacy decoder requires exact bytes")
-        observed_sha = hashlib.sha256(raw_payload).hexdigest()
-        if raw_length != len(raw_payload) or raw_sha256 != observed_sha:
-            raise ValueError("legacy raw-byte manifest binding mismatch")
-        return LegacyDiagnosticByteEnvelope(
-            entry_id, ordinal, source_path, raw_length, raw_sha256,
-            raw_payload, True, _factory_token=_LEGACY_BYTE_ENVELOPE_TOKEN,
-        )
-
 
 @dataclass(frozen=True)
 class LegacyCompatibilityProjection:

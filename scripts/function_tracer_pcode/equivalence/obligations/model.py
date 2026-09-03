@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Tuple
 
 from ..cause_identity import ProofRequirementId
+
+
+# Re-exports kept for callers that import these names from this module.
+from typing import Optional  # noqa: F401
 
 
 class ActivationState(str, Enum):

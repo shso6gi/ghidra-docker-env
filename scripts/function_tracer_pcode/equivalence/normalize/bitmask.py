@@ -289,10 +289,6 @@ def _is_zero(expr: Expression) -> bool:
     return expr.expr_type == ExpressionType.CONSTANT and int(expr.value) == 0
 
 
-def _is_all_ones_byte(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and (int(expr.value) & 0xFF) == 0xFF
-
-
 def _is_all_ones_mask_for_size(expr: Expression, size: int) -> bool:
     if expr.expr_type != ExpressionType.CONSTANT or size <= 0:
         return False

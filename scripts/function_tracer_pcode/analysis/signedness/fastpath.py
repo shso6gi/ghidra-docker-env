@@ -6,7 +6,7 @@ Fast-path unsigned 検出モジュール
 誤った符号性判定を防ぐ
 """
 
-from typing import Optional, Set, Dict, Any, FrozenSet
+from typing import Optional, Set, FrozenSet
 
 from .varnode_analyzer import VarnodeAnalyzer
 
@@ -134,14 +134,11 @@ class FastPathDetector:
         right_vn = pcode_op.getInput(1)
         
         # どちらかが定数0
-        zero_vn = None
         other_vn = None
         
         if right_vn.isConstant() and right_vn.getOffset() == 0:
-            zero_vn = right_vn
             other_vn = left_vn
         elif left_vn.isConstant() and left_vn.getOffset() == 0:
-            zero_vn = left_vn
             other_vn = right_vn
         else:
             return
@@ -196,9 +193,3 @@ class FastPathDetector:
         
         return None
     
-    def get_stats(self) -> Dict[str, Any]:
-        """統計情報を取得"""
-        return {
-            "upper_zero_check_count": len(self._upper_zero_checked_keys),
-            "upper_zero_check_keys": list(self._upper_zero_checked_keys),
-        }

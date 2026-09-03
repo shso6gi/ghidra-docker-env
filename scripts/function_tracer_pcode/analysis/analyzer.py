@@ -1578,10 +1578,6 @@ class ReturnAnalyzer:
         from .analyzer_services.session_helpers_2 import invoke as _invoke
         return _invoke('_parameter_equals_condition', self, parameter, value)
 
-    def _conditions_are_unsat(self, conditions: Sequence[Condition]) -> bool:
-        from .analyzer_services.session_helpers_2 import invoke as _invoke
-        return _invoke('_conditions_are_unsat', self, conditions)
-
     def _phi_expression_key_set(self, expr: Optional[Expression]) -> Set[Tuple[Any, ...]]:
         from .analyzer_services.session_helpers_2 import invoke as _invoke
         return _invoke('_phi_expression_key_set', self, expr)

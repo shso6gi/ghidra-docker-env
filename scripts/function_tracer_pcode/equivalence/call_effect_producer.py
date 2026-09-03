@@ -24,7 +24,6 @@ from ..model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    ReturnInfo,
     expression_provenance_key,
 )
 from ..model.signature import get_declared_type_signedness
@@ -32,7 +31,6 @@ from ..model.render_smt import (
     collect_unknown_smt_declarations,
     expression_smt_bit_width,
 )
-from ..smt import SolverStatus
 from .call_effect_obligations import (
     InternalSolverProofArtifact,
     SolverProofRecord,
@@ -2041,7 +2039,6 @@ def _render_call_region_memory_stage(
 ) -> _RenderedStage:
     lines, left_mapping, right_mapping = _call_region_parameter_prelude(proof_input)
     call_mapping = left_mapping if proof_input.call_on_left else right_mapping
-    region_mapping = right_mapping if proof_input.call_on_left else left_mapping
     reach = _render_reachability(proof_input.call_arguments, call_mapping)
     if proof_input.call_on_left:
         left_effects, right_effects = (

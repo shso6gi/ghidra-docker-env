@@ -17,7 +17,7 @@ from .contracts import (
     authority_digest,
     canonical_value,
 )
-from ...smt.interface import SolverResult, SolverStatus
+from ...smt.interface import SolverResult
 from ...smt.parallel import ParallelResult, ParallelSolverRunner
 
 

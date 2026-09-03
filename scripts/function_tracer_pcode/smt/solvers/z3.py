@@ -171,7 +171,6 @@ class Z3Solver(SMTSolver):
         smt_script: str,
         cancellation_token: Optional[Any] = None
     ) -> SolverResult:
-        import sys
         self._debug_print("=== Z3 check_equivalence_direct START ===")
         self._debug_print(f"Current timeout: {self.timeout}s")
         

@@ -3,8 +3,12 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Optional, Dict, Any, List, Tuple
-from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, Tuple
+from dataclasses import dataclass
+
+
+# Re-exports kept for callers that import these names from this module.
+from typing import List  # noqa: F401
 
 
 class SolverStatus(Enum):
@@ -29,10 +33,6 @@ class SolverResult:
     def is_equivalent(self) -> bool:
         """等価かどうか"""
         return self.status == SolverStatus.UNSAT
-    
-    def has_counterexample(self) -> bool:
-        """反例があるか"""
-        return self.status == SolverStatus.SAT and self.model is not None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,17 +107,6 @@ class SMTSolver(ABC):
             SolverResult: 検証結果
         """
         pass
-    
-    def check_equivalence(
-        self,
-        smt_script: str,
-        return_var1: str,
-        return_var2: str
-    ) -> SolverResult:
-        """
-        2つのreturn値の等価性を検証（後方互換性のため）
-        """
-        return self.check_equivalence_direct(smt_script)
     
     @abstractmethod
     def get_model(self) -> Optional[Dict[str, Any]]:

@@ -1279,17 +1279,6 @@ def _no_active_pair_certificate_proven(
     return False
 
 
-def comparison_receipt_production_session(
-    receipt: "ComparisonExecutionReceipt", frame: "PreparedDispatchFrame",
-) -> Any:
-    """Return the exact production session captured by the trusted issuer."""
-
-    from .v2.production_context import comparison_receipt_authority
-
-    authority = comparison_receipt_authority(receipt, frame)
-    return authority[2] if authority is not None else None
-
-
 @dataclass(frozen=True)
 class ComparisonExecutionReceipt:
     receipt_id: str
@@ -1389,10 +1378,6 @@ class ComparisonExecutionReceipt:
             and count_map.get("projection_no_active_pair_proven")
             == int(_no_active_pair_certificate_proven(frame, self.query_records))
         )
-
-    def disposition_count(self, name: str) -> int:
-        return dict(self.disposition_counts).get(name, 0)
-
 
 @dataclass
 class PreparedDispatchFrame:
@@ -2247,8 +2232,8 @@ def lower_call_projection_for_case_pair(
                 (left_exprs[0], right_expr) for right_expr in right_exprs[1:]
             )
             for left_expr, right_expr in expression_pairs:
-                left_bits = int(getattr(left_expr, "get_bit_width", lambda: 0)() or 0)
-                right_bits = int(getattr(right_expr, "get_bit_width", lambda: 0)() or 0)
+                int(getattr(left_expr, "get_bit_width", lambda: 0)() or 0)
+                int(getattr(right_expr, "get_bit_width", lambda: 0)() or 0)
                 from .return_width_surface import (
                     BlockedObservation,
                     build_call_site_return_width_receipt,

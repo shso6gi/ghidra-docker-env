@@ -10,7 +10,6 @@ from ._shared import (
     ExpressionType,
     Mapping,
     SolverStatus,
-    UnknownReasonId,
     Z3Solver,
     build_condition_only_query,
     build_normalized_inequality_query,
@@ -21,7 +20,6 @@ from ._shared import (
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
-    expression_contains_unsupported_smt_ops,
     expression_node_has_unsupported_smt_ops,
     expression_uses_smt_float_theory,
     expression_uses_smt_uf,
@@ -33,7 +31,6 @@ from ._shared import (
     solve_query_twostage,
     try_solver_proven_rewrite_equivalence,
 )
-
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
     if implementation_function is None:

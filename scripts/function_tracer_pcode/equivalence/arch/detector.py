@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """アーキテクチャ検出モジュール"""
 
-from typing import Optional
 
 
 class ArchitectureDetector:
@@ -51,22 +50,3 @@ class ArchitectureDetector:
         
         return False
     
-    def get_architecture_info(self, program) -> dict:
-        """アーキテクチャ情報を取得"""
-        info = {
-            "is_mips64": False,
-            "processor": "unknown",
-            "pointer_size": 0,
-            "language_id": "unknown"
-        }
-        
-        try:
-            lang = program.getLanguage()
-            info["language_id"] = str(lang.getLanguageID())
-            info["processor"] = str(lang.getProcessor())
-            info["pointer_size"] = program.getDefaultPointerSize()
-            info["is_mips64"] = self.is_mips64(program)
-        except Exception as e:
-            self._debug_print(f"Error getting architecture info: {e}")
-        
-        return info

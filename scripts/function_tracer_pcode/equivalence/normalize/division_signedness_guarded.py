@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """UDIV→SDIV正規化（SMTガード証明版）"""
 
-from typing import Optional, List, Tuple, Callable
+from typing import List, Tuple, Callable
 from ...model import Expression, ExpressionType
 from .context import NormalizationContext
 from .guard_prover import prove_guard_condition
@@ -81,7 +81,7 @@ def _try_convert_udiv_to_sdiv(
     
     if dividend_class == "unknown" or divisor_class == "unknown":
         if context.debug:
-            print(f"[DivisionSignednessGuarded] Complex expressions, skip")
+            print("[DivisionSignednessGuarded] Complex expressions, skip")
         return expr
     
     # SMT式を生成（シンボル名置換を適用）
@@ -102,7 +102,7 @@ def _try_convert_udiv_to_sdiv(
     guard2_smt = f"(bvslt (_ bv0 {divisor_bits}) {divisor_smt})"
     
     if context.debug:
-        print(f"[DivisionSignednessGuarded] Trying UDIV->SDIV conversion...")
+        print("[DivisionSignednessGuarded] Trying UDIV->SDIV conversion...")
         print(f"  Dividend: {dividend_smt[:80]}")
         print(f"  Divisor: {divisor_smt[:80]}")
     
@@ -124,7 +124,7 @@ def _try_convert_udiv_to_sdiv(
     
     if not guard1_proven:
         if context.debug:
-            print(f"[DivisionSignednessGuarded] Guard 1 (dividend >= 0) NOT proven")
+            print("[DivisionSignednessGuarded] Guard 1 (dividend >= 0) NOT proven")
         return expr
     
     guard2_proven, guard2_error = prove_guard_condition(
@@ -144,13 +144,13 @@ def _try_convert_udiv_to_sdiv(
     
     if not guard2_proven:
         if context.debug:
-            print(f"[DivisionSignednessGuarded] Guard 2 (divisor > 0) NOT proven")
+            print("[DivisionSignednessGuarded] Guard 2 (divisor > 0) NOT proven")
         return expr
     
     # 両方証明できた → 変換を適用
     normalized = expr.clone_with(operator="INT_SDIV", operands=[dividend, divisor])
     
-    reason = f"Guards proven via SMT: dividend>=0, divisor>0"
+    reason = "Guards proven via SMT: dividend>=0, divisor>0"
     
     context.record_rule(
         rule_name="UDIV_TO_SDIV_GUARD_PROVEN",

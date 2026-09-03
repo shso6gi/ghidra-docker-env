@@ -29,11 +29,7 @@ from ._shared import (
     hashlib,
     summarize_expression,
 )
-from ._api import (
-    ConditionTracker,
-    StructuralRecurrenceSummarizer,
-    accept_summary_return_candidates,
-)
+from ._api import ConditionTracker, StructuralRecurrenceSummarizer
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")
@@ -880,7 +876,7 @@ def _impl_analyze_function(
                     print(event.format_detail(indent=0))
         elif len(tracer.unknown_tracker.events) > 0:
             print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
-            print(f"  Use --debug flag for detailed report")
+            print("  Use --debug flag for detailed report")
 
         self._call_analysis_cache[analysis_scope_key] = result
         function_cache_key = self._function_cache_key(function)

@@ -176,7 +176,6 @@ def _impl__recover_implicit_return_from_terminal_call(
 ) -> Optional[List[ReturnInfo]]:
     """`call foo(...); return;` 形式の wrapper を callee summary から復元する。"""
     from ...transform import ExpressionExpander
-    from ...transform.expander import ExpandedValue
 
     expander = ExpressionExpander(
         tracer,

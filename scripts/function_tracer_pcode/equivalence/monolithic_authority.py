@@ -860,19 +860,7 @@ class RegionSolverExecutionReceipt:
         query: RenderedRegionQuery,
         session_certificate: SharedZ3SessionCertificate,
     ) -> bool:
-        payload = (
-            "region_solver_execution_receipt_v1",
-            self.receipt_digest,
-            self.query_contract_digest,
-            self.region_id,
-            self.query_kind,
-            self.formula_digest,
-            self.disposition,
-            self.solver_result_digest,
-            self.session_certificate_digest,
-            self.execution_lease_digest,
-            self.backend_identity,
-        )
+        pass
 
 
 def _verify_session_certificate(

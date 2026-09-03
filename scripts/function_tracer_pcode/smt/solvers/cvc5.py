@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import time
 import re
-from typing import Optional, Dict, Any, Tuple, List, TYPE_CHECKING
+from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 
 from ..interface import SMTSolver, SolverResult, SolverStatus
 
 # 型チェック時のみインポート
 if TYPE_CHECKING:
-    import cvc5 as cvc5_module
+    pass
 
 
 class CVC5Solver(SMTSolver):
@@ -204,7 +204,7 @@ class CVC5Solver(SMTSolver):
                         
                         # 既知の変数のみ処理
                         if term_name not in self._declared_consts:
-                            self._debug_print(f"    Skipping (not in declared_consts)")
+                            self._debug_print("    Skipping (not in declared_consts)")
                             continue
                         
                         # getValue を呼び出し

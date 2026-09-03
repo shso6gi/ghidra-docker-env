@@ -63,13 +63,6 @@ class PathCoverageResult:
     def is_complete(self) -> bool:
         return self.status == "complete"
 
-    def is_complete_unreachable(self) -> bool:
-        return self.status == "complete_unreachable"
-
-    def is_inconclusive(self) -> bool:
-        return self.status == "inconclusive"
-
-
 class ConditionTracker:
     """条件分岐を追跡"""
     
@@ -110,23 +103,6 @@ class ConditionTracker:
             bucket.append(summary)
             if block_index in self.block_by_index:
                 self.block_by_index[block_index].switch_dispatch_summaries = list(bucket)
-
-    def get_switch_dispatch_summaries(self, block_or_index=None):
-        if block_or_index is None:
-            summaries = []
-            for bucket in self.switch_dispatch_summaries.values():
-                summaries.extend(bucket)
-            return summaries
-
-        if isinstance(block_or_index, int):
-            return list(self.switch_dispatch_summaries.get(block_or_index, []))
-
-        block_index = getattr(block_or_index, "index", None)
-        if block_index is None:
-            block_index = getattr(getattr(block_or_index, "block", None), "getIndex", lambda: None)()
-        if block_index is None:
-            return []
-        return list(self.switch_dispatch_summaries.get(block_index, []))
 
     def _clone_conditions(self, conditions: List[Condition]) -> List[Condition]:
         return list(conditions or [])
@@ -378,10 +354,6 @@ class ConditionTracker:
             return None
         return self.block_by_hash.get(block.hashCode())
     
-    def get_block_by_index(self, index: int) -> Optional[BasicBlockInfo]:
-        """インデックスからブロック情報を取得"""
-        return self.block_by_index.get(index)
-    
     def get_path_conditions_to_block(self, target_block: BasicBlockInfo) -> List[Condition]:
         """
         エントリーからターゲットブロックまでのパス条件を取得（単一パス）
@@ -443,7 +415,7 @@ class ConditionTracker:
         # 有効なパスがない場合は最初のパスを返す（フォールバック）
         if all_paths:
             if self.debug:
-                self._debug_print(f"  WARNING: No valid paths, using first path as fallback", 1)
+                self._debug_print("  WARNING: No valid paths, using first path as fallback", 1)
             self._single_path_cache[target_block.index] = self._clone_conditions(all_paths[0])
             return self._clone_conditions(all_paths[0])
         return []

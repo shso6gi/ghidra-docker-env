@@ -4,25 +4,25 @@
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
-import time
 
 from ...model import FunctionReturnAnalysis, FunctionSignature
 from ...model.signature import (
     ResolvedTypeSpec,
     get_data_type_display_name,
     get_declared_type_size_bytes,
-    is_suspicious_undefined_data_type,
     is_unsigned_data_type,
-    is_undefined_data_type,
     is_void_data_type,
     resolve_integer_type_spec,
     resolve_type_spec,
 )
-from ..result import EquivalenceResult
 from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from ..typing.signedness_param_fix import ParamSignednessFixer
 from ..arch.detector import ArchitectureDetector
 from ..arch.mips64 import MIPS64Handler
+
+
+# Re-exports kept for callers that import these names from this module.
+from ..result import EquivalenceResult  # noqa: F401
 
 
 # ============================================================================
@@ -846,8 +846,6 @@ class PhaseHandler:
         self._debug_print("Phase 2: Pattern-based return type fix")
         self._debug_print("=" * 60)
         
-        params1 = ctx.analysis1.parameters if ctx.analysis1 else []
-        params2 = ctx.analysis2.parameters if ctx.analysis2 else []
         
         changed_binary1 = False
         changed_binary2 = False

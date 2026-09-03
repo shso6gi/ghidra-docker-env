@@ -782,7 +782,6 @@ def _impl_check(
                     )
                     from ...v2.production_signals import (
                         emit_abi_width_readonly_signal,
-                        register_abi_width_solver_candidate,
                         register_readonly_promotion,
                     )
 

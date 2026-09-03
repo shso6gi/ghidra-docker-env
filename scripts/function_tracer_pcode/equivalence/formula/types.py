@@ -54,12 +54,6 @@ class ParameterPair:
             return 0
         return min(self.param1.bit_width, self.param2.bit_width)
 
-    def get_larger_width(self) -> int:
-        width1 = self.param1.bit_width if self.param1 else 0
-        width2 = self.param2.bit_width if self.param2 else 0
-        return max(width1, width2)
-
-
 @dataclass
 class FormulaBuilderResult:
     """SMT式構築の結果"""

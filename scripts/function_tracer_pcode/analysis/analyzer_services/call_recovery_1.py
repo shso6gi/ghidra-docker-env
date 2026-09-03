@@ -1587,7 +1587,6 @@ def _impl__resolve_local_code_target_expansions(
     current_function=None,
     args: Optional[List[Expression]] = None,
 ):
-    from ...transform.expander import ExpandedValue
 
     args = list(args or [])
     cache_key = self._local_target_cache_key(address_value, args)

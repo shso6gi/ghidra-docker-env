@@ -159,14 +159,6 @@ class SignednessEvidence:
             counts[ev.opcode] = counts.get(ev.opcode, 0) + 1
         return counts
     
-    def has_any_evidence(self) -> bool:
-        """何らかの証拠があるかどうか"""
-        return (
-            len(self.signed_strong) > 0 or
-            len(self.signed_medium) > 0 or
-            len(self.unsigned) > 0
-        )
-    
     def to_dict(self) -> Dict[str, Any]:
         """辞書形式に変換"""
         result = {
@@ -184,30 +176,3 @@ class SignednessEvidence:
         
         return result
     
-    def format_debug_string(self) -> str:
-        """デバッグ用の文字列を生成"""
-        lines = []
-        lines.append(f"Signedness Result: {self.result.value}")
-        lines.append(f"Evidence Summary: {self.get_summary()}")
-        
-        if self.signed_strong:
-            lines.append("  Signed Strong Evidence:")
-            for ev in self.signed_strong:
-                lines.append(f"    - {ev.opcode} at {ev.address}")
-        
-        if self.signed_medium:
-            lines.append("  Signed Medium Evidence:")
-            for ev in self.signed_medium:
-                lines.append(f"    - {ev.opcode} at {ev.address}")
-        
-        if self.unsigned:
-            lines.append("  Unsigned Evidence:")
-            for ev in self.unsigned:
-                lines.append(f"    - {ev.opcode} at {ev.address}")
-        
-        if self.excluded_fastpath:
-            lines.append("  Excluded Fast-path Evidence:")
-            for ev in self.excluded_fastpath:
-                lines.append(f"    - {ev.opcode} at {ev.address}: {ev.exclusion_reason}")
-        
-        return "\n".join(lines)

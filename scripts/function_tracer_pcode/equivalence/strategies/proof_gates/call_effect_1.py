@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from ._shared import (
-    Mapping,
-    UnknownReasonId,
-    UnknownRecoveryProofKind,
-    build_proof_obligation_id,
-)
+from ._shared import Mapping, UnknownRecoveryProofKind, build_proof_obligation_id
 
 def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
     implementation_function = globals().get(f"_impl_{_service_name}")

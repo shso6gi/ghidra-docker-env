@@ -1225,12 +1225,10 @@ def _full_width_mask_singleton_condition(condition: Condition) -> Optional[Condi
     first_const = _raw_constant_value(first)
     second_const = _raw_constant_value(second)
     if first_const is not None and getattr(second, "expr_type", None) == ExpressionType.PARAMETER:
-        mask = first
         source = second
         mask_value = first_const
     elif second_const is not None and getattr(first, "expr_type", None) == ExpressionType.PARAMETER:
         source = first
-        mask = second
         mask_value = second_const
     else:
         return None
@@ -2216,15 +2214,6 @@ def _raw_constant_value(expr: Optional[Expression]) -> Optional[int]:
         return int(expr.value)
     except (TypeError, ValueError):
         return None
-
-
-def _combine_or(expressions: Sequence[Expression]) -> Expression:
-    if not expressions:
-        raise ValueError("Cannot OR an empty expression list")
-    result = expressions[0]
-    for expr in expressions[1:]:
-        result = Expression.binary_op("BOOL_OR", result, expr)
-    return result
 
 
 def _condition_as_expression(condition: Condition) -> Expression:
@@ -3287,22 +3276,6 @@ def _state_transition_cases_key(cases: Any) -> Optional[Tuple[Any, ...]]:
         entries.append(("transition_case", condition_key, expr_key))
     entries.sort(key=repr)
     return ("transition_cases", tuple(entries))
-
-
-def _counted_loop_transition_evidence_from_runtime_ref(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
-    if runtime_ref is None or type(runtime_ref).__name__ != "CountedLoopSummaryRef":
-        return None
-    loop_summary = getattr(runtime_ref, "loop_summary", None)
-    loop_key = _loop_summary_transition_evidence(loop_summary)
-    if loop_key is None:
-        return None
-    return (
-        "counted_loop_transition_evidence",
-        int(getattr(runtime_ref, "induction_step", 0) or 0),
-        int(getattr(runtime_ref, "result_size", 0) or 0),
-        tuple(getattr(runtime_ref, "residue_cases", ()) or ()),
-        loop_key,
-    )
 
 
 def _loop_summary_transition_evidence(loop_summary: Any) -> Optional[Tuple[Any, ...]]:

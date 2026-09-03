@@ -95,44 +95,6 @@ def build_pair_execution_target(
     return {**body, "target_digest": authority_digest(body)}
 
 
-def validate_pair_execution_target(
-    target: Mapping[str, Any], *, repo_root: Path | None = None,
-    expected_source_digest: str | None = None,
-) -> None:
-    fields = {
-        "schema", "authority_kind", "sample_identity",
-        "output_sample_relative_path", "function_name", "left_binary_id",
-        "right_binary_id", "source_path", "source_sha256",
-        "left_binary_path", "left_binary_sha256", "right_binary_path",
-        "right_binary_sha256", "analysis_source_digest",
-        "analysis_config_digest", "target_digest",
-    }
-    if not isinstance(target, Mapping) or set(target) != fields:
-        raise ValueError("pair execution target schema differs")
-    if target["schema"] != PAIR_EXECUTION_TARGET_SCHEMA or target["authority_kind"] != PAIR_EXECUTION_TARGET_KIND:
-        raise ValueError("pair execution target kind is invalid")
-    if any(type(target[field]) is not str or not target[field] for field in fields):
-        raise ValueError("pair execution target contains an empty identity")
-    body = {key: target[key] for key in target if key != "target_digest"}
-    if target["target_digest"] != authority_digest(body):
-        raise ValueError("pair execution target digest differs")
-    if expected_source_digest is not None and target["analysis_source_digest"] != expected_source_digest:
-        raise ValueError("pair execution target source digest differs")
-    if repo_root is None:
-        return
-    for path_field, hash_field in (
-        ("source_path", "source_sha256"),
-        ("left_binary_path", "left_binary_sha256"),
-        ("right_binary_path", "right_binary_sha256"),
-    ):
-        path = Path(target[path_field])
-        if path.is_absolute() or ".." in path.parts:
-            raise ValueError("pair execution target path is unsafe")
-        absolute = repo_root.resolve() / path
-        if not absolute.is_file() or sha256_file(absolute) != target[hash_field]:
-            raise ValueError("pair execution target input hash differs")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=".")

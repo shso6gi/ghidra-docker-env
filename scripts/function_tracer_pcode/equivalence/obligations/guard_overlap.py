@@ -14,7 +14,7 @@ import hmac
 import inspect
 from pathlib import Path
 import secrets
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 _GUARD_ARTIFACT_AUTHORITY_KEY = secrets.token_bytes(32)

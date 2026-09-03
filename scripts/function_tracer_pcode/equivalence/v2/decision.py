@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Sequence, Tuple
+from typing import Tuple
 
 from .contracts import Outcome, VerifiedLifecycleProjection, authority_digest
 

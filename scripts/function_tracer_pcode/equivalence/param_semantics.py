@@ -126,33 +126,6 @@ def _infer_parameter_semantics_object_keyed(
     return hints, hints_by_identity
 
 
-def hints_by_name(
-    analysis: FunctionReturnAnalysis,
-) -> Dict[str, Tuple[str, int]]:
-    """Return semantic hints keyed by parameter name for existing consumers."""
-    by_index = infer_parameter_semantics(analysis)
-    unique_names = _globally_unique_parameter_names(analysis.parameters or [])
-    candidates: Dict[str, list[Tuple[str, int]]] = {}
-    for param in analysis.parameters or []:
-        index = _normalize_parameter_index(param.get("index"))
-        if index is None:
-            continue
-        hint = by_index.get(index)
-        if hint is None:
-            continue
-        name = param.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        if name not in unique_names:
-            continue
-        candidates.setdefault(name, []).append((hint.signedness, hint.narrow_bits))
-    return {
-        name: values[0]
-        for name, values in candidates.items()
-        if len(values) == 1
-    }
-
-
 def hint_objects_by_name(
     analysis: FunctionReturnAnalysis,
 ) -> Dict[str, ParameterSemanticHint]:
@@ -747,13 +720,6 @@ def _should_emit_hint(
     if declared_signedness not in {"signed", "unsigned"}:
         return True
     return signedness != declared_signedness
-
-
-def _has_direct_signedness_conflict(param_evidence: Dict[str, Any]) -> bool:
-    return (
-        int(param_evidence.get("direct_signed_score", 0)) > 0
-        and int(param_evidence.get("direct_unsigned_score", 0)) > 0
-    )
 
 
 def _resolve_direct_signedness(param_evidence: Dict[str, Any]) -> Optional[str]:

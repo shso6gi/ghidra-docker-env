@@ -15,7 +15,7 @@ Recognized exact arithmetic-series forms are reduced to a canonical
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..model import (
     Expression,

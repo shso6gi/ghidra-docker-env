@@ -3284,12 +3284,6 @@ class ReductionAccumulatorProof:
     def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
         return self.lower_to_loop_summary_ref()
 
-    def _pairwise_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
-        return self._build_loop_summary_ref(
-            loop_var_unit_override=self._pairwise_loop_var_unit(),
-            canonicalize_scalar_iteration=True,
-        )
-
     def with_runtime_evidence(
         self,
         *,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import FrozenSet, Iterable, Mapping, MutableMapping, Set, Tuple
+from typing import FrozenSet, Iterable, Mapping, Set, Tuple
 
 from .contracts import (
     BoundSatisfactionContract,

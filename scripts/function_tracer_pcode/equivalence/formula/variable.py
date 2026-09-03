@@ -11,13 +11,11 @@ sign/zero extension から導かれる値として拘束する。
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum, auto
-import re
 
 from ...model import (
     AddressValueRef,
     Expression,
     ExpressionType,
-    Condition,
     StorageInfo,
     FunctionReturnAnalysis,
     CanonicalLocation,
@@ -223,7 +221,7 @@ class VariableAnalyzer:
         self._debug_print(f"Classifying variable '{var_name}' ({var_bit_width}bit) by storage")
         
         if var_storage is None:
-            self._debug_print(f"  -> UNKNOWN: No storage info available")
+            self._debug_print("  -> UNKNOWN: No storage info available")
             return ExtraVariableAnalysis(
                 name=var_name,
                 bit_width=var_bit_width,
@@ -232,7 +230,7 @@ class VariableAnalyzer:
             )
         
         if not var_storage.is_register:
-            self._debug_print(f"  -> INDEPENDENT_INPUT: Not a register")
+            self._debug_print("  -> INDEPENDENT_INPUT: Not a register")
             return ExtraVariableAnalysis(
                 name=var_name,
                 bit_width=var_bit_width,
@@ -264,12 +262,12 @@ class VariableAnalyzer:
             
             # 同一の親レジスタを共有するかチェック
             if not var_storage.shares_base_register_with(param_storage_info):
-                self._debug_print(f"    -> Different base register")
+                self._debug_print("    -> Different base register")
                 continue
             
             # パラメータの型幅が親レジスタ幅より小さいかチェック
             if param_storage_info.size_bits >= param_storage_info.base_register_size_bits:
-                self._debug_print(f"    -> Parameter occupies full register")
+                self._debug_print("    -> Parameter occupies full register")
                 continue
             
             # 変数がパラメータの補完部分（上位ビット）かチェック
@@ -303,9 +301,9 @@ class VariableAnalyzer:
                     reason=fragment_info.get_reason_string()
                 )
             else:
-                self._debug_print(f"    -> Not a complement (overlapping or non-adjacent)")
+                self._debug_print("    -> Not a complement (overlapping or non-adjacent)")
         
-        self._debug_print(f"  -> INDEPENDENT_INPUT: No matching parameter found")
+        self._debug_print("  -> INDEPENDENT_INPUT: No matching parameter found")
         return ExtraVariableAnalysis(
             name=var_name,
             bit_width=var_bit_width,
@@ -397,7 +395,7 @@ class VariableAnalyzer:
                 storage = all_vars_with_storage.get(name)
                 print(f"  Variable: {name}")
                 if storage is None:
-                    print(f"    -> StorageInfo: None (NOT COLLECTED)")
+                    print("    -> StorageInfo: None (NOT COLLECTED)")
                 else:
                     print(f"    -> is_register: {storage.is_register}")
                     print(f"    -> register_name: {storage.register_name}")
@@ -411,7 +409,7 @@ class VariableAnalyzer:
                 print(f"  Parameter: {param.get('name')}")
                 storage = param.get('storage')
                 if storage is None:
-                    print(f"    -> storage: None")
+                    print("    -> storage: None")
                 else:
                     print(f"    -> is_register: {storage.get('is_register')}")
                     print(f"    -> register_name: {storage.get('register_name')}")

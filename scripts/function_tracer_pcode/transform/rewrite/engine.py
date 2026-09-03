@@ -34,7 +34,7 @@ from .rules import (
 )
 
 if TYPE_CHECKING:
-    from ...model import Expression, ReturnInfo, FunctionReturnAnalysis
+    from ...model import Expression, FunctionReturnAnalysis
 
 
 class ExpressionRewriter:
@@ -119,10 +119,6 @@ class ExpressionRewriter:
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[ExpressionRewriter] {msg}")
-    
-    def add_rule(self, rule: RewriteRule):
-        """カスタムリライトルールを追加"""
-        self.rules.append(rule)
     
     def rewrite(self, expr: 'Expression') -> RewriteResult:
         """
@@ -292,15 +288,6 @@ class ExpressionRewriter:
         
         return expr
     
-    def get_rewrite_history(self) -> List[Tuple[str, str, str]]:
-        """
-        リライトの履歴を取得
-        
-        Returns:
-            [(rule_name, before_string, after_string), ...]
-        """
-        return self._rewrite_history.copy()
-    
     def was_rewritten(self) -> bool:
         """リライトが適用されたかどうか"""
         return len(self._rewrite_history) > 0
@@ -320,7 +307,7 @@ def rewrite_analysis_returns(
     Returns:
         (リライトされた解析結果, 各return値のリライト結果リスト)
     """
-    from ...model import Condition, ReturnInfo, FunctionReturnAnalysis
+    from ...model import Condition, ReturnInfo
     
     rewrite_results = []
     new_returns = []

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """除算の符号性正規化（UDIV/SDIV統一、bvneg対応強化版）"""
 
-from typing import Optional, Tuple
+from typing import Tuple
 from ...model import Expression, ExpressionType
 from .context import NormalizationContext
+
+
+# Re-exports kept for callers that import these names from this module.
+from typing import Optional  # noqa: F401
 
 
 def normalize_division_signedness(
@@ -84,7 +88,7 @@ def _is_safe_for_sdiv_conversion(
     dividend_class, dividend_var = _classify_term(dividend)
     
     if dividend_class == "unknown":
-        return False, f"Dividend is complex expression"
+        return False, "Dividend is complex expression"
     
     if dividend_class == "var":
         # 単純な変数
@@ -101,7 +105,7 @@ def _is_safe_for_sdiv_conversion(
     divisor_class, divisor_var = _classify_term(divisor)
     
     if divisor_class == "unknown":
-        return False, f"Divisor is complex expression"
+        return False, "Divisor is complex expression"
     
     if divisor_class == "var":
         # 単純な変数

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -987,10 +986,6 @@ def _extract_integer_constant(expr: Optional[Expression]) -> Optional[int]:
     return None
 
 
-def _is_named_param(expr: Expression, param_name: str) -> bool:
-    return expr.expr_type == ExpressionType.PARAMETER and expr.name == param_name
-
-
 def _matches_index_param(expr: Expression, param_name: str) -> bool:
     name, _ = _extract_index_param(expr)
     return name == param_name
@@ -1011,7 +1006,3 @@ def _is_minus_one_constant(expr: Expression) -> bool:
     mask = (1 << bit_width) - 1
     return value == mask
 
-
-def _is_nonnegative_constant(expr: Expression) -> bool:
-    value = _extract_integer_constant(expr)
-    return value is not None and value >= 0

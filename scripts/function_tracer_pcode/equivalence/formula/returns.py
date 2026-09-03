@@ -165,32 +165,6 @@ def coerce_return_value_to_bitvec(
     return value_smt
 
 
-def should_sign_extend_to_return_size(analysis: FunctionReturnAnalysis) -> bool:
-    """return値の幅補正で sign extension を使うべきか判定する。"""
-    surface_getter = getattr(analysis, "get_comparison_surface", None)
-    if callable(surface_getter):
-        surface = surface_getter()
-        override = getattr(surface, "use_sign_extension", None)
-        if override is not None:
-            return bool(override)
-
-        type_name_getter = getattr(analysis, "get_comparison_type_name", None)
-        type_obj_getter = getattr(analysis, "get_comparison_type_obj", None)
-        if callable(type_name_getter) or callable(type_obj_getter):
-            return should_sign_extend_return_type(
-                type_name_getter() if callable(type_name_getter) else analysis.return_type,
-                return_type_obj=(
-                    type_obj_getter()
-                    if callable(type_obj_getter)
-                    else getattr(analysis, "return_type_obj", None)
-                ),
-            )
-    return should_sign_extend_return_type(
-        analysis.return_type,
-        return_type_obj=getattr(analysis, "return_type_obj", None),
-    )
-
-
 def should_sign_extend_return_type(
     return_type: Optional[str],
     return_type_obj=None,
@@ -382,13 +356,6 @@ def _return_defs_require_relation(return_defs: List[Dict[str, object]]) -> bool:
     return False
 
 
-def _readonly_ref_from_return_def(
-    ret_def: Dict[str, object],
-) -> Optional[ReadonlyReductionRef]:
-    value = ret_def.get("raw_value")
-    return _readonly_ref_from_value(value)
-
-
 def _readonly_ref_from_value(value) -> Optional[ReadonlyReductionRef]:
     runtime_ref = getattr(value, "runtime_ref", None)
     if isinstance(runtime_ref, ReadonlyReductionRef):
@@ -424,29 +391,6 @@ def _readonly_ref_count_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[ob
     return ("parameter", index)
 
 
-def _readonly_ref_count_identities(ref: ReadonlyReductionRef) -> set[Tuple[object, ...]]:
-    identities: set[Tuple[object, ...]] = set()
-    identities_fn = getattr(ref, "count_parameter_semantic_identities", None)
-    if callable(identities_fn):
-        try:
-            identities.update(tuple(identity) for identity in identities_fn() if identity is not None)
-        except (TypeError, ValueError):
-            pass
-    identity = _readonly_ref_count_identity(ref)
-    if identity is not None:
-        identities.add(tuple(identity))
-    storage_key = getattr(ref, "count_parameter_storage_identity_key", None)
-    if storage_key is not None:
-        identities.add(("parameter_storage", tuple(storage_key)))
-    try:
-        index = getattr(ref, "count_parameter_index", None)
-        if index is not None and int(index) >= 0:
-            identities.add(("parameter", int(index)))
-    except (TypeError, ValueError):
-        pass
-    return identities
-
-
 def _readonly_ref_count_storage_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
     storage_key = getattr(ref, "count_parameter_storage_identity_key", None)
     if storage_key is None:
@@ -475,24 +419,6 @@ def _readonly_refs_count_identity_compatible(
     left_index = _readonly_ref_count_index_identity(left)
     right_index = _readonly_ref_count_index_identity(right)
     return left_index is not None and right_index is not None and left_index == right_index
-
-
-def _readonly_ref_surface_key(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
-    pointer_key = ref.pointer_base_ref.semantic_key()
-    if pointer_key is None:
-        return None
-    count_identity = _readonly_ref_count_identity(ref)
-    if count_identity is None:
-        return None
-    return (
-        "readonly_reduction_surface",
-        str(ref.reduction_kind),
-        pointer_key,
-        count_identity,
-        max(1, int(ref.result_size or 0)),
-        bool(ref.signed_counter),
-        int(getattr(ref, "constant_bias", 0) or 0),
-    )
 
 
 def _readonly_refs_share_surface(left: ReadonlyReductionRef, right: ReadonlyReductionRef) -> bool:

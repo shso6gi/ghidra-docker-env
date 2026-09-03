@@ -7,7 +7,7 @@ authority while preserving the original result behavior.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 TOP_LEVEL_SOURCE_CONTRACT = "return-analyzer-top-level-decompile-v2"

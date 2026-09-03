@@ -28,7 +28,7 @@ from ._shared import (
     expression_key_safe,
     replace,
 )
-from ._api import StructuralRecurrenceSummarizer, accept_summary_return_candidates
+from ._api import StructuralRecurrenceSummarizer
 from ...model import (
     FunctionOutcomeSeed,
     ReturnValueFlowCertificate,
@@ -370,7 +370,7 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
             except Exception as e:
                 self._debug_print(f"    conditions: (error: {e})", 1)
         else:
-            self._debug_print(f"    conditions: (unconditional/always)", 1)
+            self._debug_print("    conditions: (unconditional/always)", 1)
 
     self._debug_print("=" * 60)
 

@@ -3,7 +3,7 @@
 
 import hashlib
 import re
-from typing import List, Dict, Optional, Tuple, Set, Any
+from typing import List, Dict, Optional, Tuple, Any
 
 from ...model import (
     Condition,
@@ -51,16 +51,15 @@ from .types import (
     ParameterInfo,
     ParameterPair,
 )
-from .variable import (
-    VariableAnalyzer, 
-    ExtraVariableAnalysis, 
-    VariableClassification,
-    get_parameter_fragment_constraints
-)
+from .variable import VariableAnalyzer, ExtraVariableAnalysis, get_parameter_fragment_constraints
 from .symbol_replace import build_symbol_replacer
 from ...analysis.memory_resolver import collect_memory_bit_widths_from_analysis
 
 from ..ub.constraints import UbConstraintBuilder
+
+
+# Re-exports kept for callers that import these names from this module.
+from .variable import VariableClassification  # noqa: F401
 
 
 def _rewrite_guard_parameter_metadata_for_smt(guard, param_infos):
@@ -920,7 +919,7 @@ class FormulaBuilder:
         extra_vars2: List[ExtraVariableInfo]
     ):
         """デバッグ情報を出力"""
-        print(f"[FormulaBuilder] Function 1 parameters:")
+        print("[FormulaBuilder] Function 1 parameters:")
         for p in params1:
             signed_str = "signed" if p.is_signed else "unsigned"
             semantic_str = ""
@@ -928,7 +927,7 @@ class FormulaBuilder:
                 semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
             print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars1:
-            print(f"[FormulaBuilder] Function 1 extra variables:")
+            print("[FormulaBuilder] Function 1 extra variables:")
             for v in extra_vars1:
                 status = ""
                 if v.analysis:
@@ -939,7 +938,7 @@ class FormulaBuilder:
                         status += f" -> {parent} ({ext_type})"
                 print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
         
-        print(f"[FormulaBuilder] Function 2 parameters:")
+        print("[FormulaBuilder] Function 2 parameters:")
         for p in params2:
             signed_str = "signed" if p.is_signed else "unsigned"
             semantic_str = ""
@@ -947,7 +946,7 @@ class FormulaBuilder:
                 semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
             print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars2:
-            print(f"[FormulaBuilder] Function 2 extra variables:")
+            print("[FormulaBuilder] Function 2 extra variables:")
             for v in extra_vars2:
                 status = ""
                 if v.analysis:
@@ -1417,21 +1416,6 @@ class FormulaBuilder:
                     return None
         return None
 
-    def _readonly_reduction_contract_key(self, reduction_ref, proof, expr) -> Optional[Tuple[Any, ...]]:
-        result_bits = max(1, int(expression_smt_bit_width(expr) or 0))
-        result_size = max(1, (result_bits + 7) // 8)
-        for owner in (reduction_ref, proof):
-            key_fn = getattr(owner, "readonly_term_sequence_contract_key", None)
-            if not callable(key_fn):
-                continue
-            try:
-                key = key_fn(result_size=result_size)
-            except (AttributeError, TypeError, ValueError):
-                key = None
-            if key is not None:
-                return key
-        return None
-
     def _readonly_reduction_witness_counts(self, reduction_ref, proof) -> Tuple[int, ...]:
         counts = set()
         for witnesses in (
@@ -1821,11 +1805,11 @@ class FormulaBuilder:
             lines.append("; " + "-" * 40)
             
             if fragment_lines1:
-                lines.append(f"; Function 1 fragments:")
+                lines.append("; Function 1 fragments:")
                 lines.extend(fragment_lines1)
             
             if fragment_lines2:
-                lines.append(f"; Function 2 fragments:")
+                lines.append("; Function 2 fragments:")
                 lines.extend(fragment_lines2)
             
             lines.append("")
@@ -1975,16 +1959,6 @@ class FormulaBuilder:
         全てのreturn定義の条件を反映したite式を生成
         """
         return build_return_definition(analysis, return_var_name, param_infos)
-    
-    def _replace_param_names(
-        self,
-        smt_expr: str,
-        param_infos: List[ParameterInfo]
-    ) -> str:
-        """SMT式内のパラメータ名を置換"""
-        from .params import replace_symbol_names
-
-        return replace_symbol_names(smt_expr, param_infos)
     
     def _build_ite_expression(self, return_defs: List[dict], return_size: int) -> str:
         """

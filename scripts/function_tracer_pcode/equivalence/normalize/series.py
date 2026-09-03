@@ -25,95 +25,6 @@ def normalize_series_patterns(
     return canonical
 
 
-def _match_sum_to_triangular(expr: Expression) -> Expression:
-    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_SUB" or len(expr.operands) != 2:
-        return expr
-
-    base_expr, square_term = _match_base_plus_square(expr.operands[0])
-    if base_expr is None or square_term is None:
-        return expr
-
-    square_base = _match_square(square_term)
-    if square_base is None:
-        return expr
-
-    square_origin = _match_var_plus_const(square_base)
-    base_origin = _match_var_plus_const(base_expr)
-    if square_origin is None or base_origin is None:
-        return expr
-
-    base_var, base_bias = base_origin
-    square_var, square_bias = square_origin
-    if not _same_nonconstant_expr(base_var, square_var):
-        return expr
-    if base_bias != 0 or square_bias != -1:
-        return expr
-
-    tri_operands = _match_half_product(expr.operands[1], target_size=expr.size or base_expr.size or 0)
-    if tri_operands is None:
-        return expr
-    left_tri, right_tri = tri_operands
-    left_origin = _match_var_plus_const(left_tri)
-    right_origin = _match_var_plus_const(right_tri)
-    if left_origin is None or right_origin is None:
-        return expr
-
-    left_var, left_bias = left_origin
-    right_var, right_bias = right_origin
-    if not _same_nonconstant_expr(base_var, left_var) or not _same_nonconstant_expr(base_var, right_var):
-        return expr
-
-    offsets = sorted([left_bias, right_bias])
-    if offsets != [-2, -1]:
-        return expr
-
-    return _build_triangular(base_var, expr.size or base_var.size or 4)
-
-
-def _match_triangular_with_affine_completion(expr: Expression) -> Expression:
-    terms = _flatten_add_terms(expr)
-    if len(terms) < 2:
-        return expr
-
-    for index, (sign, term) in enumerate(terms):
-        if sign != 1:
-            continue
-        tri_operands = _match_half_product(term, target_size=expr.size or term.size or 0)
-        if tri_operands is None:
-            continue
-        left_tri, right_tri = tri_operands
-        left_origin = _match_var_plus_const(left_tri)
-        right_origin = _match_var_plus_const(right_tri)
-        if left_origin is None or right_origin is None:
-            continue
-
-        left_var, left_bias = left_origin
-        right_var, right_bias = right_origin
-        if not _same_nonconstant_expr(left_var, right_var):
-            continue
-
-        offsets = sorted([left_bias, right_bias])
-        remaining_expr = _sum_terms(
-            signed_term
-            for term_index, signed_term in enumerate(terms)
-            if term_index != index
-        )
-        if remaining_expr is None:
-            continue
-
-        coeff_bias = _match_affine_coeff_bias(remaining_expr, left_var)
-        if coeff_bias is None:
-            continue
-        coeff, bias = coeff_bias
-
-        if offsets == [-2, -1] and coeff == 2 and bias == -1:
-            return _build_triangular(left_var, expr.size or left_var.size or 4)
-        if offsets == [-1, 0] and coeff == 1 and bias == 0:
-            return _build_triangular(left_var, expr.size or left_var.size or 4)
-
-    return expr
-
-
 def _match_base_plus_square(expr: Expression) -> Tuple[Optional[Expression], Optional[Expression]]:
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_ADD" or len(expr.operands) != 2:
         return None, None
@@ -291,16 +202,6 @@ def _clone_expression(expr: Expression) -> Expression:
         read_order_key=expr.read_order_key,
         runtime_ref=getattr(expr, "runtime_ref", None),
         opcode=getattr(expr, "opcode", None),
-    )
-
-
-def _matches_commutative_product(expr: Expression, left: Expression, right: Expression) -> bool:
-    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
-        return False
-    expr_left, expr_right = expr.operands
-    return (
-        (_same_nonconstant_expr(expr_left, left) and _same_nonconstant_expr(expr_right, right))
-        or (_same_nonconstant_expr(expr_left, right) and _same_nonconstant_expr(expr_right, left))
     )
 
 

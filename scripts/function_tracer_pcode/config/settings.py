@@ -11,7 +11,6 @@ from typing import Mapping, MutableMapping, Optional
 
 # Ghidra内で実行されているかどうかを検出
 try:
-    from ghidra.program.model.listing import Program # type: ignore[import]
     IN_GHIDRA = True
 except ImportError:
     IN_GHIDRA = False

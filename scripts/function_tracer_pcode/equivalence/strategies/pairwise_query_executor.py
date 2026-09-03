@@ -5,7 +5,7 @@ import contextvars
 import hashlib
 import inspect
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 

@@ -208,14 +208,12 @@ def _extract_final_result_events(
 ) -> Tuple[Tuple[int, str, Optional[Mapping[str, Any]]], ...]:
     events = []
     current_lines = []
-    payload_start = -1
     in_payload = False
     for index, line in enumerate(text.splitlines()):
         stripped = line.strip()
         if stripped == RESULT_JSON_BEGIN:
             in_payload = True
             current_lines = []
-            payload_start = index
             continue
         if stripped == RESULT_JSON_END and in_payload:
             raw_json = "\n".join(current_lines).strip()
@@ -231,7 +229,6 @@ def _extract_final_result_events(
                     )
             in_payload = False
             current_lines = []
-            payload_start = -1
             continue
         if in_payload:
             current_lines.append(line)

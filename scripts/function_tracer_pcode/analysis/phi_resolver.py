@@ -3,10 +3,14 @@
 
 from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
-from ..model import Expression, Condition, ExpressionType, PcodeOpRef, UnknownValueRef
+from ..model import Expression, Condition, PcodeOpRef, UnknownValueRef
 from ..model.intrinsics import resolve_pcode_intrinsic
 from .debug import summarize_expression
 from .condition import ConditionSimplifier, ConditionNormalizer
+
+
+# Re-exports kept for callers that import these names from this module.
+from ..model import ExpressionType  # noqa: F401
 
 
 class _PhiExpansionBudgetOrigin:
@@ -198,7 +202,7 @@ class PhiHandler:
             return self._clone_branches(cached)
         
         if op_key in self._expanding_ops:
-            self._debug_print(f"Circular reference detected", depth)
+            self._debug_print("Circular reference detected", depth)
             return [
                 ExpandedBranch(
                     base_conditions,
@@ -264,7 +268,7 @@ class PhiHandler:
         for i in range(num_inputs):
             input_varnode = multiequal_op.getInput(i)
             
-            self._debug_print(f"", depth)
+            self._debug_print("", depth)
             self._debug_print(f"--- Processing Input[{i}] ---", depth + 1)
             
             if self.debug:
@@ -286,7 +290,7 @@ class PhiHandler:
             
             # 自己参照スキップ
             if is_self_ref:
-                self._debug_print(f"Skipping self-reference input", depth + 1)
+                self._debug_print("Skipping self-reference input", depth + 1)
                 continue
 
             input_condition_sets: List[List[Condition]] = [list(base_conditions)]
@@ -319,11 +323,11 @@ class PhiHandler:
                     )
 
                 if ConditionSimplifier.is_contradiction(input_conditions):
-                    self._debug_print(f"Conditions are contradictory, skipping", depth + 1)
+                    self._debug_print("Conditions are contradictory, skipping", depth + 1)
                     continue
 
                 # 入力値を展開
-                self._debug_print(f"Tracing input value...", depth + 1)
+                self._debug_print("Tracing input value...", depth + 1)
                 expanded_values = self._trace_input_value(
                     input_varnode, input_conditions, depth + 1
                 )
@@ -338,7 +342,7 @@ class PhiHandler:
         
         # ★ 統計サマリー
         if self.debug:
-            self._debug_print(f"", depth)
+            self._debug_print("", depth)
             self._debug_print(f"MULTIEQUAL summary: self_refs={self_ref_count}/{num_inputs}, "
                               f"valid={len(all_branches)}", depth)
             if self_ref_reasons:

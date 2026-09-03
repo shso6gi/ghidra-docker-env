@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Sequence, Tuple
 
 from .contracts import (
     BlockerEligibilityBaseRow,

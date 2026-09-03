@@ -4,7 +4,7 @@
 Magic number変換、power-of-two最適化、剰余最適化を含む
 """
 
-from typing import Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from .base import RewriteRule
 from ..magic_division import MagicConstants, is_power_of_two, log2_exact
 
@@ -43,13 +43,6 @@ class DivByConstantRuleBase(RewriteRule):
         
         return True
     
-    def _get_divisor_and_bits(self, expr: 'Expression') -> Tuple[int, int]:
-        """除数とビット幅を取得"""
-        divisor = expr.operands[1].value
-        n_bits = expr.operands[0].get_bit_width()
-        return divisor, n_bits
-
-
 class SignedDivBy3Rule(RewriteRule):
     """
     signed除算 x sdiv 3 のmagic number変換

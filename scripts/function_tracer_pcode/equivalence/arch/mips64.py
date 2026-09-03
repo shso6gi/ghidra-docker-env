@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """MIPS64 ABI処理モジュール"""
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any
 from ...model import FunctionReturnAnalysis, Expression, ExpressionType
 from ...model.signature import (
     ResolvedTypeSpec,
@@ -376,23 +376,6 @@ class MIPS64Handler:
         """
         return hint_objects_by_identity(analysis)
     
-    def _detect_extension_patterns(
-        self,
-        expr: Expression,
-        evidence: Dict[str, Dict[str, Any]],
-    ) -> None:
-        """
-        式からパラメータの width/signedness 証拠を収集
-
-        検出パターン:
-        1. INT_SEXT(SUBPIECE(PARAM, 0)) → signed 32bit
-        2. INT_ZEXT(SUBPIECE(PARAM, 0)) → unsigned 32bit
-        3. INT_AND(PARAM, 0xffffffff) → 32bit 利用 + unsigned 寄り
-        4. SUBPIECE(PARAM, 0) (size=4) → 32bit 利用の証拠
-        5. INT_SLESS / INT_SLESSEQUAL with 0/-1 → signed 利用の証拠
-        """
-        self._detect_extension_patterns_recursive(expr, evidence)
-    
     def _detect_extension_patterns_recursive(
         self,
         expr: Expression,
@@ -685,24 +668,6 @@ class MIPS64Handler:
         if not narrow_bits:
             return None
         return narrow_bits[0]
-
-    def _resolve_usage_signedness(
-        self,
-        param_evidence: Dict[str, Any],
-        param: Optional[Dict[str, Any]],
-    ) -> Optional[str]:
-        """証拠スコアから signedness を決める。"""
-        signed_score = param_evidence.get("signed_score", 0)
-        unsigned_score = param_evidence.get("unsigned_score", 0)
-
-        if signed_score > unsigned_score:
-            return "signed"
-        if unsigned_score > signed_score:
-            return "unsigned"
-        if signed_score == 0 and unsigned_score == 0:
-            return None
-
-        return self._infer_signedness(param) if param is not None else None
 
     def _record_signed_comparison_evidence(
         self,

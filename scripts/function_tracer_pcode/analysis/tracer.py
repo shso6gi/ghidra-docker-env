@@ -24,7 +24,7 @@ from ..model import (
 )
 from ..model.intrinsics import resolve_pcode_intrinsic
 from ..model.signature import get_data_type_display_name, is_unsigned_data_type
-from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
+from ..config.settings import MAX_TRACE_DEPTH
 from .debug.unknown_trace import (
     UnknownTracker, UnknownEvent, UnknownReason,
     VarnodeInfo, PcodeOpInfo
@@ -897,63 +897,6 @@ class PcodeTracer:
             if storage is not None:
                 break
         return self._get_storage_info_from_variable_storage(storage)
-
-    def _coerce_call_argument_to_parameter(
-        self,
-        expr: Expression,
-        parameter,
-        storage_info: StorageInfo,
-    ) -> Optional[Expression]:
-        size_bytes = 0
-        try:
-            size_bytes = int(parameter.getLength())
-        except Exception:
-            size_bytes = 0
-        if size_bytes <= 0:
-            try:
-                size_bytes = int(parameter.getSize())
-            except Exception:
-                size_bytes = 0
-        if size_bytes <= 0:
-            size_bytes = max(1, int(getattr(storage_info, "size", 0) or 0))
-
-        data_type_obj = None
-        try:
-            data_type_obj = parameter.getDataType()
-        except Exception:
-            data_type_obj = None
-        data_type = get_data_type_display_name(data_type_obj)
-        is_signed = self._coerce_descriptor_signedness(data_type_obj, data_type)
-        target_storage = storage_info
-        if size_bytes > 0 and int(getattr(target_storage, "size", 0) or 0) != int(size_bytes):
-            target_storage = StorageInfo(
-                is_register=True,
-                space_name=target_storage.space_name,
-                space_id=target_storage.space_id,
-                offset=target_storage.offset,
-                size=int(size_bytes),
-                size_bits=int(size_bytes) * 8,
-                register_offset=target_storage.register_offset,
-                register_size=int(size_bytes),
-                register_size_bits=int(size_bytes) * 8,
-                register_name=target_storage.register_name,
-                base_register_name=target_storage.base_register_name,
-                base_register_offset=target_storage.base_register_offset,
-                base_register_size=target_storage.base_register_size,
-                base_register_size_bits=target_storage.base_register_size_bits,
-                bit_offset_in_base=target_storage.bit_offset_in_base,
-                is_stack_pointer=target_storage.is_stack_pointer,
-                is_frame_pointer=target_storage.is_frame_pointer,
-            )
-        coerced = self._coerce_expression_width(
-            expr,
-            getattr(expr, "storage_info", None),
-            target_storage,
-            is_signed=is_signed,
-        )
-        coerced.data_type = data_type
-        coerced.data_type_obj = data_type_obj
-        return coerced
 
     def _call_storage_is_unmodified_before_call(
         self,

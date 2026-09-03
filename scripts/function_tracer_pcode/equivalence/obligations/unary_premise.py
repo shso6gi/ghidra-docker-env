@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple
+from typing import Any
 
 from ...model.recurrence_contracts import (
     FUNCTION_UNARY_PREMISE_SCHEMA_ID,

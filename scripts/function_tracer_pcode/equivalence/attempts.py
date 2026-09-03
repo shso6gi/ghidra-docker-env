@@ -11,7 +11,6 @@ from .debug_trace import (
     PairwiseDecisiveInfo,
     ProofCompletionEvent,
     ReasonCompletionEvent,
-    ReasonCausalTransition,
     TransitionReason,
 )
 from .result import EquivalenceResult, RewriteInfo
@@ -257,7 +256,7 @@ def _record_explicit_proof_completions(
                 )
                 slot = str(canonical_requirement.get("proof_kind") or "")
                 if all((snapshot_fingerprint, premise_digest, artifact_digest, recognizing_stage, target, slot)):
-                    validated = debug_trace.add_reason_completion(
+                    debug_trace.add_reason_completion(
                         ReasonCompletionEvent(
                             completion_event_id=(
                                 "reason_completion",

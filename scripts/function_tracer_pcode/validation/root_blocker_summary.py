@@ -9,10 +9,9 @@ are preserved in full and therefore may over-partition, but never over-merge.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from ..equivalence.cause_identity import (
-    CAUSE_IDENTITY_SCHEMA_VERSION,
     CauseKey,
     IdentityScope,
     ProofRequirementId,
@@ -658,15 +657,6 @@ def _resolve_transitions(
         _freeze(item.get("occurrence_id")): item for item in occurrences
     }
     occurrence_ids = set(occurrence_by_id)
-    proven_completions = {
-        _freeze(item.get("completion_id")): item
-        for item in completions
-        if (
-            isinstance(item, Mapping)
-            and str(item.get("proof_status")) == "proven"
-            and bool(item.get("proof_artifact_ref"))
-        )
-    }
     result = {}
     for completion in reason_completions:
         if not isinstance(completion, Mapping):

@@ -3,7 +3,7 @@
 
 import hashlib
 import re
-from typing import Any, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
     COUNTED_LOOP_SUM_OPCODE,
@@ -624,10 +624,6 @@ def expression_uses_smt_float_theory(expr) -> bool:
             if len(operands) == 1 and int(expression_smt_bit_width(operands[0]) or 0) in _FLOAT_BV_WIDTH_TO_SORT:
                 return True
     return False
-
-
-def expressions_use_smt_float_theory(expressions: Iterable[Any]) -> bool:
-    return any(expression_uses_smt_float_theory(expr) for expr in expressions if expr is not None)
 
 
 def expression_uses_smt_uf(expr, *, float_mode: str = "fp") -> bool:

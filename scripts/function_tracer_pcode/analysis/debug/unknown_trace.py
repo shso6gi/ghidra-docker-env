@@ -2,7 +2,7 @@
 """Unknown発生イベントの追跡・記録モジュール"""
 
 from dataclasses import dataclass
-from typing import Optional, List, Any
+from typing import Optional, List
 from enum import Enum, auto
 
 
@@ -210,9 +210,6 @@ class UnknownTracker:
     def enable(self):
         self.enabled = True
     
-    def disable(self):
-        self.enabled = False
-    
     def record(self, event: UnknownEvent):
         """イベントを記録"""
         if self.enabled:
@@ -242,31 +239,6 @@ class UnknownTracker:
             lines.append(f"  {reason.name}: {count}")
         
         return "\n".join(lines)
-    
-    def get_detailed_report(self) -> str:
-        """詳細レポートを取得"""
-        if not self.events:
-            return "No unknown events recorded."
-        
-        lines = [
-            "=" * 70,
-            f"UNKNOWN EVENT DETAILED REPORT ({len(self.events)} events)",
-            "=" * 70,
-        ]
-        
-        for i, event in enumerate(self.events):
-            lines.append(f"\n--- Event {i + 1}/{len(self.events)} ---")
-            lines.append(event.format_detail(indent=0))
-        
-        lines.append("\n" + "=" * 70)
-        lines.append(self.get_summary())
-        lines.append("=" * 70)
-        
-        return "\n".join(lines)
-    
-    def filter_by_reason(self, reason: UnknownReason) -> List[UnknownEvent]:
-        """特定の理由のイベントのみ抽出"""
-        return [e for e in self.events if e.reason == reason]
     
     def filter_phi_related(self) -> List[UnknownEvent]:
         """PHI関連のイベントのみ抽出"""
