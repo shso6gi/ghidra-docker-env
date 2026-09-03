@@ -11,6 +11,7 @@ from typing import Mapping, MutableMapping, Optional
 
 # Ghidra内で実行されているかどうかを検出
 try:
+    from ghidra.program.model.listing import Program  # noqa: F401  (import probe: succeeds only inside Ghidra)
     IN_GHIDRA = True
 except ImportError:
     IN_GHIDRA = False

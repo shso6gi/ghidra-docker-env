@@ -1235,6 +1235,8 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
         fi
 
         skipped_completed_pairs=0
+        SUMMARY_ERROR_PAIRS_READY=0
+        SUMMARY_ERROR_PAIRS=()
         if [[ "$ERROR_ONLY_RERUN" == 1 ]] && ! load_error_only_summary_pairs "$output_function_dir"; then
             RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
             continue

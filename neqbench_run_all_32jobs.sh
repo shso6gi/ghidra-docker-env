@@ -416,6 +416,9 @@ summary_pair_files_reusable() {
     "$PYTHON_BIN" -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if isinstance(value, dict) else 1)' \
         "$status" >/dev/null 2>&1
 }
+declare -A SUMMARY_ERROR_PAIRS=()
+SUMMARY_ERROR_PAIRS_READY=0
+
 load_error_only_summary_pairs() {
     local function_dir="$1" summary="$1/results_summary.txt" error_count
     SUMMARY_ERROR_PAIRS_READY=0
@@ -698,6 +701,8 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
                 "$function_position" "$function_total" "$total" "$total"
             continue
         fi
+        SUMMARY_ERROR_PAIRS_READY=0
+        SUMMARY_ERROR_PAIRS=()
         if [[ "$ERROR_ONLY_RERUN" == 1 ]] && ! load_error_only_summary_pairs "$function_dir"; then
             RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
             continue

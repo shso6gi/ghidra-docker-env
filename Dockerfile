@@ -65,7 +65,8 @@ RUN pip3 install --no-cache-dir --upgrade pip && \
 # a writable scratch location for Ghidra's per-user config and caches.
 ENV HOME=/tmp/home \
     PYTHONDONTWRITEBYTECODE=1
-RUN mkdir -p /tmp/home && chmod 1777 /tmp/home
+RUN mkdir -p /tmp/home && chmod 1777 /tmp/home && \
+    git config --system --add safe.directory /workspace
 
 WORKDIR /workspace
 CMD ["/bin/bash"]
