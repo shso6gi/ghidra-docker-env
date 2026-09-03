@@ -45,6 +45,7 @@ from scripts.function_tracer_pcode.core import (
     VarnodeFlowRef,
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 
 
 def _analysis(binary_id, entry, storage_bits, *, extension=None):
@@ -835,6 +836,11 @@ def test_monolithic_replay_reuses_original_query_bundle_and_fails_closed(monkeyp
 
     monkeypatch.setattr(
         module,
+        "prepare_pair_return_observation",
+        lambda *_args, **_kwargs: pytest.fail("replay rebuilt a receipt"),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_return_width,
         "prepare_pair_return_observation",
         lambda *_args, **_kwargs: pytest.fail("replay rebuilt a receipt"),
     )

@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+import scripts.function_tracer_pcode.semantics.transform.expander_canonical as _mx_expander_canonical
 
 def test_return_analyzer_rewrite_prefers_precise_object_state_carrier_for_observed_effect_value():
     dst = Expression.parameter("dst", 0, size=8)
@@ -401,7 +402,17 @@ def test_expression_expander_prefers_observed_rewrite_over_flat_raw_normalizatio
         lambda expr, *_args, **_kwargs: swapped if expr is traced else expr,
     )
     monkeypatch.setattr(
+        _mx_expander_canonical,
+        "rewrite_observed_loads_from_effects",
+        lambda expr, *_args, **_kwargs: swapped if expr is traced else expr,
+    )
+    monkeypatch.setattr(
         expander_module,
+        "normalize_post_state_expression",
+        lambda expr, *_args, **_kwargs: flattened if expr is traced else expr,
+    )
+    monkeypatch.setattr(
+        _mx_expander_canonical,
         "normalize_post_state_expression",
         lambda expr, *_args, **_kwargs: flattened if expr is traced else expr,
     )
@@ -728,6 +739,11 @@ def test_expression_expander_multiequal_shortcut_defers_flattened_observed_load_
     )
     monkeypatch.setattr(
         expander_module,
+        "rewrite_observed_loads_from_effects",
+        lambda _expr, _conditions, _effects, _parameters: rewritten_phi,
+    )
+    monkeypatch.setattr(
+        _mx_expander_canonical,
         "rewrite_observed_loads_from_effects",
         lambda _expr, _conditions, _effects, _parameters: rewritten_phi,
     )

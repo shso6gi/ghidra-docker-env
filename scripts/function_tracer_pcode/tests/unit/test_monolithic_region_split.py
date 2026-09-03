@@ -12,6 +12,9 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
+import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
+import scripts.function_tracer_pcode.proof.strategies.monolithic_regions as _mx_monolithic_regions
+import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 
 
 def _present_return_abi_facts() -> dict:
@@ -787,7 +790,37 @@ def test_split_ignores_late_strategy_module_factory_symbol(monkeypatch) -> None:
         lambda *_args, **_kwargs: FakeSession(),
     )
     monkeypatch.setattr(
+        _mx_monolithic_regions,
+        "_PINNED_CREATE_SHARED_Z3_REGION_SESSION",
+        lambda *_args, **_kwargs: FakeSession(),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_return_width,
+        "_PINNED_CREATE_SHARED_Z3_REGION_SESSION",
+        lambda *_args, **_kwargs: FakeSession(),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_counterexamples,
+        "_PINNED_CREATE_SHARED_Z3_REGION_SESSION",
+        lambda *_args, **_kwargs: FakeSession(),
+    )
+    monkeypatch.setattr(
         monolithic,
+        "_PINNED_EXECUTE_EXPECTED_VALUE_QUERY",
+        lambda *_args, **_kwargs: ParallelResult(results=[], is_equivalent=True),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_regions,
+        "_PINNED_EXECUTE_EXPECTED_VALUE_QUERY",
+        lambda *_args, **_kwargs: ParallelResult(results=[], is_equivalent=True),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_return_width,
+        "_PINNED_EXECUTE_EXPECTED_VALUE_QUERY",
+        lambda *_args, **_kwargs: ParallelResult(results=[], is_equivalent=True),
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_counterexamples,
         "_PINNED_EXECUTE_EXPECTED_VALUE_QUERY",
         lambda *_args, **_kwargs: ParallelResult(results=[], is_equivalent=True),
     )

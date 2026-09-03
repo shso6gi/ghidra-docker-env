@@ -111,6 +111,9 @@ from scripts.function_tracer_pcode.core import (
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+import scripts.function_tracer_pcode.checker.preflight_gate as _mx_preflight_gate
+import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
+import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 
 
 def _pcode_ref(
@@ -1440,6 +1443,11 @@ def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkey
         "validate_call_resolution_projection",
         tamper_before_final_gate,
     )
+    monkeypatch.setattr(
+        _mx_preflight_gate,
+        "validate_call_resolution_projection",
+        tamper_before_final_gate,
+    )
     result = checker.check(left, right, "left", "right")
 
     assert call_count == 2
@@ -2091,7 +2099,22 @@ def test_preflight_monolithic_branch_consumes_prepared_surface_and_emits_receipt
         reject_uncertified_decision_transform,
     )
     monkeypatch.setattr(
+        _mx_monolithic_return_width,
+        "normalize_analysis_semantic_width",
+        reject_uncertified_decision_transform,
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_counterexamples,
+        "normalize_analysis_semantic_width",
+        reject_uncertified_decision_transform,
+    )
+    monkeypatch.setattr(
         monolithic_module,
+        "align_return_value_extension_surfaces",
+        reject_uncertified_decision_transform,
+    )
+    monkeypatch.setattr(
+        _mx_monolithic_return_width,
         "align_return_value_extension_surfaces",
         reject_uncertified_decision_transform,
     )

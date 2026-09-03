@@ -47,6 +47,8 @@ from scripts.function_tracer_pcode.core.render_smt import (
     collect_unknown_smt_declarations,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
+import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 
 
 def _build_formula(builder, *args, **kwargs):
@@ -1872,7 +1874,10 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
         return True
 
     monkeypatch.setattr(monolithic_module, "normalize_analysis_semantic_width", _fake_normalize)
+    monkeypatch.setattr(_mx_monolithic_return_width, "normalize_analysis_semantic_width", _fake_normalize)
+    monkeypatch.setattr(_mx_monolithic_counterexamples, "normalize_analysis_semantic_width", _fake_normalize)
     monkeypatch.setattr(monolithic_module, "validate_counterexample_globally", _capture_validate)
+    monkeypatch.setattr(_mx_monolithic_counterexamples, "validate_counterexample_globally", _capture_validate)
 
     strategy = MonolithicStrategy(_FormulaBuilder(), solver_runner=Mock(), debug=False)
 
@@ -1921,6 +1926,7 @@ def test_monolithic_counterexample_validation_replacer_uses_fp_mode(monkeypatch)
         return True
 
     monkeypatch.setattr(monolithic_module, "validate_counterexample_globally", _capture_validate)
+    monkeypatch.setattr(_mx_monolithic_counterexamples, "validate_counterexample_globally", _capture_validate)
 
     strategy = MonolithicStrategy(_FormulaBuilder(), solver_runner=Mock(), debug=False)
 
