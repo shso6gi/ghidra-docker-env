@@ -71,7 +71,9 @@ class UbConstraintBuilder:
         # 1. -MIN_INT 制約
         if "negate_min" in constraint_types:
             negate_min_constraints = self._build_negate_min_constraints(
-                analysis, param_infos
+                analysis,
+                param_infos,
+                symbol_replace_fn=symbol_replace_fn,
             )
             if negate_min_constraints:
                 all_constraints.extend(negate_min_constraints)
@@ -224,88 +226,118 @@ class UbConstraintBuilder:
     def _build_negate_min_constraints(
         self,
         analysis: FunctionReturnAnalysis,
-        param_infos: List['ParameterInfo']
+        param_infos: List['ParameterInfo'],
+        symbol_replace_fn: Optional[Callable[[str], str]] = None,
     ) -> List[str]:
         """
-        -MIN_INT オーバーフローを除外する制約を生成
-        
+        -INT_MIN オーバーフローを除外する制約を生成
+
         検出対象:
-        - Expression内の INT_2COMP (bvneg) 演算子
-        - そのオペランドがパラメータである場合
-        
+        - 戻り値式・ケース条件式の中の INT_2COMP (bvneg)
+        - オペランドがパラメータなら、そのパラメータが signed のとき
+        - オペランドが任意の式なら、signed 演算文脈（INT_SLESS 等）の下にあるとき
+          （unsigned の負号は C で定義済みなので除外しない）
+
         生成制約:
-        - (assert (not (= param_x (_ bvMIN_VAL WIDTH))))
+        - (assert (not (= <operand> (_ bvINT_MIN WIDTH))))
         """
-        # Step 1: bvneg(param) を検出
-        negated_params = self._collect_negated_params(analysis)
-        
-        if not negated_params:
-            self._debug_print("No negated parameters found")
+        negation_sites = self._collect_negation_sites(analysis)
+        if not negation_sites:
+            self._debug_print("No negation sites found")
             return []
-        
-        self._debug_print(f"Found {len(negated_params)} negated parameter(s): {negated_params}")
-        
-        # Step 2: 各パラメータに対して制約を生成
-        constraints = []
-        
-        for param_name in negated_params:
-            # パラメータ情報を検索
-            param_info = self._find_param_info(param_name, param_infos)
-            
-            if param_info is None:
-                self._debug_print(f"Warning: Parameter '{param_name}' not found in param_infos")
+
+        constraints: List[str] = []
+        seen: Set[Tuple[str, int]] = set()
+
+        for site, signed_context in negation_sites:
+            operand = site.operands[0] if getattr(site, "operands", None) else None
+            if operand is None or operand.expr_type == ExpressionType.CONSTANT:
                 continue
-            
-            # MIN値を計算（符号付き整数の最小値）
-            # 例: 64bit -> 2^63 = 9223372036854775808
-            min_val = 2 ** (param_info.bit_width - 1)
-            
-            # 制約を生成
+
+            if operand.expr_type == ExpressionType.PARAMETER:
+                param_info = self._find_param_info(getattr(operand, "name", None), param_infos)
+                if param_info is None:
+                    self._debug_print(
+                        f"Warning: Parameter '{getattr(operand, 'name', None)}' not found in param_infos"
+                    )
+                    continue
+                if not getattr(param_info, "is_signed", True):
+                    self._debug_print(
+                        f"Skipping unsigned negation of {param_info.smt_name} (defined behaviour)"
+                    )
+                    continue
+                operand_smt = param_info.smt_name
+                width = int(param_info.bit_width)
+            else:
+                if not signed_context:
+                    self._debug_print(
+                        f"Skipping negation outside signed context: {operand.to_string()}"
+                    )
+                    continue
+                width = int(operand.get_bit_width() or 0)
+                if width <= 0:
+                    continue
+                operand_smt = operand.to_smt()
+                if symbol_replace_fn is not None:
+                    try:
+                        operand_smt = symbol_replace_fn(operand)
+                    except TypeError:
+                        operand_smt = symbol_replace_fn(operand_smt)
+
+            key = (operand_smt, width)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            min_val = 2 ** (width - 1)
             comment = (
-                f"; Exclude UB: -{param_info.smt_name} when "
-                f"{param_info.smt_name} = INT{param_info.bit_width}_MIN"
+                f"; Exclude UB: -({operand_smt}) when {operand_smt} = INT{width}_MIN"
             )
             constraint = (
-                f"(assert (not (= {param_info.smt_name} "
-                f"(_ bv{min_val} {param_info.bit_width}))))"
+                f"(assert (not (= {operand_smt} (_ bv{min_val} {width}))))"
             )
-            
             constraints.append(comment)
             constraints.append(constraint)
-            
             self._debug_print(
-                f"Added constraint: {param_info.smt_name} != {min_val} "
-                f"({param_info.bit_width}bit MIN)"
+                f"Added constraint: {operand_smt} != {min_val} ({width}bit MIN)"
             )
-        
+
         return constraints
-    
-    def _collect_negated_params(
+
+    def _collect_negation_sites(
         self,
-        analysis: FunctionReturnAnalysis
-    ) -> Set[str]:
-        """
-        Expression中の bvneg のオペランドであるパラメータを収集
-        
-        Args:
-            analysis: 関数解析結果
-        
-        Returns:
-            bvnegされているパラメータ名のセット（元の名前: "param_1" など）
-        """
-        negated = set()
-        
-        # 各returnのvalueとconditionを走査
+        analysis: FunctionReturnAnalysis,
+    ) -> List[Tuple[Expression, bool]]:
+        """戻り値式とケース条件式から INT_2COMP サイトを (式, signed文脈) で収集"""
+        sites: List[Tuple[Expression, bool]] = []
         for ret in analysis.returns:
-            # 戻り値の式を走査
-            self._walk_expression(ret.value, negated)
-            
-            # 条件式も走査（条件内でbvnegが使われる可能性）
+            self._walk_expression_for_negation(ret.value, sites, signed_context=False)
             for cond in ret.conditions:
-                # Condition も Expression のサブクラスまたは同等の構造を持つ
-                self._walk_condition(cond, negated)
-        
-        return negated
+                self._walk_expression_for_negation(
+                    getattr(cond, "expression", None),
+                    sites,
+                    signed_context=False,
+                )
+        return sites
+
+    def _walk_expression_for_negation(
+        self,
+        expr: Optional[Expression],
+        sites: List[Tuple[Expression, bool]],
+        signed_context: bool,
+    ) -> None:
+        if expr is None:
+            return
+        next_signed_context = signed_context or self._is_signed_operation(expr)
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP
+            and getattr(expr, "operator", None) == "INT_2COMP"
+        ):
+            sites.append((expr, next_signed_context))
+        if hasattr(expr, "operands") and expr.operands:
+            for operand in expr.operands:
+                if operand is not None:
+                    self._walk_expression_for_negation(operand, sites, next_signed_context)
 
     def _collect_shift_sites(
         self,
@@ -432,73 +464,6 @@ class UbConstraintBuilder:
             "INT_SLESSEQUAL",
             "INT_SRIGHT",
         }
-    
-    def _walk_condition(
-        self,
-        cond: Condition,
-        negated: Set[str]
-    ):
-        """
-        Conditionを走査してbvneg(param)を検出
-        
-        Args:
-            cond: 走査するCondition
-            negated: 検出されたパラメータ名を追加するセット
-        """
-        # Conditionの左辺と右辺を走査（getattr で安全にアクセス）
-        left_expr = getattr(cond, 'left', None)
-        if left_expr is not None:
-            self._walk_expression(left_expr, negated)
-        
-        right_expr = getattr(cond, 'right', None)
-        if right_expr is not None:
-            self._walk_expression(right_expr, negated)
-    
-    def _walk_expression(
-        self,
-        expr: Expression,
-        negated: Set[str]
-    ):
-        """
-        Expressionツリーを再帰的に走査してbvneg(param)を検出
-        
-        Args:
-            expr: 走査するExpression
-            negated: 検出されたパラメータ名を追加するセット
-        """
-        if expr is None:
-            return
-        
-        # UNARY_OP かつ INT_2COMP (bvneg) をチェック（getattr で安全にアクセス）
-        expr_type = getattr(expr, 'expr_type', None)
-        if expr_type is None:
-            expr_type = getattr(expr, 'type', None)
-        
-        if expr_type is None:
-            return
-        
-        if expr_type == ExpressionType.UNARY_OP:
-            operator = getattr(expr, 'operator', None)
-            if operator == "INT_2COMP":
-                # オペランドがパラメータかチェック
-                operands = getattr(expr, 'operands', None)
-                if operands and len(operands) > 0:
-                    operand = operands[0]
-                    
-                    operand_type = getattr(operand, 'expr_type', None)
-                    if operand_type is None:
-                        operand_type = getattr(operand, 'type', None)
-                    
-                    if operand_type == ExpressionType.PARAMETER:
-                        param_name = getattr(operand, 'name', None)
-                        if param_name is not None:
-                            negated.add(param_name)
-        
-        # 再帰的に子ノードを探索
-        if hasattr(expr, 'operands') and expr.operands:
-            for operand in expr.operands:
-                if operand is not None:
-                    self._walk_expression(operand, negated)
     
     def _find_param_info(
         self,
