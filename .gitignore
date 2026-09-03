@@ -25,12 +25,12 @@ hs_err_pid*.log
 **/.phase8-execution-authority/
 artifacts/**/*.key
 
-# Target binaries: the EqBench tree is not git-managed; compiled objects anywhere under targets/ are rebuilt
+# Target binaries: the EqBench tree is not git-managed; compiled objects (targets/, tests/fixtures/targets/) are rebuilt
 targets/EqBench/
-targets/**/*-x86_64-gcc-O*
-targets/**/*-x86_64-clang-O*
-targets/**/*-arm64-gcc-O*
-targets/**/*-arm64-clang-O*
-targets/**/*-mips64-gcc-O*
-targets/**/*-mips64-clang-O*
-targets/**/*.compile.log
+*-x86_64-gcc-O[0-3]
+*-x86_64-clang-O[0-3]
+*-arm64-gcc-O[0-3]
+*-arm64-clang-O[0-3]
+*-mips64-gcc-O[0-3]
+*-mips64-clang-O[0-3]
+*.compile.log

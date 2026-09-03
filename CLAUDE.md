@@ -46,7 +46,7 @@ bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh rerun_eqbench_error
 docker compose run --rm ghidra-dev python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 ```
 
-A few tests (`grep -l pyghidra tests/unit`) exercise real PyGhidra and skip/fail without Ghidra; everything else uses the mocks in `tests/conftest.py` (`MockProgram`, `create_mock_analysis`, `create_mock_result`) and golden cases from `tests/fixtures/cases.yml`.
+The suite is pure Python except one opt-in smoke test (`RUN_PYGHIDRA_REGRESSIONS=1`, in `test_cli_equivalence_import_fallback.py`) that needs a real EqBench binary; everything else uses the mocks in `tests/conftest.py` (`MockProgram`, `create_mock_analysis`, `create_mock_result`) and golden cases from `tests/fixtures/cases.yml`. Note that running the checker outside the runner's supervisor/execution-identity harness yields `ERROR` from the v2 authority layer by design — real-binary tests must go through that harness.
 
 ### EqBench matrix runs
 
