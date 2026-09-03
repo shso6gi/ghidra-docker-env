@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional, Any
+from scripts.function_tracer_pcode.core.signature import is_composite_data_type
 from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Expression,
@@ -18,6 +19,79 @@ from scripts.function_tracer_pcode.core import (
 
 class AddressRefMixin:
     """Address / pointer runtime references, canonical locations and symbolic post-state reads."""
+
+    def _global_object_value_expression(
+        self,
+        varnode,
+        runtime_ref: AddressValueRef,
+        *,
+        display_name: Optional[str],
+        data_type: Optional[str],
+        data_type_obj: Any,
+        storage_info: Any,
+    ) -> Expression:
+        """Value of an input ``ram`` varnode that names a global object.
+
+        A varnode whose address is a global and that has no defining op is a
+        *read* of that global.  For a scalar (numeric / pointer / undefined)
+        type the value is the memory contents at that address, so emit a
+        memory load of the concrete address: the memory resolver concretises
+        it when the block is read-only (``.rodata`` constants) and it stays a
+        symbolic read of ``mem`` otherwise.  Arrays, structures and unions are
+        used as address bases (PTRADD/PTRSUB), so those keep the address
+        object semantics (Issue #30).
+        """
+        size = varnode.getSize()
+        if is_composite_data_type(data_type_obj, data_type):
+            if self._debug_available():
+                self._debug_print(
+                    "  -> Address-backed composite symbol; treating as concrete address object"
+                )
+            return Expression.constant(
+                runtime_ref.address_offset, size, runtime_ref=runtime_ref,
+            )
+        if runtime_ref.is_readonly_memory():
+            image_value = self._read_program_memory_value(runtime_ref.address_offset, size)
+            if image_value is not None:
+                if self._debug_available():
+                    self._debug_print(
+                        f"  -> Global scalar read {display_name or ''}@0x{runtime_ref.address_offset:x}: "
+                        f"read-only image constant 0x{image_value:x}"
+                    )
+                return Expression.constant(image_value, size)
+        pointer_size = 8
+        try:
+            pointer_size = int(self.program.getDefaultPointerSize()) or 8
+        except Exception:
+            pointer_size = 8
+        if self._debug_available():
+            self._debug_print(
+                f"  -> Global scalar read {display_name or ''}@0x{runtime_ref.address_offset:x}: "
+                "memory load of the concrete address"
+            )
+        address_expr = Expression.constant(
+            runtime_ref.address_offset, pointer_size, runtime_ref=runtime_ref,
+        )
+        return Expression.memory(address_expr, size)
+
+    def _read_program_memory_value(self, address_value: int, size_bytes: int) -> Optional[int]:
+        """Unsigned integer at ``address_value`` from the program image, or None."""
+        if address_value < 0 or size_bytes <= 0:
+            return None
+        try:
+            memory = self.program.getMemory()
+            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
+            address = default_space.getAddress(address_value)
+            if address is None:
+                return None
+            raw = [int(memory.getByte(address.add(offset))) & 0xFF for offset in range(size_bytes)]
+            ordered = raw if self.program.getLanguage().isBigEndian() else list(reversed(raw))
+            value = 0
+            for byte in ordered:
+                value = (value << 8) | byte
+            return value
+        except Exception:
+            return None
 
     def _make_address_runtime_ref(
         self,

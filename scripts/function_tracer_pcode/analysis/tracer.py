@@ -496,14 +496,13 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                         and runtime_ref.has_concrete_address()
                         and varnode.isAddress()
                     ):
-                        if self._debug_available():
-                            self._debug_print(
-                                "  -> Address-backed symbol; treating as concrete address object"
-                            )
-                        return Expression.constant(
-                            runtime_ref.address_offset,
-                            varnode.getSize(),
-                            runtime_ref=runtime_ref,
+                        return self._global_object_value_expression(
+                            varnode,
+                            runtime_ref,
+                            display_name=sym_name,
+                            data_type=dtype,
+                            data_type_obj=dtype_obj,
+                            storage_info=storage_info,
                         )
                     
                     return Expression.variable(
@@ -525,14 +524,18 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                     and runtime_ref.has_concrete_address()
                     and varnode.isAddress()
                 ):
-                    if self._debug_available():
-                        self._debug_print(
-                            "  -> Address-backed high variable; treating as concrete address object"
-                        )
-                    return Expression.constant(
-                        runtime_ref.address_offset,
-                        varnode.getSize(),
-                        runtime_ref=runtime_ref,
+                    high_dtype_obj = None
+                    try:
+                        high_dtype_obj = high_var.getDataType()
+                    except Exception:
+                        high_dtype_obj = None
+                    return self._global_object_value_expression(
+                        varnode,
+                        runtime_ref,
+                        display_name=name,
+                        data_type=str(high_dtype_obj) if high_dtype_obj is not None else None,
+                        data_type_obj=high_dtype_obj,
+                        storage_info=storage_info,
                     )
                 return Expression.variable(
                     name, size=varnode.getSize(),

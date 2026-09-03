@@ -563,6 +563,10 @@ def _resolve_direct_readonly_address(
     const_total, symbolic_bases, scaled_terms = flattened
     if scaled_terms or len(symbolic_bases) > 1:
         return None
+    if symbolic_bases and not _address_ref_may_be_readonly(symbolic_bases[0]):
+        # The image bytes of a writable or volatile block are only initial
+        # values; a load from there must stay a symbolic memory read.
+        return None
 
     candidates: List[int] = []
 
@@ -612,6 +616,15 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
         index_param_name=param_name,
         index_bits=index_bits,
     )
+
+
+def _address_ref_may_be_readonly(runtime_ref: AddressValueRef) -> bool:
+    """False only when the block is positively known to be writable or volatile."""
+    if getattr(runtime_ref, "can_write", None) is True:
+        return False
+    if getattr(runtime_ref, "is_volatile", None) is True:
+        return False
+    return True
 
 
 def _flatten_additive_terms(

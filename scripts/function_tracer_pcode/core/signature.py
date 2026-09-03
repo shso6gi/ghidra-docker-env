@@ -166,6 +166,31 @@ def is_undefined_data_type(
     return False
 
 
+def is_composite_data_type(
+    data_type_obj: Any = None,
+    data_type_name: Optional[str] = None,
+) -> bool:
+    """配列・構造体・共用体などの複合型か（グローバル varnode が値ではなくオブジェクトを指す型）。"""
+    if data_type_obj is not None:
+        for probe in ("getNumElements", "getNumComponents", "getComponents"):
+            if callable(getattr(data_type_obj, probe, None)):
+                return True
+        try:
+            class_name = str(data_type_obj.getClass().getSimpleName())
+        except Exception:
+            class_name = type(data_type_obj).__name__
+        if any(token in class_name for token in ("Array", "Structure", "Union", "Composite")):
+            return True
+    name = normalize_type_name(str(data_type_name or ""))
+    if not name and data_type_obj is not None:
+        name = normalize_type_name(str(data_type_obj))
+    if not name:
+        return False
+    if name.endswith("]"):
+        return True
+    return name.startswith(("struct ", "union "))
+
+
 def is_pointer_data_type(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
