@@ -522,7 +522,7 @@ def test_pinned_proof_registry_is_immutable():
         pair_closure_producers as producer_module,
     )
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
-        orchestration_1 as _sealed_orchestration,
+        orchestration as _sealed_orchestration,
     )
 
     assert _sealed_orchestration is not None
@@ -544,7 +544,7 @@ def test_other_producer_execution_namespace_mutation_fails_closed(
     )
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
-        orchestration_1 as _sealed_orchestration,
+        orchestration as _sealed_orchestration,
     )
     from scripts.function_tracer_pcode.core import Expression
 

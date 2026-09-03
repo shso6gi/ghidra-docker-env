@@ -1711,7 +1711,7 @@ def register_builtin_receipt_executor(role: str, executor: Any) -> None:
     expected = {
         "pairwise": (
             "function_tracer_pcode.proof.strategies."
-            "pairwise_services.orchestration_1",
+            "pairwise_services.orchestration",
             "_impl_check",
         ),
         "monolithic": (

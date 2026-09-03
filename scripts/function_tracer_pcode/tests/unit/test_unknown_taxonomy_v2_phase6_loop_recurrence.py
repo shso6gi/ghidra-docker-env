@@ -662,7 +662,7 @@ def test_loop_exact_factories_ignore_mutated_producer_instance_methods():
     import scripts.function_tracer_pcode.authority.domains.loop_recurrence as loop_module
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
-        orchestration_1,
+        method_b_closure as orchestration_1,
         readonly_reduction_1,
     )
 
@@ -2632,7 +2632,7 @@ def test_recurrence_completion_rejects_inner_target_in_production_payload():
 
 
 def test_pairwise_loop_signal_contract_is_dispatch_certificate_bound():
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration_1 import (
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration import (
         dispatch_bound_observation_contract_digest,
     )
 

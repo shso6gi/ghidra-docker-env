@@ -273,7 +273,7 @@ def test_dispatch_frame_is_single_use_and_cleanup_revokes_copied_capability(monk
                 "error": 0,
             },
         )
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration_1
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration as orchestration_1
 
     def replacement_executor():
         return issue_builtin_comparison_receipt(

@@ -358,7 +358,7 @@ def seal_producer_proof_implementations(
             caller is None
             or caller.f_code.co_name != "<module>"
             or caller_path is None
-            or caller_path.name != "orchestration_1.py"
+            or caller_path.name != "orchestration.py"
             or caller_path.parent.name != "pairwise_services"
         ):
             raise RuntimeError("producer proof implementation sealer is not trusted")
