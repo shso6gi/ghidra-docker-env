@@ -1,0 +1,1092 @@
+{
+ "schema": "eqbench-measurement-subset-v1",
+ "purpose": "Fixed measurement subset used to compare checker behaviour before/after a change (see README 'Measurement subset'). Run it with eqbench_run_subset.sh, then compare the two result trees with reporting.outcome_transition and check them with reporting.soundness_gate.",
+ "ground_truth_note": "This manifest is NOT an oracle. The only ground truth is the benchmark label: sample_identity containing '/Eq/' means the pair must never be NOT_EQ, and '/Neq/' means it must never be EQUIVALENT. 'observed_baseline' merely records what the checker produced at the commit named below and may itself be wrong (an EQUIVALENT can be an accidental result of an implementation defect). Do not treat observed_baseline as expected output; use it only to explain transitions.",
+ "selection_criteria": [
+  "Eq: single-function sources only (one source == one function == 8 pairs); per benchmark family at most one source whose selected pairs were 'mixed' (EQUIVALENT+UNKNOWN) or all-UNKNOWN in the full baseline, plus REVE/barthe2big as the TIMEOUT-containing source. Families whose cheapest source exceeded the time budget (bess, gam, tsafe) are not represented.",
+  "Neq: single-function sources only, one per benchmark family preferring sources with at least one NOT_EQ, plus raytrace/sphere and raytrace/surface (known EQUIVALENT-in-Neq and ERROR cases used to exercise the soundness gate) and optimization/wood (TIMEOUT pairs).",
+  "Pair ids cover arm64/mips64 x clang/gcc, same-compiler optimisation steps (B1_B2, B5_B7, B9_B10, B13_B15) and cross-ISA / cross-compiler pairs (B1_B9, B6_B14, B3_B11, B4_B16); Neq ids are the corresponding N_/O_ same-ISA pairs.",
+  "Budget: the production runners keep only one function (8 pairs) in flight at a time, so wall time is the sum of per-function maxima plus ~17 s runner overhead per function. Each half is sized to stay under ~9 minutes and eqbench_run_subset.sh runs the two halves concurrently (8 + 8 slots <= PARALLEL_JOBS=20) so the whole subset finishes within 10 minutes."
+ ],
+ "run_settings": {
+  "PARALLEL_JOBS": 20,
+  "EQBENCH_RESOURCE_ADMISSION": 0,
+  "EQBENCH_BUILD_POLICY": "PREBUILT_ONLY",
+  "PAIR_PROCESS_TIMEOUT": "240s",
+  "note": "Full runs use PAIR_PROCESS_TIMEOUT=600s. The subset uses 240s so that TIMEOUT-prone pairs stay inside the 10 minute budget; a pair reported as TIMEOUT by the subset is therefore not directly comparable with the full-run outcome of the same pair."
+ },
+ "eq": {
+  "runner": "eqbench_run_all_32jobs.sh",
+  "pair_ids": [
+   "B1_B2",
+   "B5_B7",
+   "B9_B10",
+   "B13_B15",
+   "B1_B9",
+   "B6_B14",
+   "B3_B11",
+   "B4_B16"
+  ],
+  "sources": [
+   "CLEVER/LoopSub/Eq/new",
+   "REVE/loop2/Eq/newV",
+   "REVE/barthe2big/Eq/new",
+   "airy/Sign/Eq/newV",
+   "dart/test/Eq/newV",
+   "pow/test/Eq/newV",
+   "ran/ranzero/Eq/newV",
+   "statcalc/addValue/Eq/newV"
+  ]
+ },
+ "neq": {
+  "runner": "neqbench_run_all_32jobs.sh",
+  "pair_ids": [
+   "N_B1_O_B1",
+   "N_B2_O_B4",
+   "N_B5_O_B7",
+   "N_B9_O_B9",
+   "N_B10_O_B12",
+   "N_B13_O_B15",
+   "N_B3_O_B7",
+   "N_B11_O_B15"
+  ],
+  "sources": [
+   "CLEVER/LoopSub/Neq/new-old",
+   "REVE/loop5/Neq/newV-oldV",
+   "airy/MAX/Neq/newV-oldV",
+   "bess/SIGN/Neq/newV-oldV",
+   "ej_hash/hashCode/Neq/newV-oldV",
+   "optimization/wood/Neq/newV-oldV",
+   "raytrace/sphere/Neq/newV-oldV",
+   "raytrace/surface/Neq/newV-oldV",
+   "statcalc/addValue/Neq/newV-oldV",
+   "tsafe/normAngle/Neq/newV-oldV"
+  ]
+ },
+ "observed_baseline": {
+  "non_authoritative": true,
+  "commit": "14de763edc40ed3fa6ce0256552b0b5c463eeb70",
+  "recorded_at": "2026-09-03",
+  "settings": {
+   "PARALLEL_JOBS": 20,
+   "EQBENCH_RESOURCE_ADMISSION": 0,
+   "PAIR_PROCESS_TIMEOUT": "600s"
+  },
+  "logs": {
+   "eq": "logs/EqBench/all_eq_matrix_current",
+   "neq": "logs/EqBench/all_neq_same_isa_closure_current"
+  },
+  "eq": [
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 2.041
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 2.032
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 2.641
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B3_B11",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 1.195
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B4_B16",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 1.04
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 1.977
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B6_B14",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 1.04
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Eq/new",
+    "function_name": "foo",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 1.912
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 11.628
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 11.214
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 15.907
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B3_B11",
+    "observed_outcome": "TIMEOUT",
+    "observed_total_time_seconds": null
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B4_B16",
+    "observed_outcome": "TIMEOUT",
+    "observed_total_time_seconds": null
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 6.862
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 34.515
+   },
+   {
+    "sample_identity": "REVE/barthe2big/Eq/new",
+    "function_name": "f",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 11.554
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 5.249
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 8.938
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 17.052
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B3_B11",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 5.344
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B4_B16",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 5.119
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 12.351
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 18.856
+   },
+   {
+    "sample_identity": "REVE/loop2/Eq/newV",
+    "function_name": "f",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 14.336
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B13_B15",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 8.867
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 139.355
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 21.998
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B3_B11",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 89.245
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B4_B16",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 119.06
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 26.416
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B6_B14",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 18.461
+   },
+   {
+    "sample_identity": "airy/Sign/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 40.461
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 36.701
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 34.898
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 53.47
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B3_B11",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 86.046
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B4_B16",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 56.359
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B5_B7",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 27.904
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 44.54
+   },
+   {
+    "sample_identity": "dart/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 93.068
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 115.895
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 119.239
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B9",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 59.232
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B3_B11",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 84.28
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B4_B16",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 90.627
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 93.012
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 98.99
+   },
+   {
+    "sample_identity": "pow/test/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 141.91
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 6.294
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 25.089
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 16.222
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B3_B11",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 21.47
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B4_B16",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.669
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.376
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 15.844
+   },
+   {
+    "sample_identity": "ran/ranzero/Eq/newV",
+    "function_name": "snippet",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.161
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B13_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 14.506
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B1_B2",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 19.702
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B1_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.469
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B3_B11",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 33.579
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B4_B16",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 73.406
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B5_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 24.231
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B6_B14",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.568
+   },
+   {
+    "sample_identity": "statcalc/addValue/Eq/newV",
+    "function_name": "addValue",
+    "pair_id": "B9_B10",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 33.6
+   }
+  ],
+  "neq": [
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 7.49
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 6.892
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 7.841
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 15.289
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 6.618
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 6.022
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 11.612
+   },
+   {
+    "sample_identity": "CLEVER/LoopSub/Neq/new-old",
+    "function_name": "foo",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 17.819
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 63.243
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 34.772
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 23.484
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 47.393
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 32.086
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 27.346
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 23.27
+   },
+   {
+    "sample_identity": "REVE/loop5/Neq/newV-oldV",
+    "function_name": "f",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 58.98
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 11.012
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 10.762
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 11.284
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 11.374
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 14.1
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 13.515
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 15.244
+   },
+   {
+    "sample_identity": "airy/MAX/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 13.311
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 31.103
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 33.656
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 29.45
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 36.498
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 28.986
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 34.036
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 92.636
+   },
+   {
+    "sample_identity": "bess/SIGN/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 35.177
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 9.336
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 8.459
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 8.969
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 7.464
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 9.881
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 9.427
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 9.22
+   },
+   {
+    "sample_identity": "ej_hash/hashCode/Neq/newV-oldV",
+    "function_name": "hashCode",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "NOT_EQ",
+    "observed_total_time_seconds": 9.217
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 72.225
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 72.174
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 93.653
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 76.06
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "TIMEOUT",
+    "observed_total_time_seconds": null
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "TIMEOUT",
+    "observed_total_time_seconds": null
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "TIMEOUT",
+    "observed_total_time_seconds": null
+   },
+   {
+    "sample_identity": "optimization/wood/Neq/newV-oldV",
+    "function_name": "wood",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 74.368
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 26.958
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 26.954
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 20.953
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 113.208
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 108.507
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 80.736
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 53.558
+   },
+   {
+    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+    "function_name": "SphereConstructor",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 28.711
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 19.702
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 17.382
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 22.372
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "ERROR",
+    "observed_total_time_seconds": 67.856
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "ERROR",
+    "observed_total_time_seconds": 80.268
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "ERROR",
+    "observed_total_time_seconds": 77.311
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 81.052
+   },
+   {
+    "sample_identity": "raytrace/surface/Neq/newV-oldV",
+    "function_name": "SurfaceConstructor",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "EQUIVALENT",
+    "observed_total_time_seconds": 21.984
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 61.91
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 62.334
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 53.173
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 27.905
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 145.8
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 46.695
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 39.367
+   },
+   {
+    "sample_identity": "statcalc/addValue/Neq/newV-oldV",
+    "function_name": "addValue",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 45.433
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B10_O_B12",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 109.517
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B11_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 98.672
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B13_O_B15",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 127.679
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B1_O_B1",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 21.085
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B2_O_B4",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 39.417
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B3_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 60.968
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B5_O_B7",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 63.525
+   },
+   {
+    "sample_identity": "tsafe/normAngle/Neq/newV-oldV",
+    "function_name": "snippet",
+    "pair_id": "N_B9_O_B9",
+    "observed_outcome": "UNKNOWN",
+    "observed_total_time_seconds": 130.081
+   }
+  ]
+ }
+}

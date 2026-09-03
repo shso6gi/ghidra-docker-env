@@ -118,10 +118,15 @@ python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh
 ```
 
+Default settings for benchmark runs on this host are `PARALLEL_JOBS=20` with
+resource admission disabled (`EQBENCH_RESOURCE_ADMISSION=0`); the baseline trees
+under `logs/EqBench/*_current` were produced with them. Both runners record the
+effective values in `run_manifest.txt`.
+
 Full Eq matrix (results under `logs/EqBench/all_eq_matrix_current`):
 
 ```bash
-./eqbench_run_all_32jobs.sh
+PARALLEL_JOBS=20 EQBENCH_RESOURCE_ADMISSION=0 ./eqbench_run_all_32jobs.sh
 # representative subset / single sample
 EQBENCH_SAMPLE_FILTER='REVE/barthe2big' ./eqbench_run_all_32jobs.sh
 # validate configuration without running pairs
@@ -131,7 +136,7 @@ DRY_RUN=1 ./eqbench_run_all_32jobs.sh
 Neq same-ISA closure (results under `logs/EqBench/all_neq_same_isa_closure_current`):
 
 ```bash
-./neqbench_run_all_32jobs.sh
+PARALLEL_JOBS=20 EQBENCH_RESOURCE_ADMISSION=0 ./neqbench_run_all_32jobs.sh
 ```
 
 Re-run only the pairs that ended in ERROR in both trees:
@@ -144,6 +149,52 @@ All runners are configured through environment variables (`PARALLEL_JOBS`,
 `OUTPUT_BASE_DIR`, `EQBENCH_RUN_SCOPE`, `EQBENCH_BUILD_POLICY`,
 `SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, timeouts); see the header of each
 script for the full list and defaults.
+
+### Measurement subset
+
+`scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small
+Eq + Neq subset (8 Eq sources and 10 Neq sources, one function and 8 pairs each) for comparing
+checker behaviour before and after a change. `eqbench_run_subset.sh` runs it
+with the settings stored in the manifest (`PARALLEL_JOBS=20`,
+`EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`,
+`PAIR_PROCESS_TIMEOUT=240s`), running the Eq and Neq halves concurrently, and finishes in under 10 minutes:
+
+```bash
+OUTPUT_BASE_DIR=logs/EqBench/subset_before ./eqbench_run_subset.sh   # e.g. on main
+OUTPUT_BASE_DIR=logs/EqBench/subset_after  ./eqbench_run_subset.sh   # on the topic branch
+# SUBSET_SCOPE=eq|neq runs one half only; env overrides (PARALLEL_JOBS, ...) win over the manifest
+```
+
+Each run writes `eq/` and `neq/` result trees plus `subset_manifest.txt`
+(manifest digest, settings, elapsed seconds). Note that the subset uses a
+240 s pair timeout instead of the 600 s of full runs, so TIMEOUT counts are not
+comparable with the full trees.
+
+Compare two runs with the outcome transition table (rows: before, columns:
+after; `--fail-on-change` exits 2 on any difference, which is how determinism
+is checked by running the subset twice):
+
+```bash
+python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
+    --before logs/EqBench/subset_before/eq --after logs/EqBench/subset_after/eq --changed-only
+python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
+    --before logs/EqBench/subset_before/neq --after logs/EqBench/subset_after/neq --changed-only --json neq_transition.json
+```
+
+Check soundness against the benchmark labels only (an `Eq` sample must never be
+`NOT_EQ`, a `Neq` sample must never be `EQUIVALENT`; exit 1 on any violation,
+exit 2 when no pair status was found):
+
+```bash
+python3 -m scripts.function_tracer_pcode.reporting.soundness_gate \
+    logs/EqBench/subset_after/eq logs/EqBench/subset_after/neq
+```
+
+The gate currently fails on `logs/EqBench/all_neq_same_isa_closure_current`
+(242 `EQUIVALENT` pairs in Neq samples). The manifest's `observed_baseline`
+section records what the checker produced at the recorded commit; it is
+explicitly *not* ground truth — an EQUIVALENT/NOT_EQ there may be an accident
+of an implementation defect — and must only be used to explain transitions.
 
 ## Branching
 
