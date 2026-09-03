@@ -22,16 +22,6 @@ from ._shared import (
     re,
 )
 
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
-
 def _impl_try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
     if function is None or high_function is None or analysis is None:
         return None

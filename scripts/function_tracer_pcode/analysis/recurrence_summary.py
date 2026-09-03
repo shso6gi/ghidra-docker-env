@@ -2,7 +2,36 @@
 """Compatibility facade for StructuralRecurrenceSummarizer."""
 from __future__ import annotations
 
-from .recurrence._shared import *
+from .recurrence import (
+    affine_progression as _svc_affine_progression,
+    coordinator_1 as _svc_coordinator_1,
+    coordinator_2 as _svc_coordinator_2,
+    counted_loop_1 as _svc_counted_loop_1,
+    counted_loop_2 as _svc_counted_loop_2,
+    guard_proof as _svc_guard_proof,
+    linear_recursion as _svc_linear_recursion,
+    multiplicative_recurrence as _svc_multiplicative_recurrence,
+    object_identity as _svc_object_identity,
+    pointer_progression as _svc_pointer_progression,
+    proof_utils as _svc_proof_utils,
+    readonly_reduction_1 as _svc_readonly_reduction_1,
+    readonly_reduction_2 as _svc_readonly_reduction_2,
+    return_region as _svc_return_region,
+    state_transition_1 as _svc_state_transition_1,
+    state_transition_2 as _svc_state_transition_2,
+    unrolled_tail as _svc_unrolled_tail,
+    vectorized_reduction as _svc_vectorized_reduction,
+)
+# Re-exported for modules and tests that import these names from here.
+from .recurrence._shared import (  # noqa: F401
+    CountedLoopAccumulator,
+    CountedLoopGuard,
+    CountedLoopInduction,
+    CountedLoopUpdateCase,
+    ReadonlyRoundedCountCandidate,
+    ResidueLoopCase,
+    StateTransitionLoopModel,
+)
 
 class StructuralRecurrenceSummarizer:
     """
@@ -32,379 +61,653 @@ class StructuralRecurrenceSummarizer:
         self.debug = debug
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
 
-    def __getattr__(self, name: str):
-        from .recurrence import resolve_method
-        implementation = resolve_method(name)
-        if implementation is None:
-            raise AttributeError(f"{self.__class__.__name__!s} has no attribute {name!r}")
-        from types import MethodType
-        return MethodType(implementation, self)
-
-    def has_summary_candidate(self, function, high_function, analysis) -> bool:
-        from .recurrence.return_region import invoke as _invoke
-        return _invoke("has_summary_candidate", self, function, high_function, analysis)
-
-    def try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
-        from .recurrence.coordinator_1 import invoke as _invoke
-        return _invoke("try_summarize_function", self, function, high_function, analysis)
-
-    def try_summarize_pre_return_counted_scalar_loop(
-        self,
-        function,
-        high_function,
-        analysis,
-        return_ops: Sequence,
-    ) -> Optional[Tuple[List[ReturnInfo], str]]:
-        from .recurrence.counted_loop_1 import invoke as _invoke
-        return _invoke("try_summarize_pre_return_counted_scalar_loop", self, function, high_function, analysis, return_ops)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _safe_pcode_input_count(self, op) -> int:
-        from .recurrence.coordinator_1 import invoke as _invoke
-        return _invoke("_safe_pcode_input_count", self, op)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    @staticmethod
-    def _unique_parameters_by_name(parameters: Optional[Sequence[dict]]) -> Dict[str, dict]:
-        from .recurrence.coordinator_1 import invoke as _invoke
-        return _invoke("_unique_parameters_by_name", parameters)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _extract_counted_scalar_loop_model(
-        self,
-        high_function,
-        analysis,
-    ) -> Optional[Tuple[CountedLoopInduction, CountedLoopAccumulator, CountedLoopGuard, Tuple[ResidueLoopCase, ...]]]:
-        from .recurrence.counted_loop_1 import invoke as _invoke
-        return _invoke("_extract_counted_scalar_loop_model", self, high_function, analysis)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _find_cbranch_op(self, block):
-        from .recurrence.coordinator_1 import invoke as _invoke
-        return _invoke("_find_cbranch_op", self, block)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _build_pcode_expression(
-        self,
-        varnode,
-        *,
-        placeholders: Dict[object, Expression],
-        _seen=None,
-        _memo=None,
-    ) -> Optional[Expression]:
-        from .recurrence.proof_utils import invoke as _invoke
-        return _invoke(
-            "_build_pcode_expression",
-            self,
-            varnode,
-            placeholders=placeholders,
-            _seen=_seen,
-            _memo=_memo,
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    @staticmethod
-    def _strict_zero_iteration_exit_region_block_ops(block) -> Optional[Tuple[object, ...]]:
-        from .recurrence.return_region import invoke as _invoke
-        return _invoke("_strict_zero_iteration_exit_region_block_ops", block)
-
-    @staticmethod
-    def _zero_iteration_exit_region_mnemonic_is_safe(mnemonic: object) -> bool:
-        from .recurrence.return_region import invoke as _invoke
-        return _invoke("_zero_iteration_exit_region_mnemonic_is_safe", mnemonic)
-
-
-
-
-
-
-
-
-
-
-    @staticmethod
-    def _summary_expression_evidence_key(expr: Optional[Expression]) -> Optional[Tuple[Any, ...]]:
-        from .recurrence.object_identity import invoke as _invoke
-        return _invoke("_summary_expression_evidence_key", expr)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _canonicalize_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
-        from .recurrence.object_identity import invoke as _invoke
-        return _invoke("_canonicalize_expression", self, expr)
+    # ---- service implementations (bound explicitly; see <pkg>/*.py) ----
+    # recurrence.affine_progression
+    _binary_comparison_matches_affine_constant = _svc_affine_progression._impl__binary_comparison_matches_affine_constant
+    _build_affine_delta_expression = _svc_affine_progression._impl__build_affine_delta_expression
+    _build_affine_progression_sum_closed_expression = _svc_affine_progression._impl__build_affine_progression_sum_closed_expression
+    _build_arithmetic_progression_sum = _svc_affine_progression._impl__build_arithmetic_progression_sum
+    _collect_affine_loop_state_placeholders = _svc_affine_progression._impl__collect_affine_loop_state_placeholders
+    _collect_load_progressions_from_varnode = _svc_affine_progression._impl__collect_load_progressions_from_varnode
+    _extract_affine_loop_case = _svc_affine_progression._impl__extract_affine_loop_case
+    _extract_affine_placeholder_term = _svc_affine_progression._impl__extract_affine_placeholder_term
+    _extract_affine_term = _svc_affine_progression._impl__extract_affine_term
+    _grouped_accumulator_load_progressions = _svc_affine_progression._impl__grouped_accumulator_load_progressions
+    _match_load_progression = _svc_affine_progression._impl__match_load_progression
+    _return_value_matches_affine_progression_summary = _svc_affine_progression._impl__return_value_matches_affine_progression_summary
+    _solve_counter_affine_equality = _svc_affine_progression._impl__solve_counter_affine_equality
+    _summarize_affine_loop_state_phi = _svc_affine_progression._impl__summarize_affine_loop_state_phi
+    # recurrence.coordinator_1
+    _adjust_loop_bound_for_strict_relation = _svc_coordinator_1._impl__adjust_loop_bound_for_strict_relation
+    _analysis_parameter_declared_signedness = _svc_coordinator_1._impl__analysis_parameter_declared_signedness
+    _build_auxiliary_parameter_infos = _svc_coordinator_1._impl__build_auxiliary_parameter_infos
+    _build_loop_side_effect_profile = _svc_coordinator_1._impl__build_loop_side_effect_profile
+    _call_target_ref_for_op = _svc_coordinator_1._impl__call_target_ref_for_op
+    _can_reach_block = _svc_coordinator_1._impl__can_reach_block
+    _cfg_block_reachable_without_reentering_header = _svc_coordinator_1._impl__cfg_block_reachable_without_reentering_header
+    _coerce_pcode_site_int = _svc_coordinator_1._impl__coerce_pcode_site_int
+    _collect_block_predecessors = _svc_coordinator_1._impl__collect_block_predecessors
+    _collect_block_successors = _svc_coordinator_1._impl__collect_block_successors
+    _collect_loop_body_blocks = _svc_coordinator_1._impl__collect_loop_body_blocks
+    _collect_natural_loop_blocks = _svc_coordinator_1._impl__collect_natural_loop_blocks
+    _collect_reachable_loop_body_blocks = _svc_coordinator_1._impl__collect_reachable_loop_body_blocks
+    _complete_counter_constant_cover = _svc_coordinator_1._impl__complete_counter_constant_cover
+    _counter_low_bits_clear_for_or_delta = _svc_coordinator_1._impl__counter_low_bits_clear_for_or_delta
+    _counter_parameter_candidate_can_normalize = _svc_coordinator_1._impl__counter_parameter_candidate_can_normalize
+    _counter_parameter_candidate_matches_descriptor = _svc_coordinator_1._impl__counter_parameter_candidate_matches_descriptor
+    _counter_plus_constant_delta = _svc_coordinator_1._impl__counter_plus_constant_delta
+    _counter_value_satisfies_relation = _svc_coordinator_1._impl__counter_value_satisfies_relation
+    _debug = _svc_coordinator_1._impl__debug
+    _dedupe_pcode_refs = _svc_coordinator_1._impl__dedupe_pcode_refs
+    _expr_matches_counter_placeholder = _svc_coordinator_1._impl__expr_matches_counter_placeholder
+    _expr_matches_placeholder = _svc_coordinator_1._impl__expr_matches_placeholder
+    _extract_delta_from_possible_phi = _svc_coordinator_1._impl__extract_delta_from_possible_phi
+    _find_cbranch_op = _svc_coordinator_1._impl__find_cbranch_op
+    _find_no_loop_base_case = _svc_coordinator_1._impl__find_no_loop_base_case
+    _find_one_step_cases = _svc_coordinator_1._impl__find_one_step_cases
+    _float_add_has_zero_other_operand = _svc_coordinator_1._impl__float_add_has_zero_other_operand
+    _float_div_is_average_projection = _svc_coordinator_1._impl__float_div_is_average_projection
+    _follow_passthrough_varnode = _svc_coordinator_1._impl__follow_passthrough_varnode
+    _fp_denominator_is_count_parameter = _svc_coordinator_1._impl__fp_denominator_is_count_parameter
+    _high_varnode_instances = _svc_coordinator_1._impl__high_varnode_instances
+    _infer_loop_parameter_pair = _svc_coordinator_1._impl__infer_loop_parameter_pair
+    _iter_basic_blocks = _svc_coordinator_1._impl__iter_basic_blocks
+    _iter_block_ops = _svc_coordinator_1._impl__iter_block_ops
+    _iter_descendant_ops = _svc_coordinator_1._impl__iter_descendant_ops
+    _iter_varnode_descendant_ops = _svc_coordinator_1._impl__iter_varnode_descendant_ops
+    _loop_effect_profile_name = _svc_coordinator_1._impl__loop_effect_profile_name
+    _loop_variable_binder_ordinal = _svc_coordinator_1._impl__loop_variable_binder_ordinal
+    _low_mask_width_bytes = _svc_coordinator_1._impl__low_mask_width_bytes
+    _low_mask_width_bytes_from_value = _svc_coordinator_1._impl__low_mask_width_bytes_from_value
+    _make_pcode_block_ref = _svc_coordinator_1._impl__make_pcode_block_ref
+    _make_pcode_op_ref = _svc_coordinator_1._impl__make_pcode_op_ref
+    _match_less_parameter_pair = _svc_coordinator_1._impl__match_less_parameter_pair
+    _new_loop_variable_binder_scope = _svc_coordinator_1._impl__new_loop_variable_binder_scope
+    _param_expr = _svc_coordinator_1._impl__param_expr
+    _parameter_bases_memory_reads = _svc_coordinator_1._impl__parameter_bases_memory_reads
+    _parameter_name_from_expr = _svc_coordinator_1._impl__parameter_name_from_expr
+    _parameter_names_from_expr = _svc_coordinator_1._impl__parameter_names_from_expr
+    _parse_counter_comparison = _svc_coordinator_1._impl__parse_counter_comparison
+    _parse_pcode_site_text = _svc_coordinator_1._impl__parse_pcode_site_text
+    _phi_incoming_block = _svc_coordinator_1._impl__phi_incoming_block
+    _phi_input_is_cfg_entry_seed = _svc_coordinator_1._impl__phi_input_is_cfg_entry_seed
+    _phi_input_predecessor_block = _svc_coordinator_1._impl__phi_input_predecessor_block
+    _phi_input_value_varnode = _svc_coordinator_1._impl__phi_input_value_varnode
+    _pick_body_and_exit_blocks = _svc_coordinator_1._impl__pick_body_and_exit_blocks
+    _power_of_two_rounding_from_mask = _svc_coordinator_1._impl__power_of_two_rounding_from_mask
+    _program_is_big_endian = _svc_coordinator_1._impl__program_is_big_endian
+    _round_down_quotient_source = _svc_coordinator_1._impl__round_down_quotient_source
+    _rounded_count_source = _svc_coordinator_1._impl__rounded_count_source
+    _safe_bool_call = _svc_coordinator_1._impl__safe_bool_call
+    _safe_call = _svc_coordinator_1._impl__safe_call
+    _safe_expr_text = _svc_coordinator_1._impl__safe_expr_text
+    _safe_int = _svc_coordinator_1._impl__safe_int
+    _safe_pcode_input_count = _svc_coordinator_1._impl__safe_pcode_input_count
+    _safe_pcode_input_varnode = _svc_coordinator_1._impl__safe_pcode_input_varnode
+    _scaled_counter_delta_bytes = _svc_coordinator_1._impl__scaled_counter_delta_bytes
+    _scaled_parameter_varnode = _svc_coordinator_1._impl__scaled_parameter_varnode
+    _signed_varnode_constant_value = _svc_coordinator_1._impl__signed_varnode_constant_value
+    _small_integer_power_roots = _svc_coordinator_1._impl__small_integer_power_roots
+    _state_loop_phi_indices = _svc_coordinator_1._impl__state_loop_phi_indices
+    _storage_info_from_varnode = _svc_coordinator_1._impl__storage_info_from_varnode
+    _store_effect_ref_for_op = _svc_coordinator_1._impl__store_effect_ref_for_op
+    _substitute_generated_loop_variable_aliases = _svc_coordinator_1._impl__substitute_generated_loop_variable_aliases
+    _unique_parameters_by_name = staticmethod(_svc_coordinator_1._impl__unique_parameters_by_name)
+    _value_preserving_edge_kind = _svc_coordinator_1._impl__value_preserving_edge_kind
+    _value_preserving_varnode_path = _svc_coordinator_1._impl__value_preserving_varnode_path
+    _varnode_bit_width = _svc_coordinator_1._impl__varnode_bit_width
+    _varnode_constant_value = _svc_coordinator_1._impl__varnode_constant_value
+    _varnode_def_is_multiequal = _svc_coordinator_1._impl__varnode_def_is_multiequal
+    _varnode_depends_on_varnode = _svc_coordinator_1._impl__varnode_depends_on_varnode
+    _varnode_input_multiplicity = _svc_coordinator_1._impl__varnode_input_multiplicity
+    _varnode_is_base_plus_scaled_counter = _svc_coordinator_1._impl__varnode_is_base_plus_scaled_counter
+    _varnode_is_base_plus_scaled_parameter = _svc_coordinator_1._impl__varnode_is_base_plus_scaled_parameter
+    _varnode_is_count_minus_rounded = _svc_coordinator_1._impl__varnode_is_count_minus_rounded
+    _varnode_is_count_minus_rounded_plus_start = _svc_coordinator_1._impl__varnode_is_count_minus_rounded_plus_start
+    _varnode_is_int_to_float_parameter = _svc_coordinator_1._impl__varnode_is_int_to_float_parameter
+    _varnode_is_scaled_counter = _svc_coordinator_1._impl__varnode_is_scaled_counter
+    _varnode_is_scaled_counter_plus_constant = _svc_coordinator_1._impl__varnode_is_scaled_counter_plus_constant
+    _varnode_is_scaled_parameter_plus_constant = _svc_coordinator_1._impl__varnode_is_scaled_parameter_plus_constant
+    _varnode_low_bits_clear = _svc_coordinator_1._impl__varnode_low_bits_clear
+    _varnode_matches_parameter = _svc_coordinator_1._impl__varnode_matches_parameter
+    _varnode_size_bits = _svc_coordinator_1._impl__varnode_size_bits
+    _varnode_unsigned_constant_value = _svc_coordinator_1._impl__varnode_unsigned_constant_value
+    try_summarize_function = _svc_coordinator_1._impl_try_summarize_function
+    # recurrence.coordinator_2
+    _bit_width_from_low_bit_mask = _svc_coordinator_2._impl__bit_width_from_low_bit_mask
+    _build_closed_form = _svc_coordinator_2._impl__build_closed_form
+    _build_parity_split_loop_value = _svc_coordinator_2._impl__build_parity_split_loop_value
+    _comparison_to_relation = _svc_coordinator_2._impl__comparison_to_relation
+    _constant_value = _svc_coordinator_2._impl__constant_value
+    _expr_is_add_one_of_param = _svc_coordinator_2._impl__expr_is_add_one_of_param
+    _extract_additive_delta = _svc_coordinator_2._impl__extract_additive_delta
+    _extract_counter_parity = _svc_coordinator_2._impl__extract_counter_parity
+    _extract_store_delta_expr = _svc_coordinator_2._impl__extract_store_delta_expr
+    _extract_unit_step_from_call_argument = _svc_coordinator_2._impl__extract_unit_step_from_call_argument
+    _flatten_add_terms = _svc_coordinator_2._impl__flatten_add_terms
+    _infer_counter_bit_width = _svc_coordinator_2._impl__infer_counter_bit_width
+    _is_direct_self_call = _svc_coordinator_2._impl__is_direct_self_call
+    _iter_pcode_ops = _svc_coordinator_2._impl__iter_pcode_ops
+    _matches_shifted_high_reconstruction = _svc_coordinator_2._impl__matches_shifted_high_reconstruction
+    _negate_relation = _svc_coordinator_2._impl__negate_relation
+    _normalize_counter_view = _svc_coordinator_2._impl__normalize_counter_view
+    _param_expr_placeholder = _svc_coordinator_2._impl__param_expr_placeholder
+    _parameter_can_be_counter = _svc_coordinator_2._impl__parameter_can_be_counter
+    _parameter_comparison_relation = _svc_coordinator_2._impl__parameter_comparison_relation
+    _raw_constant_value = _svc_coordinator_2._impl__raw_constant_value
+    _scale_term = _svc_coordinator_2._impl__scale_term
+    _signed_constant_value = _svc_coordinator_2._impl__signed_constant_value
+    _sum_terms = _svc_coordinator_2._impl__sum_terms
+    _synthesize_one_step_cases_from_effects = _svc_coordinator_2._impl__synthesize_one_step_cases_from_effects
+    _triangular = _svc_coordinator_2._impl__triangular
+    _truncate_to_width = _svc_coordinator_2._impl__truncate_to_width
+    _zero_extend_bitpattern = _svc_coordinator_2._impl__zero_extend_bitpattern
+    # recurrence.counted_loop_1
+    _accumulator_backedge_indices = _svc_counted_loop_1._impl__accumulator_backedge_indices
+    _accumulator_phi_candidates_can_group = _svc_counted_loop_1._impl__accumulator_phi_candidates_can_group
+    _analysis_is_safe_for_counted_scalar_summary = _svc_counted_loop_1._impl__analysis_is_safe_for_counted_scalar_summary
+    _assign_counted_loop_accumulator_binder_ordinals = _svc_counted_loop_1._impl__assign_counted_loop_accumulator_binder_ordinals
+    _build_counted_loop_case_refs = _svc_counted_loop_1._impl__build_counted_loop_case_refs
+    _build_counted_loop_summary_intrinsic = _svc_counted_loop_1._impl__build_counted_loop_summary_intrinsic
+    _build_counted_loop_summary_value = _svc_counted_loop_1._impl__build_counted_loop_summary_value
+    _build_counted_scalar_loop_summary = _svc_counted_loop_1._impl__build_counted_scalar_loop_summary
+    _build_peeled_decrement_accumulator_sum_value = _svc_counted_loop_1._impl__build_peeled_decrement_accumulator_sum_value
+    _build_state_decrement_accumulator_sum_value = _svc_counted_loop_1._impl__build_state_decrement_accumulator_sum_value
+    _candidate_counted_loop_guards = _svc_counted_loop_1._impl__candidate_counted_loop_guards
+    _canonicalize_peeled_counted_loop_value = _svc_counted_loop_1._impl__canonicalize_peeled_counted_loop_value
+    _canonicalize_zero_prefix_counted_loop_value = _svc_counted_loop_1._impl__canonicalize_zero_prefix_counted_loop_value
+    _count_counted_scalar_loop_models = _svc_counted_loop_1._impl__count_counted_scalar_loop_models
+    _counted_loop_accumulator_order_key = _svc_counted_loop_1._impl__counted_loop_accumulator_order_key
+    _counted_loop_accumulator_priority = _svc_counted_loop_1._impl__counted_loop_accumulator_priority
+    _counted_loop_accumulator_stable_key = _svc_counted_loop_1._impl__counted_loop_accumulator_stable_key
+    _counted_loop_identity_match_key = _svc_counted_loop_1._impl__counted_loop_identity_match_key
+    _counted_loop_model_priority = _svc_counted_loop_1._impl__counted_loop_model_priority
+    _counted_loop_prefix_contributes_zero = _svc_counted_loop_1._impl__counted_loop_prefix_contributes_zero
+    _counted_loop_summary_source_key_fallback = _svc_counted_loop_1._impl__counted_loop_summary_source_key_fallback
+    _counted_loop_summary_source_key_from_parts = _svc_counted_loop_1._impl__counted_loop_summary_source_key_from_parts
+    _derive_direct_counted_loop_conditions = _svc_counted_loop_1._impl__derive_direct_counted_loop_conditions
+    _extract_counted_loop_update_cases = _svc_counted_loop_1._impl__extract_counted_loop_update_cases
+    _extract_counted_scalar_loop_model = _svc_counted_loop_1._impl__extract_counted_scalar_loop_model
+    _find_state_loop_accumulator = _svc_counted_loop_1._impl__find_state_loop_accumulator
+    _has_branch_accumulator_candidate = _svc_counted_loop_1._impl__has_branch_accumulator_candidate
+    _has_counted_scalar_loop_candidate = _svc_counted_loop_1._impl__has_counted_scalar_loop_candidate
+    _has_exact_accumulator_init_return_at_state_one = _svc_counted_loop_1._impl__has_exact_accumulator_init_return_at_state_one
+    _induction_backedge_indices = _svc_counted_loop_1._impl__induction_backedge_indices
+    _is_counted_loop_bound_expr = _svc_counted_loop_1._impl__is_counted_loop_bound_expr
+    _looks_like_peeled_counted_loop_start = _svc_counted_loop_1._impl__looks_like_peeled_counted_loop_start
+    _match_accumulator_phi = _svc_counted_loop_1._impl__match_accumulator_phi
+    _match_accumulator_phi_candidate = _svc_counted_loop_1._impl__match_accumulator_phi_candidate
+    _match_counted_loop_accumulators = _svc_counted_loop_1._impl__match_counted_loop_accumulators
+    _match_counted_loop_guard = _svc_counted_loop_1._impl__match_counted_loop_guard
+    _match_counted_loop_induction = _svc_counted_loop_1._impl__match_counted_loop_induction
+    _match_latch_counted_loop_guard = _svc_counted_loop_1._impl__match_latch_counted_loop_guard
+    _multiequal_accumulator_update_rejection_reason = _svc_counted_loop_1._impl__multiequal_accumulator_update_rejection_reason
+    _multiequal_input_is_accumulator_update = _svc_counted_loop_1._impl__multiequal_input_is_accumulator_update
+    _pre_return_counted_scalar_summary_is_cfg_safe = _svc_counted_loop_1._impl__pre_return_counted_scalar_summary_is_cfg_safe
+    _state_loop_accumulator_delta = _svc_counted_loop_1._impl__state_loop_accumulator_delta
+    _state_loop_accumulator_priority = _svc_counted_loop_1._impl__state_loop_accumulator_priority
+    _try_build_latch_exit_decrement_accumulator_sum_returns = _svc_counted_loop_1._impl__try_build_latch_exit_decrement_accumulator_sum_returns
+    _try_extract_counted_loop_update_cases_for_summary = _svc_counted_loop_1._impl__try_extract_counted_loop_update_cases_for_summary
+    _try_summarize_counted_scalar_loop = _svc_counted_loop_1._impl__try_summarize_counted_scalar_loop
+    _unique_multiequal_accumulator_update_input = _svc_counted_loop_1._impl__unique_multiequal_accumulator_update_input
+    _validate_counted_loop_update_cases = _svc_counted_loop_1._impl__validate_counted_loop_update_cases
+    _varnode_aliases_accumulator_object = _svc_counted_loop_1._impl__varnode_aliases_accumulator_object
+    _varnode_is_accumulator_update_for_phi = _svc_counted_loop_1._impl__varnode_is_accumulator_update_for_phi
+    try_summarize_pre_return_counted_scalar_loop = _svc_counted_loop_1._impl_try_summarize_pre_return_counted_scalar_loop
+    # recurrence.counted_loop_2
+    _accumulator_load_group_signature = _svc_counted_loop_2._impl__accumulator_load_group_signature
+    _choose_return_reaching_accumulator = _svc_counted_loop_2._impl__choose_return_reaching_accumulator
+    _try_summarize_branch_accumulator_loop = _svc_counted_loop_2._impl__try_summarize_branch_accumulator_loop
+    # recurrence.guard_proof
+    _analysis_active_preconditions = _svc_guard_proof._impl__analysis_active_preconditions
+    _analysis_mentions_parameter_in_conditions = _svc_guard_proof._impl__analysis_mentions_parameter_in_conditions
+    _bounded_prefix_region_conditions_from_exact_anchor = _svc_guard_proof._impl__bounded_prefix_region_conditions_from_exact_anchor
+    _build_base_conditions = _svc_guard_proof._impl__build_base_conditions
+    _build_block_edge_condition = _svc_guard_proof._impl__build_block_edge_condition
+    _canonicalize_condition_parameters_for_analysis = _svc_guard_proof._impl__canonicalize_condition_parameters_for_analysis
+    _canonicalize_zero_value_under_conditions = _svc_guard_proof._impl__canonicalize_zero_value_under_conditions
+    _common_conditions_across_paths = _svc_guard_proof._impl__common_conditions_across_paths
+    _condition_clause_expression = _svc_guard_proof._impl__condition_clause_expression
+    _condition_conjunction_unsat_with_solver = _svc_guard_proof._impl__condition_conjunction_unsat_with_solver
+    _condition_for_cbranch_op = _svc_guard_proof._impl__condition_for_cbranch_op
+    _condition_is_less = _svc_guard_proof._impl__condition_is_less
+    _condition_is_nonpositive_state = _svc_guard_proof._impl__condition_is_nonpositive_state
+    _condition_is_not_less = _svc_guard_proof._impl__condition_is_not_less
+    _condition_is_positive_state = _svc_guard_proof._impl__condition_is_positive_state
+    _condition_is_state_equals_one = _svc_guard_proof._impl__condition_is_state_equals_one
+    _condition_is_step_equality = _svc_guard_proof._impl__condition_is_step_equality
+    _condition_mentions_counter = _svc_guard_proof._impl__condition_mentions_counter
+    _condition_references_only_counter_parameter = _svc_guard_proof._impl__condition_references_only_counter_parameter
+    _condition_relation = _svc_guard_proof._impl__condition_relation
+    _condition_sets_equivalent = _svc_guard_proof._impl__condition_sets_equivalent
+    _condition_term_to_expression = _svc_guard_proof._impl__condition_term_to_expression
+    _conditions_allow_counter_value = _svc_guard_proof._impl__conditions_allow_counter_value
+    _conditions_are_disjoint_from_conditions = _svc_guard_proof._impl__conditions_are_disjoint_from_conditions
+    _conditions_cover_nonpositive_parameter_region = _svc_guard_proof._impl__conditions_cover_nonpositive_parameter_region
+    _conditions_cover_summary_excluded_counter_value = _svc_guard_proof._impl__conditions_cover_summary_excluded_counter_value
+    _conditions_equivalent_object_centric = _svc_guard_proof._impl__conditions_equivalent_object_centric
+    _conditions_imply_counter_identity_value = _svc_guard_proof._impl__conditions_imply_counter_identity_value
+    _conditions_imply_counter_value = _svc_guard_proof._impl__conditions_imply_counter_value
+    _conditions_imply_with_smt = _svc_guard_proof._impl__conditions_imply_with_smt
+    _conditions_include_nonpositive_state = _svc_guard_proof._impl__conditions_include_nonpositive_state
+    _conditions_include_positive_state = _svc_guard_proof._impl__conditions_include_positive_state
+    _conditions_include_state_equals_one = _svc_guard_proof._impl__conditions_include_state_equals_one
+    _conditions_overlap_conditions = _svc_guard_proof._impl__conditions_overlap_conditions
+    _conditions_overlap_for_analysis_parameters = _svc_guard_proof._impl__conditions_overlap_for_analysis_parameters
+    _counter_equality_condition = _svc_guard_proof._impl__counter_equality_condition
+    _counter_guard_parameter_candidates = _svc_guard_proof._impl__counter_guard_parameter_candidates
+    _counter_guard_signedness_from_condition = _svc_guard_proof._impl__counter_guard_signedness_from_condition
+    _counter_singleton_region_covers_return_conditions = _svc_guard_proof._impl__counter_singleton_region_covers_return_conditions
+    _enumerate_paths_with_conditions = _svc_guard_proof._impl__enumerate_paths_with_conditions
+    _enumerate_paths_with_conditions_result = _svc_guard_proof._impl__enumerate_paths_with_conditions_result
+    _exact_counter_value_from_conditions = _svc_guard_proof._impl__exact_counter_value_from_conditions
+    _expression_is_boolean_condition_value = _svc_guard_proof._impl__expression_is_boolean_condition_value
+    _first_return_overlapping_conditions = _svc_guard_proof._impl__first_return_overlapping_conditions
+    _guard_handoff_key = _svc_guard_proof._impl__guard_handoff_key
+    _infer_lower_bound_from_base_conditions = _svc_guard_proof._impl__infer_lower_bound_from_base_conditions
+    _infer_lower_bound_from_conditions = _svc_guard_proof._impl__infer_lower_bound_from_conditions
+    _infer_upper_bound_from_conditions = _svc_guard_proof._impl__infer_upper_bound_from_conditions
+    _is_condition_counter_view = _svc_guard_proof._impl__is_condition_counter_view
+    _loop_block_guard_conditions = _svc_guard_proof._impl__loop_block_guard_conditions
+    _loop_block_guard_effect_info = _svc_guard_proof._impl__loop_block_guard_effect_info
+    _negate_simple_condition_set = _svc_guard_proof._impl__negate_simple_condition_set
+    _negated_return_region_condition = _svc_guard_proof._impl__negated_return_region_condition
+    _nonzero_returns_are_disjoint_from_base_guard = _svc_guard_proof._impl__nonzero_returns_are_disjoint_from_base_guard
+    _normalize_counter_parameter_conditions = _svc_guard_proof._impl__normalize_counter_parameter_conditions
+    _normalize_latch_continue_guard = _svc_guard_proof._impl__normalize_latch_continue_guard
+    _normalize_loop_continue_guard = _svc_guard_proof._impl__normalize_loop_continue_guard
+    _positive_counter_conditions_for_return = _svc_guard_proof._impl__positive_counter_conditions_for_return
+    _positive_state_guard_expression = _svc_guard_proof._impl__positive_state_guard_expression
+    _positive_state_init_guard_expression = _svc_guard_proof._impl__positive_state_init_guard_expression
+    _progress_guarded_stop_one_anchor_is_proved = _svc_guard_proof._impl__progress_guarded_stop_one_anchor_is_proved
+    _progress_guarded_unit_entry_guard_expression = _svc_guard_proof._impl__progress_guarded_unit_entry_guard_expression
+    _progress_guarded_unit_step_expression = _svc_guard_proof._impl__progress_guarded_unit_step_expression
+    _prove_expression_equivalence_under_conditions = _svc_guard_proof._impl__prove_expression_equivalence_under_conditions
+    _prove_return_conditions_cover_region = _svc_guard_proof._impl__prove_return_conditions_cover_region
+    _prove_summary_conditions_plus_exact_returns_cover_active_precondition = _svc_guard_proof._impl__prove_summary_conditions_plus_exact_returns_cover_active_precondition
+    _repair_two_way_partition_conditions = _svc_guard_proof._impl__repair_two_way_partition_conditions
+    _return_conditions_are_disjoint_from_conditions = _svc_guard_proof._impl__return_conditions_are_disjoint_from_conditions
+    _return_conditions_imply_conditions = _svc_guard_proof._impl__return_conditions_imply_conditions
+    _return_overlaps_conditions = _svc_guard_proof._impl__return_overlaps_conditions
+    _return_value_equals_under_conditions = _svc_guard_proof._impl__return_value_equals_under_conditions
+    _state_guard_is_placeholder_not_equal_one = _svc_guard_proof._impl__state_guard_is_placeholder_not_equal_one
+    _state_guard_is_positive_after_progress_step = _svc_guard_proof._impl__state_guard_is_positive_after_progress_step
+    _state_guard_proves_signed_positive_placeholder = _svc_guard_proof._impl__state_guard_proves_signed_positive_placeholder
+    _summary_guard_constraints_key = _svc_guard_proof._impl__summary_guard_constraints_key
+    _summary_return_conditions_key = _svc_guard_proof._impl__summary_return_conditions_key
+    _two_way_condition_partition_is_total = _svc_guard_proof._impl__two_way_condition_partition_is_total
+    _zero_base_guard_cover_for_positive_counter_guard = _svc_guard_proof._impl__zero_base_guard_cover_for_positive_counter_guard
+    # recurrence.linear_recursion
+    _build_recursive_conditions = _svc_linear_recursion._impl__build_recursive_conditions
+    _expression_contains_recursive_unknown = _svc_linear_recursion._impl__expression_contains_recursive_unknown
+    _try_summarize_linear_self_recursion = _svc_linear_recursion._impl__try_summarize_linear_self_recursion
+    # recurrence.multiplicative_recurrence
+    _build_direct_multiplicative_state_value = _svc_multiplicative_recurrence._impl__build_direct_multiplicative_state_value
+    _build_multiplicative_state_then_triangular_sum_value = _svc_multiplicative_recurrence._impl__build_multiplicative_state_then_triangular_sum_value
+    _multiplicative_accumulator_delta_multiplier = _svc_multiplicative_recurrence._impl__multiplicative_accumulator_delta_multiplier
+    _multiplicative_phi_return_summary_conditions = _svc_multiplicative_recurrence._impl__multiplicative_phi_return_summary_conditions
+    _record_structural_multiplicative_return_region_proof = _svc_multiplicative_recurrence._impl__record_structural_multiplicative_return_region_proof
+    _try_summarize_multiplicative_phi_return_region = _svc_multiplicative_recurrence._impl__try_summarize_multiplicative_phi_return_region
+    # recurrence.object_identity
+    _block_identity_key = _svc_object_identity._impl__block_identity_key
+    _block_key = _svc_object_identity._impl__block_key
+    _canonicalize_expression = _svc_object_identity._impl__canonicalize_expression
+    _canonicalize_expression_parameters_for_analysis = _svc_object_identity._impl__canonicalize_expression_parameters_for_analysis
+    _clean_edge_specific_handoff_blocks_key = _svc_object_identity._impl__clean_edge_specific_handoff_blocks_key
+    _counter_parameter_identity_key = _svc_object_identity._impl__counter_parameter_identity_key
+    _expression_storage_identity_key = _svc_object_identity._impl__expression_storage_identity_key
+    _expressions_have_same_structural_key = _svc_object_identity._impl__expressions_have_same_structural_key
+    _handoff_widths_key = _svc_object_identity._impl__handoff_widths_key
+    _loop_variable_identity_ref = _svc_object_identity._impl__loop_variable_identity_ref
+    _parameter_expression_semantic_identity = _svc_object_identity._impl__parameter_expression_semantic_identity
+    _parameter_expressions_share_counter_identity = _svc_object_identity._impl__parameter_expressions_share_counter_identity
+    _parameter_identity_keys_from_descriptor = _svc_object_identity._impl__parameter_identity_keys_from_descriptor
+    _parameter_storage_identity_key = _svc_object_identity._impl__parameter_storage_identity_key
+    _pcode_block_group_key = _svc_object_identity._impl__pcode_block_group_key
+    _pcode_op_order_key = _svc_object_identity._impl__pcode_op_order_key
+    _phi_incoming_same_storage_definition = _svc_object_identity._impl__phi_incoming_same_storage_definition
+    _positive_summary_parameter_key = _svc_object_identity._impl__positive_summary_parameter_key
+    _return_info_summary_identity_key = _svc_object_identity._impl__return_info_summary_identity_key
+    _runtime_ref_stable_key = _svc_object_identity._impl__runtime_ref_stable_key
+    _same_counter_expression = _svc_object_identity._impl__same_counter_expression
+    _same_high_variable = _svc_object_identity._impl__same_high_variable
+    _same_pcode_block = _svc_object_identity._impl__same_pcode_block
+    _same_placeholder_varnode = _svc_object_identity._impl__same_placeholder_varnode
+    _same_storage_varnode = _svc_object_identity._impl__same_storage_varnode
+    _same_varnode_identity = _svc_object_identity._impl__same_varnode_identity
+    _same_varnode_object_identity = _svc_object_identity._impl__same_varnode_object_identity
+    _same_varnode_value = _svc_object_identity._impl__same_varnode_value
+    _sanitize_summary_evidence_key = _svc_object_identity._impl__sanitize_summary_evidence_key
+    _stable_key_looks_like_loop_summary = _svc_object_identity._impl__stable_key_looks_like_loop_summary
+    _stable_key_or_none = _svc_object_identity._impl__stable_key_or_none
+    _storage_infos_refer_to_same_parameter_slot = _svc_object_identity._impl__storage_infos_refer_to_same_parameter_slot
+    _summary_expression_evidence_key = staticmethod(_svc_object_identity._impl__summary_expression_evidence_key)
+    _summary_return_expression_key = _svc_object_identity._impl__summary_return_expression_key
+    _summary_storage_identity_key = _svc_object_identity._impl__summary_storage_identity_key
+    _summary_symbol_identity_from_descriptor = _svc_object_identity._impl__summary_symbol_identity_from_descriptor
+    _summary_symbol_identity_from_expression = _svc_object_identity._impl__summary_symbol_identity_from_expression
+    _summary_symbol_identity_sort_key = _svc_object_identity._impl__summary_symbol_identity_sort_key
+    _summary_value_source_key = _svc_object_identity._impl__summary_value_source_key
+    _value_flow_varnode_key = _svc_object_identity._impl__value_flow_varnode_key
+    _value_preserving_edge_key = _svc_object_identity._impl__value_preserving_edge_key
+    _varnode_cache_key = _svc_object_identity._impl__varnode_cache_key
+    _zero_iteration_exit_region_op_key = _svc_object_identity._impl__zero_iteration_exit_region_op_key
+    # recurrence.pointer_progression
+    _accumulator_init_index = _svc_pointer_progression._impl__accumulator_init_index
+    _address_expr_for_location = _svc_pointer_progression._impl__address_expr_for_location
+    _address_space_ref = _svc_pointer_progression._impl__address_space_ref
+    _bounded_prefix_exact_insert_index = _svc_pointer_progression._impl__bounded_prefix_exact_insert_index
+    _byte_offset_from_parameter_pointer = _svc_pointer_progression._impl__byte_offset_from_parameter_pointer
+    _byte_offset_from_pointer = _svc_pointer_progression._impl__byte_offset_from_pointer
+    _byte_offset_from_pointer_like = _svc_pointer_progression._impl__byte_offset_from_pointer_like
+    _condition_is_pointer_nonnull = _svc_pointer_progression._impl__condition_is_pointer_nonnull
+    _condition_is_pointer_null = _svc_pointer_progression._impl__condition_is_pointer_null
+    _constant_resolves_to_executable_address = _svc_pointer_progression._impl__constant_resolves_to_executable_address
+    _constant_resolves_to_function_body_address = _svc_pointer_progression._impl__constant_resolves_to_function_body_address
+    _expression_contains_address_constant = _svc_pointer_progression._impl__expression_contains_address_constant
+    _expression_contains_address_literal_access = _svc_pointer_progression._impl__expression_contains_address_literal_access
+    _expression_contains_executable_address_constant = _svc_pointer_progression._impl__expression_contains_executable_address_constant
+    _extract_index_step = _svc_pointer_progression._impl__extract_index_step
+    _extract_index_step_expression = _svc_pointer_progression._impl__extract_index_step_expression
+    _extract_linear_location_coefficients = _svc_pointer_progression._impl__extract_linear_location_coefficients
+    _extract_pointer_step = _svc_pointer_progression._impl__extract_pointer_step
+    _find_pointer_null_case = _svc_pointer_progression._impl__find_pointer_null_case
+    _function_body_address_ranges = _svc_pointer_progression._impl__function_body_address_ranges
+    _has_pointer_base_plus_constant = _svc_pointer_progression._impl__has_pointer_base_plus_constant
+    _index_phi_has_step = _svc_pointer_progression._impl__index_phi_has_step
+    _index_phis_for_load_context = _svc_pointer_progression._impl__index_phis_for_load_context
+    _induction_info_from_scaled_index = _svc_pointer_progression._impl__induction_info_from_scaled_index
+    _induction_init_index = _svc_pointer_progression._impl__induction_init_index
+    _infer_pointer_parameter_name = _svc_pointer_progression._impl__infer_pointer_parameter_name
+    _load_byte_offsets_from_pointer = _svc_pointer_progression._impl__load_byte_offsets_from_pointer
+    _load_progression_from_pointer_phi = _svc_pointer_progression._impl__load_progression_from_pointer_phi
+    _location_base_ref_from_parameter = _svc_pointer_progression._impl__location_base_ref_from_parameter
+    _match_index_progression_phi = _svc_pointer_progression._impl__match_index_progression_phi
+    _match_pointer_equality = _svc_pointer_progression._impl__match_pointer_equality
+    _match_pointer_progression_phi = _svc_pointer_progression._impl__match_pointer_progression_phi
+    _match_pointer_progression_phi_by_storage = _svc_pointer_progression._impl__match_pointer_progression_phi_by_storage
+    _matched_index_progression = _svc_pointer_progression._impl__matched_index_progression
+    _matches_index_progression = _svc_pointer_progression._impl__matches_index_progression
+    _parameter_has_pointer_guards = _svc_pointer_progression._impl__parameter_has_pointer_guards
+    _parameter_has_pointer_progression = _svc_pointer_progression._impl__parameter_has_pointer_progression
+    _parameter_index_from_symbol = _svc_pointer_progression._impl__parameter_index_from_symbol
+    _parse_pcode_address_offset = _svc_pointer_progression._impl__parse_pcode_address_offset
+    _phi_has_pointer_step = _svc_pointer_progression._impl__phi_has_pointer_step
+    _pointer_nonnull_condition = _svc_pointer_progression._impl__pointer_nonnull_condition
+    _pointer_phi_seed_offsets = _svc_pointer_progression._impl__pointer_phi_seed_offsets
+    _pointer_phis_for_load_context = _svc_pointer_progression._impl__pointer_phis_for_load_context
+    _resolve_store_target_address_space_ref = _svc_pointer_progression._impl__resolve_store_target_address_space_ref
+    _return_info_address_matches_pcode_ref = _svc_pointer_progression._impl__return_info_address_matches_pcode_ref
+    _return_info_address_offset = _svc_pointer_progression._impl__return_info_address_offset
+    _scaled_index_stride = _svc_pointer_progression._impl__scaled_index_stride
+    _scaled_index_stride_and_start = _svc_pointer_progression._impl__scaled_index_stride_and_start
+    _store_address_space_ref_for_op = _svc_pointer_progression._impl__store_address_space_ref_for_op
+    # recurrence.proof_utils
+    _build_expression_equivalence_query = _svc_proof_utils._impl__build_expression_equivalence_query
+    _build_pcode_expression = _svc_proof_utils._impl__build_pcode_expression
+    _clone_summary_expression_for_smt = _svc_proof_utils._impl__clone_summary_expression_for_smt
+    _coerce_summary_expression_to_size = _svc_proof_utils._impl__coerce_summary_expression_to_size
+    _collect_expression_memory_widths = _svc_proof_utils._impl__collect_expression_memory_widths
+    _collect_expression_symbol_specs = _svc_proof_utils._impl__collect_expression_symbol_specs
+    _copy_symbol_expression = _svc_proof_utils._impl__copy_symbol_expression
+    _expression_contains_subexpression = _svc_proof_utils._impl__expression_contains_subexpression
+    _expression_depends_on_signature = _svc_proof_utils._impl__expression_depends_on_signature
+    _expression_equivalence_target_bits = _svc_proof_utils._impl__expression_equivalence_target_bits
+    _expression_integer_constants = _svc_proof_utils._impl__expression_integer_constants
+    _expression_is_loop_invariant_bias = _svc_proof_utils._impl__expression_is_loop_invariant_bias
+    _expression_is_unresolved = _svc_proof_utils._impl__expression_is_unresolved
+    _expression_mentions_placeholder = _svc_proof_utils._impl__expression_mentions_placeholder
+    _expression_prefers_signed_extension = _svc_proof_utils._impl__expression_prefers_signed_extension
+    _expression_tree_contains_type = _svc_proof_utils._impl__expression_tree_contains_type
+    _extract_addend_expression = _svc_proof_utils._impl__extract_addend_expression
+    _flatten_bool_and_expression = _svc_proof_utils._impl__flatten_bool_and_expression
+    _implied_counter_constant_expression = _svc_proof_utils._impl__implied_counter_constant_expression
+    _is_constant_expression = _svc_proof_utils._impl__is_constant_expression
+    _iter_expression_nodes = _svc_proof_utils._impl__iter_expression_nodes
+    _loop_variable_expression = _svc_proof_utils._impl__loop_variable_expression
+    _normalize_counter_parameter_expression = _svc_proof_utils._impl__normalize_counter_parameter_expression
+    _parameter_expression = _svc_proof_utils._impl__parameter_expression
+    _parameter_expression_candidates = _svc_proof_utils._impl__parameter_expression_candidates
+    _render_summary_auxiliary_smt = _svc_proof_utils._impl__render_summary_auxiliary_smt
+    _scale_expression = _svc_proof_utils._impl__scale_expression
+    _substitute_exact_expression = _svc_proof_utils._impl__substitute_exact_expression
+    _sum_expression_terms = _svc_proof_utils._impl__sum_expression_terms
+    _summary_symbol_spec_from_expression = _svc_proof_utils._impl__summary_symbol_spec_from_expression
+    _terms_equivalent = _svc_proof_utils._impl__terms_equivalent
+    _trace_varnode_expression = _svc_proof_utils._impl__trace_varnode_expression
+    # recurrence.readonly_reduction_1
+    _address_points_to_readonly_data = _svc_readonly_reduction_1._impl__address_points_to_readonly_data
+    _base_witnesses_exactly_cover_region = _svc_readonly_reduction_1._impl__base_witnesses_exactly_cover_region
+    _collect_readonly_prefix_accumulator_proofs = _svc_readonly_reduction_1._impl__collect_readonly_prefix_accumulator_proofs
+    _expression_contains_readonly_address_constant = _svc_readonly_reduction_1._impl__expression_contains_readonly_address_constant
+    _expression_contains_readonly_literal_access = _svc_readonly_reduction_1._impl__expression_contains_readonly_literal_access
+    _find_latch_exit_decrement_sum_witness_returns = _svc_readonly_reduction_1._impl__find_latch_exit_decrement_sum_witness_returns
+    _has_readonly_pointer_reduction_candidate = _svc_readonly_reduction_1._impl__has_readonly_pointer_reduction_candidate
+    _infer_readonly_pointer_reduction_parameters = _svc_readonly_reduction_1._impl__infer_readonly_pointer_reduction_parameters
+    _normalize_readonly_reduction_candidate = _svc_readonly_reduction_1._impl__normalize_readonly_reduction_candidate
+    _prove_return_region_summary_witnesses = _svc_readonly_reduction_1._impl__prove_return_region_summary_witnesses
+    _read_readonly_int32_lanes = _svc_readonly_reduction_1._impl__read_readonly_int32_lanes
+    _readonly_affine_progression_literal = _svc_readonly_reduction_1._impl__readonly_affine_progression_literal
+    _readonly_affine_progression_literal_step = _svc_readonly_reduction_1._impl__readonly_affine_progression_literal_step
+    _readonly_bounded_counter_region_is_covered_by_exact_returns = _svc_readonly_reduction_1._impl__readonly_bounded_counter_region_is_covered_by_exact_returns
+    _readonly_candidate_pairwise_contract_key = _svc_readonly_reduction_1._impl__readonly_candidate_pairwise_contract_key
+    _readonly_counter_candidate_score = _svc_readonly_reduction_1._impl__readonly_counter_candidate_score
+    _readonly_exact_materialized_returns_conflict_with_accumulator_proof = _svc_readonly_reduction_1._impl__readonly_exact_materialized_returns_conflict_with_accumulator_proof
+    _readonly_int32_progression_literal_at_value = _svc_readonly_reduction_1._impl__readonly_int32_progression_literal_at_value
+    _readonly_pointer_candidate_score = _svc_readonly_reduction_1._impl__readonly_pointer_candidate_score
+    _readonly_preserved_return_as_exact_seed = _svc_readonly_reduction_1._impl__readonly_preserved_return_as_exact_seed
+    _readonly_preserved_summary_is_subsumed_by_replacement = _svc_readonly_reduction_1._impl__readonly_preserved_summary_is_subsumed_by_replacement
+    _readonly_proof_return_sites_cover_returns = _svc_readonly_reduction_1._impl__readonly_proof_return_sites_cover_returns
+    _readonly_reduction_candidate_score = _svc_readonly_reduction_1._impl__readonly_reduction_candidate_score
+    _readonly_reduction_condition_signature = _svc_readonly_reduction_1._impl__readonly_reduction_condition_signature
+    _readonly_reduction_normalization_state_key = _svc_readonly_reduction_1._impl__readonly_reduction_normalization_state_key
+    _readonly_reduction_positive_conditions = _svc_readonly_reduction_1._impl__readonly_reduction_positive_conditions
+    _readonly_reduction_ref_from_return = _svc_readonly_reduction_1._impl__readonly_reduction_ref_from_return
+    _readonly_reduction_ref_specificity = _svc_readonly_reduction_1._impl__readonly_reduction_ref_specificity
+    _readonly_reduction_region_returns = _svc_readonly_reduction_1._impl__readonly_reduction_region_returns
+    _readonly_reduction_region_returns_with_signedness = _svc_readonly_reduction_1._impl__readonly_reduction_region_returns_with_signedness
+    _readonly_reduction_replaceable_positive_returns = _svc_readonly_reduction_1._impl__readonly_reduction_replaceable_positive_returns
+    _readonly_reduction_return_signature = _svc_readonly_reduction_1._impl__readonly_reduction_return_signature
+    _readonly_reduction_summary_expression = _svc_readonly_reduction_1._impl__readonly_reduction_summary_expression
+    _readonly_region_returns_are_subsumable_by_proof = _svc_readonly_reduction_1._impl__readonly_region_returns_are_subsumable_by_proof
+    _readonly_return_is_superseded_by_summary_region = _svc_readonly_reduction_1._impl__readonly_return_is_superseded_by_summary_region
+    _readonly_synthetic_positive_return_from_proof = _svc_readonly_reduction_1._impl__readonly_synthetic_positive_return_from_proof
+    _readonly_tied_candidates_have_same_pairwise_contract = _svc_readonly_reduction_1._impl__readonly_tied_candidates_have_same_pairwise_contract
+    _readonly_unresolved_preserved_return_is_subsumed_by_replacement = _svc_readonly_reduction_1._impl__readonly_unresolved_preserved_return_is_subsumed_by_replacement
+    _readonly_witness_terms_form_scalar_prefix = _svc_readonly_reduction_1._impl__readonly_witness_terms_form_scalar_prefix
+    _record_readonly_reduction_return_region_proof = _svc_readonly_reduction_1._impl__record_readonly_reduction_return_region_proof
+    _residue_cases_contain_readonly_affine_literal_address = _svc_readonly_reduction_1._impl__residue_cases_contain_readonly_affine_literal_address
+    _select_readonly_reduction_candidate = _svc_readonly_reduction_1._impl__select_readonly_reduction_candidate
+    _synthesize_exact_returns_from_readonly_witnesses = _svc_readonly_reduction_1._impl__synthesize_exact_returns_from_readonly_witnesses
+    _try_summarize_readonly_pointer_reduction = _svc_readonly_reduction_1._impl__try_summarize_readonly_pointer_reduction
+    _zero_base_return_witnesses_for_region = _svc_readonly_reduction_1._impl__zero_base_return_witnesses_for_region
+    # recurrence.readonly_reduction_2
+    _adjust_readonly_load_signature_access = _svc_readonly_reduction_2._impl__adjust_readonly_load_signature_access
+    _build_readonly_reduction_expression_from_terms = _svc_readonly_reduction_2._impl__build_readonly_reduction_expression_from_terms
+    _build_readonly_reduction_semantic_witnesses = _svc_readonly_reduction_2._impl__build_readonly_reduction_semantic_witnesses
+    _canonicalize_readonly_exact_witness_terms = _svc_readonly_reduction_2._impl__canonicalize_readonly_exact_witness_terms
+    _collect_readonly_sum_accumulator_proofs = _svc_readonly_reduction_2._impl__collect_readonly_sum_accumulator_proofs
+    _detect_readonly_sum_accumulator_proof = _svc_readonly_reduction_2._impl__detect_readonly_sum_accumulator_proof
+    _detect_vectorized_readonly_prefix_sum_accumulator_proof = _svc_readonly_reduction_2._impl__detect_vectorized_readonly_prefix_sum_accumulator_proof
+    _expected_readonly_prefix_seed_terms = _svc_readonly_reduction_2._impl__expected_readonly_prefix_seed_terms
+    _extract_fp_count_one_readonly_terms = _svc_readonly_reduction_2._impl__extract_fp_count_one_readonly_terms
+    _extract_fp_readonly_exact_return_terms_and_bias = _svc_readonly_reduction_2._impl__extract_fp_readonly_exact_return_terms_and_bias
+    _extract_readonly_accumulator_seed_terms = _svc_readonly_reduction_2._impl__extract_readonly_accumulator_seed_terms
+    _extract_readonly_reduction_exact_witnesses = _svc_readonly_reduction_2._impl__extract_readonly_reduction_exact_witnesses
+    _extract_readonly_reduction_term_descriptor = _svc_readonly_reduction_2._impl__extract_readonly_reduction_term_descriptor
+    _extract_readonly_reduction_terms = _svc_readonly_reduction_2._impl__extract_readonly_reduction_terms
+    _extract_readonly_reduction_terms_and_bias = _svc_readonly_reduction_2._impl__extract_readonly_reduction_terms_and_bias
+    _extract_readonly_return_terms_and_bias = _svc_readonly_reduction_2._impl__extract_readonly_return_terms_and_bias
+    _follow_readonly_load_addend_passthrough = _svc_readonly_reduction_2._impl__follow_readonly_load_addend_passthrough
+    _infer_exact_count_from_readonly_terms = _svc_readonly_reduction_2._impl__infer_exact_count_from_readonly_terms
+    _normalize_readonly_constant_bias = _svc_readonly_reduction_2._impl__normalize_readonly_constant_bias
+    _order_readonly_exact_positive_returns = _svc_readonly_reduction_2._impl__order_readonly_exact_positive_returns
+    _readonly_candidate_counts_from_term_contract = _svc_readonly_reduction_2._impl__readonly_candidate_counts_from_term_contract
+    _readonly_exact_count_region_is_fully_covered_by_return = _svc_readonly_reduction_2._impl__readonly_exact_count_region_is_fully_covered_by_return
+    _readonly_exact_count_return_residual_conditions = _svc_readonly_reduction_2._impl__readonly_exact_count_return_residual_conditions
+    _readonly_exact_positive_return_is_absorbable = _svc_readonly_reduction_2._impl__readonly_exact_positive_return_is_absorbable
+    _readonly_exact_positive_return_prefix_score = _svc_readonly_reduction_2._impl__readonly_exact_positive_return_prefix_score
+    _readonly_exact_positive_return_selection_key = _svc_readonly_reduction_2._impl__readonly_exact_positive_return_selection_key
+    _readonly_float_addend_reduction_kind = _svc_readonly_reduction_2._impl__readonly_float_addend_reduction_kind
+    _readonly_load_progression_term_counter = _svc_readonly_reduction_2._impl__readonly_load_progression_term_counter
+    _readonly_loop_anchor_covers_return_region = _svc_readonly_reduction_2._impl__readonly_loop_anchor_covers_return_region
+    _readonly_loop_trip_count_for_count_value = _svc_readonly_reduction_2._impl__readonly_loop_trip_count_for_count_value
+    _readonly_materialized_positive_return_matches_accumulator_contract = _svc_readonly_reduction_2._impl__readonly_materialized_positive_return_matches_accumulator_contract
+    _readonly_positive_prefix_is_exactly_covered = _svc_readonly_reduction_2._impl__readonly_positive_prefix_is_exactly_covered
+    _readonly_positive_return_accumulator_anchor_count = _svc_readonly_reduction_2._impl__readonly_positive_return_accumulator_anchor_count
+    _readonly_positive_return_has_materialized_readonly_terms = _svc_readonly_reduction_2._impl__readonly_positive_return_has_materialized_readonly_terms
+    _readonly_positive_return_matches_accumulator_proof = _svc_readonly_reduction_2._impl__readonly_positive_return_matches_accumulator_proof
+    _readonly_positive_return_materializes_count_value = _svc_readonly_reduction_2._impl__readonly_positive_return_materializes_count_value
+    _readonly_positive_return_proves_count_value = _svc_readonly_reduction_2._impl__readonly_positive_return_proves_count_value
+    _readonly_reduction_condition_references_only_counter = _svc_readonly_reduction_2._impl__readonly_reduction_condition_references_only_counter
+    _readonly_reduction_condition_signedness = _svc_readonly_reduction_2._impl__readonly_reduction_condition_signedness
+    _readonly_reduction_count_compare_op = _svc_readonly_reduction_2._impl__readonly_reduction_count_compare_op
+    _readonly_reduction_counter_is_signed = _svc_readonly_reduction_2._impl__readonly_reduction_counter_is_signed
+    _readonly_reduction_counter_signedness_evidence = _svc_readonly_reduction_2._impl__readonly_reduction_counter_signedness_evidence
+    _readonly_reduction_result_size = _svc_readonly_reduction_2._impl__readonly_reduction_result_size
+    _readonly_reduction_term_expression = _svc_readonly_reduction_2._impl__readonly_reduction_term_expression
+    _readonly_region_is_covered_by_returns = _svc_readonly_reduction_2._impl__readonly_region_is_covered_by_returns
+    _readonly_region_value_proof_allows_broadened_positive_coverage = _svc_readonly_reduction_2._impl__readonly_region_value_proof_allows_broadened_positive_coverage
+    _readonly_residual_conditions_are_counter_only = _svc_readonly_reduction_2._impl__readonly_residual_conditions_are_counter_only
+    _readonly_return_has_only_counter_guards_beyond_conditions = _svc_readonly_reduction_2._impl__readonly_return_has_only_counter_guards_beyond_conditions
+    _readonly_return_region_value_is_proven = _svc_readonly_reduction_2._impl__readonly_return_region_value_is_proven
+    _readonly_round_down_candidate_from_op = _svc_readonly_reduction_2._impl__readonly_round_down_candidate_from_op
+    _readonly_round_down_candidates = _svc_readonly_reduction_2._impl__readonly_round_down_candidates
+    _readonly_round_down_mask_candidate = _svc_readonly_reduction_2._impl__readonly_round_down_mask_candidate
+    _readonly_round_down_multiply_candidate = _svc_readonly_reduction_2._impl__readonly_round_down_multiply_candidate
+    _readonly_round_down_shift_candidate = _svc_readonly_reduction_2._impl__readonly_round_down_shift_candidate
+    _readonly_seed_terms_are_materialized_pre_loop = _svc_readonly_reduction_2._impl__readonly_seed_terms_are_materialized_pre_loop
+    _readonly_subtract_condition_region = _svc_readonly_reduction_2._impl__readonly_subtract_condition_region
+    _readonly_subtract_condition_regions = _svc_readonly_reduction_2._impl__readonly_subtract_condition_regions
+    _readonly_summary_return_should_precede_preserved_return = _svc_readonly_reduction_2._impl__readonly_summary_return_should_precede_preserved_return
+    _readonly_term_multiset_key = _svc_readonly_reduction_2._impl__readonly_term_multiset_key
+    _readonly_vectorized_return_region_sequence_is_proven = _svc_readonly_reduction_2._impl__readonly_vectorized_return_region_sequence_is_proven
+    _resolve_readonly_exact_witness_terms = _svc_readonly_reduction_2._impl__resolve_readonly_exact_witness_terms
+    _self_consistent_readonly_exact_witness_terms = _svc_readonly_reduction_2._impl__self_consistent_readonly_exact_witness_terms
+    _synthesize_linear_readonly_reduction_witnesses = _svc_readonly_reduction_2._impl__synthesize_linear_readonly_reduction_witnesses
+    _varnode_is_int_to_float_readonly_load = _svc_readonly_reduction_2._impl__varnode_is_int_to_float_readonly_load
+    # recurrence.return_region
+    _assign_summary_auxiliary_symbols = _svc_return_region._impl__assign_summary_auxiliary_symbols
+    _collect_summary_parameter_specs = _svc_return_region._impl__collect_summary_parameter_specs
+    _direct_return_value_and_return_refs_from_varnodes = _svc_return_region._impl__direct_return_value_and_return_refs_from_varnodes
+    _exit_region_return_refs_using_value = _svc_return_region._impl__exit_region_return_refs_using_value
+    _fp_average_return_value_and_return_refs_from_varnodes = _svc_return_region._impl__fp_average_return_value_and_return_refs_from_varnodes
+    _pcode_op_ref_from_return_info = _svc_return_region._impl__pcode_op_ref_from_return_info
+    _prove_return_value_equals_summary_closed_form = _svc_return_region._impl__prove_return_value_equals_summary_closed_form
+    _reachable_return_op_refs_from_varnodes = _svc_return_region._impl__reachable_return_op_refs_from_varnodes
+    _reachable_return_value_and_return_refs_from_varnodes = _svc_return_region._impl__reachable_return_value_and_return_refs_from_varnodes
+    _reachable_return_value_op_refs_from_varnodes = _svc_return_region._impl__reachable_return_value_op_refs_from_varnodes
+    _record_return_region_summary_proof = _svc_return_region._impl__record_return_region_summary_proof
+    _return_covers_nonpositive_parameter_region = _svc_return_region._impl__return_covers_nonpositive_parameter_region
+    _return_info_matches_adjacent_value_copy = _svc_return_region._impl__return_info_matches_adjacent_value_copy
+    _return_info_matches_pcode_op_ref = _svc_return_region._impl__return_info_matches_pcode_op_ref
+    _return_info_matches_reachable_value_pcode_op_ref = _svc_return_region._impl__return_info_matches_reachable_value_pcode_op_ref
+    _return_info_pcode_site = _svc_return_region._impl__return_info_pcode_site
+    _return_is_constant = _svc_return_region._impl__return_is_constant
+    _return_is_exact_anchor_seed = _svc_return_region._impl__return_is_exact_anchor_seed
+    _return_is_stable_resolved_phi_anchor_seed = _svc_return_region._impl__return_is_stable_resolved_phi_anchor_seed
+    _return_op_returns_varnode = _svc_return_region._impl__return_op_returns_varnode
+    _return_value_contains_phi_circular = _svc_return_region._impl__return_value_contains_phi_circular
+    _strict_zero_iteration_exit_region_block_ops = staticmethod(_svc_return_region._impl__strict_zero_iteration_exit_region_block_ops)
+    _summary_excluded_counter_values = _svc_return_region._impl__summary_excluded_counter_values
+    _summary_storage_info_from_parameter = _svc_return_region._impl__summary_storage_info_from_parameter
+    _summary_working_size = _svc_return_region._impl__summary_working_size
+    _synthesize_bounded_prefix_exact_returns = _svc_return_region._impl__synthesize_bounded_prefix_exact_returns
+    _varnode_additive_return_contribution_count = _svc_return_region._impl__varnode_additive_return_contribution_count
+    _varnode_has_additive_return_contribution = _svc_return_region._impl__varnode_has_additive_return_contribution
+    _varnode_reaches_return = _svc_return_region._impl__varnode_reaches_return
+    _zero_iteration_exit_region_mnemonic_is_safe = staticmethod(_svc_return_region._impl__zero_iteration_exit_region_mnemonic_is_safe)
+    has_summary_candidate = _svc_return_region._impl_has_summary_candidate
+    # recurrence.state_transition_1
+    _add_state_transition_accumulator_seed = _svc_state_transition_1._impl__add_state_transition_accumulator_seed
+    _build_counted_state_transition_value = _svc_state_transition_1._impl__build_counted_state_transition_value
+    _build_multiplicative_state_transition_loop_value = _svc_state_transition_1._impl__build_multiplicative_state_transition_loop_value
+    _build_progress_guarded_unit_state_transition_value = _svc_state_transition_1._impl__build_progress_guarded_unit_state_transition_value
+    _build_state_transition_expression = _svc_state_transition_1._impl__build_state_transition_expression
+    _canonicalize_state_transition_condition = _svc_state_transition_1._impl__canonicalize_state_transition_condition
+    _canonicalize_state_transition_value = _svc_state_transition_1._impl__canonicalize_state_transition_value
+    _combine_conditions_for_state_transition = _svc_state_transition_1._impl__combine_conditions_for_state_transition
+    _combine_state_transition_condition_complements = _svc_state_transition_1._impl__combine_state_transition_condition_complements
+    _complete_default_state_transition_cases = _svc_state_transition_1._impl__complete_default_state_transition_cases
+    _counted_loop_transition_evidence_key_from_parts = _svc_state_transition_1._impl__counted_loop_transition_evidence_key_from_parts
+    _extract_counted_state_transition_cases = _svc_state_transition_1._impl__extract_counted_state_transition_cases
+    _extract_counted_state_transition_loop_models = _svc_state_transition_1._impl__extract_counted_state_transition_loop_models
+    _find_state_transition_loop_model = _svc_state_transition_1._impl__find_state_transition_loop_model
+    _has_proved_return_region_state_transition_candidate = _svc_state_transition_1._impl__has_proved_return_region_state_transition_candidate
+    _has_state_transition_loop_candidate = _svc_state_transition_1._impl__has_state_transition_loop_candidate
+    _multiplicative_phi_transition_multiplier_candidates = _svc_state_transition_1._impl__multiplicative_phi_transition_multiplier_candidates
+    _multiplicative_state_transition_iteration_start_expr = _svc_state_transition_1._impl__multiplicative_state_transition_iteration_start_expr
+    _multiplicative_state_transition_multiplier_candidates = _svc_state_transition_1._impl__multiplicative_state_transition_multiplier_candidates
+    _normalize_state_transition_condition_term = _svc_state_transition_1._impl__normalize_state_transition_condition_term
+    _prior_counted_state_transition_base_value = _svc_state_transition_1._impl__prior_counted_state_transition_base_value
+    _prior_state_transition_handoff_proof_content = _svc_state_transition_1._impl__prior_state_transition_handoff_proof_content
+    _prior_state_transition_value_flow_key = _svc_state_transition_1._impl__prior_state_transition_value_flow_key
+    _record_completed_prior_state_transition_handoff_proof = _svc_state_transition_1._impl__record_completed_prior_state_transition_handoff_proof
+    _recover_proved_multiplicative_state_transition_base = _svc_state_transition_1._impl__recover_proved_multiplicative_state_transition_base
+    _return_region_state_transition_multiplier_candidates = _svc_state_transition_1._impl__return_region_state_transition_multiplier_candidates
+    _single_multiplicative_phi_transition_multiplier = _svc_state_transition_1._impl__single_multiplicative_phi_transition_multiplier
+    _state_transition_cases_evidence_key = _svc_state_transition_1._impl__state_transition_cases_evidence_key
+    _state_transition_exact_return_exclusion_conditions = _svc_state_transition_1._impl__state_transition_exact_return_exclusion_conditions
+    _state_transition_guard_false_at_stop_value = _svc_state_transition_1._impl__state_transition_guard_false_at_stop_value
+    _state_transition_guard_false_successor = _svc_state_transition_1._impl__state_transition_guard_false_successor
+    _state_transition_guard_stop_constant = _svc_state_transition_1._impl__state_transition_guard_stop_constant
+    _state_transition_iteration_start_expr = _svc_state_transition_1._impl__state_transition_iteration_start_expr
+    _state_transition_loop_transition_evidence_key = _svc_state_transition_1._impl__state_transition_loop_transition_evidence_key
+    _state_transition_object_zero_iteration_anchor_key = _svc_state_transition_1._impl__state_transition_object_zero_iteration_anchor_key
+    _state_transition_path_conditions = _svc_state_transition_1._impl__state_transition_path_conditions
+    _state_transition_predecessor_path_conditions = _svc_state_transition_1._impl__state_transition_predecessor_path_conditions
+    _state_transition_summary_cases = _svc_state_transition_1._impl__state_transition_summary_cases
+    _try_build_latch_guarded_state_transition_model_for_phi = _svc_state_transition_1._impl__try_build_latch_guarded_state_transition_model_for_phi
+    _try_build_state_transition_model_for_phi = _svc_state_transition_1._impl__try_build_state_transition_model_for_phi
+    _try_summarize_proved_return_region_state_transition_composition = _svc_state_transition_1._impl__try_summarize_proved_return_region_state_transition_composition
+    _try_summarize_state_transition_loop = _svc_state_transition_1._impl__try_summarize_state_transition_loop
+    # recurrence.state_transition_2
+    _build_state_transition_loop_side_effect_profile = _svc_state_transition_2._impl__build_state_transition_loop_side_effect_profile
+    _collect_state_transition_loop_blocks = _svc_state_transition_2._impl__collect_state_transition_loop_blocks
+    _collect_state_transition_loop_phi_ops = _svc_state_transition_2._impl__collect_state_transition_loop_phi_ops
+    _extract_multiplicative_accumulator_transition = _svc_state_transition_2._impl__extract_multiplicative_accumulator_transition
+    _normalize_state_transition_state_guard = _svc_state_transition_2._impl__normalize_state_transition_state_guard
+    _state_transition_model_priority = _svc_state_transition_2._impl__state_transition_model_priority
+    # recurrence.unrolled_tail
+    _condition_to_exact_residue = _svc_unrolled_tail._impl__condition_to_exact_residue
+    _extract_exact_residue_case = _svc_unrolled_tail._impl__extract_exact_residue_case
+    _extract_residue_loop_cases = _svc_unrolled_tail._impl__extract_residue_loop_cases
+    _has_scalar_tail_bound_to_count = _svc_unrolled_tail._impl__has_scalar_tail_bound_to_count
+    _has_scalar_tail_countdown_from_count_minus_rounded = _svc_unrolled_tail._impl__has_scalar_tail_countdown_from_count_minus_rounded
+    _has_scalar_tail_from_rounded_count = _svc_unrolled_tail._impl__has_scalar_tail_from_rounded_count
+    _has_unrolled_scalar_tail_from_rounded_count = _svc_unrolled_tail._impl__has_unrolled_scalar_tail_from_rounded_count
+    _has_zero_tail_residue_guard = _svc_unrolled_tail._impl__has_zero_tail_residue_guard
+    _rounded_tail_index_varnode_matches = _svc_unrolled_tail._impl__rounded_tail_index_varnode_matches
+    _scalar_tail_cursor_matches_count_bound = _svc_unrolled_tail._impl__scalar_tail_cursor_matches_count_bound
+    _tail_index_plus_constant_delta = _svc_unrolled_tail._impl__tail_index_plus_constant_delta
+    _tail_index_varnodes_from_tail_starts = _svc_unrolled_tail._impl__tail_index_varnodes_from_tail_starts
+    _tail_load_contributes_additively_to_return = _svc_unrolled_tail._impl__tail_load_contributes_additively_to_return
+    _tail_start_varnodes_from_rounded_count = _svc_unrolled_tail._impl__tail_start_varnodes_from_rounded_count
+    _unrolled_tail_count_guards_are_object_linked = _svc_unrolled_tail._impl__unrolled_tail_count_guards_are_object_linked
+    _varnode_is_base_plus_scaled_tail_source_index = _svc_unrolled_tail._impl__varnode_is_base_plus_scaled_tail_source_index
+    _varnode_is_scaled_tail_source_index = _svc_unrolled_tail._impl__varnode_is_scaled_tail_source_index
+    _varnode_is_tail_source_mask = _svc_unrolled_tail._impl__varnode_is_tail_source_mask
+    _varnode_matches_tail_index_source_or = _svc_unrolled_tail._impl__varnode_matches_tail_index_source_or
+    # recurrence.vectorized_reduction
+    _collect_scalar_lane_roots = _svc_vectorized_reduction._impl__collect_scalar_lane_roots
+    _has_vector_countdown_loop = _svc_vectorized_reduction._impl__has_vector_countdown_loop
+    _has_vector_loop_bound_to_rounded_count = _svc_vectorized_reduction._impl__has_vector_loop_bound_to_rounded_count
+    _load_lanes_flow_additively_to_any_return = _svc_vectorized_reduction._impl__load_lanes_flow_additively_to_any_return
+    _load_lanes_flow_additively_to_return = _svc_vectorized_reduction._impl__load_lanes_flow_additively_to_return
+    _match_vector_prefix_pointer = _svc_vectorized_reduction._impl__match_vector_prefix_pointer
+    _positive_returns_match_vectorized_affine_summary = _svc_vectorized_reduction._impl__positive_returns_match_vectorized_affine_summary
+    _try_summarize_vectorized_affine_progression_sum = _svc_vectorized_reduction._impl__try_summarize_vectorized_affine_progression_sum
+    _valid_power_of_two_lane_count = _svc_vectorized_reduction._impl__valid_power_of_two_lane_count
+    _vector_cursor_matches_end_bound = _svc_vectorized_reduction._impl__vector_cursor_matches_end_bound
+    _vector_prefix_lane_return_refs = _svc_vectorized_reduction._impl__vector_prefix_lane_return_refs
+    _vector_prefix_lane_return_value_refs = _svc_vectorized_reduction._impl__vector_prefix_lane_return_value_refs
+    _vector_prefix_lanes_contribute_additively_to_return = _svc_vectorized_reduction._impl__vector_prefix_lanes_contribute_additively_to_return
+    _vector_prefix_lanes_cover_block = _svc_vectorized_reduction._impl__vector_prefix_lanes_cover_block
+    _vector_prefix_lanes_have_unit_terms_in_positive_return = _svc_vectorized_reduction._impl__vector_prefix_lanes_have_unit_terms_in_positive_return
+    _vector_prefix_positive_return_term_proof = _svc_vectorized_reduction._impl__vector_prefix_positive_return_term_proof
+    _vector_prefix_seed_terms_from_exact_returns = _svc_vectorized_reduction._impl__vector_prefix_seed_terms_from_exact_returns
+    _vector_prefix_seed_terms_from_materialized_region_returns = _svc_vectorized_reduction._impl__vector_prefix_seed_terms_from_materialized_region_returns
+    _vector_prefix_unit_term_positive_return_refs = _svc_vectorized_reduction._impl__vector_prefix_unit_term_positive_return_refs
+    _vectorized_affine_bias_candidates = _svc_vectorized_reduction._impl__vectorized_affine_bias_candidates
+    _vectorized_affine_counter_expression = _svc_vectorized_reduction._impl__vectorized_affine_counter_expression
+    _vectorized_affine_counter_guard_signedness = _svc_vectorized_reduction._impl__vectorized_affine_counter_guard_signedness

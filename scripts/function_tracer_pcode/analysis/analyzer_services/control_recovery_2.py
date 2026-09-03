@@ -10,16 +10,6 @@ from ._shared import (
 )
 from ...model import CallTargetRef
 
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
-
 def _impl__filter_noreturn_return_path_entries(
     self,
     path_entries,

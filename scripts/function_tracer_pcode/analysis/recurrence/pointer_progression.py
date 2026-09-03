@@ -13,16 +13,6 @@ from ._shared import (
     is_pointer_data_type,
 )
 
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
-
 def _impl__store_address_space_ref_for_op(self, op):
     if op is None or self._safe_pcode_input_count(op) < 1:
         return None

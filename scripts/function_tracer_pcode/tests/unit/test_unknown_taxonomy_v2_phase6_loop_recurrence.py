@@ -2103,7 +2103,7 @@ def test_multiple_recurrence_proposals_refuse_unbound_subordinate_refresh(
     monkeypatch,
 ):
     from scripts.function_tracer_pcode.analysis.analyzer_services.session_helpers_3 import (
-        invoke,
+        _impl_refresh_structural_recurrence_summary,
     )
     from scripts.function_tracer_pcode.analysis import decompilation_broker
     from scripts.function_tracer_pcode.equivalence.v2.subordinate_decompilation import (
@@ -2134,9 +2134,7 @@ def test_multiple_recurrence_proposals_refuse_unbound_subordinate_refresh(
     )
     session = _session("multiple-refresh-result")
     with production_signal_scope(session):
-        observed = invoke(
-            "refresh_structural_recurrence_summary", _Analyzer(), analysis
-        )
+        observed = _impl_refresh_structural_recurrence_summary(_Analyzer(), analysis)
 
     assert observed is analysis
     assert len(debug_messages) == 1

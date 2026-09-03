@@ -22,16 +22,6 @@ from ._shared import (
     get_declared_type_signedness,
 )
 
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
-
 def _impl__readonly_summary_return_should_precede_preserved_return(
     self,
     summary_return: ReturnInfo,
