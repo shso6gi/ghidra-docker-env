@@ -2230,6 +2230,47 @@ def _impl__outcome_partition_covered_labels(
         return set()
     return {"function1", "function2"}
 
+RELATIONAL_OUTCOME_PARTITION_BLOCKER = "outcome_relational_consistency_unknown"
+
+
+def _impl__sat_decisive_return_coverage_unsafety_reasons(
+    self,
+    coverage_unsafety_reasons: Sequence[str],
+) -> List[str]:
+    """Return the coverage reasons that must also block a decisive SAT.
+
+    ``_outcome_partition_covered_labels`` reports
+    ``outcome_relational_consistency_unknown`` only after both unary outcome
+    proofs are complete and merely the cross-function relation (return values
+    equal under overlapping guards, matching divergence/termination regions)
+    could not be established.  That relation is exactly what an equivalence
+    closure needs, so it keeps blocking EQUIVALENT; but for two functions that
+    really differ it fails by construction, and it says nothing about whether
+    a replayed SAT witness is genuine.  Unary blockers (incomplete path
+    regions, unclassified members, ...) stay SAT-blocking (Issue #28).
+    """
+    unary_blockers = getattr(self, "_last_unary_outcome_blockers", {}) or {}
+    relational_labels = {
+        label
+        for label, blocker in unary_blockers.items()
+        if blocker == RELATIONAL_OUTCOME_PARTITION_BLOCKER
+    }
+    kept: List[str] = []
+    for reason in coverage_unsafety_reasons:
+        label, _, reason_id = str(reason).partition(":")
+        if (
+            label in relational_labels
+            and reason_id == "outcome_partition_completion_unproven"
+        ):
+            self._debug_print(
+                f"  SAT decisiveness keeps {label}: relational outcome-partition "
+                "mismatch blocks EQUIVALENT only (unary partition proofs are complete)"
+            )
+            continue
+        kept.append(reason)
+    return kept
+
+
 def _impl__outcome_partition_inconclusive_labels(
     self,
     base_ctx: Mapping[str, Any],

@@ -265,6 +265,7 @@ class CheckStrategy(ABC):
     _build_return_case_coverage_query = _svc_return_coverage._impl__build_return_case_coverage_query
     _check_return_case_coverage_gap = _svc_return_coverage._impl__check_return_case_coverage_gap
     _collect_return_coverage_unsafety_reasons = _svc_return_coverage._impl__collect_return_coverage_unsafety_reasons
+    _sat_decisive_return_coverage_unsafety_reasons = _svc_return_coverage._impl__sat_decisive_return_coverage_unsafety_reasons
     _make_return_coverage_unknown_reason = _svc_return_coverage._impl__make_return_coverage_unknown_reason
     _outcome_condition_groups_are_unsat = _svc_return_coverage._impl__outcome_condition_groups_are_unsat
     _outcome_condition_smt = _svc_return_coverage._impl__outcome_condition_smt

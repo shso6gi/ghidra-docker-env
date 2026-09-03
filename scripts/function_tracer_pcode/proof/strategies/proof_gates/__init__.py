@@ -92,6 +92,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_collect_decisive_sat_unsafety_reasons": _sat_safety._impl__collect_decisive_sat_unsafety_reasons,
         "_collect_equivalence_blocking_unsafety_reasons": _sat_safety._impl__collect_equivalence_blocking_unsafety_reasons,
         "_collect_return_coverage_unsafety_reasons": _return_coverage._impl__collect_return_coverage_unsafety_reasons,
+        "_sat_decisive_return_coverage_unsafety_reasons": _return_coverage._impl__sat_decisive_return_coverage_unsafety_reasons,
         "_completed_call_effect_summary_proof_ids": _call_effect._impl__completed_call_effect_summary_proof_ids,
         "_completed_proof_section_is_clean": _recovery._impl__completed_proof_section_is_clean,
         "_completed_recovery_proof_evidence": _recovery._impl__completed_recovery_proof_evidence,

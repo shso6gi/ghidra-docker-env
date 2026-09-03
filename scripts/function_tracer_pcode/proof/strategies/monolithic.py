@@ -486,7 +486,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     analysis2,
                     decision_context,
                 )
-            sat_unsafety_reasons.extend(coverage_unsafety_reasons)
+            sat_unsafety_reasons.extend(
+                self._sat_decisive_return_coverage_unsafety_reasons(coverage_unsafety_reasons)
+            )
             if (
                 final_is_equivalent is False
                 and frozen_surface is not None

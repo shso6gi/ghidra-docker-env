@@ -1594,3 +1594,162 @@ def test_return_coverage_object_target_distinguishes_guard_partitions():
     assert build_unknown_recovery_actions([zero_reason])[0].proof_obligation_id != (
         build_unknown_recovery_actions([one_reason])[0].proof_obligation_id
     )
+
+
+def test_relational_partition_mismatch_blocks_equivalence_but_not_sat_decisiveness(monkeypatch):
+    """Issue #28: 'return outcome values differ' is an equivalence obligation, not a
+    SAT-safety blocker, once both unary partition proofs are complete."""
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    cases = []
+    for analysis in (analysis1, analysis2):
+        cases.append(ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=analysis.returns[0].value,
+            return_info=analysis.returns[0],
+            return_type=analysis.return_type or "int",
+            parameters=analysis.parameters,
+        ))
+    monkeypatch.setattr(strategy, "_outcome_partition_covered_labels", lambda *_a, **_k: set())
+    monkeypatch.setattr(
+        strategy,
+        "_outcome_partition_inconclusive_labels",
+        lambda *_a, **_k: {"function1", "function2"},
+    )
+    strategy._last_unary_outcome_blockers = {
+        "function1": "outcome_relational_consistency_unknown",
+        "function2": "outcome_relational_consistency_unknown",
+    }
+
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(), cases[:1], cases[1:],
+        lambda value: value, lambda value: value, analysis1, analysis2,
+    )
+
+    assert reasons == [
+        "function1:outcome_partition_completion_unproven",
+        "function2:outcome_partition_completion_unproven",
+    ]
+    assert strategy._sat_decisive_return_coverage_unsafety_reasons(reasons) == []
+
+    # A unary blocker on one side keeps that side SAT-blocking.
+    strategy._last_unary_outcome_blockers = {
+        "function1": "outcome_relational_consistency_unknown",
+        "function2": "outcome_path_region_completeness_incomplete",
+    }
+    mixed = [
+        "function1:outcome_partition_completion_unproven",
+        "function2:outcome_path_region_incomplete",
+        "function1:return_coverage_gap",
+    ]
+    assert strategy._sat_decisive_return_coverage_unsafety_reasons(mixed) == [
+        "function2:outcome_path_region_incomplete",
+        "function1:return_coverage_gap",
+    ]
+
+
+def test_pairwise_relational_partition_mismatch_keeps_sat_decisive(monkeypatch):
+    """End-to-end: with complete unary proofs and only the relational check failing,
+    a validated SAT witness must still yield NOT_EQ (regression for Issue #28)."""
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+            "(assert (= x_1 x_2))",
+        ],
+        "params1": [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)],
+        "params2": [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1", entry_point="0x1", parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[])], return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2", entry_point="0x2", parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2", value=_const(2), conditions=[])], return_type="int",
+    )
+    case1 = ReturnCase(index=0, conditions=[], value_expr=_const(1),
+                       return_info=analysis1.returns[0], return_type="int", parameters=analysis1.parameters)
+    case2 = ReturnCase(index=0, conditions=[], value_expr=_const(2),
+                       return_info=analysis2.returns[0], return_type="int", parameters=analysis2.parameters)
+    monkeypatch.setattr(strategy, "_extract_return_cases",
+                        lambda analysis: [case1] if analysis.function_name == "func1" else [case2])
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_a, **_k: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_a, **_k: False)
+    monkeypatch.setattr(strategy, "_outcome_partition_covered_labels", lambda *_a, **_k: set())
+    monkeypatch.setattr(strategy, "_outcome_partition_inconclusive_labels",
+                        lambda *_a, **_k: {"function1", "function2"})
+    strategy._last_unary_outcome_blockers = {
+        "function1": "outcome_relational_consistency_unknown",
+        "function2": "outcome_relational_consistency_unknown",
+    }
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_a, **_k: True,
+    )
+    from types import SimpleNamespace
+    from scripts.function_tracer_pcode.proof.obligations import SolverQueryExecutionReceipt
+
+    def _sat_query(*_a, **_k):
+        model = {"x_1": 7, "x_2": 7}
+        parallel_result = SimpleNamespace(is_equivalent=False, results=(), get_counterexample=lambda: model)
+        query_result = QueryResult(is_equivalent=False, counterexample_raw=model, solver_results=parallel_result)
+        query_result.last_query = "(check-sat)"
+        query_result.solver_query_execution_receipt = SolverQueryExecutionReceipt.from_execution(
+            query="(check-sat)", query_label="(0,0)", proof_stage="with-ineq",
+            parallel_result=parallel_result, solver_identity=("unit", "fake", ("fake",)),
+            timeout_budget=5.0, use_hard_timeout=False,
+        )
+        return query_result
+
+    strategy._solve_query_after_guard = _sat_query
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is False
+    assert result.sat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
+def test_counterexample_replay_rejects_nan_floating_point_inputs(monkeypatch):
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor as executor
+
+    base_ctx = {
+        "params1": [ParameterInfo(original_name="a", smt_name="a_1", bit_width=64, index=0, type_class="fp"),
+                    ParameterInfo(original_name="n", smt_name="n_1", bit_width=32, index=1, type_class="int")],
+        "params2": [ParameterInfo(original_name="a", smt_name="a_2", bit_width=32, index=0, type_class="fp")],
+        "extra_vars1": [], "extra_vars2": [],
+    }
+    nan64 = {"a_1": 0xFFF0000000000002, "n_1": 0xFFFFFFFF, "a_2": 0x3F800000}
+    nan32 = {"a_1": 0x3FF0000000000000, "n_1": 0xFFFFFFFF, "a_2": 0x7FC00000}
+    finite = {"a_1": 0xFFF0000000000000, "n_1": 0xFFFFFFFF, "a_2": 0x7F800000}  # -inf / +inf, not NaN
+
+    assert executor.counterexample_fp_nan_parameters(base_ctx, nan64) == ("a_1",)
+    assert executor.counterexample_fp_nan_parameters(base_ctx, nan32) == ("a_2",)
+    assert executor.counterexample_fp_nan_parameters(base_ctx, finite) == ()
+    assert executor.counterexample_fp_nan_parameters(base_ctx, None) == ()
+
+    strategy = Mock()
+    strategy._debug_print = Mock()
+    monkeypatch.setattr(
+        executor, "_collect_feasible_cases_under_model",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("replay must stop before solver use")),
+    )
+    assert executor.validate_counterexample_across_cases(
+        strategy, base_ctx, [], [], lambda v: v, lambda v: v, (0, 0), nan64,
+    ) is False
+    assert any("NaN input" in str(call) for call in strategy._debug_print.call_args_list)
