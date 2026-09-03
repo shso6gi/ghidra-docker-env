@@ -222,7 +222,9 @@ def test_shared_typed_safe_counterexample_signal_promotes_not_eq():
     ] == ["COUNTEREXAMPLE"]
 
 
-def test_safe_independent_counterexample_discards_deferred_pairwise_blockers():
+def test_safe_independent_counterexample_keeps_deferred_pairwise_blockers_active():
+    """Issue #25: an analysis-level pairwise blocker survives a later monolithic
+    counterexample; the witness alone must not make NOT_EQ decisive."""
     connector = _connector()
     session = connector.begin({"phase": "pairwise-fallback", "case": "safe-sat"})
     strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
@@ -254,10 +256,14 @@ def test_safe_independent_counterexample_discards_deferred_pairwise_blockers():
     assert [
         event.header.event_type.value
         for event in evidence.pilot_result.sealed_event_stream.events
-    ] == ["COUNTEREXAMPLE"]
-    assert evidence.pilot_result.reduction.projection.c_active_base == ()
-    assert evidence.pilot_result.reduction.projection.q_open_base == ()
-    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+    ] == ["COUNTEREXAMPLE", "CAUSE_OBSERVED"]
+    assert len(evidence.pilot_result.reduction.projection.c_active_base) == 1
+    assert {
+        row.decision_effect
+        for row in evidence.pilot_result.reduction.projection.c_active_base
+    } == {"blocks_disequivalence"}
+    assert len(evidence.pilot_result.reduction.projection.q_open_base) == 1
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
 
 
 def test_same_case_pair_different_sat_bindings_are_distinct_occurrences():
