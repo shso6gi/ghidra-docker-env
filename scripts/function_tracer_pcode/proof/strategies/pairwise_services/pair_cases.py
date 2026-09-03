@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.proof.strategies.pairwise``."""
+"""Pair case collection: parameter objects, unknown expression classification and case assembly."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._api impor
     extract_sign_facts,
     normalize_expression,
 )
+
 
 def _impl__conditions_with_object_identity_parameter_symbols(
     self,
@@ -81,6 +82,7 @@ def _impl__conditions_with_object_identity_parameter_symbols(
         if condition is not None and getattr(condition, "expression", None) is not None
     ]
 
+
 def _impl__parameter_object_identity_key(
     self,
     expr: Expression,
@@ -101,13 +103,16 @@ def _impl__parameter_object_identity_key(
             return ("parameter_storage", storage_key, size_bits)
     return None
 
+
 def _impl__opaque_parameter_object_identity_key(self, expr: Expression) -> tuple:
     size_bits = max(1, int(expression_smt_bit_width(expr) or getattr(expr, "get_bit_width", lambda: 0)() or 0))
     return ("unresolved_parameter_object", id(expr), size_bits)
 
+
 def _impl__normalize_constant_bias(self, value: int, result_size: int) -> int:
     bits = max(1, int(result_size or 0)) * 8
     return int(value) % (1 << bits)
+
 
 def _impl__raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]:
     if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
@@ -116,6 +121,7 @@ def _impl__raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]
         return int(expr.value)
     except (TypeError, ValueError):
         return None
+
 
 def _impl__low_mask_width_bytes(
     self,
@@ -135,6 +141,7 @@ def _impl__low_mask_width_bytes(
         return None
     return width
 
+
 def _impl__expressions_share_object_centric_structure(
     self,
     left: Optional[Expression],
@@ -146,6 +153,7 @@ def _impl__expressions_share_object_centric_structure(
         return self._intrinsic_runtime_values_equivalent(left, right)
     equivalent, _reason = are_structurally_equivalent(left, right, debug=self.debug)
     return equivalent
+
 
 def _impl__try_normalization_equivalence(
     self,
@@ -177,6 +185,7 @@ def _impl__try_normalization_equivalence(
         normalization_rule_application_cls=NormalizationRuleApplication,
     )
 
+
 def _impl__extract_return_cases(
     self,
     analysis: FunctionReturnAnalysis
@@ -185,6 +194,7 @@ def _impl__extract_return_cases(
         analysis,
         normalization_settings=self.normalization_settings,
     )
+
 
 def _impl__prune_unreachable_cases(
     self,
@@ -258,6 +268,7 @@ def _impl__prune_unreachable_cases(
         )
     return cases
 
+
 def _impl__register_pairwise_extra_assertions(
     self,
     base_ctx: Dict[str, Any],
@@ -269,6 +280,7 @@ def _impl__register_pairwise_extra_assertions(
         return
     by_pair = base_ctx.setdefault("pairwise_extra_assertions_by_pair", {})
     by_pair[pair_id] = tuple(str(item) for item in assertions if str(item).strip())
+
 
 def _impl__clear_pairwise_extra_assertions(
     self,
@@ -284,6 +296,7 @@ def _impl__clear_pairwise_extra_assertions(
     lowered_keys_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowered_unknown_keys_by_pair")
     if isinstance(lowered_keys_by_pair, dict):
         lowered_keys_by_pair.pop(pair_id, None)
+
 
 def _impl__collect_case_unknown_expression_nodes(self, case: ReturnCase) -> Tuple[Any, ...]:
     result: List[Any] = []
@@ -302,10 +315,12 @@ def _impl__collect_case_unknown_expression_nodes(self, case: ReturnCase) -> Tupl
         add_from(getattr(condition, "expression", None))
     return tuple(result)
 
+
 def _impl__collect_unknown_expression_nodes(self, expr: Any) -> Tuple[Any, ...]:
     result: List[Any] = []
     self._collect_unknown_expression_nodes_into(expr, result)
     return tuple(result)
+
 
 def _impl__collect_unknown_expression_nodes_into(self, expr: Any, result: List[Any]) -> None:
     if expr is None or getattr(expr, "expr_type", None) is None:
@@ -321,6 +336,7 @@ def _impl__collect_unknown_expression_nodes_into(self, expr: Any, result: List[A
         return
     for operand in getattr(expr, "operands", []) or []:
         self._collect_unknown_expression_nodes_into(operand, result)
+
 
 def _impl__solve_canonical_return_observation(
     self,
@@ -388,6 +404,7 @@ def _impl__solve_canonical_return_observation(
     result.consumer_binding_receipt_digest = prepared.binding_receipt.binding_digest
     return result
 
+
 def _impl__create_aggregate_result(
     self,
     is_equivalent: Optional[bool],
@@ -408,6 +425,7 @@ def _impl__create_aggregate_result(
     )
     return ParallelResult(results=[solver_result])
 
+
 def _impl__cases_are_contradictory(
     self,
     case1: ReturnCase,
@@ -426,6 +444,7 @@ def _impl__cases_are_contradictory(
         return solver_result
     return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
 
+
 def _impl__get_expression_safety_checker(
     self,
     base_ctx: Optional[Dict[str, Any]] = None,
@@ -439,6 +458,7 @@ def _impl__get_expression_safety_checker(
         per_query_timeout=self.per_query_timeout,
         base_ctx=base_ctx,
     )
+
 
 def _impl__create_empty_result(self) -> StrategyResult:
     return StrategyResult(
@@ -457,6 +477,7 @@ def _impl__create_empty_result(self) -> StrategyResult:
         ],
     )
 
+
 def _impl__debug_symbol_mapping(self, base_ctx: Dict[str, Any]) -> None:
     self._debug_print("Symbol replacement mapping:")
     self._debug_print("  Function 1:")
@@ -469,6 +490,7 @@ def _impl__debug_symbol_mapping(self, base_ctx: Dict[str, Any]) -> None:
         self._debug_print(f"    {param.original_name} -> {param.smt_name}")
     for var in base_ctx.get("extra_vars2", []):
         self._debug_print(f"    {var.original_name} -> {var.smt_name}")
+
 
 def _impl__rewrite_cases_with_parameter_fragments(
     self,
@@ -513,6 +535,7 @@ def _impl__rewrite_cases_with_parameter_fragments(
             NormalizationContext(settings=self.normalization_settings),
         )
         case._value_smt_cache.clear()
+
 
 def _impl__rewrite_expr_with_parameter_fragments(
     self,
@@ -571,6 +594,7 @@ def _impl__rewrite_expr_with_parameter_fragments(
     collapsed = self._collapse_parameter_fragment_extension(candidate, fragment_map)
     return collapsed
 
+
 def _impl__collapse_parameter_fragment_extension(
     self,
     expr: Expression,
@@ -598,6 +622,7 @@ def _impl__collapse_parameter_fragment_extension(
         return collapsed
     return expr
 
+
 def _impl__match_shift_or_fragment_expr(
     self,
     shifted_expr: Expression,
@@ -621,6 +646,7 @@ def _impl__match_shift_or_fragment_expr(
         fragment_map,
         expected_shift_bits=int(shift_amount.value),
     )
+
 
 def _impl__build_fragment_extension_expr(
     self,

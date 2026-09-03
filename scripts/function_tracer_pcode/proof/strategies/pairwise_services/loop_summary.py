@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.proof.strategies.pairwise``."""
+"""Loop-summary case handling: counted loops, phi-circular states and auxiliary refs."""
 
 from __future__ import annotations
 
@@ -26,6 +26,21 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     json,
     parameter_identity_key_from_expression,
 )
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    Condition,
+    CountedLoopSummaryRef,
+    Expression,
+    ExpressionType,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
+    ReturnCase,
+    _PendingLoopSummaryPair,
+    compare_loop_summaries,
+    expression_smt_bit_width,
+    replace,
+)
+
 
 def _impl__unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
     reason_text = str(reason or "")
@@ -62,6 +77,7 @@ def _impl__unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
     if len(classification.reason_ids) != 1:
         raise ValueError("loop fallback lacks one typed semantic reason")
     return classification.reason_ids[0]
+
 
 def _impl__case_pair_loop_summaries_solver_equivalent(
     self,
@@ -120,6 +136,7 @@ def _impl__case_pair_loop_summaries_solver_equivalent(
         left_case,
         right_case,
     )
+
 
 def _impl__case_pair_loop_summaries_solver_equivalent_core(
     self,
@@ -211,6 +228,7 @@ def _impl__case_pair_loop_summaries_solver_equivalent_core(
         return False
     return True
 
+
 def _impl__case_pair_counted_loop_summaries_closed_values_equivalent(
     self,
     left_ref,
@@ -276,6 +294,7 @@ def _impl__case_pair_counted_loop_summaries_closed_values_equivalent(
         parameters,
     )
 
+
 def _impl__loop_summary_constant_bias(self, summary) -> int:
     result_size = int(getattr(summary, "result_size", 0) or 0)
     if result_size <= 0:
@@ -288,6 +307,7 @@ def _impl__loop_summary_constant_bias(self, summary) -> int:
         return int(getattr(summary, "constant_bias", 0) or 0) & mask
     except (TypeError, ValueError):
         return 0
+
 
 def _impl__counted_loop_summary_wrapper_semantics_match(self, left_ref, right_ref) -> bool:
     if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
@@ -307,6 +327,7 @@ def _impl__counted_loop_summary_wrapper_semantics_match(self, left_ref, right_re
         and left_bias == right_bias
     )
 
+
 def _impl__counted_loop_ref_constant_bias(self, ref) -> int:
     result_size = max(1, int(getattr(ref, "result_size", 0) or 4))
     bits = max(1, result_size * 8)
@@ -315,6 +336,7 @@ def _impl__counted_loop_ref_constant_bias(self, ref) -> int:
         return int(getattr(ref, "constant_bias", 0) or 0) & mask
     except (TypeError, ValueError):
         return 0
+
 
 def _impl__loop_summary_surface_blocks_solver_equality(self, left_summary, right_summary) -> bool:
     if getattr(left_summary, "loop_var_unit", None) != getattr(right_summary, "loop_var_unit", None):
@@ -337,6 +359,7 @@ def _impl__loop_summary_surface_blocks_solver_equality(self, left_summary, right
         return True
     return left_case_keys != right_case_keys
 
+
 def _impl__loop_term_descriptor_semantic_key(self, summary) -> Optional[Tuple[Any, ...]]:
     descriptor = getattr(summary, "term_descriptor", None)
     semantic_key = getattr(descriptor, "semantic_key", None)
@@ -347,6 +370,7 @@ def _impl__loop_term_descriptor_semantic_key(self, summary) -> Optional[Tuple[An
             return None
         return key
     return None
+
 
 def _impl__runtime_loop_contract_shortcut_decision(
     self,
@@ -361,6 +385,7 @@ def _impl__runtime_loop_contract_shortcut_decision(
         return _RuntimeShortcutDecision(False, False, reason="not_loop_contract")
     return self._runtime_refs_shortcut_decision(left_ref, right_ref, result_size=result_size)
 
+
 def _impl__loop_limit_storage_identity_key(self, limit_key: tuple) -> Optional[tuple]:
     normalized = tuple(limit_key or ())
     if len(normalized) != 2:
@@ -374,6 +399,7 @@ def _impl__loop_limit_storage_identity_key(self, limit_key: tuple) -> Optional[t
     if tag == "loop_limit_count_storage_identity":
         return ("parameter_storage", tuple(value or ()))
     return None
+
 
 def _impl__loop_limit_storage_key_is_legacy_index_compatible(
     self,
@@ -404,6 +430,7 @@ def _impl__loop_limit_storage_key_is_legacy_index_compatible(
         and storage_index == limit_index_identity
     )
 
+
 def _impl__counted_loop_summary_runtime_profile_key(self, counted_ref: CountedLoopSummaryRef) -> Tuple[Any, ...]:
     return (
         "counted_loop_summary_profile_ref",
@@ -421,6 +448,7 @@ def _impl__counted_loop_summary_runtime_profile_key(self, counted_ref: CountedLo
         ),
         self._counted_loop_ref_constant_bias(counted_ref),
     )
+
 
 def _impl__counted_loop_summary_loop_profile_key(self, loop_summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
     if loop_summary is None:
@@ -449,6 +477,7 @@ def _impl__counted_loop_summary_loop_profile_key(self, loop_summary: Optional[Lo
             for case in tuple(getattr(loop_summary, "cases", ()) or ())
         ),
     )
+
 
 def _impl__counted_loop_summary_contract_key(self, counted_ref: CountedLoopSummaryRef) -> Optional[Tuple[Any, ...]]:
     runtime_key = self._counted_loop_summary_runtime_profile_key(counted_ref)
@@ -479,6 +508,7 @@ def _impl__counted_loop_summary_contract_key(self, counted_ref: CountedLoopSumma
         tuple(case.stable_key() for case in tuple(getattr(loop_summary, "cases", ()) or ())),
     )
 
+
 def _impl__counted_loop_summary_count_identities(self, counted_ref: CountedLoopSummaryRef) -> Tuple[Tuple[Any, ...], ...]:
     identities: List[Tuple[Any, ...]] = []
     for value in (
@@ -499,6 +529,7 @@ def _impl__counted_loop_summary_count_identities(self, counted_ref: CountedLoopS
         if key is not None:
             identities.append(("loop_expression", key))
     return tuple(dict.fromkeys(identities))
+
 
 def _impl__phi_circular_semantic_recurrence_stage_evidence(
     self,
@@ -612,6 +643,7 @@ def _impl__phi_circular_semantic_recurrence_stage_evidence(
         ),
     )
 
+
 def _impl__semantic_recurrence_query_plan(
     cls,
     *,
@@ -643,6 +675,7 @@ def _impl__semantic_recurrence_query_plan(
         *object_content,
     )
 
+
 def _impl__stable_semantic_recurrence_hash(value: Any) -> str:
     canonical = json.dumps(
         _impl__semantic_recurrence_jsonable(value),
@@ -650,6 +683,7 @@ def _impl__stable_semantic_recurrence_hash(value: Any) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 def _impl__semantic_recurrence_jsonable(value: Any) -> Any:
     if isinstance(value, tuple):
@@ -676,6 +710,7 @@ def _impl__semantic_recurrence_jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
+
 
 def _impl__phi_circular_origin_shape_relation(
     cls,
@@ -705,12 +740,14 @@ def _impl__phi_circular_origin_shape_relation(
         ("right_origin_shapes", right_shapes),
     )
 
+
 def _impl__phi_circular_unknown_origin_shape_key(cls, unknown: Any) -> Optional[Tuple[Any, ...]]:
     if not cls._unknown_expression_is_originated_phi_circular(unknown):
         return None
     runtime_ref = getattr(unknown, "runtime_ref", None)
     origin_key = cls._stable_key_or_none(getattr(runtime_ref, "origin_ref", None))
     return cls._pcode_origin_cross_binary_shape_key(origin_key)
+
 
 def _impl__find_phi_origin_shape_relation(cls, value: Any) -> Optional[Tuple[Any, ...]]:
     normalized = cls._normalize_nested_tuple(value)
@@ -740,6 +777,7 @@ def _impl__find_phi_origin_shape_relation(cls, value: Any) -> Optional[Tuple[Any
                 return found
     return None
 
+
 def _impl__phi_circular_case_value_shape(
     case_shape: Optional[Tuple[Any, ...]],
 ) -> Optional[Any]:
@@ -749,6 +787,7 @@ def _impl__phi_circular_case_value_shape(
     if isinstance(value_item, tuple) and len(value_item) == 2 and value_item[0] == "value":
         return value_item[1]
     return None
+
 
 def _impl__phi_circular_unknown_count_relation(
     left_count: int,
@@ -761,6 +800,7 @@ def _impl__phi_circular_unknown_count_relation(
         ("left_count", int(left_count)),
         ("right_count", int(right_count)),
     )
+
 
 def _impl__phi_circular_value_shape_relation(
     cls,
@@ -794,10 +834,12 @@ def _impl__phi_circular_value_shape_relation(
         ("right_constant_value", right_constant),
     )
 
+
 def _impl__phi_circular_shape_kind(value: Optional[Any]) -> str:
     if isinstance(value, tuple) and value:
         return str(value[0])
     return "unavailable"
+
 
 def _impl__phi_circular_summary_parameter_index(value: Optional[Any]) -> Optional[int]:
     if not (isinstance(value, tuple) and len(value) == 4 and value[0] == "parameter"):
@@ -811,6 +853,7 @@ def _impl__phi_circular_summary_parameter_index(value: Optional[Any]) -> Optiona
         return None
     return index if index >= 0 else None
 
+
 def _impl__phi_circular_constant_value(value: Optional[Any]) -> Optional[int]:
     if not (isinstance(value, tuple) and len(value) == 3 and value[0] == "const"):
         return None
@@ -818,6 +861,7 @@ def _impl__phi_circular_constant_value(value: Optional[Any]) -> Optional[int]:
         return int(value[1])
     except (TypeError, ValueError):
         return None
+
 
 def _impl__phi_circular_case_condition_literals(
     self,
@@ -827,6 +871,7 @@ def _impl__phi_circular_case_condition_literals(
     for condition in getattr(case, "conditions", None) or ():
         literals.extend(self._phi_circular_condition_literals(condition))
     return tuple(sorted(literals, key=repr))
+
 
 def _impl__phi_circular_condition_literals(self, condition: Any) -> Tuple[Any, ...]:
     if condition is None:
@@ -847,6 +892,7 @@ def _impl__phi_circular_condition_literals(self, condition: Any) -> Tuple[Any, .
             key=repr,
         )
     )
+
 
 def _impl__phi_circular_boolean_literals_from_shape(
     self,
@@ -877,6 +923,7 @@ def _impl__phi_circular_boolean_literals_from_shape(
         )
     return (("guard_literal", bool(polarity), shape),)
 
+
 def _impl__phi_circular_opposing_condition_literals(
     left_literals: Tuple[Any, ...],
     right_literals: Tuple[Any, ...],
@@ -895,6 +942,7 @@ def _impl__phi_circular_opposing_condition_literals(
         if atom in left_by_atom and left_by_atom[atom] != right_polarity:
             opposing.append(("opposing_guard_literal", atom))
     return tuple(sorted(opposing, key=repr))
+
 
 def _impl__collect_phi_circular_origin_details(self, expr: Any) -> Tuple[Any, ...]:
     details: List[Tuple[Any, ...]] = []
@@ -924,6 +972,7 @@ def _impl__collect_phi_circular_origin_details(self, expr: Any) -> Tuple[Any, ..
         details.append(item)
     return tuple(sorted(details, key=repr))
 
+
 def _impl__value_contains_originated_phi_circular(cls, value: Any) -> bool:
     normalized = cls._normalize_nested_tuple(value)
     if isinstance(normalized, tuple):
@@ -940,6 +989,7 @@ def _impl__value_contains_originated_phi_circular(cls, value: Any) -> bool:
         )
     return False
 
+
 def _impl__object_target_contains_originated_phi_circular(cls, value: Any) -> bool:
     if isinstance(value, tuple):
         if cls._tuple_is_originated_phi_circular_runtime_ref(value):
@@ -955,6 +1005,7 @@ def _impl__object_target_contains_originated_phi_circular(cls, value: Any) -> bo
         )
     return False
 
+
 def _impl__tuple_is_originated_phi_circular_runtime_ref(value: Tuple[Any, ...]) -> bool:
     return (
         len(value) >= 6
@@ -963,6 +1014,7 @@ def _impl__tuple_is_originated_phi_circular_runtime_ref(value: Tuple[Any, ...]) 
         and value[4] == "multiequal_pcode_op"
         and value[5] is not None
     )
+
 
 def _impl__method_b_loop_value_object_key(self, expr: Any) -> Tuple[Any, ...]:
     runtime_ref = getattr(expr, "runtime_ref", None)
@@ -973,6 +1025,7 @@ def _impl__method_b_loop_value_object_key(self, expr: Any) -> Tuple[Any, ...]:
         self._semantic_key_or_stable_key_or_none(loop_summary),
         self._method_b_expression_runtime_object_key(expr),
     )
+
 
 def _impl__case_pair_loop_summary_safe_fallback_reason(
     self,
@@ -985,6 +1038,7 @@ def _impl__case_pair_loop_summary_safe_fallback_reason(
         left_case=case1,
         right_case=case2,
     )
+
 
 def _impl__loop_summary_safe_fallback_reason_for_values(
     self,
@@ -1096,6 +1150,7 @@ def _impl__loop_summary_safe_fallback_reason_for_values(
             return reason
     return None
 
+
 def _impl__expression_contains_loop_summary_runtime(self, expr: Optional[Expression]) -> bool:
     if expr is None:
         return False
@@ -1113,6 +1168,7 @@ def _impl__expression_contains_loop_summary_runtime(self, expr: Optional[Express
         self._expression_contains_loop_summary_runtime(operand)
         for operand in getattr(expr, "operands", []) or []
     )
+
 
 def _impl__case_pair_counted_loop_summary_matches_closed_expression(
     self,
@@ -1175,6 +1231,7 @@ def _impl__case_pair_counted_loop_summary_matches_closed_expression(
     if self.debug:
         self._debug_print(f"counted-vs-closed proof SMT result: {proved}")
     return proved
+
 
 def _impl__case_pair_counted_loop_summaries_match_by_closed_values(
     self,
@@ -1290,6 +1347,7 @@ def _impl__case_pair_counted_loop_summaries_match_by_closed_values(
         )
     return False
 
+
 def _impl__composed_counted_state_transition_summaries_match(
     self,
     left: Expression,
@@ -1298,6 +1356,7 @@ def _impl__composed_counted_state_transition_summaries_match(
     left_key = self._composed_counted_state_transition_summary_key(left)
     right_key = self._composed_counted_state_transition_summary_key(right)
     return left_key is not None and left_key == right_key
+
 
 def _impl__composed_counted_state_transition_summary_key(
     self,
@@ -1361,6 +1420,7 @@ def _impl__composed_counted_state_transition_summary_key(
         limit_key,
     )
 
+
 def _impl__counted_loop_outer_side_effect_key(
     self,
     counted_ref: CountedLoopSummaryRef,
@@ -1380,6 +1440,7 @@ def _impl__counted_loop_outer_side_effect_key(
     if profile_key is None:
         return None
     return ("outer_loop_side_effect_profile", profile_key)
+
 
 def _impl__counted_state_transition_semantic_core_key(
     self,
@@ -1437,6 +1498,7 @@ def _impl__counted_state_transition_semantic_core_key(
         guard_keys,
     )
 
+
 def _impl__canonical_counted_state_transition_outer_start_key(
     self,
     start: Expression,
@@ -1454,6 +1516,7 @@ def _impl__canonical_counted_state_transition_outer_start_key(
         return ("const", 0)
     return ("const", int(start_value))
 
+
 def _impl__counted_residue_term_at_zero_is_zero(
     residue_cases: Tuple[Tuple[int, int, int, int], ...],
 ) -> bool:
@@ -1465,6 +1528,7 @@ def _impl__counted_residue_term_at_zero_is_zero(
         if 0 % int(modulus) == int(residue) and int(bias) != 0:
             return False
     return True
+
 
 def _impl__case_pair_has_one_sided_counted_loop_summary(
     self,
@@ -1479,6 +1543,7 @@ def _impl__case_pair_has_one_sided_counted_loop_summary(
         return False
     closed_expr = right if left_counted else left
     return not self._expression_contains_loop_summary_runtime(closed_expr)
+
 
 def _impl__is_provable_counted_loop_summary_value(
     self,
@@ -1529,6 +1594,7 @@ def _impl__is_provable_counted_loop_summary_value(
         return False
     return True
 
+
 def _impl__prove_counted_loop_closed_expression_candidates(
     self,
     *,
@@ -1557,6 +1623,7 @@ def _impl__prove_counted_loop_closed_expression_candidates(
         ):
             return True
     return False
+
 
 def _impl__counted_loop_closed_expression_candidates(
     self,
@@ -1600,6 +1667,7 @@ def _impl__counted_loop_closed_expression_candidates(
         if candidate is not None
     ]
     return tuple(candidates)
+
 
 def _impl__counted_loop_bounded_state_transition_base_candidate(
     self,
@@ -1647,6 +1715,7 @@ def _impl__counted_loop_bounded_state_transition_base_candidate(
     candidate.size = max(1, int(getattr(counted, "size", 0) or result_size or 0))
     return candidate
 
+
 def _impl__counted_state_transition_side_effects_allow_bounded_unroll(
     self,
     runtime_ref: CountedStateTransitionLoopSummaryRef,
@@ -1682,6 +1751,7 @@ def _impl__counted_state_transition_side_effects_allow_bounded_unroll(
         return False
     return True
 
+
 def _impl__counted_state_transition_value_operands_match_ref(
     self,
     operands: Sequence[Expression],
@@ -1703,6 +1773,7 @@ def _impl__counted_state_transition_value_operands_match_ref(
         except Exception:
             return False
     return True
+
 
 def _impl__bounded_state_transition_iteration_count_from_conditions(
     self,
@@ -1759,6 +1830,7 @@ def _impl__bounded_state_transition_iteration_count_from_conditions(
             return iteration_count
     return None
 
+
 def _impl__bounded_state_transition_trip_count_is_proved(
     self,
     runtime_ref: CountedStateTransitionLoopSummaryRef,
@@ -1800,6 +1872,7 @@ def _impl__bounded_state_transition_trip_count_is_proved(
     guard_conclusions.append(Condition(exit_equality))
     return self._condition_set_implies(conditions, guard_conclusions, parameters)
 
+
 def _impl__counted_state_transition_cases_allow_bounded_unroll(
     self,
     runtime_ref: CountedStateTransitionLoopSummaryRef,
@@ -1827,6 +1900,7 @@ def _impl__counted_state_transition_cases_allow_bounded_unroll(
         return False
     return True
 
+
 def _impl__unroll_counted_state_transition_value(
     self,
     runtime_ref: CountedStateTransitionLoopSummaryRef,
@@ -1843,6 +1917,7 @@ def _impl__unroll_counted_state_transition_value(
         value = self._replace_expression_node(transition_expr, state_placeholder, value)
         value.size = max(1, int(getattr(runtime_ref, "result_size", 0) or getattr(value, "size", 0) or 0))
     return value
+
 
 def _impl__counted_loop_affine_closed_expression_candidate(
     self,
@@ -1863,6 +1938,7 @@ def _impl__counted_loop_affine_closed_expression_candidate(
         conditions=conditions,
         parameters=parameters,
     )
+
 
 def _impl__counted_loop_positive_closed_expression(
     self,
@@ -2013,6 +2089,7 @@ def _impl__counted_loop_positive_closed_expression(
     total.size = target_size
     return total
 
+
 def _impl__counted_loop_values_are_provably_equivalent(
     self,
     left: Expression,
@@ -2089,6 +2166,7 @@ def _impl__counted_loop_values_are_provably_equivalent(
         parameters,
     )
 
+
 def _impl__counted_loop_affine_values_are_provably_equivalent(
     self,
     left: Expression,
@@ -2153,6 +2231,7 @@ def _impl__counted_loop_affine_values_are_provably_equivalent(
         parameters,
     )
 
+
 def _impl__counted_loop_affine_widths_are_safe(
     self,
     left: Expression,
@@ -2203,6 +2282,7 @@ def _impl__counted_loop_affine_widths_are_safe(
                 return False
     return True
 
+
 def _impl__counted_loop_refs_allow_affine_value_proof(self, left_ref, right_ref) -> bool:
     if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
         return False
@@ -2220,6 +2300,7 @@ def _impl__counted_loop_refs_allow_affine_value_proof(self, left_ref, right_ref)
     ):
         return False
     return True
+
 
 def _impl__counted_loop_affine_closed_expression(
     self,
@@ -2361,6 +2442,7 @@ def _impl__counted_loop_affine_closed_expression(
     low.size = target_size
     return low
 
+
 def _impl__counted_loop_affine_trip_count_expression(
     self,
     start: Expression,
@@ -2387,6 +2469,7 @@ def _impl__counted_loop_affine_trip_count_expression(
     ):
         return None
     return candidate
+
 
 def _impl__counted_loop_limit_matches_start_plus_step_count(
     self,
@@ -2430,3 +2513,341 @@ def _impl__counted_loop_limit_matches_start_plus_step_count(
         return True
     equality = Condition(Expression.binary_op("INT_EQUAL", limit_sized, expected_limit))
     return self._condition_set_implies(conditions, [equality], parameters)
+
+
+def _impl__counted_loop_refs_allow_value_proof(self, left_ref, right_ref) -> bool:
+    if left_ref is None or right_ref is None:
+        return False
+    if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+        return False
+    left_loop_summary = getattr(left_ref, "loop_summary", None)
+    right_loop_summary = getattr(right_ref, "loop_summary", None)
+    if left_loop_summary is None and right_loop_summary is None:
+        return True
+    for loop_summary in (left_loop_summary, right_loop_summary):
+        requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+        if callable(requires_effect_proof) and requires_effect_proof():
+            return False
+        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+        if callable(requires_path_proof) and requires_path_proof():
+            return False
+    loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
+    if loop_result.blocks_shortcut():
+        return False
+    return loop_result.is_equivalent() is True
+
+
+def _impl__counted_loop_refs_match_ignoring_signedness(self, left_ref, right_ref) -> bool:
+    if left_ref is None or right_ref is None:
+        return False
+    if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+        return False
+    try:
+        return (
+            int(getattr(left_ref, "induction_step", 0) or 0)
+            == int(getattr(right_ref, "induction_step", 0) or 0)
+            and max(1, int(getattr(left_ref, "result_size", 0) or 0))
+            == max(1, int(getattr(right_ref, "result_size", 0) or 0))
+            and tuple(getattr(left_ref, "residue_cases", ()) or ())
+            == tuple(getattr(right_ref, "residue_cases", ()) or ())
+            and getattr(left_ref, "source", None) == getattr(right_ref, "source", None)
+        )
+    except Exception:
+        return False
+
+
+def _impl__counted_loop_signedness_difference_is_guarded(
+    self,
+    left: Expression,
+    right: Expression,
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict[str, Any]],
+) -> bool:
+    left_ref = getattr(left, "runtime_ref", None)
+    right_ref = getattr(right, "runtime_ref", None)
+    if bool(getattr(left_ref, "signed_loop", False)) == bool(getattr(right_ref, "signed_loop", False)):
+        return True
+    operands = list(getattr(left, "operands", None) or [])
+    if len(operands) != 3:
+        return False
+    # Signed and unsigned COUNTED_LOOP_SUM lowerings differ in how start/limit
+    # are extended to the wide arithmetic domain. If both are non-negative
+    # under the current pair guard, the two interpretations coincide.
+    return all(
+        self._expression_is_provably_nonnegative_under_conditions(expr, conditions, parameters)
+        for expr in operands[1:3]
+    )
+
+
+def _impl__clone_auxiliary_counted_loop_summary_ref(
+    self,
+    runtime_ref: CountedLoopSummaryRef,
+    identity_to_spec: Dict[Tuple[object, ...], Dict[str, Any]],
+) -> Optional[CountedLoopSummaryRef]:
+    cloned_bias_terms = self._clone_auxiliary_residue_bias_terms(
+        tuple(getattr(runtime_ref, "residue_bias_terms", ()) or ()),
+        identity_to_spec,
+    )
+    if cloned_bias_terms is None:
+        return None
+    loop_summary = getattr(runtime_ref, "loop_summary", None)
+    cloned_loop_summary = loop_summary
+    if isinstance(loop_summary, LoopSummaryRef):
+        cloned_loop_summary = self._clone_auxiliary_loop_summary_ref(loop_summary, identity_to_spec)
+        if cloned_loop_summary is None:
+            return None
+    return replace(
+        runtime_ref,
+        residue_bias_terms=cloned_bias_terms,
+        loop_summary=cloned_loop_summary,
+    )
+
+
+def _impl__clone_auxiliary_loop_summary_ref(
+    self,
+    loop_summary: LoopSummaryRef,
+    identity_to_spec: Dict[Tuple[object, ...], Dict[str, Any]],
+) -> Optional[LoopSummaryRef]:
+    term_descriptor = getattr(loop_summary, "term_descriptor", None)
+    if not isinstance(term_descriptor, LoopTermDescriptorRef):
+        return loop_summary
+    cloned_bias_terms = self._clone_auxiliary_residue_bias_terms(
+        tuple(getattr(term_descriptor, "residue_bias_terms", ()) or ()),
+        identity_to_spec,
+    )
+    if cloned_bias_terms is None:
+        return None
+    return replace(
+        loop_summary,
+        term_descriptor=replace(term_descriptor, residue_bias_terms=cloned_bias_terms),
+    )
+
+
+def _impl__case_pair_can_defer_loop_summary_proof(
+    self,
+    left_case: ReturnCase,
+    right_case: ReturnCase,
+    reason: str,
+) -> bool:
+    if reason == "loop_summary_guard_mismatch":
+        return self._loop_summary_contracts_match_without_guard(
+            left_case.value_expr,
+            right_case.value_expr,
+        )
+    return False
+
+
+def _impl__loop_summary_contracts_match_without_guard(
+    self,
+    left: Optional[Expression],
+    right: Optional[Expression],
+) -> bool:
+    if left is None or right is None:
+        return False
+    left_has_loop = self._expression_contains_loop_summary_runtime(left)
+    right_has_loop = self._expression_contains_loop_summary_runtime(right)
+    if not left_has_loop or not right_has_loop:
+        return False
+    if left.expr_type == ExpressionType.INTRINSIC and right.expr_type == ExpressionType.INTRINSIC:
+        decision = self._runtime_loop_contract_shortcut_decision(
+            getattr(left, "runtime_ref", None),
+            getattr(right, "runtime_ref", None),
+        )
+        if decision.equivalent and decision.requires_guard_equivalence:
+            return True
+    if left.expr_type != right.expr_type:
+        return False
+    left_operands = list(getattr(left, "operands", []) or [])
+    right_operands = list(getattr(right, "operands", []) or [])
+    if len(left_operands) != len(right_operands):
+        return False
+    return any(
+        self._loop_summary_contracts_match_without_guard(left_operand, right_operand)
+        for left_operand, right_operand in zip(left_operands, right_operands)
+    )
+
+
+def _impl__resolve_pending_loop_summary_pairs_with_partition_proof(
+    self,
+    pending_pairs: Sequence[_PendingLoopSummaryPair],
+    cases1: Sequence[ReturnCase],
+    cases2: Sequence[ReturnCase],
+    resolved_pairs: set[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    resolved_pending: set[tuple[int, int]] = set()
+    progress = True
+    while progress:
+        progress = False
+        known_resolved = set(resolved_pairs) | resolved_pending
+        for pending in pending_pairs:
+            pair_key = (pending.i, pending.j)
+            if pair_key in resolved_pending:
+                continue
+            if not self._pending_loop_summary_pair_has_exact_delta_coverage(
+                pending,
+                cases1,
+                cases2,
+                known_resolved,
+            ):
+                continue
+            resolved_pending.add(pair_key)
+            progress = True
+    return resolved_pending
+
+
+def _impl__pending_loop_summary_pair_has_exact_delta_coverage(
+    self,
+    pending: _PendingLoopSummaryPair,
+    cases1: Sequence[ReturnCase],
+    cases2: Sequence[ReturnCase],
+    resolved_pairs: set[tuple[int, int]],
+) -> bool:
+    left_cover_cases = [
+        cases1[left_index]
+        for left_index, _right_index in sorted(resolved_pairs)
+        if _right_index == pending.j
+        and left_index != pending.i
+        and 0 <= left_index < len(cases1)
+        and not self._expression_contains_loop_summary_runtime(cases1[left_index].value_expr)
+    ]
+    right_cover_cases = [
+        cases2[right_index]
+        for _left_index, right_index in sorted(resolved_pairs)
+        if _left_index == pending.i
+        and right_index != pending.j
+        and 0 <= right_index < len(cases2)
+        and not self._expression_contains_loop_summary_runtime(cases2[right_index].value_expr)
+    ]
+    return self._condition_delta_region_is_covered_by_cases(
+        self._case_summary_condition_basis(pending.left_case),
+        self._case_summary_condition_basis(pending.right_case),
+        right_cover_cases,
+        pending.left_case,
+        pending.right_case,
+    ) and self._condition_delta_region_is_covered_by_cases(
+        self._case_summary_condition_basis(pending.right_case),
+        self._case_summary_condition_basis(pending.left_case),
+        left_cover_cases,
+        pending.right_case,
+        pending.left_case,
+    )
+
+
+def _impl__phi_circular_case_shape_and_unknowns(
+    self,
+    case: ReturnCase,
+) -> Tuple[Optional[Tuple[Any, ...]], Tuple[Any, ...]]:
+    unknowns: List[Any] = []
+    value_shape = self._phi_circular_expression_shape_key(
+        getattr(case, "value_expr", None),
+        unknowns,
+    )
+    if value_shape is None:
+        return None, ()
+    condition_shapes: List[Tuple[Any, ...]] = []
+    for condition in getattr(case, "conditions", None) or ():
+        expression = getattr(condition, "expression", None)
+        condition_shape = self._phi_circular_expression_shape_key(expression, unknowns)
+        if condition_shape is None:
+            return None, ()
+        condition_shapes.append(
+            (
+                "condition",
+                bool(getattr(condition, "negated", False)),
+                condition_shape,
+            )
+        )
+    return (
+        (
+            "phi_circular_case_shape",
+            ("value", value_shape),
+            ("conditions", tuple(condition_shapes)),
+        ),
+        tuple(unknowns),
+    )
+
+
+def _impl__phi_circular_expression_shape_key(
+    self,
+    expr: Any,
+    unknowns: List[Any],
+) -> Optional[Tuple[Any, ...]]:
+    if expr is None or getattr(expr, "expr_type", None) is None:
+        return None
+    expr_type = expr.expr_type
+    if expr_type == ExpressionType.UNKNOWN:
+        if not self._unknown_expression_is_originated_phi_circular(expr):
+            return None
+        bits = int(expression_smt_bit_width(expr) or 0)
+        if bits <= 0:
+            return None
+        unknowns.append(expr)
+        return ("unknown", "phi_circular", bits)
+    if self._expression_node_is_unsupported_smt_op(expr):
+        return None
+    bits = int(expression_smt_bit_width(expr) or 0)
+    if expr_type == ExpressionType.CONSTANT:
+        return ("const", int(getattr(expr, "value", 0) or 0), bits)
+    if expr_type == ExpressionType.LITERAL:
+        return ("literal", repr(getattr(expr, "value", None)), bits)
+    if expr_type == ExpressionType.PARAMETER:
+        raw_value = getattr(expr, "value", None)
+        return (
+            "parameter",
+            str(getattr(expr, "name", "") or ""),
+            -1 if raw_value is None else int(raw_value),
+            bits,
+        )
+    if expr_type == ExpressionType.VARIABLE:
+        return None
+    if expr_type == ExpressionType.UNARY_OP:
+        operands = getattr(expr, "operands", None) or ()
+        if len(operands) != 1:
+            return None
+        operand = self._phi_circular_expression_shape_key(operands[0], unknowns)
+        if operand is None:
+            return None
+        return ("unary", str(getattr(expr, "operator", "") or ""), bits, operand)
+    if expr_type == ExpressionType.BINARY_OP:
+        operands = getattr(expr, "operands", None) or ()
+        if len(operands) != 2:
+            return None
+        left = self._phi_circular_expression_shape_key(operands[0], unknowns)
+        right = self._phi_circular_expression_shape_key(operands[1], unknowns)
+        if left is None or right is None:
+            return None
+        return (
+            "binary",
+            str(getattr(expr, "operator", "") or ""),
+            bits,
+            left,
+            right,
+        )
+    if expr_type == ExpressionType.INTRINSIC:
+        operands = []
+        for operand_expr in getattr(expr, "operands", None) or ():
+            operand = self._phi_circular_expression_shape_key(operand_expr, unknowns)
+            if operand is None:
+                return None
+            operands.append(operand)
+        return (
+            "intrinsic",
+            str(getattr(expr, "name", "") or ""),
+            None if getattr(expr, "opcode", None) is None else int(getattr(expr, "opcode")),
+            bits,
+            tuple(operands),
+        )
+    return None
+
+
+def _impl__unknown_expression_is_originated_phi_circular(cls, expr: Any) -> bool:
+    if getattr(expr, "expr_type", None) != ExpressionType.UNKNOWN:
+        return False
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if getattr(runtime_ref, "kind", None) != "opaque_unknown":
+        return False
+    if getattr(runtime_ref, "reason", None) != "phi_circular":
+        return False
+    if getattr(runtime_ref, "origin_kind", None) != "multiequal_pcode_op":
+        return False
+    return cls._stable_key_or_none(getattr(runtime_ref, "origin_ref", None)) is not None

@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
-from scripts.function_tracer_pcode.analysis.returns.return_extraction_1 import (
+from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
     _build_function_outcome_seed,
     _produce_standard_termination_path_effect_evidence,
 )

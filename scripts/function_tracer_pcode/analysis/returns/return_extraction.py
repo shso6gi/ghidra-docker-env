@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.returns.analyzer``."""
+"""Return-value extraction from P-code RETURN ops, regions and tracked values."""
 
 from __future__ import annotations
 
@@ -50,9 +50,22 @@ from scripts.function_tracer_pcode.core.structural import (
     expression_key_safe as _outcome_expression_key_safe,
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from typing import Any, List, Optional, Set, Tuple
+from scripts.function_tracer_pcode.analysis.returns._shared import (
+    Condition,
+    ConditionSimplifier,
+    ReturnInfo,
+    _expressions_equivalent,
+    _expressions_equivalent_under_conditions,
+    expression_contains_post_state_reads,
+    lower_post_state_expression_for_smt,
+    replace,
+)
+
 
 def _impl__return_site_key(self, ret_info: ReturnInfo) -> str:
     return ret_info.site_key()
+
 
 def _impl__return_site_metadata_from_info(info: ReturnInfo) -> Dict[str, Optional[object]]:
     return {
@@ -64,6 +77,7 @@ def _impl__return_site_metadata_from_info(info: ReturnInfo) -> Dict[str, Optiona
             getattr(info, "return_value_pcode_op_refs", ()) or ()
         ),
     }
+
 
 def _impl__return_value_pcode_op_refs_from_varnode(
     self,
@@ -86,6 +100,7 @@ def _impl__return_value_pcode_op_refs_from_varnode(
         seen.add(key)
         refs.append(ref)
     return tuple(refs)
+
 
 def _impl__return_value_producer_chain(varnode, *, max_depth: int = 4) -> Tuple[Any, ...]:
     """Collect the direct return producer plus transparent single-input producers."""
@@ -128,6 +143,7 @@ def _impl__return_value_producer_chain(varnode, *, max_depth: int = 4) -> Tuple[
         except Exception:
             break
     return tuple(refs)
+
 
 def _impl__site_metadata_with_return_value_pcode_op_refs(
     self,
@@ -253,6 +269,7 @@ def _build_return_value_flow_certificate(
         payload_expression_identity=payload_identity,
     )
 
+
 def _impl__make_return_info(
     self,
     *,
@@ -303,6 +320,7 @@ def _impl__make_return_info(
         ),
         return_path_evidence=return_path_evidence,
     )
+
 
 def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
     """
@@ -374,6 +392,7 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
 
     # 条件カバレッジの簡易チェック
     self._check_condition_coverage(analysis)
+
 
 def _impl__try_pre_return_counted_loop_summary(
     self,
@@ -466,6 +485,7 @@ def _impl__try_pre_return_counted_loop_summary(
     self._dump_return_infos(result)
     return result
 
+
 def _impl__make_pre_return_summary_anchor(
     self,
     function,
@@ -500,6 +520,7 @@ def _impl__make_pre_return_summary_anchor(
     anchor.return_kind = "summary_anchor"
     anchor.acceptance_status = "anchor"
     return anchor
+
 
 def _impl__function_body_has_phase1_pure_return_forbidden_ops(self, function) -> bool:
     if function is None:
@@ -553,6 +574,7 @@ def _impl__function_body_has_phase1_pure_return_forbidden_ops(self, function) ->
                 return True
     return not saw_op
 
+
 def _impl__high_function_has_phase1_pure_return_forbidden_ops(self, high_function) -> bool:
     if high_function is None:
         return True
@@ -577,6 +599,7 @@ def _impl__high_function_has_phase1_pure_return_forbidden_ops(self, high_functio
                 return True
     return not saw_op
 
+
 def _impl__phase1_pure_return_forbids_mnemonic(mnemonic: Optional[str]) -> bool:
     name = str(mnemonic or "").strip().upper()
     if not name:
@@ -587,6 +610,7 @@ def _impl__phase1_pure_return_forbids_mnemonic(mnemonic: Optional[str]) -> bool:
         return True
     return False
 
+
 def _impl__phase1_return_type_is_float(return_type: Optional[str], return_type_obj=None) -> bool:
     texts = [return_type, str(return_type_obj) if return_type_obj is not None else None]
     for text in texts:
@@ -596,6 +620,7 @@ def _impl__phase1_return_type_is_float(return_type: Optional[str], return_type_o
         if any(token in normalized for token in ("float", "double", "longdouble", "long double")):
             return True
     return False
+
 
 def _impl__apply_outcome_partition_summaries(
     self,
@@ -924,11 +949,13 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
         partition_revision=int(getattr(analysis, "partition_revision", 0) or 0),
     )
 
+
 def _impl__clear_outcome_partition_summaries(self, analysis: FunctionReturnAnalysis) -> None:
     """Drop synthetic outcome partition state before rebuilding it from current returns."""
     analysis.return_outcomes = ()
     analysis.divergence_outcomes = ()
     analysis.unknown_outcomes = ()
+
 
 def _impl__try_apply_single_guard_nonprogress_loop_outcomes(
     self,
@@ -1019,6 +1046,7 @@ def _impl__try_apply_single_guard_nonprogress_loop_outcomes(
             analysis.analysis_notes.append("outcome_partition_unknown_nonprogress_loop")
     return True
 
+
 def _impl__analysis_has_positive_region_outcome_obligation(
     self,
     analysis: Optional[FunctionReturnAnalysis],
@@ -1057,6 +1085,7 @@ def _impl__analysis_has_positive_region_outcome_obligation(
             return True
     return False
 
+
 def _impl__acc_phi_flows_to_return_origin_phi(
     self,
     acc_phi,
@@ -1086,6 +1115,7 @@ def _impl__acc_phi_flows_to_return_origin_phi(
             if self._return_origin_phi_has_acc_output_input(op, acc_phi):
                 return True
     return False
+
 
 def _impl__return_origin_phi_has_acc_output_input(self, return_phi, acc_phi) -> bool:
     acc_output = getattr(acc_phi, "getOutput", lambda: None)()
@@ -1117,6 +1147,7 @@ def _impl__return_origin_phi_has_acc_output_input(self, return_phi, acc_phi) -> 
         return True
     return False
 
+
 def _impl__return_info_candidate_phi_origin_keys(self, ret: Optional[ReturnInfo]) -> Set[Tuple[Any, ...]]:
     if ret is None:
         return set()
@@ -1128,6 +1159,7 @@ def _impl__return_info_candidate_phi_origin_keys(self, ret: Optional[ReturnInfo]
     )
     return keys
 
+
 def _impl__return_info_return_phi_origin_keys(self, ret: Optional[ReturnInfo]) -> Set[Tuple[Any, ...]]:
     if ret is None:
         return set()
@@ -1138,6 +1170,7 @@ def _impl__return_info_return_phi_origin_keys(self, ret: Optional[ReturnInfo]) -
         )
     )
     return keys
+
 
 def _impl__return_phi_origin_keys_from_summary_source_key(self, value) -> Set[Tuple[Any, ...]]:
     keys: Set[Tuple[Any, ...]] = set()
@@ -1157,6 +1190,7 @@ def _impl__return_phi_origin_keys_from_summary_source_key(self, value) -> Set[Tu
         if isinstance(item, tuple):
             keys.update(self._return_phi_origin_keys_from_summary_source_key(item))
     return keys
+
 
 def _impl__return_conditions_cover_region(
     self,
@@ -1192,6 +1226,7 @@ def _impl__return_conditions_cover_region(
         disjunction = Expression.binary_op("BOOL_OR", disjunction, expr)
     return self._conditions_are_unsat(tuple(region_conditions or ()) + (Condition(disjunction, True),))
 
+
 def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any, ...]:
     return (
         "return_info",
@@ -1202,6 +1237,7 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any,
         ),
         expression_key_safe(getattr(ret, "value", None)),
     )
+
 
 def _impl__try_apply_triangular_mod_optimized_outcomes(
     self,
@@ -1291,6 +1327,7 @@ def _impl__try_apply_triangular_mod_optimized_outcomes(
         analysis.analysis_notes.append("outcome_partition_unknown_optimized_triangular_mod")
     return True
 
+
 def _impl__return_partition_miss_guard(self, returns: Sequence[ReturnInfo]) -> Condition:
     miss_terms = []
     for ret in returns or ():
@@ -1309,6 +1346,7 @@ def _impl__return_partition_miss_guard(self, returns: Sequence[ReturnInfo]) -> C
         expr = Expression.binary_op("BOOL_AND", expr, term)
     return Condition(expr, False)
 
+
 def _impl__analysis_return_size_bytes(self, analysis: FunctionReturnAnalysis) -> int:
     for ret in getattr(analysis, "returns", []) or []:
         size = int(getattr(ret.value, "size", 0) or 0)
@@ -1319,6 +1357,7 @@ def _impl__analysis_return_size_bytes(self, analysis: FunctionReturnAnalysis) ->
     if bits > 0:
         return max(1, (bits + 7) // 8)
     return 4
+
 
 def _impl__make_synthetic_outcome_return(
     self,
@@ -1339,6 +1378,7 @@ def _impl__make_synthetic_outcome_return(
         summary_candidate_id=("outcome_partition", tag, getattr(analysis, "function_name", None)),
     )
 
+
 def _impl__high_function_has_nonreturning_region_candidate(self, high_function) -> bool:
     if self._high_function_has_cfg_cycle(high_function):
         return True
@@ -1353,6 +1393,7 @@ def _impl__high_function_has_nonreturning_region_candidate(self, high_function) 
         if not has_return:
             return True
     return False
+
 
 def _impl__return_infos_have_conflicting_overlap(
     self,
@@ -1381,6 +1422,7 @@ def _impl__return_infos_have_conflicting_overlap(
             return True
     return False
 
+
 def _impl__collect_linear_ops_to_return(
     self,
     block_path: List[Any],
@@ -1398,6 +1440,7 @@ def _impl__collect_linear_ops_to_return(
     if not linear_ops or not self._pcode_ops_match(linear_ops[-1], return_op):
         return None
     return linear_ops
+
 
 def _impl__tracked_return_value_key(self, tracked: _TrackedReturnValue) -> Tuple[Any, ...]:
     varnode_key = self._varnode_location_key(tracked.varnode)
@@ -1421,6 +1464,7 @@ def _impl__tracked_return_value_key(self, tracked: _TrackedReturnValue) -> Tuple
         producer_key = ("id", id(tracked.producer_op))
     return (varnode_key, storage_key, producer_key)
 
+
 def _impl__deduplicate_tracked_return_values(
     self,
     tracked_values: List[_TrackedReturnValue],
@@ -1434,6 +1478,7 @@ def _impl__deduplicate_tracked_return_values(
         seen.add(key)
         deduped.append(tracked)
     return deduped
+
 
 def _impl__make_tracked_return_value(
     self,
@@ -1455,6 +1500,7 @@ def _impl__make_tracked_return_value(
         producer_op=producer_op,
     )
 
+
 def _impl__make_tracked_return_storage_value(
     self,
     storage: Optional[StorageInfo],
@@ -1466,6 +1512,7 @@ def _impl__make_tracked_return_storage_value(
         storage=storage,
         producer_op=producer_op,
     )
+
 
 def _impl__make_tracked_return_value_from_affecting_op(
     self,
@@ -1491,6 +1538,7 @@ def _impl__make_tracked_return_value_from_affecting_op(
             producer_op=pcode_op,
         )
     return None
+
 
 def _impl__resolve_implicit_return_tracked_values(
     self,
@@ -1550,6 +1598,7 @@ def _impl__resolve_implicit_return_tracked_values(
                 )
     return tracked_values
 
+
 def _impl__tracked_return_value_is_affected_by_op(
     self,
     tracked: _TrackedReturnValue,
@@ -1585,6 +1634,7 @@ def _impl__tracked_return_value_is_affected_by_op(
             if self._storages_overlap_for_return_recovery(tracked_storage, return_storage):
                 return True
     return False
+
 
 def _impl__resolve_local_return_expression(
     self,
@@ -1634,6 +1684,7 @@ def _impl__resolve_local_return_expression(
     self._debug_print("Local target RETURN without explicit value; defaulting to 0")
     return Expression.constant(0, 1)
 
+
 def _impl__get_function_return_varnodes(self, function) -> List[Any]:
     if function is None:
         return []
@@ -1652,6 +1703,7 @@ def _impl__get_function_return_varnodes(self, function) -> List[Any]:
         return []
     return []
 
+
 def _impl__get_current_prototype_return_varnodes(self) -> List[Any]:
     prototype = self._current_function_prototype
     if prototype is None:
@@ -1667,6 +1719,7 @@ def _impl__get_current_prototype_return_varnodes(self) -> List[Any]:
     except Exception:
         return []
     return []
+
 
 def _impl__infer_abi_return_storages(self) -> List[StorageInfo]:
     """関数シグネチャが void に潰れていても使える保守的な返り値レジスタ候補。"""
@@ -1708,6 +1761,7 @@ def _impl__infer_abi_return_storages(self) -> List[StorageInfo]:
         return [_reg("eax")]
     return []
 
+
 def _impl__get_return_type_info(self, high_function):
     """戻り値の型オブジェクトと表示名を取得"""
     try:
@@ -1720,6 +1774,7 @@ def _impl__get_return_type_info(self, high_function):
         self._debug_print(f"Failed to get return type: {e}")
     return None, None
 
+
 def _impl__get_return_type(self, high_function) -> Optional[str]:
     """後方互換: 戻り値の表示名だけを返す。"""
     try:
@@ -1731,6 +1786,7 @@ def _impl__get_return_type(self, high_function) -> Optional[str]:
     except Exception as e:
         self._debug_print(f"Failed to get return type: {e}")
     return None
+
 
 def _impl__analyze_return_op(
     self,
@@ -1904,6 +1960,7 @@ def _impl__analyze_return_op(
     finally:
         self._current_blocked_return_path_conditions = previous_blocked
 
+
 def _impl__function_has_no_return(self, function) -> bool:
     if function is None:
         return False
@@ -1916,6 +1973,7 @@ def _impl__function_has_no_return(self, function) -> bool:
             except Exception:
                 continue
     return False
+
 
 def _impl__analyze_implicit_return_value(
     self,
@@ -1984,6 +2042,7 @@ def _impl__analyze_implicit_return_value(
         )
     return None
 
+
 def _impl__recover_return_infos_from_tracked_sources(
     self,
     tracked_sources: List[_TrackedReturnValue],
@@ -2017,6 +2076,7 @@ def _impl__recover_return_infos_from_tracked_sources(
     if not recovered_results:
         return None
     return self._merge_equivalent_return_infos(recovered_results)
+
 
 def _impl__materialize_tracked_return_source(
     self,
@@ -2067,6 +2127,7 @@ def _impl__materialize_tracked_return_source(
         site_metadata=value_site_metadata,
     )
 
+
 def _impl__storages_overlap_for_return_recovery(self, left, right) -> bool:
     if left is None or right is None:
         return False
@@ -2084,6 +2145,7 @@ def _impl__storages_overlap_for_return_recovery(self, left, right) -> bool:
         and getattr(left, "offset", None) == getattr(right, "offset", None)
         and getattr(left, "size", None) == getattr(right, "size", None)
     )
+
 
 def _impl__analyze_return_value(
     self,
@@ -2202,6 +2264,7 @@ def _impl__analyze_return_value(
         )]
 
     return results
+
 
 def _impl__append_smt_lowerable_phi_return_fallback_infos(
     self,
@@ -2328,6 +2391,7 @@ def _impl__append_smt_lowerable_phi_return_fallback_infos(
         self._prune_less_precise_return_infos(list(return_infos or []) + additions)
     )
 
+
 def _impl__phi_origin_keys_from_return_varnode_trace(
     self,
     tracer,
@@ -2341,6 +2405,7 @@ def _impl__phi_origin_keys_from_return_varnode_trace(
     if isinstance(fallback_value, Expression):
         keys.update(self._phi_circular_origin_stable_keys(fallback_value))
     return tuple(sorted(keys, key=repr))
+
 
 def _impl__build_return_infos_from_expansions(
     self,
@@ -2476,6 +2541,7 @@ def _impl__build_return_infos_from_expansions(
     pruned = self._prune_less_precise_return_infos(results)
     return self._merge_equivalent_return_infos(pruned)
 
+
 def _impl__split_object_centric_return_case(
     self,
     value: Expression,
@@ -2521,6 +2587,7 @@ def _impl__split_object_centric_return_case(
             )
             self._debug_print(f"    conditions={cond_dump}")
     return deduplicated or [(value, conditions)]
+
 
 def _impl__prune_less_precise_return_infos(
     self,
@@ -2588,6 +2655,7 @@ def _impl__prune_less_precise_return_infos(
 
     return pruned
 
+
 def _impl__return_value_is_multiplicative_phi_recurrence_candidate(self, value: Optional[Expression]) -> bool:
     if getattr(value, "expr_type", None) != ExpressionType.BINARY_OP:
         return False
@@ -2599,6 +2667,7 @@ def _impl__return_value_is_multiplicative_phi_recurrence_candidate(self, value: 
     has_phi_unknown = any(self._expression_contains_phi_circular_marker(operand) for operand in operands)
     has_constant = any(getattr(operand, "expr_type", None) == ExpressionType.CONSTANT for operand in operands)
     return bool(has_phi_unknown and has_constant)
+
 
 def _impl__exclusivize_return_regions(
     self,
@@ -2663,6 +2732,7 @@ def _impl__exclusivize_return_regions(
             )
     return preserved
 
+
 def _impl__return_region_priority_key(
     self,
     info: ReturnInfo,
@@ -2683,6 +2753,7 @@ def _impl__return_region_priority_key(
         phi_score,
         int(original_index),
     )
+
 
 def _impl__compare_return_region_order(
     self,
@@ -2717,6 +2788,7 @@ def _impl__compare_return_region_order(
     if left_key > right_key:
         return 1
     return 0
+
 
 def _impl__return_region_can_be_shadowed_by_prior(
     self,
@@ -2755,6 +2827,7 @@ def _impl__return_region_can_be_shadowed_by_prior(
     # refinement unless one side carries a proof-backed semantic contract.
     return False
 
+
 def _impl__return_region_conditions_imply(
     self,
     antecedent: Sequence[Condition],
@@ -2768,6 +2841,7 @@ def _impl__return_region_conditions_imply(
         return False
     return antecedent_set.implies_all(consequent)
 
+
 def _impl__return_region_conditions_mutually_imply(
     self,
     left: Sequence[Condition],
@@ -2780,6 +2854,7 @@ def _impl__return_region_conditions_mutually_imply(
         right,
         left,
     )
+
 
 def _impl__subtract_return_region_conjunction(
     self,
@@ -2818,6 +2893,7 @@ def _impl__subtract_return_region_conjunction(
 
     return residual_regions
 
+
 def _impl__analysis_has_ambiguous_condition_region_returns(
     self,
     analysis: Optional[FunctionReturnAnalysis],
@@ -2849,6 +2925,7 @@ def _impl__analysis_has_ambiguous_condition_region_returns(
             return True
     return False
 
+
 def _impl__merge_equivalent_return_infos(
     self,
     return_infos: List[ReturnInfo],
@@ -2878,3 +2955,238 @@ def _impl__merge_equivalent_return_infos(
             if changed:
                 break
     return merged
+
+
+def _impl__merge_return_info_pair(
+    self,
+    left: ReturnInfo,
+    right: ReturnInfo,
+    all_infos: Optional[List[ReturnInfo]] = None,
+    left_index: Optional[int] = None,
+    right_index: Optional[int] = None,
+) -> Optional[ReturnInfo]:
+    if self._return_site_key(left) != self._return_site_key(right):
+        return None
+    if not _expressions_equivalent(left.value, right.value):
+        return None
+
+    shared_conditions, left_residual, right_residual = self._partition_return_conditions(
+        left.conditions,
+        right.conditions,
+    )
+
+    if not left_residual and not right_residual:
+        return self._make_merged_return_info(left, right, shared_conditions, "deduplicated identical return case")
+
+    if (
+        self._condition_sets_are_complementary(left_residual, right_residual)
+        and self._can_safely_collapse_complementary_return_pair(
+            left,
+            right,
+            shared_conditions,
+            all_infos or [],
+            left_index,
+            right_index,
+        )
+    ):
+        return self._make_merged_return_info(
+            left,
+            right,
+            shared_conditions,
+            "collapsed complementary return cases",
+        )
+
+    return None
+
+
+def _impl__can_safely_collapse_complementary_return_pair(
+    self,
+    left: ReturnInfo,
+    right: ReturnInfo,
+    merged_conditions: List[Condition],
+    all_infos: List[ReturnInfo],
+    left_index: Optional[int],
+    right_index: Optional[int],
+) -> bool:
+    current_effect_summary = self._current_effect_summary
+    if (
+        current_effect_summary is not None
+        and (
+            expression_contains_post_state_reads(left.value)
+            or expression_contains_post_state_reads(right.value)
+        )
+    ):
+        lowered_left = lower_post_state_expression_for_smt(
+            left.value,
+            left.conditions,
+            current_effect_summary.effects,
+            self._current_parameters,
+        )
+        lowered_right = lower_post_state_expression_for_smt(
+            right.value,
+            right.conditions,
+            current_effect_summary.effects,
+            self._current_parameters,
+        )
+        if (
+            lowered_left is None
+            or lowered_right is None
+            or expression_contains_post_state_reads(lowered_left)
+            or expression_contains_post_state_reads(lowered_right)
+        ):
+            return False
+        if not _expressions_equivalent_under_conditions(
+            lowered_left,
+            lowered_right,
+            merged_conditions,
+            self._current_parameters,
+        ):
+            if self.debug:
+                self._debug_print(
+                    "skipping complementary return-case collapse because symbolic post-state "
+                    "lowers differently across branches: "
+                    f"left={self._debug_expr_summary(lowered_left)} "
+                    f"right={self._debug_expr_summary(lowered_right)}"
+                )
+            return False
+
+    if not all_infos:
+        return True
+
+    merged_scope = ConditionSimplifier.simplify_conditions_object_centric(list(merged_conditions))
+    for index, other in enumerate(all_infos):
+        if index == left_index or index == right_index:
+            continue
+        if self._return_site_key(other) != self._return_site_key(left):
+            continue
+        if _expressions_equivalent(other.value, left.value):
+            continue
+
+        overlap_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(merged_scope) + list(other.conditions)
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(overlap_conditions):
+            continue
+
+        if self.debug:
+            cond_dump = [
+                ConditionSimplifier.get_simplified_condition_string(cond)
+                for cond in overlap_conditions
+            ]
+            self._debug_print(
+                "skipping complementary return-case collapse due to overlapping "
+                f"different-valued case: value={self._debug_expr_summary(other.value)} "
+                f"conditions={cond_dump}"
+            )
+        return False
+
+    return True
+
+
+def _impl__partition_return_conditions(
+    self,
+    left_conditions: List[Condition],
+    right_conditions: List[Condition],
+) -> Tuple[List[Condition], List[Condition], List[Condition]]:
+    shared: List[Condition] = []
+    right_used: Set[int] = set()
+    left_residual: List[Condition] = []
+
+    for left_cond in left_conditions:
+        match_index = None
+        for index, right_cond in enumerate(right_conditions):
+            if index in right_used:
+                continue
+            if left_cond.equals(right_cond):
+                match_index = index
+                break
+        if match_index is None:
+            left_residual.append(left_cond)
+            continue
+        right_used.add(match_index)
+        shared.append(left_cond)
+
+    right_residual = [
+        cond for index, cond in enumerate(right_conditions) if index not in right_used
+    ]
+    return (
+        ConditionSimplifier.simplify_conditions_object_centric(shared),
+        ConditionSimplifier.simplify_conditions_object_centric(left_residual),
+        ConditionSimplifier.simplify_conditions_object_centric(right_residual),
+    )
+
+
+def _impl__make_merged_return_info(
+    self,
+    primary: ReturnInfo,
+    secondary: ReturnInfo,
+    merged_conditions: List[Condition],
+    reason: str,
+) -> ReturnInfo:
+    normalized_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+        list(merged_conditions)
+    )
+    if self.debug:
+        cond_dump = [
+            ConditionSimplifier.get_simplified_condition_string(cond)
+            for cond in normalized_conditions
+        ]
+        self._debug_print(
+            f"{reason}: value={self._debug_expr_summary(primary.value)} conditions={cond_dump}"
+        )
+    return replace(
+        primary,
+        value=primary.value,
+        conditions=normalized_conditions,
+        branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
+        summary_candidate_source_key=self._merge_return_info_summary_candidate_source_keys(
+            primary,
+            secondary,
+        ),
+    )
+
+
+def _impl__merge_return_info_summary_candidate_source_keys(
+    self,
+    primary: ReturnInfo,
+    secondary: ReturnInfo,
+) -> Optional[Tuple[Any, ...]]:
+    primary_key = getattr(primary, "summary_candidate_source_key", None)
+    secondary_key = getattr(secondary, "summary_candidate_source_key", None)
+    if primary_key is None:
+        return secondary_key
+    if secondary_key is None or secondary_key == primary_key:
+        return primary_key
+    candidate_keys = tuple(
+        sorted(
+            self._candidate_phi_origin_keys_from_summary_source_key(primary_key)
+            | self._candidate_phi_origin_keys_from_summary_source_key(secondary_key),
+            key=repr,
+        )
+    )
+    return_keys = tuple(
+        sorted(
+            self._return_phi_origin_keys_from_summary_source_key(primary_key)
+            | self._return_phi_origin_keys_from_summary_source_key(secondary_key),
+            key=repr,
+        )
+    )
+    proof_sources = tuple(
+        key for key in (primary_key, secondary_key)
+        if self._candidate_phi_origin_keys_from_summary_source_key(key)
+        or self._return_phi_origin_keys_from_summary_source_key(key)
+    )
+    discovery_only_sources = tuple(
+        key for key in (primary_key, secondary_key)
+        if key not in proof_sources
+    )
+    items: List[Tuple[Any, ...]] = []
+    if candidate_keys:
+        items.append(("candidate_phi_origin_keys", candidate_keys))
+    if return_keys:
+        items.append(("return_phi_origin_keys", return_keys))
+    if proof_sources:
+        items.append(("proof_candidate_sources", proof_sources))
+    if discovery_only_sources:
+        items.append(("discovery_only_sources", discovery_only_sources))
+    return ("merged_return_info_sources", *items)

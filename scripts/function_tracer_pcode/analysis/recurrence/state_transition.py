@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence.summarizer``."""
+"""State-transition loop models (multiplicative / counted / prior-state)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,14 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
+from typing import Any, Dict, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    Expression,
+    ExpressionType,
+    LoopSideEffectProfileRef,
+    StateTransitionLoopModel,
+)
+
 
 def _impl__counted_loop_transition_evidence_key_from_parts(
     self,
@@ -112,6 +120,7 @@ def _impl__counted_loop_transition_evidence_key_from_parts(
     except Exception:
         return None
 
+
 def _impl__build_counted_state_transition_value(
     self,
     *,
@@ -166,6 +175,7 @@ def _impl__build_counted_state_transition_value(
     )
     intrinsic.size = max(1, int(result_size or getattr(initial_state, "size", 0) or 4))
     return intrinsic
+
 
 def _impl__recover_proved_multiplicative_state_transition_base(
     self,
@@ -253,6 +263,7 @@ def _impl__recover_proved_multiplicative_state_transition_base(
         return candidate
     return None
 
+
 def _impl__multiplicative_phi_transition_multiplier_candidates(
     self,
     expr: Optional[Expression],
@@ -305,6 +316,7 @@ def _impl__multiplicative_phi_transition_multiplier_candidates(
         max_candidates=max_candidates,
     )
 
+
 def _impl__single_multiplicative_phi_transition_multiplier(
     self,
     recursive_returns: Sequence[ReturnInfo],
@@ -336,6 +348,7 @@ def _impl__single_multiplicative_phi_transition_multiplier(
             return None
     return expected
 
+
 def _impl__has_proved_return_region_state_transition_candidate(self, analysis) -> bool:
     parameters = list(getattr(analysis, "parameters", []) or [])
     returns = tuple(getattr(analysis, "returns", ()) or ())
@@ -345,6 +358,7 @@ def _impl__has_proved_return_region_state_transition_candidate(self, analysis) -
         self._raw_constant_value(getattr(ret, "value", None)) == 1
         for ret in returns
     )
+
 
 def _impl__try_summarize_proved_return_region_state_transition_composition(
     self,
@@ -429,6 +443,7 @@ def _impl__try_summarize_proved_return_region_state_transition_composition(
     self._debug("Declined return-region state-transition composition summary: proof unavailable")
     return None
 
+
 def _impl__return_region_state_transition_multiplier_candidates(
     self,
     returns: Sequence[ReturnInfo],
@@ -450,6 +465,7 @@ def _impl__return_region_state_transition_multiplier_candidates(
             if len(candidates) >= int(max_candidates):
                 return tuple(candidates)
     return tuple(candidates)
+
 
 def _impl__multiplicative_state_transition_multiplier_candidates(
     self,
@@ -484,6 +500,7 @@ def _impl__multiplicative_state_transition_multiplier_candidates(
         if len(candidates) >= int(max_candidates):
             break
     return tuple(candidates[: max(1, int(max_candidates))])
+
 
 def _impl__extract_counted_state_transition_loop_models(
     self,
@@ -576,6 +593,7 @@ def _impl__extract_counted_state_transition_loop_models(
     models.sort(key=lambda model: self._counted_loop_accumulator_priority(model.accumulator), reverse=True)
     return tuple(models)
 
+
 def _impl__extract_counted_state_transition_cases(
     self,
     accumulator: CountedLoopAccumulator,
@@ -653,6 +671,7 @@ def _impl__extract_counted_state_transition_cases(
         seen.add(key)
         cases.append((tuple(simplified), self._canonicalize_expression(reduced_update)))
     return tuple(cases)
+
 
 def _impl__prior_counted_state_transition_base_value(
     self,
@@ -820,6 +839,7 @@ def _impl__prior_counted_state_transition_base_value(
         )
     return None
 
+
 def _impl__record_completed_prior_state_transition_handoff_proof(
     self,
     analysis,
@@ -863,6 +883,7 @@ def _impl__record_completed_prior_state_transition_handoff_proof(
     analysis.completed_recovery_proof_evidence = tuple(records)
     return True
 
+
 def _impl__prior_state_transition_handoff_proof_content(
     self,
     object_target_key: Tuple[Any, ...],
@@ -903,6 +924,7 @@ def _impl__prior_state_transition_handoff_proof_content(
         ),
     }
 
+
 def _impl__prior_state_transition_value_flow_key(
     self,
     prior_accumulator: CountedLoopAccumulator,
@@ -931,8 +953,10 @@ def _impl__prior_state_transition_value_flow_key(
         )
     return None
 
+
 def _impl__has_state_transition_loop_candidate(self, high_function) -> bool:
     return self._find_state_transition_loop_model(high_function, analysis=None) is not None
+
 
 def _impl__try_summarize_state_transition_loop(
     self,
@@ -1308,6 +1332,7 @@ def _affine_under_residue(
             return left_affine[0] * right_affine[1], left_affine[1] * right_affine[1]
     return None
 
+
 def _impl__build_progress_guarded_unit_state_transition_value(
     self,
     *,
@@ -1332,6 +1357,7 @@ def _impl__build_progress_guarded_unit_state_transition_value(
     if state_value is None or self._expression_is_unresolved(state_value):
         return None
     return self._canonicalize_expression(state_value)
+
 
 def _impl__state_transition_exact_return_exclusion_conditions(
     self,
@@ -1370,6 +1396,7 @@ def _impl__state_transition_exact_return_exclusion_conditions(
                 continue
             exclusions.append(exclusion)
     return tuple(exclusions)
+
 
 def _impl__build_multiplicative_state_transition_loop_value(
     self,
@@ -1452,6 +1479,7 @@ def _impl__build_multiplicative_state_transition_loop_value(
         return None
     return transition_value
 
+
 def _impl__state_transition_iteration_start_expr(
     self,
     state_guard: Optional[Expression],
@@ -1466,6 +1494,7 @@ def _impl__state_transition_iteration_start_expr(
     if stop_value is None:
         return None
     return Expression.constant(int(stop_value), size=max(1, int(size or 4)))
+
 
 def _impl__multiplicative_state_transition_iteration_start_expr(
     self,
@@ -1502,6 +1531,7 @@ def _impl__multiplicative_state_transition_iteration_start_expr(
     if stop_value == 1:
         self._debug("Declined multiplicative state-transition start=1: anchor proof unavailable")
     return None
+
 
 def _impl__state_transition_object_zero_iteration_anchor_key(
     self,
@@ -1589,6 +1619,7 @@ def _impl__state_transition_object_zero_iteration_anchor_key(
         ("return_refs", tuple(ref.stable_key() for ref in return_refs)),
     )
 
+
 def _impl__state_transition_guard_false_at_stop_value(
     self,
     state_guard: Optional[Expression],
@@ -1620,6 +1651,7 @@ def _impl__state_transition_guard_false_at_stop_value(
     except Exception:
         return False
 
+
 def _impl__state_transition_guard_false_successor(
     self,
     model: StateTransitionLoopModel,
@@ -1628,6 +1660,7 @@ def _impl__state_transition_guard_false_successor(
     true_out = getattr(header, "getTrueOut", lambda: None)()
     false_out = getattr(header, "getFalseOut", lambda: None)()
     return false_out if bool(getattr(model, "continue_on_true", False)) else true_out
+
 
 def _impl__state_transition_guard_stop_constant(
     self,
@@ -1707,6 +1740,7 @@ def _impl__state_transition_guard_stop_constant(
             return 0
     return None
 
+
 def _impl__state_transition_loop_transition_evidence_key(
     self,
     summary_ref: StateTransitionLoopSummaryRef,
@@ -1784,6 +1818,7 @@ def _impl__state_transition_loop_transition_evidence_key(
         ("replacement_obligation", "not_required_without_phi_circular"),
     )
 
+
 def _impl__state_transition_cases_evidence_key(self, cases: Any) -> Optional[Tuple[Any, ...]]:
     if not isinstance(cases, (tuple, list)) or not cases:
         return None
@@ -1813,6 +1848,7 @@ def _impl__state_transition_cases_evidence_key(self, cases: Any) -> Optional[Tup
     entries.sort(key=repr)
     return ("transition_cases", tuple(entries))
 
+
 def _impl__add_state_transition_accumulator_seed(
     self,
     accumulator_init: Expression,
@@ -1840,6 +1876,7 @@ def _impl__add_state_transition_accumulator_seed(
         return None
     combined.size = result_size
     return self._canonicalize_expression(combined)
+
 
 def _impl__find_state_transition_loop_model(
     self,
@@ -1889,6 +1926,7 @@ def _impl__find_state_transition_loop_model(
         return None
     candidates.sort(key=self._state_transition_model_priority, reverse=True)
     return candidates[0]
+
 
 def _impl__try_build_latch_guarded_state_transition_model_for_phi(
     self,
@@ -2054,6 +2092,7 @@ def _impl__try_build_latch_guarded_state_transition_model_for_phi(
         accumulator_phi_backedge_indices=tuple(int(index) for index in accumulator_backedge_indices),
     )
 
+
 def _impl__try_build_state_transition_model_for_phi(
     self,
     *,
@@ -2172,6 +2211,7 @@ def _impl__try_build_state_transition_model_for_phi(
         accumulator_phi_backedge_indices=tuple(int(index) for index in accumulator_backedge_indices),
     )
 
+
 def _impl__build_state_transition_expression(
     self,
     *,
@@ -2242,6 +2282,7 @@ def _impl__build_state_transition_expression(
     phi.size = max(1, int(getattr(phi_output, "getSize", lambda: 4)() or 4))
     return phi
 
+
 def _impl__state_transition_predecessor_path_conditions(
     self,
     *,
@@ -2290,6 +2331,7 @@ def _impl__state_transition_predecessor_path_conditions(
         return None
     return tuple(result)
 
+
 def _impl__state_transition_path_conditions(
     self,
     *,
@@ -2319,6 +2361,7 @@ def _impl__state_transition_path_conditions(
         return None
     return tuple(result)
 
+
 def _impl__combine_conditions_for_state_transition(
     self,
     conditions: Sequence[Condition],
@@ -2343,6 +2386,7 @@ def _impl__combine_conditions_for_state_transition(
         expr = cond_expr if expr is None else Expression.binary_op("BOOL_AND", expr, cond_expr)
         expr.size = 1
     return Condition(self._canonicalize_expression(expr), False)
+
 
 def _impl__state_transition_summary_cases(
     self,
@@ -2399,6 +2443,7 @@ def _impl__state_transition_summary_cases(
         )
     )
     return tuple((condition, negated, value) for condition, negated, value, _is_source_default in cases)
+
 
 def _impl__canonicalize_state_transition_condition(
     self,
@@ -2467,6 +2512,7 @@ def _impl__canonicalize_state_transition_condition(
     normalized_expr, normalized_negated = self._normalize_state_transition_condition_term(combined, False)
     return Condition(normalized_expr, normalized_negated)
 
+
 def _impl__complete_default_state_transition_cases(
     self,
     cases: Sequence[Tuple[Optional[Expression], bool, Expression, bool]],
@@ -2497,6 +2543,7 @@ def _impl__complete_default_state_transition_cases(
     completed[index] = (complement_expr, complement_negated, value, is_source_default)
     return tuple(completed)
 
+
 def _impl__combine_state_transition_condition_complements(
     self,
     terms: Sequence[Tuple[Expression, bool]],
@@ -2518,6 +2565,7 @@ def _impl__combine_state_transition_condition_complements(
         return None
     complement_expr = self._canonicalize_expression(complement_expr)
     return self._normalize_state_transition_condition_term(complement_expr, False)
+
 
 def _impl__normalize_state_transition_condition_term(
     self,
@@ -2546,6 +2594,7 @@ def _impl__normalize_state_transition_condition_term(
         expr = self._canonicalize_expression(expr)
         negated = not negated
     return expr, bool(negated)
+
 
 def _impl__canonicalize_state_transition_value(
     self,
@@ -2613,3 +2662,185 @@ def _impl__canonicalize_state_transition_value(
         rebuilt.size = expr.size
         return self._canonicalize_expression(rebuilt)
     return expr
+
+
+def _impl__collect_state_transition_loop_phi_ops(
+    self,
+    loop_blocks: Sequence[object],
+    preferred_phi_ops: Sequence[object],
+) -> Tuple[object, ...]:
+    result = []
+    seen = set()
+
+    def add(phi_op) -> None:
+        key = id(phi_op)
+        if key not in seen:
+            seen.add(key)
+            result.append(phi_op)
+
+    for phi_op in preferred_phi_ops or ():
+        add(phi_op)
+    for block in loop_blocks or ():
+        for op in self._iter_block_ops(block):
+            if (
+                getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+                and getattr(op, "getOutput", lambda: None)() is not None
+            ):
+                add(op)
+    return tuple(result)
+
+
+def _impl__normalize_state_transition_state_guard(
+    self,
+    state_guard: Optional[Expression],
+    state_placeholder: Expression,
+) -> Optional[Expression]:
+    guard = self._canonicalize_expression(state_guard)
+    if guard is None:
+        return None
+    placeholder_key = state_placeholder.structural_key()
+
+    def is_placeholder(value: Optional[Expression]) -> bool:
+        if value is None:
+            return False
+        try:
+            return value.structural_key() == placeholder_key
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return False
+
+    if (
+        guard.expr_type == ExpressionType.UNARY_OP
+        and guard.operator == "BOOL_NEGATE"
+        and len(guard.operands) == 1
+    ):
+        inner = self._canonicalize_expression(guard.operands[0])
+        if (
+            inner.expr_type == ExpressionType.BINARY_OP
+            and inner.operator == "INT_SLESS"
+            and len(inner.operands) == 2
+            and is_placeholder(inner.operands[0])
+            and self._raw_constant_value(inner.operands[1]) == 1
+        ):
+            return self._positive_state_guard_expression(state_placeholder)
+    if (
+        guard.expr_type == ExpressionType.BINARY_OP
+        and guard.operator == "INT_SLESSEQUAL"
+        and len(guard.operands) == 2
+        and self._raw_constant_value(guard.operands[0]) == 1
+        and is_placeholder(guard.operands[1])
+    ):
+        return self._positive_state_guard_expression(state_placeholder)
+    return guard
+
+
+def _impl__extract_multiplicative_accumulator_transition(
+    self,
+    expr: Expression,
+    accumulator_placeholder: Expression,
+) -> Optional[Expression]:
+    expr = self._canonicalize_expression(expr)
+    if expr is None:
+        return None
+    multiplier = self._multiplicative_accumulator_delta_multiplier(
+        expr,
+        accumulator_placeholder,
+    )
+    if multiplier is None or int(multiplier) in {0, 1}:
+        return None
+    return expr
+
+
+def _impl__state_transition_model_priority(
+    self,
+    model: StateTransitionLoopModel,
+) -> Tuple[int, int, int]:
+    return (
+        1 if self._varnode_reaches_return(model.accumulator_phi_output) else 0,
+        len(model.loop_blocks),
+        max(1, int(getattr(model.state_phi_output, "getSize", lambda: 0)() or 0)),
+    )
+
+
+def _impl__collect_state_transition_loop_blocks(
+    self,
+    *,
+    header_block,
+    body_block,
+    exit_block,
+    backedge_indices: Sequence[int],
+) -> Tuple[object, ...]:
+    header_key = self._block_key(header_block)
+    exit_key = self._block_key(exit_block)
+    blocks_by_key: Dict[object, object] = {}
+
+    def add(block) -> None:
+        key = self._block_key(block)
+        if key is not None and key != exit_key and key not in blocks_by_key:
+            blocks_by_key[key] = block
+
+    add(header_block)
+    add(body_block)
+    in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
+    stack = []
+    for index in backedge_indices:
+        if index < in_size:
+            predecessor = header_block.getIn(index)
+            add(predecessor)
+            stack.append(predecessor)
+    while stack:
+        current = stack.pop()
+        current_key = self._block_key(current)
+        if current_key == header_key:
+            continue
+        for predecessor in self._collect_block_predecessors(current):
+            predecessor_key = self._block_key(predecessor)
+            if predecessor_key in {None, exit_key}:
+                continue
+            if not self._can_reach_block(body_block, predecessor) and predecessor_key != header_key:
+                continue
+            if predecessor_key not in blocks_by_key:
+                blocks_by_key[predecessor_key] = predecessor
+                stack.append(predecessor)
+    return tuple(blocks_by_key.values())
+
+
+def _impl__build_state_transition_loop_side_effect_profile(
+    self,
+    *,
+    loop_blocks: Sequence[object],
+) -> LoopSideEffectProfileRef:
+    memory_reads = False
+    memory_writes = False
+    calls = False
+    escapes = False
+    conditional_guards = False
+    for block in loop_blocks or ():
+        for op in self._iter_block_ops(block):
+            mnemonic = getattr(op, "getMnemonic", lambda: None)()
+            if mnemonic == "LOAD":
+                memory_reads = True
+            elif mnemonic == "STORE":
+                memory_writes = True
+            elif mnemonic in {"CALL", "CALLIND"}:
+                calls = True
+                escapes = True
+            elif mnemonic == "BRANCHIND":
+                escapes = True
+            elif mnemonic == "CBRANCH":
+                conditional_guards = True
+    return LoopSideEffectProfileRef(
+        profile=self._loop_effect_profile_name(
+            memory_reads=memory_reads,
+            memory_writes=memory_writes,
+            calls=calls,
+            escapes=escapes,
+            conditional_guards=conditional_guards,
+        ),
+        memory_reads=memory_reads,
+        memory_writes=memory_writes,
+        calls=calls,
+        escapes=escapes,
+        conditional_guards=conditional_guards,
+        effect_count=0,
+        guard_count=1 if conditional_guards else 0,
+    )

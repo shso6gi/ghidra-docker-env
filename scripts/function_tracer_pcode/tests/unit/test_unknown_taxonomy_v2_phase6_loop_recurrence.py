@@ -663,7 +663,7 @@ def test_loop_exact_factories_ignore_mutated_producer_instance_methods():
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
         method_b_closure as orchestration_1,
-        readonly_reduction_1,
+        readonly_reduction as readonly_reduction_1,
     )
 
     _, term, _, strategy, exact_case, summary_case, _, _ = _loop_exact_fixture()

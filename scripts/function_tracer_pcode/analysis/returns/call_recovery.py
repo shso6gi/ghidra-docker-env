@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.returns.analyzer``."""
+"""Call-site recovery: deferred/indirect call targets, bounded refinement and call argument alignment."""
 
 from __future__ import annotations
 
@@ -41,6 +41,31 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     substitute_condition,
     substitute_expression,
 )
+from typing import Any, Dict, List, Optional, Set, Tuple
+from scripts.function_tracer_pcode.analysis.returns._shared import (
+    CallTargetRef,
+    Condition,
+    ConditionTracker,
+    EffectSummary,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    PcodeTracer,
+    ReturnInfo,
+    _enumerate_constant_expression_branches,
+    _expression_contains_observed_loads,
+    _expressions_equivalent_under_conditions,
+    _resolve_call_target_ref,
+    canonicalize_expr_read_location,
+    coerce_call_target_ref,
+    expression_contains_post_state_reads,
+    lower_post_state_expression_for_smt,
+    promote_effect_value_match_to_post_state_read,
+    promote_observed_loads_to_post_state_reads,
+    rewrite_observed_loads_from_effects,
+)
+from scripts.function_tracer_pcode.analysis.returns._api import resolve_call_targets
+
 
 def _impl__direct_call_target_function_key(self, op) -> Optional[Tuple[object, ...]]:
     try:
@@ -60,6 +85,7 @@ def _impl__direct_call_target_function_key(self, op) -> Optional[Tuple[object, .
         return CallTargetRef.from_function(target_function).stable_key()
     except Exception:
         return None
+
 
 def _impl__normalize_return_callother_userops(self, analysis: FunctionReturnAnalysis) -> None:
     if analysis is None or not analysis.returns:
@@ -91,6 +117,7 @@ def _impl__normalize_return_callother_userops(self, analysis: FunctionReturnAnal
     note = "object_centric_callother_userop_normalization"
     if note not in analysis.analysis_notes:
         analysis.analysis_notes.append(note)
+
 
 def _impl__normalize_callother_userop_expression(self, expr: Optional[Expression]) -> Tuple[Optional[Expression], bool]:
     if expr is None:
@@ -146,6 +173,7 @@ def _impl__normalize_callother_userop_expression(self, expr: Optional[Expression
         return expr.clone_with(operands=rewritten_operands), True
     return expr, False
 
+
 def _impl__cbranch_direct_target_keys(self, cbranch, block) -> Set[Tuple[str, int]]:
     try:
         if int(getattr(cbranch, "getNumInputs", lambda: 0)() or 0) < 1:
@@ -157,6 +185,7 @@ def _impl__cbranch_direct_target_keys(self, cbranch, block) -> Set[Tuple[str, in
     if len(source_spaces) != 1:
         return set()
     return self._address_like_keys(target, default_space=next(iter(source_spaces)))
+
 
 def _impl__iter_outcome_call_candidates(
     self,
@@ -197,6 +226,7 @@ def _impl__iter_outcome_call_candidates(
             getattr(call_evidence, "recovery_status", "inconclusive"),
             "effect_call_argument_evidence",
         )
+
 
 def _impl__try_apply_triangular_mod_caller_outcomes(
     self,
@@ -272,6 +302,7 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
         analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
     return True
 
+
 def _impl__find_caller_return_partition_for_param_minus_one_obligation(
     self,
     analysis: FunctionReturnAnalysis,
@@ -302,6 +333,7 @@ def _impl__find_caller_return_partition_for_param_minus_one_obligation(
                 one_ret = ret
     return zero_ret, one_ret
 
+
 def _impl__caller_return_value_matches_param_on_eq_one(
     self,
     value: Optional[Expression],
@@ -312,6 +344,7 @@ def _impl__caller_return_value_matches_param_on_eq_one(
     if self._expression_is_same_parameter_ignoring_subpiece(value, param):
         return True
     return self._constant_int_value(value) == 1
+
 
 def _impl__cached_callee_analysis_for_outcome_summary(
     self,
@@ -343,6 +376,7 @@ def _impl__cached_callee_analysis_for_outcome_summary(
         if cached is not None:
             return cached
     return None
+
 
 def _impl__make_deferred_call_recorder(self, current_function=None):
     current_function_ref = (
@@ -403,6 +437,7 @@ def _impl__make_deferred_call_recorder(self, current_function=None):
 
     return record_call
 
+
 def _impl__align_deferred_call_arguments_for_recording(
     self,
     target_ref: CallTargetRef,
@@ -423,6 +458,7 @@ def _impl__align_deferred_call_arguments_for_recording(
     if aligned is None:
         return raw_args
     return list(aligned)
+
 
 def _impl__apply_bounded_call_refinement(
     self,
@@ -482,6 +518,7 @@ def _impl__apply_bounded_call_refinement(
             f"Applied bounded call refinement to '{analysis.function_name}' "
             f"(remaining deferred calls={len(analysis.deferred_calls)})"
         )
+
 
 def _impl__apply_effect_call_argument_evidence_to_deferred_calls(
     self,
@@ -550,6 +587,7 @@ def _impl__apply_effect_call_argument_evidence_to_deferred_calls(
     if incomplete and "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes:
         analysis.analysis_notes.append("effect_call_argument_evidence_incomplete")
 
+
 def _impl__recover_call_wrapper_returns(
     self,
     decompile_results,
@@ -606,6 +644,7 @@ def _impl__recover_call_wrapper_returns(
                 "Call-wrapper recovery declined: no unresolved return or uncovered terminal-call path"
             )
     return None
+
 
 def _impl__recover_uncovered_terminal_call_returns_from_pcode(
     self,
@@ -689,6 +728,7 @@ def _impl__recover_uncovered_terminal_call_returns_from_pcode(
     )
     return merged
 
+
 def _impl__call_wrapper_recovery_conflicts_with_existing_returns(
     self,
     existing_returns: List[ReturnInfo],
@@ -707,6 +747,7 @@ def _impl__call_wrapper_recovery_conflicts_with_existing_returns(
                 continue
             return True
     return False
+
 
 def _impl__recover_call_wrapper_returns_from_pcode(
     self,
@@ -781,6 +822,7 @@ def _impl__recover_call_wrapper_returns_from_pcode(
 
     return recovered or None
 
+
 def _impl__find_indirect_dispatch_op_on_block(
     self,
     block_info,
@@ -796,6 +838,7 @@ def _impl__find_indirect_dispatch_op_on_block(
         except Exception:
             continue
     return None
+
 
 def _impl__enumerate_switch_dispatch_targets(
     self,
@@ -837,6 +880,7 @@ def _impl__enumerate_switch_dispatch_targets(
         return []
     return resolved_targets
 
+
 def _impl__recover_dispatch_call_arguments(
     self,
     dispatch_op,
@@ -869,6 +913,7 @@ def _impl__recover_dispatch_call_arguments(
             )
         )
     return recovered
+
 
 def _impl__resolve_switch_case_target_expansions(
     self,
@@ -985,6 +1030,7 @@ def _impl__resolve_switch_case_target_expansions(
         )
     return expanded_values or None
 
+
 def _impl__enumerate_switch_branch_targets(
     self,
     switch_block,
@@ -1050,6 +1096,7 @@ def _impl__enumerate_switch_branch_targets(
 
     return resolved_targets
 
+
 def _impl__switch_recovery_targets_problematic_region(
     self,
     analysis: FunctionReturnAnalysis,
@@ -1068,6 +1115,7 @@ def _impl__switch_recovery_targets_problematic_region(
     if affected_analysis.has_overlapping_unconditional_returns():
         return True
     return self._analysis_has_ambiguous_condition_region_returns(affected_analysis)
+
 
 def _impl__find_terminal_call_on_block_path(
     self,
@@ -1092,6 +1140,7 @@ def _impl__find_terminal_call_on_block_path(
         block_path=block_path,
         path_conditions=path_conditions,
     )
+
 
 def _impl__find_terminal_call_from_linear_ops(
     self,
@@ -1126,9 +1175,11 @@ def _impl__find_terminal_call_from_linear_ops(
             return pcode_op
     return None
 
+
 def _impl__is_pcode_call_op(self, pcode_op) -> bool:
     opcode = self._get_pcode_opcode(pcode_op)
     return opcode in _PCODE_CALL_OPCODES
+
 
 def _impl__build_return_tracking_targets(
     self,
@@ -1156,6 +1207,7 @@ def _impl__build_return_tracking_targets(
             tracked_values.append(self._make_tracked_return_storage_value(storage))
 
     return self._deduplicate_tracked_return_values(tracked_values)
+
 
 def _impl__call_output_proves_wrapper_return(
     self,
@@ -1204,6 +1256,7 @@ def _impl__call_output_proves_wrapper_return(
         tracer=tracer,
         current_function=current_function,
     )
+
 
 def _impl__tracked_values_match_call_output(
     self,
@@ -1255,8 +1308,10 @@ def _impl__tracked_values_match_call_output(
                 return True
     return False
 
+
 def _impl__coerce_runtime_target_ref(self, target) -> Optional[CallTargetRef]:
     return coerce_call_target_ref(target)
+
 
 def _impl__bound_parameter_values_from_call_args(
     self,
@@ -1276,6 +1331,7 @@ def _impl__bound_parameter_values_from_call_args(
             continue
         bound_by_identity[parameter_index] = arg
     return self._normalize_bound_parameter_values(bound_by_identity)
+
 
 def _impl__bound_parameter_storage_values_from_call_args(
     self,
@@ -1299,6 +1355,7 @@ def _impl__bound_parameter_storage_values_from_call_args(
         bound_by_storage[tuple(storage_key)] = arg
     return self._normalize_bound_parameter_storage_values(bound_by_storage)
 
+
 def _impl__bound_parameter_maps_for_target_args(
     self,
     target,
@@ -1313,10 +1370,12 @@ def _impl__bound_parameter_maps_for_target_args(
         self._bound_parameter_storage_values_from_call_args(args, callee_parameters),
     )
 
+
 def _impl__target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[Tuple[Any, ...]]:
     if target_ref is None:
         return None
     return target_ref.analysis_key()
+
 
 def _impl__resolve_target_function(self, target) -> Optional[Any]:
     target_ref = self._coerce_runtime_target_ref(target)
@@ -1331,6 +1390,7 @@ def _impl__resolve_target_function(self, target) -> Optional[Any]:
     if target_ref.function_name:
         return self._find_function_by_name(target_ref.function_name)
     return None
+
 
 def _impl__get_freshest_callee_parameters(self, target) -> List[Dict]:
     callee = self._resolve_target_function(target)
@@ -1358,6 +1418,7 @@ def _impl__get_freshest_callee_parameters(self, target) -> List[Dict]:
     self._effect_summary_parameter_cache[callee_key] = list(merged_parameters)
     return list(merged_parameters)
 
+
 def _impl__should_synthesize_implicit_passthrough_for_call(
     self,
     tracer: PcodeTracer,
@@ -1369,6 +1430,7 @@ def _impl__should_synthesize_implicit_passthrough_for_call(
     if self._is_passthrough_storage_live_in_for_call(tracer, call_op, target_storage):
         return True
     return True
+
 
 def _impl__is_passthrough_storage_live_in_for_call(
     self,
@@ -1406,6 +1468,7 @@ def _impl__is_passthrough_storage_live_in_for_call(
             return False
     return True
 
+
 def _impl__invoke_get_or_analyze_call_target(
     self,
     target,
@@ -1434,11 +1497,13 @@ def _impl__invoke_get_or_analyze_call_target(
                 active_functions,
             )
 
+
 def _impl__make_call_resolver(self, active_functions: Set[Tuple[Any, ...]], current_function=None):
     def resolve_call(target, args):
         return self._resolve_call_expansions(target, args, active_functions, current_function)
 
     return resolve_call
+
 
 def _impl__resolve_call_expansions(
     self,
@@ -1577,6 +1642,7 @@ def _impl__resolve_call_expansions(
         expanded.return_signed = None
     return expanded
 
+
 def _impl__resolve_local_code_target_expansions(
     self,
     address_value: int,
@@ -1680,6 +1746,7 @@ def _impl__resolve_local_code_target_expansions(
     self._local_target_cache[cache_key] = expanded
     return expanded
 
+
 def _impl__local_target_cache_key(
     self,
     address_value: int,
@@ -1694,6 +1761,7 @@ def _impl__local_target_cache_key(
             if arg is not None
         ),
     )
+
 
 def _impl__specialize_local_target_expansions(
     self,
@@ -1746,6 +1814,7 @@ def _impl__specialize_local_target_expansions(
             )
         )
     return specialized
+
 
 def _impl__expand_linear_code_target(self, addr, tracer, current_function=None):
     from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
@@ -1862,6 +1931,7 @@ def _impl__expand_linear_code_target(self, addr, tracer, current_function=None):
     self._debug_print(f"Local target resolution failed: no RETURN found from {addr}")
     return None
 
+
 def _impl__get_implicit_return_target_storages(
     self,
     function,
@@ -1888,6 +1958,7 @@ def _impl__get_implicit_return_target_storages(
         )
     return fallback
 
+
 def _impl__resolve_local_branch_target(self, instruction):
     try:
         flows = instruction.getFlows()
@@ -1905,6 +1976,7 @@ def _impl__resolve_local_branch_target(self, instruction):
     except Exception:
         fallthrough = None
     return fallthrough
+
 
 def _impl__get_or_analyze_call_target(
     self,
@@ -1952,6 +2024,7 @@ def _impl__get_or_analyze_call_target(
         return analysis
     return cached
 
+
 def _impl__call_summary_is_safe(
     self,
     value: Expression,
@@ -1974,6 +2047,7 @@ def _impl__call_summary_is_safe(
 
     return True
 
+
 def _impl__expression_unknowns_are_deferred_call_refs(self, expr: Optional[Expression]) -> bool:
     if expr is None:
         return True
@@ -1993,6 +2067,7 @@ def _impl__expression_unknowns_are_deferred_call_refs(self, expr: Optional[Expre
         if not self._expression_unknowns_are_deferred_call_refs(operand):
             return False
     return True
+
 
 def _impl__expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
     if expr is None:
@@ -2016,6 +2091,7 @@ def _impl__expression_contains_unknown_or_call(self, expr: Optional[Expression])
             return True
 
     return False
+
 
 def _impl__specialize_call_analysis(
     self,
@@ -2129,6 +2205,7 @@ def _impl__specialize_call_analysis(
         deferred_calls=specialized_deferred_calls,
     )
 
+
 def _impl__merge_deferred_calls_into_current_analysis(
     self,
     deferred_calls: Optional[Dict[Tuple[object, ...], DeferredCallInfo]],
@@ -2188,6 +2265,7 @@ def _impl__merge_deferred_calls_into_current_analysis(
                 call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
             )
 
+
 def _impl__merge_call_argument_recovery_state(
     existing_status: Optional[str],
     existing_reason: Optional[str],
@@ -2216,6 +2294,7 @@ def _impl__merge_call_argument_recovery_state(
     if (existing_reason is None) and (incoming_reason is not None):
         return incoming_norm, incoming_reason
     return existing_norm, existing_reason
+
 
 def _impl__normalize_call_target_expression(
     self,
@@ -2283,6 +2362,7 @@ def _impl__normalize_call_target_expression(
         return expr
     return expr.clone_with(operands=rewritten_operands)
 
+
 def _impl__rewrite_deferred_runtime_refs_in_expression(
     self,
     expr: Optional[Expression],
@@ -2339,6 +2419,7 @@ def _impl__rewrite_deferred_runtime_refs_in_expression(
         return expr
     return expr.clone_with(operands=rewritten_operands)
 
+
 def _impl__block_path_contains_noreturn_call(
     self,
     block_path,
@@ -2353,8 +2434,10 @@ def _impl__block_path_contains_noreturn_call(
                 return True
     return False
 
+
 def _impl__is_noreturn_call_op(self, pcode_op, tracer: PcodeTracer) -> bool:
     return self._is_noreturn_control_transfer_op(pcode_op, tracer)
+
 
 def _impl__resolve_object_centric_call_targets(
     self,
@@ -2362,3 +2445,329 @@ def _impl__resolve_object_centric_call_targets(
     tracer: Optional[PcodeTracer],
 ) -> List[CallTargetRef]:
     return self._resolve_object_centric_transfer_targets(pcode_op, tracer)
+
+
+def _impl__resolve_object_centric_transfer_targets(
+    self,
+    pcode_op,
+    tracer: Optional[PcodeTracer],
+) -> List[CallTargetRef]:
+    if pcode_op is None or tracer is None:
+        return []
+
+    resolved: List[CallTargetRef] = []
+
+    try:
+        mnemonic = str(pcode_op.getMnemonic())
+    except Exception:
+        mnemonic = ""
+
+    if mnemonic in {"CALL", "CALLIND"}:
+        try:
+            image_base = None
+            if self.program is not None:
+                image_base = self.program.getImageBase().getOffset()
+            for target_ref, _conditions in resolve_call_targets(
+                tracer,
+                pcode_op,
+                conditions=[],
+                parameters=list(self._current_parameters or []),
+                read_memory_value=self._read_memory_value if self.program is not None else None,
+                image_base=image_base,
+                debug=self.debug,
+            ):
+                if target_ref is not None:
+                    resolved.append(target_ref)
+        except Exception:
+            pass
+    elif mnemonic == "BRANCHIND":
+        try:
+            target_varnode = pcode_op.getInput(0)
+        except Exception:
+            target_varnode = None
+
+        if target_varnode is not None:
+            resolver = getattr(tracer, "resolve_call_target_ref", None)
+            if callable(resolver):
+                try:
+                    direct_target = resolver(
+                        target_varnode,
+                        allow_containing=True,
+                        allow_code_address=True,
+                    )
+                except Exception:
+                    direct_target = None
+                direct_target_ref = coerce_call_target_ref(direct_target)
+                if direct_target_ref is not None:
+                    resolved.append(direct_target_ref)
+
+            try:
+                target_expr = tracer.trace_varnode(target_varnode, use_cache=False)
+            except Exception:
+                target_expr = None
+            if target_expr is not None:
+                target_expr = self._concretize_readonly_loads(
+                    target_expr,
+                    [],
+                    self._current_parameters,
+                )
+                for _branch_conditions, address_value in _enumerate_constant_expression_branches(target_expr):
+                    target_function = self._resolve_function_from_program_offset(int(address_value))
+                    if target_function is not None:
+                        resolved.append(CallTargetRef.from_function(target_function))
+                    else:
+                        resolved.append(CallTargetRef.from_code_address(int(address_value)))
+
+    if not resolved:
+        fallback_target = _resolve_call_target_ref(tracer, pcode_op)
+        if fallback_target is not None:
+            resolved.append(fallback_target)
+
+    deduped: List[CallTargetRef] = []
+    seen_keys = set()
+    for target_ref in resolved:
+        stable_key = target_ref.stable_key()
+        if stable_key in seen_keys:
+            continue
+        seen_keys.add(stable_key)
+        deduped.append(target_ref)
+    return deduped
+
+
+def _impl__resolve_function_from_call_target_ref(
+    self,
+    target_ref: Optional[CallTargetRef],
+):
+    if target_ref is None or target_ref.is_unknown():
+        return None
+
+    function_obj = getattr(target_ref, "function_obj", None)
+    if function_obj is not None:
+        return function_obj
+
+    if target_ref.entry_offset is not None:
+        return self._resolve_function_from_program_offset(target_ref.entry_offset)
+
+    if target_ref.address_offset is not None:
+        return self._resolve_function_from_program_offset(target_ref.address_offset)
+
+    return None
+
+
+def _impl__find_terminal_call_before_return(
+    self,
+    return_op,
+    condition_tracker: ConditionTracker,
+    tracer: Optional[PcodeTracer] = None,
+    current_function=None,
+):
+    """同一 basic block 内で wrapper return とみなせる末尾 CALL/CALLIND を探す。"""
+    return_parent = getattr(return_op, "getParent", lambda: None)()
+    return_block = condition_tracker.get_block_by_hash(return_parent)
+    if return_block is None:
+        return None
+
+    linear_ops = self._collect_linear_ops_to_return([return_block], return_op)
+    if not linear_ops:
+        return None
+    return self._find_terminal_call_from_linear_ops(
+        linear_ops,
+        return_op,
+        tracer=tracer,
+        condition_tracker=condition_tracker,
+        current_function=current_function,
+        block_path=[return_block],
+        path_conditions=None,
+    )
+
+
+def _impl__recover_implicit_return_from_terminal_call(
+    self,
+    call_op,
+    address: str,
+    tracer: PcodeTracer,
+    condition_tracker: ConditionTracker,
+    path_conditions: List[Condition],
+    return_index: int,
+    all_path_conditions: Optional[List[List[Condition]]] = None,
+    active_functions: Optional[Set[Tuple[Any, ...]]] = None,
+    current_function=None,
+    site_metadata: Optional[Dict[str, Optional[object]]] = None,
+) -> Optional[List[ReturnInfo]]:
+    """`call foo(...); return;` 形式の wrapper を callee summary から復元する。"""
+    from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
+
+    expander = ExpressionExpander(
+        tracer,
+        condition_tracker,
+        debug=self.debug,
+        call_resolver=self._make_call_resolver(active_functions or set(), current_function),
+        effect_summary=self._current_effect_summary,
+        parameters=self._current_parameters,
+        resolve_callee_parameters=self._get_freshest_callee_parameters,
+        read_memory_value=self._read_memory_value,
+        image_base=self.program.getImageBase().getOffset(),
+        record_deferred_call=self._make_deferred_call_recorder(current_function),
+    )
+
+    path_condition_sets = all_path_conditions or []
+    if not path_condition_sets:
+        path_condition_sets = [path_conditions] if path_conditions else [[]]
+
+    expanded_values = []
+    for conds in path_condition_sets:
+        expanded_values.extend(
+            expander._expand_call_operation(
+                call_op,
+                conds,
+                depth=0,
+                output_size=0,
+            )
+        )
+
+    if not expanded_values:
+        return None
+
+    results = self._build_return_infos_from_expansions(
+        address,
+        expanded_values,
+        return_index,
+        site_metadata=site_metadata,
+    )
+    return results or None
+
+
+def _impl__is_semantically_lossless_effect_sensitive_rewrite(
+    self,
+    original: Optional[Expression],
+    rewritten: Optional[Expression],
+    conditions: List[Condition],
+    effect_summary: EffectSummary,
+) -> bool:
+    if original is None or rewritten is None:
+        return False
+    if not expression_contains_post_state_reads(rewritten):
+        return False
+    if not _expression_contains_observed_loads(original):
+        return False
+    rewritten_location = canonicalize_expr_read_location(
+        rewritten,
+        self._current_parameters,
+    )
+    if rewritten_location is not None:
+        existing_effect_carrier = promote_effect_value_match_to_post_state_read(
+            original,
+            rewritten_location,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+            symbolic_post_state=True,
+        )
+        if existing_effect_carrier is not None:
+            return False
+
+    comparison_targets: List[Expression] = [original]
+    if _expression_contains_observed_loads(original):
+        observed_post_state = promote_observed_loads_to_post_state_reads(
+            original,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+            symbolic_post_state=True,
+        )
+        if observed_post_state is not None:
+            comparison_targets.append(observed_post_state)
+            lowered_observed_post_state = lower_post_state_expression_for_smt(
+                observed_post_state,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if lowered_observed_post_state is not None:
+                comparison_targets.append(lowered_observed_post_state)
+        observed_rewritten = rewrite_observed_loads_from_effects(
+            original,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        if observed_rewritten is not None:
+            comparison_targets.append(observed_rewritten)
+
+    lowered_rewritten = lower_post_state_expression_for_smt(
+        rewritten,
+        conditions,
+        effect_summary.effects,
+        self._current_parameters,
+    )
+    lowered_rewritten = lowered_rewritten if lowered_rewritten is not None else rewritten
+    if expression_contains_post_state_reads(lowered_rewritten):
+        return False
+
+    for target in comparison_targets:
+        lowered_target = lower_post_state_expression_for_smt(
+            target,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        candidate = lowered_target if lowered_target is not None else target
+        if _expressions_equivalent_under_conditions(
+            lowered_rewritten,
+            candidate,
+            conditions,
+            self._current_parameters,
+        ):
+            return True
+    return False
+
+
+def _impl__expression_contains_deferred_call_value(self, expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return False
+    if getattr(expr, "expr_type", None) == ExpressionType.UNKNOWN:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if getattr(runtime_ref, "deferred_call_ref", None) is not None:
+            return True
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+        for condition, value in expr.value or []:
+            if condition is not None and self._expression_contains_deferred_call_value(condition.expression):
+                return True
+            if self._expression_contains_deferred_call_value(value):
+                return True
+        return False
+    for operand in getattr(expr, "operands", None) or ():
+        if self._expression_contains_deferred_call_value(operand):
+            return True
+    return False
+
+
+def _impl__clear_resolved_call_effect_blockers(self, analysis: Optional[FunctionReturnAnalysis]) -> None:
+    if analysis is None:
+        return
+    if getattr(analysis, "deferred_calls", None):
+        return
+    if any(
+        self._expression_contains_deferred_call_value(getattr(ret, "value", None))
+        or any(
+            self._expression_contains_deferred_call_value(getattr(cond, "expression", None))
+            for cond in (getattr(ret, "conditions", None) or [])
+        )
+        for ret in (getattr(analysis, "returns", None) or [])
+    ):
+        return
+    blocking_notes = {
+        "effect_call_argument_evidence",
+        "effect_call_argument_evidence_incomplete",
+    }
+    effect_summary = getattr(analysis, "effect_summary", None)
+    if effect_summary is not None and getattr(effect_summary, "call_argument_evidence", None):
+        return
+    if any(note in blocking_notes for note in getattr(analysis, "analysis_notes", []) or []):
+        analysis.analysis_notes = [
+            note
+            for note in (analysis.analysis_notes or [])
+            if note not in blocking_notes
+        ]
+        if "bounded_call_effect_resolved" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("bounded_call_effect_resolved")

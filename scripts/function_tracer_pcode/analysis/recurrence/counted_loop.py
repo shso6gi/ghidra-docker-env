@@ -1,4 +1,4 @@
-"""Stateless method implementations extracted from ``scripts.function_tracer_pcode.analysis.recurrence.summarizer``."""
+"""Counted-loop summaries: accumulators, induction matching and scalar tails."""
 
 from __future__ import annotations
 
@@ -33,6 +33,15 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_expression_signature,
     replace,
 )
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    Condition,
+    ConditionSimplifier,
+    CountedLoopAccumulator,
+    Expression,
+    PcodeOpRef,
+    ReturnInfo,
+)
+
 
 def _impl_try_summarize_pre_return_counted_scalar_loop(
     self,
@@ -54,6 +63,7 @@ def _impl_try_summarize_pre_return_counted_scalar_loop(
         analysis,
         pre_return_ops=return_ops,
     )
+
 
 def _impl__pre_return_counted_scalar_summary_is_cfg_safe(
     self,
@@ -106,6 +116,7 @@ def _impl__pre_return_counted_scalar_summary_is_cfg_safe(
         return False
     return True
 
+
 def _impl__count_counted_scalar_loop_models(self, high_function, analysis) -> int:
     if high_function is None:
         return 0
@@ -154,6 +165,7 @@ def _impl__count_counted_scalar_loop_models(self, high_function, analysis) -> in
                     return len(seen)
     return len(seen)
 
+
 def _impl__has_counted_scalar_loop_candidate(self, high_function) -> bool:
     if high_function is None:
         return False
@@ -166,6 +178,7 @@ def _impl__has_counted_scalar_loop_candidate(self, high_function) -> bool:
             return True
     return False
 
+
 def _impl__try_summarize_counted_scalar_loop(
     self,
     function,
@@ -177,6 +190,7 @@ def _impl__try_summarize_counted_scalar_loop(
     if not self._analysis_is_safe_for_counted_scalar_summary(analysis):
         return None
     return self._build_counted_scalar_loop_summary(function, high_function, analysis)
+
 
 def _impl__analysis_is_safe_for_counted_scalar_summary(self, analysis) -> bool:
     if analysis is None:
@@ -196,6 +210,7 @@ def _impl__analysis_is_safe_for_counted_scalar_summary(self, analysis) -> bool:
         self._debug("Declined counted scalar loop summary: control flow is incomplete")
         return False
     return True
+
 
 def _impl__build_counted_scalar_loop_summary(
     self,
@@ -465,6 +480,7 @@ def _impl__build_counted_scalar_loop_summary(
     )
     return summarized, "counted_scalar_loop_summary"
 
+
 def _impl__counted_loop_summary_source_key_from_parts(
     self,
     *,
@@ -512,6 +528,7 @@ def _impl__counted_loop_summary_source_key_from_parts(
         )
     except Exception:
         return None
+
 
 def _impl__counted_loop_summary_source_key_fallback(self, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
     if runtime_ref is None or type(runtime_ref).__name__ != "CountedLoopSummaryRef":
@@ -565,6 +582,7 @@ def _impl__counted_loop_summary_source_key_fallback(self, runtime_ref: Any) -> O
         loop_summary_key,
     )
 
+
 def _impl__build_counted_loop_summary_value(
     self,
     *,
@@ -599,6 +617,7 @@ def _impl__build_counted_loop_summary_value(
     if intrinsic is not None:
         return intrinsic
     return None
+
 
 def _impl__build_counted_loop_summary_intrinsic(
     self,
@@ -683,6 +702,7 @@ def _impl__build_counted_loop_summary_intrinsic(
     intrinsic.size = max(1, int(result_size or 0))
     return intrinsic
 
+
 def _impl__canonicalize_zero_prefix_counted_loop_value(
     self,
     value: Optional[Expression],
@@ -736,6 +756,7 @@ def _impl__canonicalize_zero_prefix_counted_loop_value(
     )
     return canonical
 
+
 def _impl__counted_loop_prefix_contributes_zero(
     self,
     stop: int,
@@ -755,6 +776,7 @@ def _impl__counted_loop_prefix_contributes_zero(
         if int(coeff) * index + int(bias) != 0:
             return False
     return True
+
 
 def _impl__canonicalize_peeled_counted_loop_value(
     self,
@@ -814,6 +836,7 @@ def _impl__canonicalize_peeled_counted_loop_value(
     )
     return canonical
 
+
 def _impl__looks_like_peeled_counted_loop_start(
     self,
     start_expr: Optional[Expression],
@@ -839,6 +862,7 @@ def _impl__looks_like_peeled_counted_loop_start(
         if self._expression_depends_on_signature(branch_value, limit_signature):
             saw_limit_dependent = True
     return saw_zero and saw_limit_dependent
+
 
 def _impl__derive_direct_counted_loop_conditions(
     self,
@@ -889,6 +913,7 @@ def _impl__derive_direct_counted_loop_conditions(
     if negated is None:
         return None
     return negated, common
+
 
 def _impl__extract_counted_scalar_loop_model(
     self,
@@ -962,6 +987,7 @@ def _impl__extract_counted_scalar_loop_model(
 
     return best_model
 
+
 def _impl__counted_loop_identity_match_key(
     self,
     left_induction: CountedLoopInduction,
@@ -1005,6 +1031,7 @@ def _impl__counted_loop_identity_match_key(
         "bv_modular",
     )
 
+
 def _impl__candidate_counted_loop_guards(
     self,
     header_block,
@@ -1032,6 +1059,7 @@ def _impl__candidate_counted_loop_guards(
         guards.append(candidate)
     return guards
 
+
 def _impl__induction_backedge_indices(
     self,
     induction: CountedLoopInduction,
@@ -1041,6 +1069,7 @@ def _impl__induction_backedge_indices(
         return indices
     return (int(getattr(induction, "backedge_index", 0)),)
 
+
 def _impl__accumulator_backedge_indices(
     self,
     accumulator: CountedLoopAccumulator,
@@ -1049,6 +1078,7 @@ def _impl__accumulator_backedge_indices(
     if indices:
         return indices
     return (int(getattr(accumulator, "backedge_index", 0)),)
+
 
 def _impl__match_counted_loop_induction(
     self,
@@ -1099,6 +1129,7 @@ def _impl__match_counted_loop_induction(
     )
     return None
 
+
 def _impl__match_counted_loop_guard(
     self,
     header_block,
@@ -1138,6 +1169,7 @@ def _impl__match_counted_loop_guard(
             entry_condition_expr=entry_condition_expr,
         )
     return None
+
 
 def _impl__match_latch_counted_loop_guard(
     self,
@@ -1198,6 +1230,7 @@ def _impl__match_latch_counted_loop_guard(
         entry_condition_expr=entry_condition_expr,
         latch_block=latch_block,
     )
+
 
 def _impl__match_counted_loop_accumulators(
     self,
@@ -1286,6 +1319,7 @@ def _impl__match_counted_loop_accumulators(
     candidates = self._assign_counted_loop_accumulator_binder_ordinals(candidates)
     return candidates
 
+
 def _impl__assign_counted_loop_accumulator_binder_ordinals(
     self,
     accumulators: Sequence[CountedLoopAccumulator],
@@ -1330,6 +1364,7 @@ def _impl__assign_counted_loop_accumulator_binder_ordinals(
         )
     return rebound
 
+
 def _impl__counted_loop_accumulator_priority(
     self,
     accumulator: CountedLoopAccumulator,
@@ -1343,6 +1378,7 @@ def _impl__counted_loop_accumulator_priority(
         init_const,
     )
 
+
 def _impl__counted_loop_accumulator_order_key(
     self,
     accumulator: CountedLoopAccumulator,
@@ -1355,6 +1391,7 @@ def _impl__counted_loop_accumulator_order_key(
         -int(priority[2]),
         repr(stable_key),
     )
+
 
 def _impl__counted_loop_accumulator_stable_key(
     self,
@@ -1371,6 +1408,7 @@ def _impl__counted_loop_accumulator_stable_key(
         member_keys,
         update_key,
     )
+
 
 def _impl__counted_loop_model_priority(
     self,
@@ -1393,6 +1431,7 @@ def _impl__counted_loop_model_priority(
         member_count,
         max_bias,
     )
+
 
 def _impl__extract_counted_loop_update_cases(
     self,
@@ -1505,6 +1544,7 @@ def _impl__extract_counted_loop_update_cases(
         )
     return cases
 
+
 def _impl__try_extract_counted_loop_update_cases_for_summary(
     self,
     accumulator: CountedLoopAccumulator,
@@ -1515,6 +1555,7 @@ def _impl__try_extract_counted_loop_update_cases_for_summary(
         return tuple(self._extract_counted_loop_update_cases(accumulator, induction, guard))
     except (AttributeError, TypeError, IndexError, RecursionError):
         return ()
+
 
 def _impl__build_counted_loop_case_refs(
     self,
@@ -1540,6 +1581,7 @@ def _impl__build_counted_loop_case_refs(
         )
     return tuple(refs)
 
+
 def _impl__is_counted_loop_bound_expr(self, expr: Optional[Expression]) -> bool:
     if expr is None or self._expression_is_unresolved(expr):
         return False
@@ -1560,6 +1602,7 @@ def _impl__is_counted_loop_bound_expr(self, expr: Optional[Expression]) -> bool:
         }:
             return False
     return True
+
 
 def _impl__validate_counted_loop_update_cases(
     self,
@@ -1653,6 +1696,7 @@ def _impl__validate_counted_loop_update_cases(
 
     return True
 
+
 def _impl__has_branch_accumulator_candidate(
     self,
     analysis,
@@ -1667,6 +1711,7 @@ def _impl__has_branch_accumulator_candidate(
     if not self._infer_pointer_parameter_name(analysis):
         return False
     return True
+
 
 def _impl__has_exact_accumulator_init_return_at_state_one(
     self,
@@ -1731,6 +1776,7 @@ def _impl__has_exact_accumulator_init_return_at_state_one(
     )
     return coverage_key is not None
 
+
 def _impl__build_state_decrement_accumulator_sum_value(
     self,
     *,
@@ -1779,6 +1825,7 @@ def _impl__build_state_decrement_accumulator_sum_value(
     if closed_form is None:
         return None
     return self._truncate_to_width(closed_form, result_size)
+
 
 def _impl__try_build_latch_exit_decrement_accumulator_sum_returns(
     self,
@@ -1874,6 +1921,7 @@ def _impl__try_build_latch_exit_decrement_accumulator_sum_returns(
         ),
     ]
 
+
 def _impl__build_peeled_decrement_accumulator_sum_value(
     self,
     state_init_expr: Expression,
@@ -1903,6 +1951,7 @@ def _impl__build_peeled_decrement_accumulator_sum_value(
     total = Expression.binary_op("INT_SUB", square_plus_state, half_low)
     total.size = state_size
     return self._canonicalize_expression(self._truncate_to_width(total, result_size))
+
 
 def _impl__find_state_loop_accumulator(
     self,
@@ -1993,6 +2042,7 @@ def _impl__find_state_loop_accumulator(
         phi_backedge_indices,
     )
 
+
 def _impl__state_loop_accumulator_delta(
     self,
     *,
@@ -2035,6 +2085,7 @@ def _impl__state_loop_accumulator_delta(
         return None
     return delta_exprs[0]
 
+
 def _impl__state_loop_accumulator_priority(
     self,
     phi_output,
@@ -2048,11 +2099,13 @@ def _impl__state_loop_accumulator_priority(
         max(1, int(getattr(phi_output, "getSize", lambda: 0)() or 0)),
     )
 
+
 def _impl__multiequal_input_is_accumulator_update(self, phi_op, input_varnode) -> bool:
     return self._same_varnode_identity(
         input_varnode,
         self._unique_multiequal_accumulator_update_input(phi_op),
     )
+
 
 def _impl__unique_multiequal_accumulator_update_input(self, phi_op):
     phi_output = getattr(phi_op, "getOutput", lambda: None)()
@@ -2083,6 +2136,7 @@ def _impl__unique_multiequal_accumulator_update_input(self, phi_op):
         ):
             return None
     return update_inputs[0][1]
+
 
 def _impl__multiequal_accumulator_update_rejection_reason(self, phi_op) -> str:
     phi_output = getattr(phi_op, "getOutput", lambda: None)()
@@ -2119,6 +2173,7 @@ def _impl__multiequal_accumulator_update_rejection_reason(self, phi_op) -> str:
         f"seed_entry={tuple(seed_entry)}"
     )
 
+
 def _impl__varnode_is_accumulator_update_for_phi(self, candidate, phi_output) -> bool:
     def_op = getattr(candidate, "getDef", lambda: None)()
     if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_ADD":
@@ -2133,6 +2188,7 @@ def _impl__varnode_is_accumulator_update_for_phi(self, candidate, phi_output) ->
         if self._same_varnode_value(candidate, phi_output):
             return True
     return False
+
 
 def _impl__varnode_aliases_accumulator_object(self, candidate, phi_output) -> bool:
     """Return True when a non-update PHI input is the accumulator object itself.
@@ -2170,6 +2226,7 @@ def _impl__varnode_aliases_accumulator_object(self, candidate, phi_output) -> bo
         if self._same_varnode_identity(candidate_rep, phi_rep):
             return True
     return False
+
 
 def _impl__match_accumulator_phi(
     self,
@@ -2323,6 +2380,7 @@ def _impl__match_accumulator_phi(
     )
     return proof
 
+
 def _impl__match_accumulator_phi_candidate(
     self,
     phi_op,
@@ -2404,6 +2462,7 @@ def _impl__match_accumulator_phi_candidate(
             )
     return None
 
+
 def _impl__accumulator_phi_candidates_can_group(
     self,
     base: ReadonlyAccumulatorPhiCandidate,
@@ -2432,3 +2491,204 @@ def _impl__accumulator_phi_candidates_can_group(
     return self._accumulator_load_group_signature(base.load_progressions) == self._accumulator_load_group_signature(
         sibling.load_progressions
     )
+
+
+def _impl__accumulator_load_group_signature(
+    self,
+    load_progressions: Sequence[Dict[str, object]],
+) -> Optional[Tuple[object, ...]]:
+    if not load_progressions:
+        return None
+    first = load_progressions[0]
+    induction_ref = first.get("induction_phi_ref")
+    return (
+        induction_ref.stable_key() if isinstance(induction_ref, PcodeOpRef) else None,
+        int(first.get("stride", 0) or 0),
+        int(first.get("start_index", 0) or 0),
+        int(first.get("index_step", 1) or 1),
+        int(first.get("index_scale", first.get("stride", 0)) or first.get("stride", 0) or 0),
+    )
+
+
+def _impl__choose_return_reaching_accumulator(
+    self,
+    candidates: Sequence[CountedLoopAccumulator],
+) -> CountedLoopAccumulator:
+    reaching = [
+        candidate for candidate in candidates
+        if self._varnode_reaches_return(candidate.phi_output)
+    ]
+    if reaching:
+        return reaching[0]
+    return candidates[0]
+
+
+def _impl__try_summarize_branch_accumulator_loop(
+    self,
+    analysis,
+) -> Optional[Tuple[List[ReturnInfo], str]]:
+    if analysis is None or not analysis.returns or len(analysis.parameters or []) < 3:
+        self._debug("Declined branch-accumulator summary: insufficient returns/parameters")
+        return None
+    effect_summary = getattr(analysis, "effect_summary", None)
+    if effect_summary is None:
+        self._debug("Declined branch-accumulator summary: no effect summary")
+        return None
+
+    loop_params = self._infer_loop_parameter_pair(analysis)
+    if loop_params is None:
+        self._debug("Declined branch-accumulator summary: could not infer loop parameter pair")
+        return None
+    start_name, limit_name = loop_params
+
+    pointer_param = self._infer_pointer_parameter_name(analysis)
+    if not pointer_param:
+        self._debug("Declined branch-accumulator summary: could not infer pointer parameter")
+        return None
+
+    working_returns = list(analysis.returns)
+    null_case = self._find_pointer_null_case(working_returns, pointer_param)
+    require_pointer_nonnull = null_case is not None
+    base_case = self._find_no_loop_base_case(
+        working_returns,
+        pointer_param,
+        start_name,
+        limit_name,
+        require_pointer_nonnull=require_pointer_nonnull,
+    )
+    if base_case is None:
+        self._debug(
+            "Declined branch-accumulator summary: could not identify no-loop base case "
+            f"(pointer={pointer_param}, start={start_name}, limit={limit_name})"
+        )
+        return None
+
+    step_cases = self._find_one_step_cases(
+        working_returns,
+        pointer_param,
+        start_name,
+        limit_name,
+        require_pointer_nonnull=require_pointer_nonnull,
+    )
+    if step_cases is None:
+        synthesized = self._synthesize_one_step_cases_from_effects(
+            analysis,
+            base_case,
+            pointer_param,
+            start_name,
+            limit_name,
+            require_pointer_nonnull=require_pointer_nonnull,
+        )
+        if not synthesized:
+            self._debug("Declined branch-accumulator summary: could not synthesize one-step cases from effects")
+            return None
+        working_returns.extend(synthesized)
+        step_cases = self._find_one_step_cases(
+            working_returns,
+            pointer_param,
+            start_name,
+            limit_name,
+            require_pointer_nonnull=require_pointer_nonnull,
+        )
+        if step_cases is None:
+            self._debug("Declined branch-accumulator summary: synthesized one-step cases still did not match")
+            return None
+
+    even_case, odd_case = step_cases
+    base_expr = base_case.value
+    even_delta = self._extract_additive_delta(even_case.value, base_expr, analysis.parameters or [])
+    odd_delta = self._extract_additive_delta(odd_case.value, base_expr, analysis.parameters or [])
+    if even_delta is None or odd_delta is None:
+        self._debug("Declined branch-accumulator summary: could not isolate additive deltas")
+        return None
+
+    even_affine = self._extract_affine_term(even_delta, start_name)
+    odd_affine = self._extract_affine_term(odd_delta, start_name)
+    if even_affine is None or odd_affine is None:
+        self._debug("Declined branch-accumulator summary: one-step deltas are not affine in the loop counter")
+        return None
+
+    loop_even_value = self._build_parity_split_loop_value(
+        base_expr,
+        start_name,
+        limit_name,
+        even_affine,
+        odd_affine,
+        start_is_even=True,
+    )
+    loop_odd_value = self._build_parity_split_loop_value(
+        base_expr,
+        start_name,
+        limit_name,
+        even_affine,
+        odd_affine,
+        start_is_even=False,
+    )
+    if loop_even_value is None or loop_odd_value is None:
+        self._debug("Declined branch-accumulator summary: failed to build closed-form loop values")
+        return None
+
+    loop_conditions_common = [
+        self._pointer_nonnull_condition(pointer_param, analysis),
+        Condition(
+            Expression.binary_op(
+                "INT_SLESS",
+                self._param_expr(analysis, start_name),
+                self._param_expr(analysis, limit_name),
+            ),
+            False,
+        ),
+    ]
+    even_start_cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op(
+                "INT_AND",
+                self._param_expr(analysis, start_name),
+                Expression.constant(1, self._param_expr(analysis, start_name).size or 4),
+            ),
+            Expression.constant(0, self._param_expr(analysis, start_name).size or 4),
+        ),
+        False,
+    )
+    odd_start_cond = even_start_cond.negate()
+
+    summarized: List[ReturnInfo] = []
+    if null_case is not None:
+        summarized.append(null_case)
+    summarized.append(base_case)
+    summarized.append(
+        ReturnInfo(
+            address=base_case.address,
+            value=loop_even_value,
+            conditions=ConditionSimplifier.simplify_conditions_object_centric(loop_conditions_common + [even_start_cond]),
+            branch_index=10_100,
+            pcode_identity=base_case.pcode_identity,
+            pcode_order=base_case.pcode_order,
+            pcode_time=base_case.pcode_time,
+            pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(
+                getattr(base_case, "return_value_pcode_op_refs", ()) or ()
+            ),
+        )
+    )
+    summarized.append(
+        ReturnInfo(
+            address=base_case.address,
+            value=loop_odd_value,
+            conditions=ConditionSimplifier.simplify_conditions_object_centric(loop_conditions_common + [odd_start_cond]),
+            branch_index=10_101,
+            pcode_identity=base_case.pcode_identity,
+            pcode_order=base_case.pcode_order,
+            pcode_time=base_case.pcode_time,
+            pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(
+                getattr(base_case, "return_value_pcode_op_refs", ()) or ()
+            ),
+        )
+    )
+    self._debug(
+        "Recovered counted loop branch-accumulator summary "
+        f"(start={start_name}, limit={limit_name}, even={even_affine}, odd={odd_affine})"
+    )
+    return summarized, "counted_loop_branch_accumulator_summary"

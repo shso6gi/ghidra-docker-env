@@ -1,4 +1,4 @@
-"""Stateless effect-summary implementations."""
+"""Call-argument evidence: parameter binding, storage descriptors and width validation."""
 
 from __future__ import annotations
 
@@ -139,6 +139,33 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     canonicalize_location,
     canonicalize_param_location,
 )
+from typing import Dict, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    CanonicalLocation,
+    Condition,
+    Expression,
+    ExpressionType,
+    LocationBaseRef,
+    PostStateReadRef,
+    StorageInfo,
+)
+from scripts.function_tracer_pcode.analysis.effects._api import (
+    _collect_parameter_replacements_from_conditions,
+    _expression_contains_parameter_identity,
+    _expressions_equivalent,
+    _normalize_parameter_index,
+    _parameter_base_ref,
+    _parameter_expression_from_descriptor,
+    _parameter_identity_key_from_base_ref,
+    _parameter_identity_keys_from_expression,
+    _recover_parameter_expression_from_varnode,
+    _resolve_parameter_descriptor,
+    _resolve_parameter_descriptor_from_identity,
+    _stack_location_key,
+    _try_get_order_key,
+    substitute_expression,
+)
+
 
 def _impl__collect_named_parameter_names(parameters: Sequence[Dict]) -> List[str]:
     return [
@@ -147,6 +174,7 @@ def _impl__collect_named_parameter_names(parameters: Sequence[Dict]) -> List[str
         for name in [param.get("name")]
         if isinstance(name, str) and name
     ]
+
 
 def _impl__storage_base_ref(
     storage: Optional[StorageInfo],
@@ -165,6 +193,7 @@ def _impl__storage_base_ref(
         storage_identity_key=storage.storage_identity_key(),
         display_hint=f"{space_name}@{int(storage.offset)}:{max(1, int(storage.size or 0))}",
     )
+
 
 def _impl__record_call_argument_evidence(
     evidence: Dict[Tuple[object, ...], CallArgumentEvidence],
@@ -277,6 +306,7 @@ def _impl__record_call_argument_evidence(
             return
     evidence[key] = _merge_call_argument_evidence(previous, new_evidence)
 
+
 def _impl__has_target_specific_call_argument_evidence(
     evidence: Mapping[Tuple[object, ...], CallArgumentEvidence],
     pcode_key: Tuple[object, ...],
@@ -294,6 +324,7 @@ def _impl__has_target_specific_call_argument_evidence(
             return True
     return False
 
+
 def _impl__call_argument_evidence_storage_key(
     pcode_key: Optional[Tuple[object, ...]],
     target_ref: Optional[CallTargetRef],
@@ -305,6 +336,7 @@ def _impl__call_argument_evidence_storage_key(
     except Exception:
         return None
     return ("call_argument_evidence", pcode_key, ("target", target_key))
+
 
 def _impl__merge_call_argument_evidence(
     previous: CallArgumentEvidence,
@@ -360,6 +392,7 @@ def _impl__merge_call_argument_evidence(
         reason=current.reason or previous.reason or "argument_evidence_path_conflict",
     )
 
+
 def _impl__preserve_complete_call_argument_evidence(
     previous: CallArgumentEvidence,
     current: CallArgumentEvidence,
@@ -387,6 +420,7 @@ def _impl__preserve_complete_call_argument_evidence(
         reason=None,
     )
 
+
 def _impl__merge_recoverable_partial_call_argument_evidence(
     previous: CallArgumentEvidence,
     current: CallArgumentEvidence,
@@ -410,6 +444,7 @@ def _impl__merge_recoverable_partial_call_argument_evidence(
         reason=kept.reason or "argument_recovery_recoverable_partial",
     )
 
+
 def _impl__call_argument_prefix_compatible(
     prefix: Sequence[Expression],
     full: Sequence[Expression],
@@ -421,6 +456,7 @@ def _impl__call_argument_prefix_compatible(
         for left, right in zip(prefix or (), full or ())
     )
 
+
 def _impl__call_argument_evidence_incomplete_reason(
     target_is_resolved: bool,
     identities_are_proven: bool,
@@ -431,6 +467,7 @@ def _impl__call_argument_evidence_incomplete_reason(
         return "callee_parameter_identity_unproven"
     return "argument_recovery_incomplete"
 
+
 def _impl__normalize_call_argument_recovery_status(status: Optional[str]) -> str:
     if status in {
         CallArgumentEvidence.RECOVERY_COMPLETE,
@@ -440,11 +477,13 @@ def _impl__normalize_call_argument_recovery_status(status: Optional[str]) -> str
         return str(status)
     return CallArgumentEvidence.RECOVERY_COMPLETE
 
+
 def _impl__call_argument_recovery_is_complete(
     callee_parameters: Sequence[Dict],
     args: Sequence[Expression],
 ) -> bool:
     return _call_argument_recovery_status(callee_parameters, args) == CallArgumentEvidence.RECOVERY_COMPLETE
+
 
 def _impl__call_argument_recovery_status(
     callee_parameters: Sequence[Dict],
@@ -458,6 +497,7 @@ def _impl__call_argument_recovery_status(
     if recovered_count > 0:
         return CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
     return CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
 
 def _impl__call_arguments_may_expose_parameter_memory(
     args: Sequence[Expression],
@@ -476,6 +516,7 @@ def _impl__call_arguments_may_expose_parameter_memory(
         )
         for index, arg in enumerate(args or ())
     )
+
 
 def _impl__call_argument_may_expose_parameter_memory(
     expr: Optional[Expression],
@@ -502,6 +543,7 @@ def _impl__call_argument_may_expose_parameter_memory(
         return False
     return False
 
+
 def _impl__expression_may_be_parameter_memory_address(
     expr: Optional[Expression],
     parameters: Sequence[Dict],
@@ -527,6 +569,7 @@ def _impl__expression_may_be_parameter_memory_address(
             return _parameter_descriptor_may_expose_parameter_memory(param)
     return False
 
+
 def _impl__parameter_descriptor_from_expression(expr: Optional[Expression]) -> Dict:
     if expr is None:
         return {}
@@ -538,6 +581,7 @@ def _impl__parameter_descriptor_from_expression(expr: Optional[Expression]) -> D
         "data_type_obj": getattr(expr, "data_type_obj", None),
         "storage": getattr(expr, "storage_info", None),
     }
+
 
 def _impl__infer_call_argument_sources(
     args: Sequence[Expression],
@@ -552,6 +596,7 @@ def _impl__infer_call_argument_sources(
         else:
             sources.append("reaching_def")
     return tuple(sources)
+
 
 def _impl__recover_call_argument_expressions(
     call_op,
@@ -616,6 +661,7 @@ def _impl__recover_call_argument_expressions(
             recovered_args.append(explicit)
     return recovered_args
 
+
 def _impl__enumerate_call_argument_variants(
     args: Sequence[Expression],
     *,
@@ -650,6 +696,7 @@ def _impl__enumerate_call_argument_variants(
         if len(combined) >= limit:
             break
     return combined or [([], list(args))]
+
 
 def _impl__select_aligned_explicit_call_arguments(
     call_op,
@@ -763,6 +810,7 @@ def _impl__select_aligned_explicit_call_arguments(
         selected.append(explicit[matches[0]])
     return selected
 
+
 def _impl__select_explicit_call_arguments_by_semantic_window(
     callee_parameters: Sequence[Dict],
     explicit_args: Sequence[Expression],
@@ -787,6 +835,7 @@ def _impl__select_explicit_call_arguments_by_semantic_window(
         return None
     start = matching_windows[0]
     return explicit[start:start + callee_count]
+
 
 def _impl__explicit_call_argument_window_matches_parameter_identity(
     explicit_args: Sequence[Expression],
@@ -816,6 +865,7 @@ def _impl__explicit_call_argument_window_matches_parameter_identity(
         return False
     return strong_identity_matches > 0
 
+
 def _impl__explicit_argument_matches_callee_parameter_identity(
     expr: Optional[Expression],
     caller_parameters: Sequence[Dict],
@@ -831,6 +881,7 @@ def _impl__explicit_argument_matches_callee_parameter_identity(
     if caller_storage is None or callee_storage is None:
         return False
     return _storage_matches_parameter(caller_storage, callee_storage)
+
 
 def _impl__select_explicit_call_arguments_by_fixed_prefix(
     call_op,
@@ -873,6 +924,7 @@ def _impl__select_explicit_call_arguments_by_fixed_prefix(
             continue
         return None
     return selected
+
 
 def _impl__select_explicit_call_arguments_by_input_storage(
     call_op,
@@ -922,6 +974,7 @@ def _impl__select_explicit_call_arguments_by_input_storage(
         used_indexes.add(matches[0])
         selected.append(explicit_args[matches[0]])
     return selected
+
 
 def _impl__select_explicit_call_arguments_by_storage_window(
     call_op,
@@ -975,6 +1028,7 @@ def _impl__select_explicit_call_arguments_by_storage_window(
     start = matching_windows[0]
     return list(explicit_args[start:start + callee_count])
 
+
 def _impl__matching_explicit_call_argument_storage_windows(
     input_storages: Sequence[Optional[StorageInfo]],
     explicit_args: Sequence[Expression],
@@ -992,6 +1046,7 @@ def _impl__matching_explicit_call_argument_storage_windows(
         ):
             matching_windows.append(start)
     return matching_windows
+
 
 def _impl__explicit_call_argument_window_matches_storage(
     input_storages: Sequence[Optional[StorageInfo]],
@@ -1015,6 +1070,7 @@ def _impl__explicit_call_argument_window_matches_storage(
             return False
     return True
 
+
 def _impl__call_input_storage_is_constant_argument(
     input_storage: Optional[StorageInfo],
     explicit_arg: Optional[Expression],
@@ -1027,6 +1083,7 @@ def _impl__call_input_storage_is_constant_argument(
         not bool(getattr(input_storage, "is_register", False))
         and str(getattr(input_storage, "space_name", "") or "").lower() == "const"
     )
+
 
 def _impl__select_explicit_call_arguments_by_dependency_tail(
     call_op,
@@ -1082,6 +1139,7 @@ def _impl__select_explicit_call_arguments_by_dependency_tail(
             return None
     return selected_tail
 
+
 def _impl__call_input_storages_for_explicit_args(
     call_op,
     tracer,
@@ -1110,6 +1168,7 @@ def _impl__call_input_storages_for_explicit_args(
             input_storages.append(None)
     return input_storages
 
+
 def _impl__call_inputs_have_object_storage(
     call_op,
     tracer,
@@ -1122,6 +1181,7 @@ def _impl__call_inputs_have_object_storage(
         if storage is not None:
             return True
     return False
+
 
 def _impl__has_ambiguous_storage_windows(
     call_op,
@@ -1150,6 +1210,7 @@ def _impl__has_ambiguous_storage_windows(
         > 1
     )
 
+
 def _impl__recover_preferred_call_argument_expression(
     call_op,
     tracer,
@@ -1171,6 +1232,7 @@ def _impl__recover_preferred_call_argument_expression(
     if preferred is None:
         return None
     return _normalize_call_argument_expression(preferred, index, caller_parameters)
+
 
 def _impl__should_prefer_explicit_call_argument(
     expr: Optional[Expression],
@@ -1194,6 +1256,7 @@ def _impl__should_prefer_explicit_call_argument(
         effective_size = 8
     return canonicalize_location(expr, caller_parameters, size=effective_size) is not None
 
+
 def _impl__parameter_descriptor_looks_pointer(param: Optional[Dict]) -> bool:
     if not param:
         return False
@@ -1207,6 +1270,7 @@ def _impl__parameter_descriptor_looks_pointer(param: Optional[Dict]) -> bool:
         )
     )
 
+
 def _impl__parameter_descriptor_may_expose_parameter_memory(param: Optional[Dict]) -> bool:
     if not param:
         return True
@@ -1216,6 +1280,7 @@ def _impl__parameter_descriptor_may_expose_parameter_memory(param: Optional[Dict
         return False
     return _parameter_descriptor_is_address_sized_unknown(param)
 
+
 def _impl__parameter_descriptor_is_proven_non_pointer_scalar(param: Optional[Dict]) -> bool:
     if not param or _parameter_descriptor_looks_pointer(param):
         return False
@@ -1224,6 +1289,7 @@ def _impl__parameter_descriptor_is_proven_non_pointer_scalar(param: Optional[Dic
     if data_type_obj is not None and is_integral_data_type(data_type_obj, type_name):
         return True
     return _data_type_name_is_explicit_scalar(type_name)
+
 
 def _impl__parameter_descriptor_is_address_sized_unknown(param: Optional[Dict]) -> bool:
     if not param:
@@ -1241,6 +1307,7 @@ def _impl__parameter_descriptor_is_address_sized_unknown(param: Optional[Dict]) 
     if storage_size <= 0:
         return True
     return storage_size in {4, 8}
+
 
 def _impl__parameter_descriptor_storage_size_bytes(param: Dict) -> int:
     try:
@@ -1267,6 +1334,7 @@ def _impl__parameter_descriptor_storage_size_bytes(param: Dict) -> int:
     except Exception:
         return 0
 
+
 def _impl__parameter_descriptor_type_name(param: Optional[Dict]) -> Optional[str]:
     if not param:
         return None
@@ -1275,6 +1343,7 @@ def _impl__parameter_descriptor_type_name(param: Optional[Dict]) -> Optional[str
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
 
 def _impl__call_argument_semantic_rank(
     expr: Optional[Expression],
@@ -1314,6 +1383,7 @@ def _impl__call_argument_semantic_rank(
 
     return 0
 
+
 def _impl__resolve_call_argument_expression(
     varnode,
     tracer,
@@ -1351,6 +1421,7 @@ def _impl__resolve_call_argument_expression(
     if recovered is not None:
         return recovered
     return expr
+
 
 def _impl__recover_call_argument_candidate_from_op(
     op,
@@ -1416,6 +1487,7 @@ def _impl__recover_call_argument_candidate_from_op(
 
     return None
 
+
 def _impl__select_best_storage_candidate(
     ops: Sequence[object],
     target_storage: StorageInfo,
@@ -1463,6 +1535,7 @@ def _impl__select_best_storage_candidate(
             best_semantic_rank = semantic_rank
 
     return best_candidate
+
 
 def _impl__recover_call_argument_from_storage(
     call_op,
@@ -1550,6 +1623,7 @@ def _impl__recover_call_argument_from_storage(
     )
     return result
 
+
 def _impl__resolve_live_in_parameter_descriptor_for_call_storage(
     caller_parameters: Sequence[Dict],
     target_storage: StorageInfo,
@@ -1586,6 +1660,7 @@ def _impl__resolve_live_in_parameter_descriptor_for_call_storage(
 
     return matches[0] if len(matches) == 1 else None
 
+
 def _impl__parameter_semantic_size_bytes(param: Optional[Dict]) -> Optional[int]:
     if not isinstance(param, dict):
         return None
@@ -1601,6 +1676,7 @@ def _impl__parameter_semantic_size_bytes(param: Optional[Dict]) -> Optional[int]
     except Exception:
         size = 0
     return size if size > 0 else None
+
 
 def _impl__parameter_declared_semantic_size_bytes(param: Optional[Dict]) -> Optional[int]:
     if not isinstance(param, dict) or _parameter_type_is_unknown(param):
@@ -1621,6 +1697,7 @@ def _impl__parameter_declared_semantic_size_bytes(param: Optional[Dict]) -> Opti
             declared_size = 0
     return declared_size if declared_size > 0 else None
 
+
 def _impl__parameter_storage_covers_required_width(
     parameter: Dict,
     required_bits: int,
@@ -1632,6 +1709,7 @@ def _impl__parameter_storage_covers_required_width(
         return False
     return int(getattr(parameter_storage, "size_bits", 0) or 0) >= required_bits
 
+
 def _impl__parameter_type_is_unknown(param: Optional[Dict]) -> bool:
     if not isinstance(param, dict):
         return True
@@ -1642,19 +1720,23 @@ def _impl__parameter_type_is_unknown(param: Optional[Dict]) -> bool:
     normalized = str(type_name or "").strip().lower()
     return not normalized or normalized.startswith("undefined")
 
+
 def _impl__call_argument_width_evidence(expr: Optional[Expression]) -> Optional[CallArgumentWidthEvidence]:
     evidence = getattr(expr, "call_argument_width_evidence", None)
     return evidence if isinstance(evidence, CallArgumentWidthEvidence) else None
 
+
 def _impl__call_argument_needs_partial_width_validation(expr: Optional[Expression]) -> bool:
     evidence = _call_argument_width_evidence(expr)
     return bool(evidence is not None and evidence.is_partial())
+
 
 def _impl__call_argument_available_bits(expr: Optional[Expression]) -> int:
     evidence = _call_argument_width_evidence(expr)
     if evidence is not None and int(evidence.source_bits or 0) > 0:
         return int(evidence.source_bits)
     return _expression_bit_width(expr)
+
 
 def _impl__call_arguments_width_safe_for_effect_summary(
     effect_summary: Optional[EffectSummary],
@@ -1688,6 +1770,7 @@ def _impl__call_arguments_width_safe_for_effect_summary(
                 ):
                     return False
     return True
+
 
 def _impl__call_arguments_width_safe_for_callee_analysis(
     callee_analysis,
@@ -1724,6 +1807,7 @@ def _impl__call_arguments_width_safe_for_callee_analysis(
         ):
             return False
     return True
+
 
 def _impl__expression_uses_parameter_beyond_width(
     expr: Optional[Expression],
@@ -1770,6 +1854,7 @@ def _impl__expression_uses_parameter_beyond_width(
             return True
     return False
 
+
 def _impl__expression_directly_matches_parameter(
     expr: Optional[Expression],
     callee_param: Dict,
@@ -1783,6 +1868,7 @@ def _impl__expression_directly_matches_parameter(
         )
     )
 
+
 def _impl__location_uses_parameter(
     location: Optional[CanonicalLocation],
     callee_param: Dict,
@@ -1790,6 +1876,7 @@ def _impl__location_uses_parameter(
     if location is None:
         return False
     return _parameter_base_ref_matches_descriptor(getattr(location, "base_ref", None), callee_param)
+
 
 def _impl__register_storage_contains(container: StorageInfo, fragment: StorageInfo) -> bool:
     if (
@@ -1808,6 +1895,7 @@ def _impl__register_storage_contains(container: StorageInfo, fragment: StorageIn
     if container_high <= container_low or fragment_high <= fragment_low:
         return False
     return container_low <= fragment_low and fragment_high <= container_high
+
 
 def _impl__path_writes_storage(
     ops: Sequence[object],
@@ -1831,8 +1919,10 @@ def _impl__path_writes_storage(
                 return True
     return False
 
+
 def _impl__varnode_matches_storage(varnode, target_storage: StorageInfo, tracer) -> bool:
     return _varnode_storage_match_rank(varnode, target_storage, tracer) > 0
+
 
 def _impl__varnode_storage_match_rank(varnode, target_storage: StorageInfo, tracer) -> int:
     varnode_storage = tracer._get_storage_info_from_varnode(varnode)
@@ -1841,6 +1931,7 @@ def _impl__varnode_storage_match_rank(varnode, target_storage: StorageInfo, trac
     if target_storage.is_register:
         return 0
     return 3 if _stack_varnode_matches_storage(varnode, target_storage) else 0
+
 
 def _impl__stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool:
     if varnode is None:
@@ -1861,8 +1952,10 @@ def _impl__stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -
     except Exception:
         return False
 
+
 def _impl__storage_infos_match(left: StorageInfo, right: StorageInfo) -> bool:
     return _storage_match_rank(left, right) > 0
+
 
 def _impl__storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
     if left.is_register or right.is_register:
@@ -1887,6 +1980,7 @@ def _impl__storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
         and left.size == right.size
     ) else 0
 
+
 def _impl__normalize_call_argument_expression(
     expr: Expression,
     arg_index: int,
@@ -1905,6 +1999,7 @@ def _impl__normalize_call_argument_expression(
         return expr
     return expr
 
+
 def _impl__expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequence[Dict]) -> bool:
     if expr is None:
         return False
@@ -1919,6 +2014,7 @@ def _impl__expression_maps_to_parameter(expr: Optional[Expression], parameters: 
         size = 8
     return canonicalize_param_location(expr, parameters, size=size) is not None
 
+
 def _impl__normalize_parameter_index(value: Optional[object]) -> Optional[int]:
     try:
         if value is None:
@@ -1928,11 +2024,13 @@ def _impl__normalize_parameter_index(value: Optional[object]) -> Optional[int]:
         return None
     return normalized if normalized >= 0 else None
 
+
 def _impl__storage_identity_key(storage: Optional[StorageInfo]) -> Optional[Tuple[object, ...]]:
     storage = _coerce_storage_info(storage)
     if storage is None:
         return None
     return storage.storage_identity_key()
+
 
 def _impl__parameter_identity_key_from_base_ref(
     base_ref: Optional[LocationBaseRef],
@@ -1976,6 +2074,7 @@ def _impl__parameter_identity_key_from_base_ref(
         )
     return ("parameter", int(base_ref.parameter_index))
 
+
 def _impl__parameter_identity_keys_from_descriptor(param: Optional[Dict]) -> Set[Tuple[object, ...]]:
     if not param:
         return set()
@@ -1991,6 +2090,7 @@ def _impl__parameter_identity_keys_from_descriptor(param: Optional[Dict]) -> Set
     if storage_key is not None:
         keys.add(storage_key)
     return keys
+
 
 def _impl__parameter_identity_keys_from_expression(
     expr: Optional[Expression],
@@ -2038,6 +2138,7 @@ def _impl__parameter_identity_keys_from_expression(
         keys.update(_parameter_identity_keys_from_descriptor(descriptor))
     return keys
 
+
 def _impl__parameter_descriptors_share_identity(left: Optional[Dict], right: Optional[Dict]) -> bool:
     if not left or not right:
         return False
@@ -2046,6 +2147,7 @@ def _impl__parameter_descriptors_share_identity(left: Optional[Dict], right: Opt
             _parameter_identity_keys_from_descriptor(right)
         )
     )
+
 
 def _impl__callee_parameter_identity_keys(
     param: object,
@@ -2058,6 +2160,7 @@ def _impl__callee_parameter_identity_keys(
     if isinstance(param, dict):
         keys.update(_parameter_identity_keys_from_descriptor(param))
     return keys
+
 
 def _impl__parameter_base_ref_matches_descriptor(
     base_ref: Optional[LocationBaseRef],
@@ -2074,6 +2177,7 @@ def _impl__parameter_base_ref_matches_descriptor(
         if base_storage is not None and param_storage is not None:
             return _storage_matches_parameter(base_storage, param_storage)
     return False
+
 
 def _impl__storage_info_from_base_ref(base_ref: Optional[LocationBaseRef]) -> Optional[StorageInfo]:
     if base_ref is None or not base_ref.is_storage():
@@ -2101,6 +2205,7 @@ def _impl__storage_info_from_base_ref(base_ref: Optional[LocationBaseRef]) -> Op
         base_register_size=size if is_register else 0,
         base_register_size_bits=(size * 8) if is_register else 0,
     )
+
 
 def _impl__storage_info_from_identity_key(identity_key: Tuple[object, ...]) -> Optional[StorageInfo]:
     try:
@@ -2139,6 +2244,7 @@ def _impl__storage_info_from_identity_key(identity_key: Tuple[object, ...]) -> O
         return None
     return None
 
+
 def _impl__coerce_callee_parameter_ref(param: object, index: int) -> Optional[LocationBaseRef]:
     if isinstance(param, LocationBaseRef) and param.is_storage():
         return param
@@ -2167,6 +2273,7 @@ def _impl__coerce_callee_parameter_ref(param: object, index: int) -> Optional[Lo
         return None
     return None
 
+
 def _impl__parameter_refs_from_descriptors(
     parameters: Sequence[Dict],
 ) -> List[LocationBaseRef]:
@@ -2177,8 +2284,10 @@ def _impl__parameter_refs_from_descriptors(
             refs.append(ref)
     return refs
 
+
 def _impl__coerce_callee_parameter_refs(params: Sequence[object]) -> List[Optional[LocationBaseRef]]:
     return [_coerce_callee_parameter_ref(param, index) for index, param in enumerate(params)]
+
 
 def _impl__coerce_argument_to_callee_parameter(
     arg: Optional[Expression],
@@ -2242,6 +2351,7 @@ def _impl__coerce_argument_to_callee_parameter(
     widened.size = target_size
     return widened
 
+
 def _impl__build_parameter_replacements(
     callee_params: Sequence[object],
     args: Sequence[Expression],
@@ -2265,6 +2375,7 @@ def _impl__build_parameter_replacements(
                 if param_index is not None:
                     replacements.setdefault(("parameter", param_index), coerced_arg)
     return replacements
+
 
 def _impl__parameter_base_ref(
     *,
@@ -2295,6 +2406,7 @@ def _impl__parameter_base_ref(
         display_hint=normalized_name,
     )
 
+
 def _impl__bind_location_to_parameter_refs(
     location: CanonicalLocation,
     parameter_refs: Sequence[LocationBaseRef],
@@ -2306,6 +2418,7 @@ def _impl__bind_location_to_parameter_refs(
         return location
     return location
 
+
 def _impl__bind_location_to_parameter_identity(
     location: CanonicalLocation,
     parameters: Sequence[Dict],
@@ -2314,6 +2427,7 @@ def _impl__bind_location_to_parameter_identity(
         location,
         _parameter_refs_from_descriptors(parameters),
     )
+
 
 def _impl__normalize_effect_locations_for_parameters(
     effects: Sequence[StoreEffect],
@@ -2331,6 +2445,7 @@ def _impl__normalize_effect_locations_for_parameters(
         for effect in (effects or [])
     ]
 
+
 def _impl__parameter_base_ref_from_expression(expr: Optional[Expression]) -> Optional[LocationBaseRef]:
     if expr is None:
         return None
@@ -2346,6 +2461,7 @@ def _impl__parameter_base_ref_from_expression(expr: Optional[Expression]) -> Opt
     if expr.expr_type == ExpressionType.PARAMETER:
         return _parameter_base_ref(name=expr.name, index=expr.value)
     return None
+
 
 def _impl__resolve_parameter_descriptor_from_identity(
     parameters: Sequence[Dict],
@@ -2387,6 +2503,7 @@ def _impl__resolve_parameter_descriptor_from_identity(
         return None
     return best_param
 
+
 def _impl__resolve_parameter_descriptor(
     expr: Optional[Expression],
     parameters: Sequence[Dict],
@@ -2399,6 +2516,7 @@ def _impl__resolve_parameter_descriptor(
         parameter_index=getattr(expr, "value", None) if expr.expr_type == ExpressionType.PARAMETER else None,
         storage_info=_coerce_storage_info(getattr(expr, "storage_info", None)),
     )
+
 
 def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int] = None) -> Optional[Expression]:
     name = param.get("name")
@@ -2427,6 +2545,7 @@ def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int]
             owner_entry_offset=param.get("owner_entry_offset"),
         ),
     )
+
 
 def _impl__recover_parameter_expression_from_varnode(
     varnode,
@@ -2498,3 +2617,297 @@ def _impl__recover_parameter_expression_from_varnode(
             return recovered
 
     return None
+
+
+def _impl__parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dict]) -> Optional[Expression]:
+    try:
+        high_var = varnode.getHigh()
+    except Exception:
+        high_var = None
+    try:
+        def_op = varnode.getDef()
+    except Exception:
+        def_op = None
+
+    storage_info = tracer._get_storage_info_from_varnode(varnode)
+
+    # Defined varnodes can reuse a parameter-like HighSymbol after register allocation.
+    # Recovering passthrough parameters is handled by the recursive caller, so avoid
+    # directly relabeling call-defined temporaries as live-in parameters here.
+    if def_op is not None:
+        return None
+
+    if high_var is not None:
+        symbol = high_var.getSymbol()
+        if symbol is not None:
+            try:
+                symbol_name = symbol.getName()
+            except Exception:
+                symbol_name = None
+            try:
+                symbol_index = symbol.getCategoryIndex() if symbol.isParameter() else None
+            except Exception:
+                symbol_index = None
+            if symbol_index is None:
+                try:
+                    symbol_index = high_var.getSlot()
+                except Exception:
+                    symbol_index = None
+            descriptor = _resolve_parameter_descriptor_from_identity(
+                parameters,
+                parameter_ref=_parameter_base_ref(name=symbol_name, index=symbol_index),
+                parameter_index=symbol_index,
+                storage_info=storage_info,
+            )
+            if descriptor is not None:
+                return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
+
+    probe = Expression.variable(
+        getattr(high_var, "getName", lambda: None)() or f"var_{id(varnode):x}",
+        size=varnode.getSize(),
+        storage_info=storage_info,
+    )
+    descriptor = _resolve_parameter_descriptor(probe, parameters)
+    if descriptor is None:
+        return None
+    return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
+
+
+def _impl__recover_parameter_from_stack_load(
+    load_op,
+    tracer,
+    parameters: Sequence[Dict],
+    depth: int,
+    seen: Set[int],
+) -> Optional[Expression]:
+    location = _stack_location_key(load_op.getInput(1), size=load_op.getOutput().getSize() if load_op.getOutput() else 0)
+    if location is None:
+        return None
+
+    load_order = _try_get_order_key(load_op)
+    if load_order is None:
+        return None
+    best_candidate = None
+    best_order = None
+    for op in tracer.get_all_pcode_ops():
+        op_order = _try_get_order_key(op)
+        if op_order is None or op_order >= load_order:
+            continue
+
+        output = op.getOutput()
+        if output is not None:
+            output_location = _stack_location_key(output, size=output.getSize())
+            if output_location == location:
+                if best_order is None or op_order > best_order:
+                    best_candidate = ("output", op)
+                    best_order = op_order
+
+        if op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
+            store_location = _stack_location_key(op.getInput(1), size=op.getInput(2).getSize())
+            if store_location == location:
+                if best_order is None or op_order > best_order:
+                    best_candidate = ("store", op)
+                    best_order = op_order
+
+    if best_candidate is None:
+        return None
+
+    kind, op = best_candidate
+    if kind == "output" and op.getNumInputs() >= 1:
+        return _recover_parameter_expression_from_varnode(
+            op.getInput(0),
+            tracer,
+            parameters,
+            depth=depth,
+            seen=seen,
+        )
+
+    if kind == "store" and op.getNumInputs() >= 3:
+        return _recover_parameter_expression_from_varnode(
+            op.getInput(2),
+            tracer,
+            parameters,
+            depth=depth,
+            seen=seen,
+        )
+
+    return None
+
+
+def _impl__expression_contains_parameter_identity(
+    expr: Optional[Expression],
+    identities: Set[Tuple[object, ...]],
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+    if identities.intersection(_parameter_identity_keys_from_expression(expr, parameters)):
+        return True
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and _expression_contains_parameter_identity(
+                cond.expression,
+                identities,
+                parameters,
+            ):
+                return True
+            if _expression_contains_parameter_identity(value, identities, parameters):
+                return True
+        return False
+    return any(
+        _expression_contains_parameter_identity(op, identities, parameters)
+        for op in getattr(expr, "operands", []) or []
+    )
+
+
+def _impl__collect_parameter_replacements_from_conditions(
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+) -> Dict[Tuple[object, ...], Expression]:
+    replacements: Dict[Tuple[object, ...], Expression] = {}
+    for cond in conditions or []:
+        if cond is None or cond.negated:
+            continue
+        expr = getattr(cond, "expression", None)
+        if (
+            expr is None
+            or expr.expr_type != ExpressionType.BINARY_OP
+            or expr.operator != "INT_EQUAL"
+            or len(expr.operands) != 2
+        ):
+            continue
+        left, right = expr.operands
+        left_keys = _parameter_identity_keys_from_expression(left, parameters)
+        right_keys = _parameter_identity_keys_from_expression(right, parameters)
+        if left_keys and not _expression_contains_parameter_identity(right, left_keys, parameters):
+            for key in left_keys:
+                replacements[key] = right
+            continue
+        if right_keys and not _expression_contains_parameter_identity(left, right_keys, parameters):
+            for key in right_keys:
+                replacements[key] = left
+    return replacements
+
+
+def _impl__apply_condition_parameter_replacements(
+    expr: Optional[Expression],
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+    replacements = _collect_parameter_replacements_from_conditions(conditions, parameters)
+    if not replacements:
+        return expr
+
+    current = expr
+    for _ in range(4):
+        rewritten = substitute_expression(current, replacements, parameters)
+        if _expressions_equivalent(rewritten, current):
+            break
+        current = rewritten
+    return current
+
+
+def _impl__lookup_parameter_replacement(
+    expr: Optional[Expression],
+    replacements: Dict[Tuple[object, ...], Expression],
+    parameters: Optional[Sequence[Dict]],
+) -> Optional[Expression]:
+    if expr is None or not replacements or parameters is None:
+        return None
+    for key in _parameter_identity_keys_from_expression(expr, parameters):
+        replacement = replacements.get(key)
+        if replacement is not None:
+            return replacement
+    return None
+
+
+def _impl__parameter_like_identity(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
+    current = expr
+    while (
+        current is not None
+        and current.expr_type == ExpressionType.UNARY_OP
+        and current.operator in {"INT_ZEXT", "INT_SEXT", "INT_2COMP"}
+        and current.operands
+    ):
+        current = current.operands[0]
+
+    if current is None:
+        return None
+    if current.expr_type == ExpressionType.PARAMETER:
+        param_index = _normalize_parameter_index(getattr(current, "value", None))
+        if param_index is not None:
+            return ("parameter", param_index)
+    runtime_ref = getattr(current, "runtime_ref", None)
+    if isinstance(runtime_ref, LocationBaseRef):
+        return _parameter_identity_key_from_base_ref(runtime_ref)
+    if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
+        location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
+        return _parameter_identity_key_from_base_ref(location_ref.base_ref)
+    return None
+
+
+def _impl__resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Optional[str]:
+    if expr is None:
+        return None
+
+    descriptor = _resolve_parameter_descriptor(expr, parameters)
+    if descriptor is None:
+        return None
+    name = descriptor.get("name")
+    return str(name) if isinstance(name, str) and name else None
+
+
+def _impl__coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
+    if storage is None:
+        return None
+    if isinstance(storage, StorageInfo):
+        return storage
+    if isinstance(storage, dict):
+        try:
+            return StorageInfo(
+                is_register=bool(storage.get("is_register", False)),
+                space_name=str(storage.get("space_name", "")),
+                space_id=storage.get("space_id"),
+                offset=int(storage.get("offset", 0)),
+                size=int(storage.get("size", 0)),
+                size_bits=int(storage.get("size_bits", 0)),
+                register_name=storage.get("register_name"),
+                register_offset=storage.get("register_offset"),
+                register_size=storage.get("register_size"),
+                register_size_bits=storage.get("register_size_bits"),
+                base_register_name=storage.get("base_register_name"),
+                base_register_offset=int(storage.get("base_register_offset", 0)),
+                base_register_size=int(storage.get("base_register_size", 0)),
+                base_register_size_bits=int(storage.get("base_register_size_bits", 0)),
+                bit_offset_in_base=int(storage.get("bit_offset_in_base", 0)),
+                is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
+                is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
+            )
+        except Exception:
+            return None
+    return None
+
+
+def _impl__storage_matches_parameter(expr_storage: StorageInfo, param_storage: StorageInfo) -> bool:
+    if expr_storage.is_register and param_storage.is_register:
+        if expr_storage.shares_base_register_with(param_storage):
+            expr_low = expr_storage.bit_offset_in_base
+            expr_high = expr_low + max(0, int(expr_storage.size_bits or 0))
+            param_low = param_storage.bit_offset_in_base
+            param_high = param_low + max(0, int(param_storage.size_bits or 0))
+            if expr_high <= expr_low or param_high <= param_low:
+                return expr_storage.register_identity_key() == param_storage.register_identity_key()
+            # Only treat a register-backed value as "the same parameter" when all
+            # of the value's bits are contained within the parameter fragment.
+            # Mere overlap is too permissive on architectures like MIPS64 where
+            # `a0` and `a0_lo` share a base register but mean different things.
+            return param_low <= expr_low and expr_high <= param_high
+        return expr_storage.register_identity_key() == param_storage.register_identity_key()
+
+    return (
+        expr_storage.space_id == param_storage.space_id
+        and expr_storage.offset == param_storage.offset
+        and expr_storage.size == param_storage.size
+    )

@@ -1,5 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
-from scripts.function_tracer_pcode.analysis.recurrence import state_transition_1
+from scripts.function_tracer_pcode.analysis.recurrence import state_transition as state_transition_1
 from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
 
 
