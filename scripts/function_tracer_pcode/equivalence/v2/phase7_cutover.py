@@ -743,17 +743,6 @@ class VerifiedFinalizationBundleFactory:
     def owns_emitted_cause(self, receipt: EmittedCauseBindingReceipt) -> bool:
         return self._emitted_causes.get(id(receipt)) is receipt
 
-    def emitted_for(
-        self, emission_binding: CauseEmissionBindingReceipt,
-    ) -> EmittedCauseBindingReceipt:
-        matches = [
-            row for row in self._emitted_causes.values()
-            if row.emission_binding_receipt_digest == emission_binding.receipt_digest
-        ]
-        if len(matches) != 1:
-            raise ValueError("pre-emission binding has no unique emitted-cause row")
-        return matches[0]
-
     def issue(self, recorder: VerifiedFinalizationRecorder) -> VerifiedFinalizationBundle:
         if (
             type(recorder) is not VerifiedFinalizationRecorder

@@ -316,23 +316,6 @@ def test_tracer_storage_backed_parameter_fallback_uses_storage_bound_argument_wi
     assert resolved.runtime_ref.storage_identity_key == storage.storage_identity_key()
 
 
-def test_tracer_implicit_call_recovery_refuses_pathless_storage_fallback(monkeypatch):
-    tracer = PcodeTracer(Mock(), _EmptyHighFunction(), debug=False)
-    target_ref = CallTargetRef.from_name("callee")
-    parameter = Mock()
-
-    monkeypatch.setattr(tracer, "_resolve_call_target_function", lambda _target_ref: object())
-    monkeypatch.setattr(tracer, "_call_target_parameters", lambda _target_function: [parameter])
-    monkeypatch.setattr(tracer, "_recover_implicit_call_arguments_with_effect_model", lambda *_args: [])
-    monkeypatch.setattr(
-        tracer,
-        "_call_storage_is_unmodified_before_call",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("pathless storage fallback must not run")),
-    )
-
-    assert tracer._recover_implicit_call_argument_expressions(object(), target_ref) == []
-
-
 def test_return_analyzer_specializes_local_target_expansions_with_bound_argument_objects():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()

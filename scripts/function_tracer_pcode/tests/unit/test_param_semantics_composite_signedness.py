@@ -4,7 +4,6 @@
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.param_semantics import (
-    hint_objects_by_name,
     infer_parameter_semantics,
     infer_parameter_semantics_by_identity,
 )
@@ -593,54 +592,6 @@ def test_infer_parameter_semantics_by_identity_uses_storage_only_descriptor():
     assert hint.narrow_bits == 32
     assert hint.signedness == "unknown"
     assert hint.signedness_source == "width_only"
-
-
-def test_hint_objects_by_name_refuses_duplicate_parameter_names():
-    left = _param("dup", 8, index=0)
-    right = _param("dup", 8, index=1)
-    analysis = FunctionReturnAnalysis(
-        function_name="duplicate_name_hints",
-        entry_point="0x1b00",
-        parameters=[
-            {"name": "dup", "data_type": "long", "size": 8, "index": 0, "is_signed": False},
-            {"name": "dup", "data_type": "long", "size": 8, "index": 1, "is_signed": False},
-        ],
-        returns=[
-            ReturnInfo(
-                address="0x1b00",
-                conditions=[],
-                value=_binary(
-                    "INT_OR",
-                    _binary("INT_AND", left, _const(0xFFFFFFFF, 8), 8),
-                    _binary("INT_AND", right, _const(0xFFFFFFFF, 8), 8),
-                    8,
-                ),
-            ),
-        ],
-    )
-
-    assert hint_objects_by_name(analysis) == {}
-
-
-def test_hint_objects_by_name_counts_duplicate_names_without_hint_evidence():
-    hinted = _param("dup", 8, index=0)
-    analysis = FunctionReturnAnalysis(
-        function_name="duplicate_name_partial_hint",
-        entry_point="0x1c00",
-        parameters=[
-            {"name": "dup", "data_type": "long", "size": 8, "index": 0, "is_signed": False},
-            {"name": "dup", "data_type": "long", "size": 8, "index": 1, "is_signed": False},
-        ],
-        returns=[
-            ReturnInfo(
-                address="0x1c00",
-                conditions=[],
-                value=_binary("INT_AND", hinted, _const(0xFFFFFFFF, 8), 8),
-            ),
-        ],
-    )
-
-    assert hint_objects_by_name(analysis) == {}
 
 
 def test_infer_parameter_semantics_does_not_resolve_weighted_direct_signedness_conflict():

@@ -522,25 +522,6 @@ if (
     raise ValueError("loop common execution registry digest drift")
 
 
-def validate_loop_registry_conservation() -> None:
-    priorities = tuple(item.terminal_priority for item in LOOP_PRODUCER_STAGE_SPECS)
-    if len(priorities) != len(set(priorities)):
-        raise ValueError("loop terminal priorities are not a total order")
-    if len({item.proof_stage for item in LOOP_PRODUCER_STAGE_SPECS}) != len(
-        LOOP_PRODUCER_STAGE_SPECS
-    ):
-        raise ValueError("loop proof stages are not unique")
-    for spec in LOOP_PRODUCER_STAGE_SPECS:
-        common = LOOP_COMMON_EXECUTION_STAGE_REGISTRY.get(
-            LOOP_DOMAIN_CONTRACT_ID,
-            spec.producer_contract_id,
-            spec.producer_version,
-            spec.proof_stage,
-        )
-        if common.terminal_priority != spec.terminal_priority:
-            raise ValueError("loop registry projection priority differs")
-
-
 _LOOP_BLOCKER_SIGNAL_TOKEN = object()
 _RECURRENCE_COMPLETION_SIGNAL_TOKEN = object()
 _RECURRENCE_BINDING_TOKEN = object()
@@ -806,82 +787,6 @@ class LoopBlockerProductionSignal:
             "typed-loop-pair-fallback-signal-v2",
             _factory_token=_LOOP_BLOCKER_SIGNAL_TOKEN,
         )
-
-    @classmethod
-    def from_summary_candidate(
-        cls,
-        analysis: Any,
-        candidate: Any,
-        source_code: str,
-        *,
-        paired_return: Any = None,
-    ) -> "LoopBlockerProductionSignal":
-        from ...model.analysis import FunctionReturnAnalysis, SummaryReturnCandidate
-
-        if type(analysis) is not FunctionReturnAnalysis:
-            raise TypeError("summary blocker requires exact function analysis")
-        if type(candidate) is not SummaryReturnCandidate:
-            raise TypeError("summary blocker requires exact summary candidate")
-        classification = classify_summary_blocker(source_code)
-        if classification.disposition is not LoopSourceDisposition.TYPED_SLICE4_CAUSE:
-            raise ValueError("summary blocker does not belong to a slice4 semantic cause")
-        reason_id = classification.reason_ids[0]
-        spec = LOOP_REASON_SPECS[reason_id]
-        function_identity = analysis.outcome_function_identity()
-        candidate_identity = (
-            "summary_candidate_v2",
-            candidate.candidate_id,
-            candidate.guard_structural_key,
-            candidate.value_structural_key,
-            candidate.loop_summary_structural_key,
-            candidate.transition_evidence_key,
-        )
-        if spec.target_kind == "same_function_return_pair":
-            if paired_return is None:
-                raise ValueError("summary overlap cause requires the exact same-function peer")
-            peer_identity = _return_object_identity(paired_return)
-            target = (
-                "same_function_summary_return_pair_v2",
-                function_identity,
-                candidate_identity,
-                peer_identity,
-            )
-        else:
-            if paired_return is not None:
-                raise ValueError("non-overlap summary cause cannot fabricate a peer")
-            target = (
-                spec.target_kind + "_v2",
-                function_identity,
-                candidate_identity,
-            )
-        return cls(
-            reason_id,
-            IdentityScope.UNARY,
-            spec.target_kind,
-            target,
-            ("missing_summary_proposition", source_code),
-            ("summary_candidate_is_semantically_admissible", reason_id),
-            (
-                "same_function_summary_acceptance",
-                candidate.active_precondition_key,
-                candidate.memory_read_set_key,
-                candidate.memory_write_set_key,
-            ),
-            ("candidate_rejected", candidate.candidate_id),
-            ("one_function_snapshot",),
-            (source_code, authority_digest(candidate_identity)),
-            "typed-summary-candidate-signal-v2",
-            _factory_token=_LOOP_BLOCKER_SIGNAL_TOKEN,
-        )
-
-
-def _return_object_identity(value: Any) -> Any:
-    to_dict = getattr(value, "to_dict", None)
-    if not callable(to_dict):
-        raise TypeError("summary overlap peer lacks immutable return authority")
-    payload = to_dict()
-    return ("return_info_v2", authority_digest(payload), payload)
-
 
 def _loop_case_object_identity(case: Any) -> Any:
     return_info = getattr(case, "return_info", None)
@@ -1592,51 +1497,6 @@ class LoopExactGuardPartitionCompletionSignal:
             "loop-exact-guard-partition-encoding-v2",
             _factory_token=_LOOP_EXACT_GUARD_SIGNAL_TOKEN,
         )
-
-    @classmethod
-    def from_pairwise_cases_after_term_authority(
-        cls,
-        blocker: LoopBlockerProductionSignal,
-        term_authority: "LoopExactTermRelationCompletionAuthority",
-        case1: Any,
-        case2: Any,
-    ) -> "LoopExactGuardPartitionCompletionSignal":
-        if type(term_authority) is not LoopExactTermRelationCompletionAuthority:
-            raise TypeError("loop exact guard requires exact term authority")
-        if term_authority.semantic_target_digest != authority_digest(
-            blocker.canonical_target_key
-        ):
-            raise ValueError("loop exact guard term authority targets another blocker")
-        validator = _sealed_pairwise_structural_validator()
-        covering = validator._method_b_covering_case_proof(case1, case2)
-        if covering is None:
-            raise ValueError("pairwise validator did not derive guard covering proof")
-        proved_counts = tuple(_method_b_structural_proof_body(covering)[5][1])
-        if not validator._cases_admit_reduction_count_values(
-            covering.exact_case,
-            covering.summary_case,
-            covering.accumulator_proof,
-            proved_counts,
-        ):
-            raise ValueError("pairwise validator did not prove exact guard coverage")
-        coverage_body = (
-            "loop_exact_guard_partition_structural_proof_v2",
-            ("case_pair_target_digest", authority_digest(blocker.canonical_target_key)),
-            ("term_proof_digest", term_authority.artifact_digest),
-            ("admitted_count_values", proved_counts),
-            ("coverage_proposition", "all_proved_counts_imply_case_partition"),
-        )
-        return cls(
-            blocker,
-            None,
-            term_authority.artifact_digest,
-            coverage_body,
-            "loop-exact-guard-partition-validator-v2",
-            2,
-            "loop-exact-guard-partition-encoding-v2",
-            _factory_token=_LOOP_EXACT_GUARD_SIGNAL_TOKEN,
-        )
-
 
 @dataclass(frozen=True, init=False)
 class _LoopExactCompletionAuthorityBase:

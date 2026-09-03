@@ -276,28 +276,6 @@ if ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY.normalized_registry_digest
     raise ValueError("Phase 6.5 common registry authority digest drift")
 
 
-def validate_abi_width_readonly_registry_conservation() -> None:
-    priorities = tuple(
-        item.terminal_priority for item in ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS
-    )
-    if priorities != tuple(sorted(priorities)) or len(priorities) != len(set(priorities)):
-        raise ValueError("Phase 6.5 priorities are not one ordered total set")
-    if len({item.proof_stage for item in ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS}) != 8:
-        raise ValueError("Phase 6.5 proof stages are not unique")
-    for item in ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS:
-        if item.proof_stage != item.proof_kind:
-            raise ValueError("Phase 6.5 v1 stage/proof-kind projection drift")
-        common = ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY.get(
-            ABI_WIDTH_READONLY_DOMAIN_ID,
-            item.producer_contract_id,
-            item.producer_version,
-            item.proof_stage,
-        )
-        if common.terminal_priority != item.terminal_priority:
-            raise ValueError("Phase 6.5 common priority projection drift")
-    validate_abi_width_readonly_production_source_conservation()
-
-
 _WIDTH_SLOTS = frozenset({
     "return_storage_fact", "payload_width_fact", "extension_evidence_fact",
 })
@@ -360,31 +338,6 @@ class AbiWidthReadonlySourceClassification:
                 raise ValueError("typed Phase 6.5 source lacks sealed reason ownership")
         elif self.reason_ids:
             raise ValueError("non-typed Phase 6.5 disposition cannot own reasons")
-
-
-def classify_width_blocker(blocker_kind: str, missing_slot: str) -> AbiWidthReadonlySourceClassification:
-    if type(blocker_kind) is not str or type(missing_slot) is not str:
-        raise TypeError("width blocker classification requires exact strings")
-    if blocker_kind == "unary_width" and missing_slot in _WIDTH_SLOTS:
-        reasons = ("return_width_provenance_unavailable",)
-    elif blocker_kind == "unary_abi" and missing_slot in _ABI_SLOTS:
-        reasons = ("return_abi_provenance_unavailable",)
-    elif blocker_kind == "observation_contract" and missing_slot == "top_level_comparison_contract":
-        reasons = ("return_observation_contract_unproven",)
-    elif blocker_kind == "pair_width_compatibility" and missing_slot == "projection_applicability":
-        reasons = (
-            "return_observation_contract_unproven",
-            "return_high_bit_relation_unproven",
-        )
-    else:
-        return AbiWidthReadonlySourceClassification(
-            AbiWidthReadonlyDisposition.INFRASTRUCTURE_INVALID,
-            (), "return_width_surface", blocker_kind + ":" + missing_slot,
-        )
-    return AbiWidthReadonlySourceClassification(
-        AbiWidthReadonlyDisposition.TYPED_SLICE5_CAUSE,
-        reasons, "return_width_surface", blocker_kind + ":" + missing_slot,
-    )
 
 
 def classify_summary_width_source(source_code: str) -> AbiWidthReadonlySourceClassification:
@@ -1998,86 +1951,13 @@ class ReturnWidthProvenanceArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_width_provenance_unavailable"
     ENCODING_VERSION = "return-width-provenance-encoding-v2"
 
-    @classmethod
-    def from_validated_fact(cls, blocker, seed, *, source_snapshot_fingerprint,
-                            slot, positive_width=None,
-                            extension_kind=None, producer_value_refs=()):
-        from ..return_width_surface import FunctionReturnWidthSeed
-
-        if type(seed) is not FunctionReturnWidthSeed or (
-            AbiWidthReadonlyBlockerSignal.from_width_seed(seed, slot).canonical_target_key
-            != blocker.canonical_target_key
-        ):
-            raise ValueError("width artifact differs from exact unary seed authority")
-        missing = blocker.missing_semantic_fact
-        if missing != ("missing_slot", slot) or slot not in _WIDTH_SLOTS:
-            raise ValueError("width artifact does not prove the exact missing slot")
-        if slot in {"return_storage_fact", "payload_width_fact"}:
-            if type(positive_width) is not int or positive_width <= 0:
-                raise ValueError("width artifact requires a positive exact width")
-            body = ("return_width_positive_fact_v2", slot, positive_width)
-        else:
-            if extension_kind not in {"same_width", "zero_extend", "sign_extend"} or not producer_value_refs:
-                raise ValueError("width extension artifact lacks a supported joined flow certificate")
-            body = ("return_width_extension_flow_v2", extension_kind, tuple(producer_value_refs))
-        return _artifact_values(cls, blocker, source_seed_digest=seed.digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=authority_digest(seed.stable_key()),
-            proof_body=body, applicability_body=("exact_return_site", blocker.canonical_target_key))
-
-
 class SameFunctionReturnWidthRelationArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_width_relation_unproven"
     ENCODING_VERSION = "same-function-return-width-relation-encoding-v2"
 
-    @classmethod
-    def from_validated_relation(cls, blocker, first_seed, second_seed, *,
-                                source_snapshot_fingerprint, observation_width,
-                                total, observation_preserving, injective_lossless):
-        expected = AbiWidthReadonlyBlockerSignal.from_same_function_width_seeds(
-            first_seed, second_seed
-        )
-        if expected.canonical_target_key != blocker.canonical_target_key:
-            raise ValueError("same-function relation artifact targets another seed pair")
-        if type(observation_width) is not int or observation_width <= 0 or not all(
-            value is True for value in (total, observation_preserving, injective_lossless)
-        ):
-            raise ValueError("same-function width relation lacks a total lossless theorem")
-        body = ("same_function_width_relation_v2", observation_width, total,
-                observation_preserving, injective_lossless)
-        pair_digest = authority_digest(tuple(sorted((first_seed.digest, second_seed.digest))))
-        return _artifact_values(cls, blocker, source_seed_digest=pair_digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=authority_digest((first_seed.stable_key(), second_seed.stable_key())),
-            proof_body=body, applicability_body=("active_guard", blocker.active_semantic_precondition))
-
-
 class ReturnAbiProvenanceArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_abi_provenance_unavailable"
     ENCODING_VERSION = "return-abi-provenance-encoding-v2"
-
-    @classmethod
-    def from_ghidra_facts(cls, blocker, seed, *, source_snapshot_fingerprint,
-                          missing_slot, calling_convention_key,
-                          return_type_key, return_storage_key, provenance_refs):
-        if type(seed) is not FunctionReturnAbiSeed or (
-            AbiWidthReadonlyBlockerSignal.from_return_abi_seed(
-                seed, missing_slot
-            ).canonical_target_key
-            != blocker.canonical_target_key
-        ):
-            raise ValueError("ABI artifact differs from exact unary seed authority")
-        if blocker.missing_semantic_fact != ("missing_abi_slot", missing_slot) or missing_slot not in _ABI_SLOTS:
-            raise ValueError("ABI artifact does not prove the exact unresolved ABI slot")
-        facts = (calling_convention_key, return_type_key, return_storage_key)
-        if any(item is None for item in facts) or not tuple(provenance_refs):
-            raise ValueError("ABI provenance artifact lacks exact Ghidra facts")
-        return _artifact_values(cls, blocker, source_seed_digest=seed.seed_digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=seed.prepared_snapshot_digest,
-            proof_body=("ghidra_return_abi_facts_v2", *facts, tuple(provenance_refs)),
-            applicability_body=("exact_return_site", blocker.canonical_target_key))
-
 
 class ReturnObservationContractArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_observation_contract_unproven"
@@ -2206,31 +2086,6 @@ class ReturnHighBitRelationProofArtifact(_AbiWidthReadonlyCompletionArtifact):
     ENCODING_VERSION = "return-high-bit-relation-encoding-v2"
 
     @classmethod
-    def from_structural_theorem(cls, blocker, seed, abi_relation_artifact, *,
-                                source_snapshot_fingerprint, theorem_id,
-                                validated_premises):
-        if type(seed) is not ReturnObservationProjectionSeed or theorem_id not in _STRUCTURAL_HIGH_BIT_THEOREMS:
-            raise ValueError("high-bit structural theorem is not sealed")
-        if not tuple(validated_premises):
-            raise ValueError("high-bit theorem lacks independently validated premises")
-        if type(abi_relation_artifact) is not ReturnAbiRelationArtifact or (
-            abi_relation_artifact.source_seed_digest != seed.seed_digest
-            or abi_relation_artifact.semantic_target_digest != authority_digest(
-                AbiWidthReadonlyBlockerSignal.from_projection_seed(
-                    "return_abi_relation_unproven", seed
-                ).canonical_target_key
-            )
-        ):
-            raise ValueError("high-bit theorem lacks exact ABI relation dependency")
-        return _artifact_values(cls, blocker, source_seed_digest=seed.seed_digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=seed.prepared_snapshot_digest,
-            proof_body=("return_high_bit_structural_theorem_v2", theorem_id, tuple(validated_premises)),
-            applicability_body=("exact_projection_and_guard", seed.guard_contract,
-                                seed.candidate_observation_width),
-            dependency_artifact_digests=(abi_relation_artifact.artifact_digest,))
-
-    @classmethod
     def from_solver_unsat(
         cls, blocker, seed, abi_relation_artifact, *, query_authority,
         membership, execution_receipt, lifecycle_projection,
@@ -2289,91 +2144,9 @@ class ReadonlyStorageIdentityArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "readonly_storage_identity_unproven"
     ENCODING_VERSION = "readonly-storage-identity-encoding-v2"
 
-    @classmethod
-    def from_validated_storage(cls, blocker, seed, *, side, member_index,
-                               source_snapshot_fingerprint,
-                               address_space, width, endian, readonly_block,
-                               provenance_refs, reachable_use_proof):
-        expected = AbiWidthReadonlyBlockerSignal.from_readonly_member(seed, side, member_index)
-        if expected.canonical_target_key != blocker.canonical_target_key:
-            raise ValueError("readonly storage artifact targets another member")
-        members = seed.left_member_keys if side == "left" else seed.right_member_keys
-        member = members[member_index]
-        term = member[6] if type(member) is tuple and len(member) == 8 else None
-        access_size = (
-            term[2]
-            if type(term) is tuple
-            and len(term) == 3
-            and term[0] == "readonly_reduction_term"
-            and type(term[2]) is int
-            else None
-        )
-        side_big_endian = seed.observation_contract[5 if side == "left" else 6]
-        expected_endian = (
-            "big" if side_big_endian is True
-            else "little" if side_big_endian is False
-            else None
-        )
-        if (
-            type(address_space) is not str
-            or not address_space
-            or type(width) is not int
-            or width <= 0
-            or width != access_size
-            or endian not in {"little", "big"}
-            or expected_endian is None
-            or endian != expected_endian
-        ):
-            raise ValueError("readonly storage artifact lacks address/width/endian")
-        if readonly_block is not True or not tuple(provenance_refs) or not reachable_use_proof:
-            raise ValueError("readonly storage artifact lacks immutable provenance theorem")
-        return _artifact_values(cls, blocker, source_seed_digest=seed.seed_digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=seed.prepared_snapshot_digest,
-            proof_body=("readonly_storage_identity_v2", address_space, width, endian,
-                        readonly_block, tuple(provenance_refs), reachable_use_proof),
-            applicability_body=("member_guard", seed.guard_contract, side, member_index))
-
-
 class ReadonlyObjectCorrespondenceArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "readonly_object_correspondence_unproven"
     ENCODING_VERSION = "readonly-object-correspondence-encoding-v2"
-
-    @classmethod
-    def from_unique_total_mapping(cls, blocker, seed, *, mapping,
-                                  source_snapshot_fingerprint,
-                                  operator_preserved, roles_order_multiplicity_preserved,
-                                  count_identity_proved, guard_iteration_proved,
-                                  load_shape_proved, value_observation_proved,
-                                  finite_witness_complete):
-        if type(seed) is not ResolvedReadonlyObjectSetSeed:
-            raise TypeError("readonly correspondence requires exact resolved seed")
-        expected = AbiWidthReadonlyBlockerSignal.from_readonly_object_sets(seed)
-        if expected.canonical_target_key != blocker.canonical_target_key:
-            raise ValueError("readonly correspondence artifact targets another object set")
-        mapping = tuple(mapping)
-        if len(mapping) != len(seed.left_member_keys) or len(mapping) != len(seed.right_member_keys):
-            raise ValueError("readonly correspondence is not total on both object sets")
-        if len({left for left, _right in mapping}) != len(mapping) or len({right for _left, right in mapping}) != len(mapping):
-            raise ValueError("readonly correspondence is not unique")
-        left_ids = {authority_digest(item) for item in seed.left_member_keys}
-        right_ids = {authority_digest(item) for item in seed.right_member_keys}
-        if {left for left, _right in mapping} != left_ids or {
-            right for _left, right in mapping
-        } != right_ids:
-            raise ValueError("readonly correspondence mapping differs from exact object sets")
-        predicates = (operator_preserved, roles_order_multiplicity_preserved,
-                      count_identity_proved, guard_iteration_proved,
-                      load_shape_proved, value_observation_proved,
-                      finite_witness_complete)
-        if not all(value is True for value in predicates):
-            raise ValueError("readonly correspondence theorem is incomplete")
-        return _artifact_values(cls, blocker, source_seed_digest=seed.seed_digest,
-            source_snapshot_digest=source_snapshot_fingerprint,
-            prepared_snapshot_digest=seed.prepared_snapshot_digest,
-            proof_body=("readonly_unique_total_correspondence_v2", mapping, predicates),
-            applicability_body=("guard_iteration_observation", seed.guard_contract, seed.observation_contract),
-            dependency_artifact_digests=seed.dependency_artifact_digests)
 
     @classmethod
     def from_solver_unsat(
@@ -3613,15 +3386,6 @@ class AbiWidthReadonlyPilotEncoder:
             RequirementCompletedEventAuthority(receipt),
         )
 
-    def complete_return_width_provenance(self, session, blocker, artifact):
-        return self._completion_intent(session, blocker, artifact, ReturnWidthProvenanceArtifact)
-
-    def complete_same_function_return_width_relation(self, session, blocker, artifact):
-        return self._completion_intent(session, blocker, artifact, SameFunctionReturnWidthRelationArtifact)
-
-    def complete_return_abi_provenance(self, session, blocker, artifact):
-        return self._completion_intent(session, blocker, artifact, ReturnAbiProvenanceArtifact)
-
     def complete_return_observation_contract(self, session, blocker, artifact):
         return self._completion_intent(session, blocker, artifact, ReturnObservationContractArtifact)
 
@@ -3630,9 +3394,6 @@ class AbiWidthReadonlyPilotEncoder:
 
     def complete_return_high_bit_relation(self, session, blocker, artifact):
         return self._completion_intent(session, blocker, artifact, ReturnHighBitRelationProofArtifact)
-
-    def complete_readonly_storage_identity(self, session, blocker, artifact):
-        return self._completion_intent(session, blocker, artifact, ReadonlyStorageIdentityArtifact)
 
     def complete_readonly_object_correspondence(self, session, blocker, artifact):
         return self._completion_intent(session, blocker, artifact, ReadonlyObjectCorrespondenceArtifact)

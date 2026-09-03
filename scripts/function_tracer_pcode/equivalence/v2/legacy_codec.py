@@ -40,30 +40,8 @@ class LegacyRecord:
             _factory_token=_LEGACY_RECORD_FACTORY_TOKEN,
         )
 
-    def write_lossless(self) -> str:
-        return self.raw_json_text
-
-
 _LEGACY_BYTE_ENVELOPE_TOKEN = object()
 
-
-@dataclass(frozen=True, init=False)
-class LegacyDiagnosticByteEnvelope:
-    """Diagnostic-only raw-byte envelope for a bound legacy manifest entry."""
-
-    entry_id: str
-    ordinal: int
-    source_path: str
-    raw_length: int
-    raw_sha256: str
-    raw_payload: bytes
-    non_authoritative: bool
-
-    def __init__(self, *values, _factory_token=None):
-        if _factory_token is not _LEGACY_BYTE_ENVELOPE_TOKEN:
-            raise ValueError("legacy byte envelopes are issued only by the lossless decoder")
-        for name, value in zip(tuple(self.__dataclass_fields__), values):
-            object.__setattr__(self, name, value)
 
 @dataclass(frozen=True)
 class LegacyCompatibilityProjection:

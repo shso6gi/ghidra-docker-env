@@ -241,12 +241,3 @@ class DerivedAnalysisView:
             semantic_fingerprint=fingerprint,
             fact_provenance=deep_freeze(dict(fact_provenance or {})),
         )
-
-    def artifact_independent_fact_ids(self, artifact_id: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], ...]:
-        return tuple(
-            sorted(
-                (fact_id for fact_id, provenance in self.fact_provenance.items()
-                 if artifact_id not in provenance.source_artifact_ids),
-                key=repr,
-            )
-        )

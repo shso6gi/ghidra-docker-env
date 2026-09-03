@@ -136,16 +136,6 @@ class ValidatedProofClosure:
     topological_order: Tuple[Tuple[object, ...], ...]
     validation_digest: str
 
-    @property
-    def is_internally_consistent(self) -> bool:
-        return self.validation_digest == _closure_validation_digest(
-            self.closure_id,
-            self.root_artifact_ids,
-            self.transitive_dependency_ids,
-            self.topological_order,
-        )
-
-
 def _closure_validation_digest(
     closure_id: Tuple[object, ...],
     roots: Tuple[Tuple[object, ...], ...],

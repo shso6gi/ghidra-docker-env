@@ -483,21 +483,6 @@ def test_structural_equality_uses_distinct_typed_closure_authority():
         )
 
 
-def test_structural_equality_receipt_rejects_unregistered_issuer():
-    with pytest.raises(RuntimeError, match="registered producer"):
-        StructuralEqualityReceipt.from_validated_structure(
-            query_label="(0,0)",
-            proof_kind="rewrite-structural",
-            evidence=("rewrite-structural", "forged"),
-        )
-    with pytest.raises(RuntimeError, match="issuer is not trusted"):
-        issue_structural_equality_receipt(
-            query_label="(0,0)",
-            proof_kind="rewrite-structural",
-            evidence=("rewrite-structural", "forged"),
-        )
-
-
 def test_duplicate_terminal_query_is_rejected():
     binding = _binding()
     ledger = PairDispositionLedger(binding, 1)

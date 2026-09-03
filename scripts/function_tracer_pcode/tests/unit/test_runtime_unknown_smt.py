@@ -49,6 +49,12 @@ from scripts.function_tracer_pcode.model.render_smt import (
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
+def _build_formula(builder, *args, **kwargs):
+    """Return (formula, return_var1, return_var2) from the extended builder API."""
+    result = builder.build_equivalence_formula_extended(*args, **kwargs)
+    return result.formula, result.return_var1, result.return_var2
+
+
 def test_expression_unknown_uses_object_centric_runtime_identity_for_smt():
     expr = Expression.unknown("call_out_of_scope:ptr_dispatch_callback")
 
@@ -252,7 +258,7 @@ def test_formula_builder_adds_readonly_reduction_finite_witness_axioms():
         ),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -312,7 +318,7 @@ def test_formula_builder_keeps_finite_witness_axioms_without_contract_key():
         ),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     assert reduction_ref.readonly_term_sequence_contract_key() is None
     reduction_expr = Expression.intrinsic(
@@ -375,7 +381,7 @@ def test_formula_builder_removes_readonly_global_contract_equality_even_when_con
             ),
             return_region_value_proven=True,
         )
-        reduction_ref = proof.to_readonly_reduction_ref()
+        reduction_ref = proof.lower_to_readonly_reduction_ref()
         assert reduction_ref is not None
         assert reduction_ref.readonly_term_sequence_contract_key() is not None
         return Expression.intrinsic(
@@ -443,7 +449,7 @@ def test_formula_builder_guards_readonly_finite_witness_axioms_with_case_and_pro
         guard_constraints=(proof_guard,),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -515,7 +521,7 @@ def test_formula_builder_rewrites_stale_readonly_proof_guard_parameter_widths():
         guard_constraints=(proof_guard,),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -578,7 +584,7 @@ def test_formula_builder_rewrites_stale_readonly_proof_guard_parameter_name_by_i
         guard_constraints=(proof_guard,),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -637,7 +643,7 @@ def test_formula_builder_skips_readonly_finite_witness_axioms_for_unlowerable_pr
         guard_constraints=("count > 3",),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -718,7 +724,7 @@ def test_formula_builder_readonly_witness_axioms_accept_storage_backed_operands(
         ),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     reduction_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -776,7 +782,7 @@ def test_formula_builder_refuses_readonly_witness_axioms_when_operands_do_not_ma
         ),
         return_region_value_proven=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     malformed_expr = Expression.intrinsic(
         "READONLY_SUM",
@@ -824,7 +830,7 @@ def test_formula_builder_rejects_monolithic_return_width_overlap_assertion():
     )
 
     with pytest.raises(ValueError, match="return width mismatch"):
-        FormulaBuilder().build_equivalence_formula(analysis1, analysis2)
+        _build_formula(FormulaBuilder(), analysis1, analysis2)
 
 
 def test_monolithic_strategy_returns_unknown_for_unbridged_return_width_mismatch():
@@ -1531,7 +1537,7 @@ def test_return_definition_orders_guard_specific_readonly_summary_before_broad_o
         returns=[ReturnInfo(address="0x2000", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    formula, _, _ = FormulaBuilder().build_equivalence_formula(analysis1, analysis2)
+    formula, _, _ = _build_formula(FormulaBuilder(), analysis1, analysis2)
     return_block = formula.split("; Return value for left", 1)[1].split("; Return value for right", 1)[0]
     broad_symbol = re.match(r"\(([^ ]+)", broad_expr.to_smt()).group(1)
     specific_symbol = re.match(r"\(([^ ]+)", specific_expr.to_smt()).group(1)
@@ -1706,7 +1712,7 @@ def test_return_definition_keeps_unrelated_readonly_summaries_in_condition_order
         returns=[ReturnInfo(address="0x2000", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    formula, _, _ = FormulaBuilder().build_equivalence_formula(analysis1, analysis2)
+    formula, _, _ = _build_formula(FormulaBuilder(), analysis1, analysis2)
     return_block = formula.split("; Return value for left", 1)[1].split("; Return value for right", 1)[0]
     broad_symbol = re.match(r"\(([^ ]+)", broad_expr.to_smt()).group(1)
     unrelated_symbol = re.match(r"\(([^ ]+)", unrelated_expr.to_smt()).group(1)

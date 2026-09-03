@@ -174,44 +174,6 @@ def test_later_independent_unknown_does_not_supersede_prior_blockers():
     assert trace.causal_transitions == []
 
 
-def test_explicit_reason_replacement_emits_supersession_transition():
-    trace = DebugTrace()
-    first = Attempt(
-        attempt_id=0,
-        retry_count=0,
-        phase="P0_BASE",
-        stage_path=[],
-        strategy="pairwise",
-        result=None,
-        transition_reason=TransitionReason.UNKNOWN.value,
-        unknown_reasons=[make_unknown_reason("unresolved_expression")],
-    )
-    second = Attempt(
-        attempt_id=1,
-        retry_count=1,
-        phase="P1_RECOVERY",
-        stage_path=[],
-        strategy="pairwise",
-        result=None,
-        transition_reason=TransitionReason.UNKNOWN.value,
-        unknown_reasons=[make_unknown_reason("unresolved_value_expression")],
-    )
-    trace.add_attempt(first)
-    trace.add_attempt(second)
-
-    trace.add_reason_replacement(
-        first.reason_occurrences[0].occurrence_id,
-        second.reason_occurrences[0].occurrence_id,
-        "expression_recovery_specialization",
-    )
-
-    assert len(trace.causal_transitions) == 1
-    transition = trace.causal_transitions[0]
-    assert transition.target_occurrence_id == first.reason_occurrences[0].occurrence_id
-    assert transition.cause_ref == second.reason_occurrences[0].occurrence_id
-    assert transition.transition_kind == "superseded"
-
-
 def test_explicit_matching_proof_completion_requires_runtime_applicability():
     requirement = {
         "schema_version": 1,
@@ -547,7 +509,7 @@ def test_debug_trace():
     assert trace_dict["attempts"][1]["transition_reason"] == "UNSAT"
     
     # JSON シリアライズ可能性確認
-    json_str = trace.to_json_string()
+    json_str = json.dumps(trace_dict)
     assert isinstance(json_str, str)
     
     parsed = json.loads(json_str)

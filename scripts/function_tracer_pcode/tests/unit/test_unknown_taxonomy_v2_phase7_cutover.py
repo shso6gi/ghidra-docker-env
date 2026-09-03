@@ -859,59 +859,6 @@ def test_supervisor_nonce_prebinds_production_identity(monkeypatch):
     assert session.identity == expected
 
 
-def test_coverage_denominator_is_expected_cause_slot_not_surviving_occurrence():
-    activation_factory, ledger, activation = activation_authority()
-    reason_registry, recovery_registry = registries()
-    authority = occurrence_authority(reason_registry)
-    binding = activation_factory.bind_emission(
-        activation=activation, expected_cause_slot_id="cause-a",
-        occurrence_authority=authority,
-    )
-    finalization_factory, bundle = finalization_authority(
-        reason_registry, recovery_registry, authority, activation_factory, binding
-    )
-    emitted = finalization_factory.emitted_for(binding)
-    projection_factory = activation_factory.open_projection_factory(finalization_factory)
-    first = projection_factory.issue(
-        activation=activation, expected_cause_slot_id="cause-a",
-        bundle=bundle, emission_binding=binding, emitted_cause=emitted,
-    )
-    census = typed_cause_coverage(
-        ledger, activation_factory, projection_factory, (first,)
-    )
-    assert census["eligible_cause_slot_count"] == 2
-    assert census["covered_cause_slot_count"] == 1
-    assert census["v2_native_typed_cause_coverage"] == 0.5
-    assert census["missing_cause_slots"] == ((activation.activation_id, "cause-b"),)
-
-
-def test_projection_requires_owned_activation_and_verified_finalization_bundle():
-    activation_factory, _, activation = activation_authority(slots=("cause-a",))
-    reason_registry, recovery_registry = registries()
-    authority = occurrence_authority(reason_registry)
-    binding = activation_factory.bind_emission(
-        activation=activation, expected_cause_slot_id="cause-a",
-        occurrence_authority=authority,
-    )
-    finalization_factory, bundle = finalization_authority(
-        reason_registry, recovery_registry, authority, activation_factory, binding
-    )
-    emitted = finalization_factory.emitted_for(binding)
-    projection_factory = activation_factory.open_projection_factory(finalization_factory)
-    copied_activation = copy.copy(activation)
-    with pytest.raises(ValueError, match="activation is not factory-owned"):
-        projection_factory.issue(
-            activation=copied_activation, expected_cause_slot_id="cause-a",
-            bundle=bundle, emission_binding=binding, emitted_cause=emitted,
-        )
-    copied_bundle = copy.copy(bundle)
-    with pytest.raises(ValueError, match="bundle is not verifier-owned"):
-        projection_factory.issue(
-            activation=activation, expected_cause_slot_id="cause-a",
-            bundle=copied_bundle, emission_binding=binding, emitted_cause=emitted,
-        )
-
-
 def test_direct_or_codec_style_stream_cannot_be_adopted_as_finalization_authority():
     reason_registry, recovery_registry = registries()
     raw = EventRecorder(
@@ -969,47 +916,6 @@ def test_cause_observation_requires_pre_emission_consumption_and_binding_is_sing
     ))
     with pytest.raises(ValueError, match="emitted-binding census differ"):
         bypass_factory.issue(bypass_recorder)
-
-
-def test_projection_slot_is_exactly_once_and_receipt_is_not_publicly_constructible():
-    activation_factory, _, activation = activation_authority(slots=("cause-a",))
-    reason_registry, recovery_registry = registries()
-    authority = occurrence_authority(reason_registry)
-    binding = activation_factory.bind_emission(
-        activation=activation, expected_cause_slot_id="cause-a",
-        occurrence_authority=authority,
-    )
-    finalization_factory, bundle = finalization_authority(
-        reason_registry, recovery_registry, authority, activation_factory, binding
-    )
-    emitted = finalization_factory.emitted_for(binding)
-    projection_factory = activation_factory.open_projection_factory(finalization_factory)
-    projection = projection_factory.issue(
-        activation=activation, expected_cause_slot_id="cause-a",
-        bundle=bundle, emission_binding=binding, emitted_cause=emitted,
-    )
-    compatibility = make_production_unknown_reason(
-        projection, projection_factory=projection_factory,
-    )
-    assert compatibility.reason_id == projection.reason_id
-    assert compatibility.typed_cause_key["receipt_digest"] == projection.receipt_digest
-    with pytest.raises(ValueError, match="not issuer-owned"):
-        make_production_unknown_reason(
-            copy.copy(projection), projection_factory=projection_factory,
-        )
-    with pytest.raises(ValueError, match="one-to-one"):
-        projection_factory.issue(
-            activation=activation, expected_cause_slot_id="cause-a",
-            bundle=bundle, emission_binding=binding, emitted_cause=emitted,
-        )
-    with pytest.raises(ValueError, match="factory-issued"):
-        ProducerActivationReceipt(*("x",) * 11)
-    with pytest.raises(ValueError, match="factory-issued"):
-        TypedResultProjectionReceipt(*("x",) * 15)
-    with pytest.raises(ValueError, match="already has a projection issuer"):
-        activation_factory.open_projection_factory(finalization_factory)
-    with pytest.raises(ValueError, match="activation-ledger-issued"):
-        TypedResultProjectionFactory(activation_factory, finalization_factory)
 
 
 def test_slot_contract_rejects_retired_reason_and_projection_reason_mismatch():

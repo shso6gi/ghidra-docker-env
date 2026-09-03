@@ -38,7 +38,6 @@ from scripts.function_tracer_pcode.equivalence.v2.loop_recurrence import (
     classify_summary_blocker,
     loop_producer_registry_authority_dict,
     summary_signals_from_acceptance,
-    validate_loop_registry_conservation,
     _issue_loop_solver_query_authority,
 )
 from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
@@ -111,27 +110,6 @@ def test_cyclic_phi_return_authority_serialization_uses_structural_reference():
     assert cycle_payload["type"] == "PHI"
     assert "cycle_ref" in cycle_payload
     assert authority_digest(payload)
-
-
-def test_loop_registry_full_and_common_digests_are_generated_from_same_rows():
-    validate_loop_registry_conservation()
-    assert authority_digest(loop_producer_registry_authority_dict()) == (
-        EXPECTED_LOOP_PRODUCER_STAGE_REGISTRY_DIGEST
-    )
-    assert LOOP_PRODUCER_STAGE_REGISTRY_DIGEST == (
-        EXPECTED_LOOP_PRODUCER_STAGE_REGISTRY_DIGEST
-    )
-    projected = ProducerStageRegistry(
-        1, tuple(item.to_common_contract() for item in LOOP_PRODUCER_STAGE_SPECS)
-    )
-    assert projected.normalized_registry_digest == EXPECTED_LOOP_COMMON_REGISTRY_DIGEST
-    assert (
-        LOOP_COMMON_EXECUTION_STAGE_REGISTRY.normalized_registry_digest
-        == EXPECTED_LOOP_COMMON_REGISTRY_DIGEST
-    )
-    assert tuple(item.terminal_priority for item in LOOP_PRODUCER_STAGE_SPECS) == (
-        10, 20, 30, 40, 50, 60, 70, 80, 90
-    )
 
 
 def test_loop_registry_digest_rejects_row_capability_or_priority_drift():
@@ -1040,119 +1018,6 @@ def _loop_solver_runtime_fixture(result_id):
         context.membership_for(query),
         (requirement, left, right, exact_case, summary_case),
     )
-
-
-def test_loop_solver_timeout_then_unsat_observes_timeout_and_completes_q(monkeypatch):
-    import scripts.function_tracer_pcode.equivalence.v2.execution_authority as execution_module
-    from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
-        ExecutionAuthorityDeploymentPolicy,
-        PINNED_SOLVER_EXECUTION_ISSUER,
-        activate_execution_authority_deployment,
-        install_execution_authority_signing_key,
-    )
-    from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.smt.parallel import ParallelResult
-
-    key_id = "loop-solver-test-key"
-    install_execution_authority_signing_key(key_id, b"l" * 32)
-    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
-        "loop-solver-test-policy", 1, "test-owner", "test-source",
-        key_id, (), 3600, "test-revocation",
-    ))
-    monkeypatch.setattr(
-        execution_module,
-        "_PINNED_PARALLEL_RUN_IMPL",
-        lambda _runner, _query, timeout: ParallelResult(results=[
-            SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
-            SolverResult("z3", SolverStatus.UNSAT, elapsed_time=0.001),
-        ]),
-    )
-    blocker, encoder, session, projection, query, membership, render_inputs = (
-        _loop_solver_runtime_fixture("loop-timeout-unsat-result")
-    )
-    receipts = PINNED_SOLVER_EXECUTION_ISSUER.execute(
-        registry=LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
-        result_occurrence_id=session.identity.result_occurrence_id,
-        membership=membership,
-        invocation_identity="loop-timeout-unsat-invocation",
-        first_invocation_ordinal=1,
-        query=query.query_text,
-        configured_timeout_ms=1000,
-        query_authority=query,
-        lifecycle_projection=projection,
-    )
-    authority = encoder.authority_for_signal(session, blocker)
-    requirement = next(
-        item for _, item in authority.bound_contract.slot_bindings
-        if item.proof_kind == query.proof_kind
-    )
-    _, left, right, exact_case, summary_case = render_inputs
-    substituted_query = _typed_loop_query(
-        blocker, requirement, left, right, exact_case, summary_case,
-        "substituted-execution-identity",
-        pair_id="(substituted,query)",
-    )
-    with pytest.raises(ValueError, match="differs from supplied query"):
-        LoopSolverExecutionBatchSignal.from_issuer_results(
-            blocker, substituted_query, membership, receipts, projection
-        )
-    batch = LoopSolverExecutionBatchSignal.from_issuer_results(
-        blocker, query, membership, tuple(reversed(receipts)), projection
-    )
-    intents = _plan_and_commit_loop_signal(encoder, session, batch)
-    assert [item.event_type for item in intents] == [
-        EventType.SOLVER_TIMEOUT,
-        EventType.REQUIREMENT_COMPLETED,
-    ]
-    assert len(session.domain_signal_state["loop_solver_unsat_completion_receipts"]) == 1
-    term_authority = session.domain_signal_state[
-        "loop_exact_completion_authorities"
-    ][0]
-    guard_signal = (
-        LoopExactGuardPartitionCompletionSignal.from_pairwise_cases_after_term_authority(
-            blocker,
-            term_authority,
-            exact_case,
-            summary_case,
-        )
-    )
-    guard_intents = encoder(session, guard_signal)
-    assert [item.event_type for item in guard_intents] == [
-        EventType.REQUIREMENT_COMPLETED
-    ]
-    census = PINNED_SOLVER_EXECUTION_ISSUER.seal_result_census(
-        LOOP_COMMON_EXECUTION_STAGE_REGISTRY,
-        session.identity.result_occurrence_id,
-    )
-    assert [event.execution_receipt.observed_status for event in census.events] == [
-        "timeout", "unsat"
-    ]
-    from scripts.function_tracer_pcode.equivalence.v2.reducer import (
-        ShadowLifecycleReducer,
-    )
-    from scripts.function_tracer_pcode.equivalence.v2.stream import (
-        CauseObservedEventAuthority,
-        EventIntent,
-        EventRecorder,
-    )
-
-    recorder = EventRecorder(
-        stream_id="loop-timeout-unsat-replay",
-        result_occurrence_id=session.identity.result_occurrence_id,
-        source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
-    )
-    recorder.append(EventIntent(
-        EventType.CAUSE_OBSERVED,
-        CauseObservedEventAuthority(encoder.authority_for_signal(session, blocker)),
-    ))
-    for intent in (*intents, *guard_intents):
-        recorder.append(intent)
-    reduction = ShadowLifecycleReducer(
-        reason_registry=LOOP_REASON_REGISTRY,
-        recovery_registry=LOOP_RECOVERY_REGISTRY,
-    ).replay(recorder.seal())
-    assert reduction.projection.c_active_base == ()
-    assert reduction.projection.q_open_base == ()
 
 
 def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(monkeypatch):
@@ -2357,55 +2222,6 @@ def _loop_production_session(*signal_types, phase7_manifest=None, case_id="loop"
         runtime,
     )
     return encoder, session
-
-
-@pytest.mark.parametrize(
-    "site_id",
-    (
-        "checker-recurrence-proposal-blocker",
-        "pairwise-loop-fallback-blocker",
-        "pairwise-pending-loop-blocker",
-        "recurrence-summary-loop",
-    ),
-)
-def test_loop_blocker_duplicate_is_filtered_before_phase7_activation(site_id):
-    from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
-        emit_loop_recurrence_signal,
-    )
-
-    root = Path(__file__).resolve().parents[4]
-    manifest = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
-    )).read_text(encoding="utf-8"))
-    encoder, session = _loop_production_session(
-        LoopBlockerProductionSignal,
-        phase7_manifest=manifest,
-        case_id="loop-duplicate-" + site_id,
-    )
-    first = _duplicate_loop_signal_for_site(site_id)
-    equivalent_instance = _duplicate_loop_signal_for_site(site_id)
-    assert equivalent_instance is not first
-    with production_signal_scope(session):
-        assert emit_loop_recurrence_signal(
-            first, producer_site_manifest_id=site_id
-        ) == 1
-        assert emit_loop_recurrence_signal(
-            first, producer_site_manifest_id=site_id
-        ) == 0
-        assert emit_loop_recurrence_signal(
-            equivalent_instance, producer_site_manifest_id=site_id
-        ) == 0
-    assert session.recorder.event_count == 1
-    assert encoder.has_observed(session, first)
-    assert encoder.has_observed(session, equivalent_instance)
-    assert len(session.domain_signal_state["loop_recurrence_observed"]) == 1
-    assert "loop_recurrence_pending_emission_transactions" not in (
-        session.domain_signal_state
-    )
-    assert len(session.phase7_runtime._materialized) == 1
-    assert session.phase7_runtime._discovery_factory._ordinals == {site_id: 1}
-    assert session._phase7_signal_transactions == {}
-    assert session.domain_signal_error_kinds == []
 
 
 @pytest.mark.parametrize("failure_stage", ("phase7_buffer", "stream_append"))

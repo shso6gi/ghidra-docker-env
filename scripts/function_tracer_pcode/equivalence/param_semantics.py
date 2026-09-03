@@ -126,42 +126,6 @@ def _infer_parameter_semantics_object_keyed(
     return hints, hints_by_identity
 
 
-def hint_objects_by_name(
-    analysis: FunctionReturnAnalysis,
-) -> Dict[str, ParameterSemanticHint]:
-    """Return semantic hint objects keyed by parameter name."""
-    by_index = infer_parameter_semantics(analysis)
-    unique_names = _globally_unique_parameter_names(analysis.parameters or [])
-    candidates: Dict[str, list[ParameterSemanticHint]] = {}
-    for param in analysis.parameters or []:
-        index = _normalize_parameter_index(param.get("index"))
-        if index is None:
-            continue
-        hint = by_index.get(index)
-        if hint is None:
-            continue
-        name = param.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        if name not in unique_names:
-            continue
-        candidates.setdefault(name, []).append(hint)
-    return {
-        name: values[0]
-        for name, values in candidates.items()
-        if len(values) == 1
-    }
-
-
-def _globally_unique_parameter_names(parameters: Iterable[Dict[str, Any]]) -> Set[str]:
-    counts: Dict[str, int] = {}
-    for param in parameters or []:
-        name = param.get("name")
-        if isinstance(name, str) and name:
-            counts[name] = counts.get(name, 0) + 1
-    return {name for name, count in counts.items() if count == 1}
-
-
 def hint_objects_by_identity(
     analysis: FunctionReturnAnalysis,
 ) -> Dict[ParameterIdentityKey, ParameterSemanticHint]:

@@ -305,16 +305,6 @@ class ProcessWorkerRuntime:
             worker_start_token=start_token, _token=_RUNTIME_TOKEN,
         )
 
-    @classmethod
-    def for_testing(
-        cls, *, process_factory: ProcessSupervisorAuthorityFactory,
-        store: DurableCheckpointStore, launch: Any, worker_start_token: str,
-    ) -> "ProcessWorkerRuntime":
-        return cls(
-            process_factory=process_factory, store=store, launch=launch,
-            worker_start_token=worker_start_token, _token=_RUNTIME_TOKEN,
-        )
-
     def prepare(
         self, *, session: Any, operational_factory: Any, reason_id: str,
         proof_requirement_id: Optional[str] = None,

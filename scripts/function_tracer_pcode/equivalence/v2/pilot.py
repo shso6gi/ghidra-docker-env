@@ -173,12 +173,6 @@ class DualWritePilotResult:
     error_receipts: Tuple[ErrorReceipt, ...] = ()
 
     @property
-    def attempted_requirement_identity_coverage(self) -> float | None:
-        if not self.attempted_solver_event_count:
-            return None
-        return self.bound_solver_event_count / self.attempted_solver_event_count
-
-    @property
     def decision_delta(self) -> bool:
         return self.legacy_outcome_after != self.candidate.decision_receipt.outcome
 

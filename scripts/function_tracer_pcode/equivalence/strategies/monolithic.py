@@ -1023,22 +1023,6 @@ class MonolithicStrategy(CheckStrategy):
                 decision_context,
             )
         return validator(analysis1, analysis2, counterexample_raw)
-    def _build_validation_analyses(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-    ) -> tuple[FunctionReturnAnalysis, FunctionReturnAnalysis]:
-        decision_context = _MonolithicDecisionExecutionContext.create(
-            analysis1,
-            analysis2,
-            decision_surface="legacy_source",
-        )
-        return self._build_validation_analyses_for_surface(
-            analysis1,
-            analysis2,
-            decision_context,
-        )
-
     def _build_validation_analyses_for_surface(
         self,
         analysis1: FunctionReturnAnalysis,

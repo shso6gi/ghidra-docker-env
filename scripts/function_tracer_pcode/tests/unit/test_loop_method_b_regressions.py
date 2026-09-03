@@ -373,7 +373,7 @@ def _readonly_sum(summary: LoopSummaryRef) -> Expression:
 
 
 def _readonly_sum_from_proof(proof: ReductionAccumulatorProof) -> Expression:
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     return Expression.intrinsic(
         "READONLY_SUM",
@@ -857,7 +857,7 @@ def test_object_centric_coverage_gap_can_be_discharged_by_active_smt_assumptions
 
 
 def _path_sensitive_readonly_ref(proof: ReductionAccumulatorProof) -> ReadonlyReductionRef:
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     assert reduction_ref.loop_summary is not None
     path_sensitive_summary = replace(
@@ -1633,7 +1633,7 @@ def test_exact_prefix_return_matches_storage_backed_count_identity():
         "READONLY_SUM",
         [_base_param(), storage_count],
         size=4,
-        runtime_ref=proof.to_readonly_reduction_ref(),
+        runtime_ref=proof.lower_to_readonly_reduction_ref(),
         opcode=READONLY_SUM_OPCODE,
     )
     parameters = [
@@ -2220,7 +2220,7 @@ def test_exact_load_sum_proof_uses_readonly_reduction_ref_not_intrinsic_name():
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     exact_info = ReturnInfo(address="0x1290", value=_load_term_expr(0), conditions=[_eq_count(1)])
     summary_info = ReturnInfo(
@@ -2272,7 +2272,7 @@ def test_exact_fp_count_one_return_matches_wide_readonly_reduction_contract():
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
     numerator.size = 8
@@ -2332,7 +2332,7 @@ def _fp_count_one_exact_summary_cases_with_name_only_denominator(parameters):
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
     numerator.size = 8
@@ -2430,7 +2430,7 @@ def test_exact_fp_count_one_return_rejects_name_only_count_descriptor_identity_m
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
     numerator.size = 8
@@ -2528,7 +2528,7 @@ def test_exact_fp_count_one_return_rejects_same_named_different_count_parameter(
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    reduction_ref = proof.to_readonly_reduction_ref()
+    reduction_ref = proof.lower_to_readonly_reduction_ref()
     assert reduction_ref is not None
     numerator = Expression.unary_op("INT2FLOAT", _load_term_expr(0))
     numerator.size = 8
@@ -3463,7 +3463,7 @@ def test_exact_load_can_match_any_readonly_reduction_ref_not_only_readonly_sum_n
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    runtime_ref = proof.to_readonly_reduction_ref()
+    runtime_ref = proof.lower_to_readonly_reduction_ref()
     assert runtime_ref is not None
     summary_value = Expression.intrinsic(
         "OBJECT_SUMMARY",
@@ -3509,7 +3509,7 @@ def test_object_contract_closes_malformed_surface_only_via_typed_aggregate_proof
         guard_constraints=(_count_gt(0),),
         signed_counter=True,
     )
-    proof_ref = proof.to_readonly_reduction_ref()
+    proof_ref = proof.lower_to_readonly_reduction_ref()
     summary_ref = _readonly_sum(_readonly_summary(start=0)).runtime_ref
     assert proof_ref is not None
     assert summary_ref is not None

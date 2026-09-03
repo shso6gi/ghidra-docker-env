@@ -591,7 +591,7 @@ def test_proof_backed_readonly_summary_subsumes_same_site_unresolved_artifact():
         return_op_refs=(return_ref,),
         return_region_value_proven=True,
     )
-    replacement_ref = proof.to_readonly_reduction_ref()
+    replacement_ref = proof.lower_to_readonly_reduction_ref()
     assert replacement_ref is not None
     unresolved_ret = ReturnInfo(
         address="0x1004",
@@ -611,7 +611,7 @@ def test_proof_backed_readonly_summary_subsumes_same_site_unresolved_artifact():
     )
     summary_excluding_count4 = list(conditions) + [_cond("INT_EQUAL", count_expr, _const(4), negated=True)]
     unproven_proof = replace(proof, return_region_value_proven=False)
-    unproven_ref = unproven_proof.to_readonly_reduction_ref()
+    unproven_ref = unproven_proof.lower_to_readonly_reduction_ref()
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
 
     assert summarizer._readonly_unresolved_preserved_return_is_subsumed_by_replacement(

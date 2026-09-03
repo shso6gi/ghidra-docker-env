@@ -25,26 +25,6 @@ def normalize_series_patterns(
     return canonical
 
 
-def _match_base_plus_square(expr: Expression) -> Tuple[Optional[Expression], Optional[Expression]]:
-    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_ADD" or len(expr.operands) != 2:
-        return None, None
-    left, right = expr.operands
-    if _match_square(left) is not None:
-        return right, left
-    if _match_square(right) is not None:
-        return left, right
-    return None, None
-
-
-def _match_square(expr: Expression) -> Optional[Expression]:
-    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
-        return None
-    left, right = expr.operands
-    if _same_nonconstant_expr(left, right):
-        return left
-    return None
-
-
 def _match_half_product(expr: Expression, target_size: int) -> Optional[Tuple[Expression, Expression]]:
     phi_operands = _match_exact_triangular_phi_operands(expr)
     if phi_operands is not None:
@@ -441,12 +421,6 @@ def _match_affine_coeff_bias(expr: Expression, base_expr: Expression) -> Optiona
         return -affine[0], -affine[1]
 
     return None
-
-
-def _build_triangular(base_expr: Expression, target_size: int) -> Expression:
-    incremented = Expression.binary_op("INT_ADD", _clone_expression(base_expr), Expression.constant(1, base_expr.size or target_size))
-    incremented.size = base_expr.size or target_size
-    return _build_half_product(base_expr, incremented, target_size)
 
 
 def _signed_const_value(expr: Expression) -> Optional[int]:

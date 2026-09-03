@@ -308,51 +308,6 @@ class DebugTrace:
         """試行を追加"""
         self.attempts.append(attempt)
 
-    def add_reason_replacement(
-        self,
-        old_occurrence_id: ReasonOccurrenceId,
-        replacement_occurrence_id: ReasonOccurrenceId,
-        replacement_stage: str,
-    ) -> None:
-        """Record an orchestration-proven logical reason replacement."""
-        occurrence_ids = {
-            occurrence.occurrence_id
-            for attempt in self.attempts
-            for occurrence in attempt.reason_occurrences
-        }
-        if old_occurrence_id not in occurrence_ids:
-            raise ValueError("replacement source occurrence is not present in this trace")
-        if replacement_occurrence_id not in occurrence_ids:
-            raise ValueError("replacement target occurrence is not present in this trace")
-        if (
-            replacement_occurrence_id.attempt_identity.attempt_ordinal
-            <= old_occurrence_id.attempt_identity.attempt_ordinal
-        ):
-            raise ValueError("replacement occurrence must belong to a later attempt")
-        stage = str(replacement_stage or "").strip()
-        if not stage:
-            raise ValueError("reason replacement requires the recognizing stage")
-        self.causal_transitions.append(
-            ReasonCausalTransition(
-                transition_id=(
-                    "explicit_reason_replacement",
-                    old_occurrence_id.attempt_identity.strategy_identity,
-                    old_occurrence_id.attempt_identity.attempt_ordinal,
-                    old_occurrence_id.reason_ordinal,
-                    replacement_occurrence_id.attempt_identity.strategy_identity,
-                    replacement_occurrence_id.attempt_identity.attempt_ordinal,
-                    replacement_occurrence_id.reason_ordinal,
-                    stage,
-                ),
-                target_occurrence_id=old_occurrence_id,
-                transition_kind="superseded",
-                cause_kind="reason_occurrence",
-                cause_ref=replacement_occurrence_id,
-                emitted_at_attempt=replacement_occurrence_id.attempt_identity,
-                transition_ordinal=len(self.causal_transitions),
-            )
-        )
-
     def add_proof_completion(self, completion: ProofCompletionEvent) -> None:
         self.proof_completion_events.append(completion)
 
@@ -607,7 +562,3 @@ class DebugTrace:
             "attempt_count": len(self.attempts),
         }
     
-    def to_json_string(self, indent: int = 2) -> str:
-        """JSON文字列として出力"""
-        import json
-        return json.dumps(self.to_dict(), indent=indent)

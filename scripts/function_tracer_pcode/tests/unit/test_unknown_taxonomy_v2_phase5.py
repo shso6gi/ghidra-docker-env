@@ -45,7 +45,6 @@ from scripts.function_tracer_pcode.equivalence.v2.production_signals import (
     ComparisonClosureProductionSignal,
     ComparisonClosurePilotEncoder,
     CompositeProductionSignalEncoder,
-    OutcomePartitionPilotEncoder,
     OutcomePartitionProductionSignal,
     emit_comparison_closure_signal,
     production_signal_scope,
@@ -67,9 +66,6 @@ from scripts.function_tracer_pcode.equivalence.v2.registry import (
     SealedReasonRegistry,
     SealedRecoveryRegistry,
     SemanticCauseIdentityFactory,
-)
-from scripts.function_tracer_pcode.equivalence.v2.shadow_compare import (
-    build_shadow_census_preview,
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import (
     CauseObservedEventAuthority,
@@ -437,40 +433,6 @@ def _materialized_phase5_difference_manifest():
     }
 
 
-def test_totality_query_timeout_is_terminal_only_with_explicit_terminalization():
-    authority = _authority()
-    stream = _stream(
-        EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)),
-        EventIntent(
-            EventType.SOLVER_TIMEOUT,
-            SolverExecutionEventAuthority("req-A", "solver-1", "TIMEOUT", 1000),
-        ),
-    )
-    result = _run(
-        stream,
-        terminalizations=(TerminalizationIntent(2, "req-A"),),
-    )
-    assert result.candidate.decision_receipt.outcome == Outcome.TIMEOUT
-    assert result.attempted_requirement_identity_coverage == 1.0
-    assert result.terminal_timeout_receipt_count == 1
-
-
-def test_solver_unknown_is_unknown_and_never_creates_a_timeout_reason():
-    authority = _authority()
-    result = _run(_stream(
-        EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)),
-        EventIntent(
-            EventType.SOLVER_UNKNOWN,
-            SolverExecutionEventAuthority("req-A", "solver-1", "UNKNOWN"),
-        ),
-    ))
-    assert result.candidate.decision_receipt.outcome == Outcome.UNKNOWN
-    assert result.attempted_requirement_identity_coverage == 1.0
-    assert {row.reason_id for row in result.reduction.projection.c_active_base} == {
-        "return_coverage_inconclusive"
-    }
-
-
 def test_nonterminal_timeout_then_alternative_unsat_closes_to_equivalent():
     authority = _authority()
     result = _run(_stream(
@@ -679,43 +641,6 @@ def test_independent_cause_arrival_order_has_equal_semantic_projection():
     assert left.reduction.projection.q_open_base == right.reduction.projection.q_open_base
 
 
-def test_invalid_manifest_entry_invalidates_entire_pilot_census():
-    authority = _authority()
-    result = _run(_stream(EventIntent(
-        EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)
-    )))
-    entry = CensusEntry(
-        "result-1", ResultKind.V2_NATIVE, ("return_outcome",),
-        ("left", "right"), ("f", "f"),
-        result.reduction.snapshot.event_stream_authority_digest,
-        result.reduction.projection.lifecycle_projection_digest,
-        result.candidate.decision_receipt.receipt_digest,
-        "artifact",
-    )
-    manifest = CensusManifest(
-        "phase5", CensusMode.V2_CANONICAL, "head", "config", (entry,)
-    )
-    row = result.reduction.projection.c_active_base[0]
-    coverage = CoverageInputs((ActiveOccurrenceMaterialization(
-        row.result_occurrence_id,
-        row.occurrence_id,
-        row.cause_id,
-        RecoveryAddressability.REQUIREMENT_REQUIRED,
-    ),))
-    invalid = build_shadow_census_preview(
-        CensusManifest(
-            "tampered", CensusMode.V2_CANONICAL, "head", "config",
-            (replace(entry, lifecycle_projection_digest="wrong"),),
-        ),
-        (result.candidate,),
-        (result.reduction.projection,),
-        (result.sealed_event_stream,),
-        coverage_inputs=coverage,
-    )
-    assert invalid.status == CensusStatus.INVALID
-    assert invalid.canonical_metrics is None
-
-
 def test_pilot_scope_excludes_timeout_diagnostics_as_semantic_reasons():
     assert "solver_unknown_timeout" not in PILOT_TYPED_CAUSE_KINDS
     assert "outcome_partition_totality_timeout" not in PILOT_TYPED_CAUSE_KINDS
@@ -804,73 +729,6 @@ def test_production_evidence_rejects_cross_bound_valid_receipt_and_entry():
     )
     with pytest.raises(ValueError, match="observation result differs"):
         forged.validate()
-
-
-def test_real_outcome_partition_producer_emits_typed_signal_without_monkeypatch():
-    observed = []
-
-    def authority_for_signal(session, signal):
-        assert isinstance(signal, OutcomePartitionProductionSignal)
-        observed.append(signal)
-        return _authority(
-            occurrence_id=f"outcome-{signal.stage}",
-            prefix="production-outcome",
-            target_key=signal.outcome_seed_digest,
-            source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
-        )
-
-    connector = ProductionDualWritePilotConnector(
-        _environment()[2],
-        domain_signal_encoder=OutcomePartitionPilotEncoder(authority_for_signal),
-    )
-    session = connector.begin({"production_fixture": "outcome_partition"})
-    seed = SimpleNamespace(
-        function_identity=("function", "bin-a", 0x1000),
-        input_domain_contract=("all_inputs",),
-        partition_revision=1,
-        extraction_schema_version=1,
-        stable_key=lambda: ("production-outcome-seed",),
-    )
-    analysis = SimpleNamespace(
-        function_name="f",
-        entry_point="0x1000",
-        binary_id="bin-a",
-        outcome_seed=seed,
-    )
-    producers = {
-        stage: (lambda: UnaryProducerResult("unknown", {"solver_status": "unknown"}))
-        for stage in (
-            "termination_classification", "cfg_reachability",
-            "path_region_completeness", "member_classification",
-            "same_kind_consistency", "cross_kind_disjointness",
-            "residual_totality", "partition_complete",
-        )
-    }
-    with production_signal_scope(session):
-        proof = prove_unary_partition(
-            analysis,
-            domain_contract=("all_inputs",),
-            normalization_policy_digest="production-fixture-v1",
-            producers=producers,
-        )
-    evidence = connector.finish(
-        session,
-        _ObservedLegacyResult(Outcome.UNKNOWN),
-        case_id="real-outcome-producer",
-    )
-    assert proof.status == "unknown"
-    assert proof.blocker_kind == "outcome_termination_classification_unknown"
-    assert session.observed_domain_signal_count == 1
-    assert len(observed) == 1
-    assert observed[0].stage == "termination_classification"
-    assert observed[0].producer_status == "unknown"
-    assert observed[0].proof_requirement_identity["proof_kind"] == (
-        "unary_outcome_termination_classification"
-    )
-    assert observed[0].producer_evidence == {"solver_status": "unknown"}
-    evidence.validate()
-    assert len(evidence.pilot_result.sealed_event_stream.events) == 1
-    assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.UNKNOWN
 
 
 def test_inconclusive_comparison_materializes_receipt_bound_typed_backlog():

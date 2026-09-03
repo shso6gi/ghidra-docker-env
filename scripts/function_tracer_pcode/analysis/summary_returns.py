@@ -3278,34 +3278,6 @@ def _state_transition_cases_key(cases: Any) -> Optional[Tuple[Any, ...]]:
     return ("transition_cases", tuple(entries))
 
 
-def _loop_summary_transition_evidence(loop_summary: Any) -> Optional[Tuple[Any, ...]]:
-    if loop_summary is None:
-        return None
-    cases = tuple(getattr(loop_summary, "cases", ()) or ())
-    if not cases:
-        return None
-    case_keys = tuple(_stable_key_or_none(case) for case in cases)
-    if any(key is None for key in case_keys):
-        return None
-    guard_keys = tuple(_stable_key_or_none(guard) for guard in getattr(loop_summary, "guard_constraints", ()) or ())
-    if any(key is None for key in guard_keys):
-        return None
-    side_effect_profile = getattr(loop_summary, "side_effect_profile", None)
-    side_effect_key = _stable_key_or_none(side_effect_profile)
-    if side_effect_key is None:
-        return None
-    if getattr(side_effect_profile, "requires_effect_proof", lambda: True)():
-        return None
-    return (
-        "loop_summary_transition_evidence",
-        _stable_key_or_none(getattr(loop_summary, "term_descriptor", None)),
-        side_effect_key,
-        guard_keys,
-        case_keys,
-        ("replacement_obligation", "not_required_without_phi_circular"),
-    )
-
-
 def _stable_key_looks_like_loop_summary(key: Tuple[Any, ...]) -> bool:
     text = repr(key)
     return any(

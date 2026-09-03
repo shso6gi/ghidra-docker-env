@@ -280,19 +280,6 @@ class StructuralEqualityReceipt:
     authority_digest: str
     schema_version: str = "structural_equality_receipt_v1"
 
-    @classmethod
-    def from_validated_structure(
-        cls,
-        *,
-        query_label: str,
-        proof_kind: str,
-        evidence: Any,
-        supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...] = (),
-    ) -> "StructuralEqualityReceipt":
-        raise RuntimeError(
-            "structural equality receipt must be issued by a registered producer"
-        )
-
     def _authority_payload(self) -> Tuple[Any, ...]:
         return (
             self.schema_version,

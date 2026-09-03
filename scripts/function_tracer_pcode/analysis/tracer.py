@@ -898,87 +898,6 @@ class PcodeTracer:
                 break
         return self._get_storage_info_from_variable_storage(storage)
 
-    def _call_storage_is_unmodified_before_call(
-        self,
-        storage_info: StorageInfo,
-        call_op,
-    ) -> bool:
-        call_key = self._pcode_sequence_sort_key(call_op)
-        if call_key is None:
-            return False
-        for op in self._iter_high_pcode_ops():
-            if self._same_pcode_op(op, call_op):
-                return True
-            op_key = self._pcode_sequence_sort_key(op)
-            if op_key is None or op_key >= call_key:
-                continue
-            output = getattr(op, "getOutput", lambda: None)()
-            if output is None:
-                continue
-            output_storage = self._get_storage_info_from_varnode(output)
-            if output_storage is None:
-                continue
-            if self._storage_ranges_overlap(storage_info, output_storage):
-                return False
-        return True
-
-    def _iter_high_pcode_ops(self):
-        blocks = getattr(self.high_function, "getBasicBlocks", lambda: [])()
-        for block in blocks or []:
-            iterator = getattr(block, "getIterator", lambda: None)()
-            if iterator is None:
-                continue
-            while iterator.hasNext():
-                yield iterator.next()
-
-    def _pcode_sequence_sort_key(self, pcode_op) -> Optional[Tuple[int, int, int]]:
-        try:
-            seq = pcode_op.getSeqnum()
-        except Exception:
-            seq = None
-        if seq is None:
-            return None
-        try:
-            target = seq.getTarget()
-            address_offset = int(target.getOffset())
-        except Exception:
-            return None
-        try:
-            seq_time = int(seq.getTime())
-        except Exception:
-            seq_time = 0
-        try:
-            seq_order = int(seq.getOrder())
-        except Exception:
-            seq_order = 0
-        return (address_offset, seq_time, seq_order)
-
-    def _same_pcode_op(self, left, right) -> bool:
-        if left is right:
-            return True
-        left_ref = self._make_pcode_op_ref(left)
-        right_ref = self._make_pcode_op_ref(right)
-        return (
-            left_ref is not None
-            and right_ref is not None
-            and left_ref.stable_key() == right_ref.stable_key()
-        )
-
-    def _storage_ranges_overlap(
-        self,
-        left: StorageInfo,
-        right: StorageInfo,
-    ) -> bool:
-        if not left.is_register or not right.is_register:
-            return False
-        if not left.shares_base_register_with(right):
-            return False
-        left_low = int(getattr(left, "bit_offset_in_base", 0) or 0)
-        left_high = left_low + int(getattr(left, "size_bits", 0) or 0)
-        right_low = int(getattr(right, "bit_offset_in_base", 0) or 0)
-        right_high = right_low + int(getattr(right, "size_bits", 0) or 0)
-        return left_high > right_low and right_high > left_low
-
     def _recover_call_target_expression(
         self,
         pcode_op,
@@ -2505,17 +2424,6 @@ class PcodeTracer:
         except Exception:
             return None
 
-    def _get_function_name(self, addr_varnode) -> str:
-        """関数アドレスから関数名を取得"""
-        target_ref = self.resolve_call_target_ref(
-            addr_varnode,
-            allow_containing=True,
-            allow_code_address=True,
-        )
-        if target_ref is None:
-            return "UNKNOWN_FUNC"
-        return target_ref.display_name()
-    
     def get_all_pcode_ops(self) -> List[Any]:
         """全てのPcodeOpをリストで取得"""
         ops = []

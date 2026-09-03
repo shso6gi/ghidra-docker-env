@@ -21,7 +21,6 @@ from scripts.function_tracer_pcode.equivalence.v2.call_effect import (
     CallEffectPilotEncoder,
     FailureDisposition,
     classify_failure,
-    validate_unique_requirement_owners,
 )
 from scripts.function_tracer_pcode.equivalence.call_effect_obligations import (
     ArtifactObjectIdentity,
@@ -49,10 +48,7 @@ from scripts.function_tracer_pcode.equivalence.v2.execution_authority import (
     TerminalLifecycleProjectionAuthority,
     TerminalTimeoutSelectionReceipt,
     activate_execution_authority_deployment,
-    begin_solver_execution_ledger,
-    decode_persisted_refutation_artifact,
     decode_persisted_execution_receipt,
-    decode_persisted_terminal_timeout_selection,
     install_execution_authority_signing_key,
 )
 from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
@@ -434,19 +430,6 @@ def test_pure_call_any_of_frontier_is_relational_and_effect_free():
     assert bindings["call_guard_relation"].requirement_id in inline_done.live_open_requirements
 
 
-def test_unique_active_requirement_owner_contract():
-    validate_unique_requirement_owners((
-        ("result-1", "req-a", "occ-a"),
-        ("result-1", "req-b", "occ-b"),
-        ("result-1", "req-a", "occ-a"),
-    ))
-    with pytest.raises(ValueError, match="multiple occurrence owners"):
-        validate_unique_requirement_owners((
-            ("result-1", "req-a", "occ-a"),
-            ("result-1", "req-a", "occ-b"),
-        ))
-
-
 def test_artifact_capability_registry_rejects_unregistered_and_refutation_completion():
     class FakeLease:
         pass
@@ -607,117 +590,6 @@ def test_attempt_membership_rejects_unsealed_status_and_stage():
         _membership(stage="new-stage").validate_against(registry)
 
 
-def test_terminal_timeout_selection_binds_registry_and_candidate():
-    registry = _registry()
-    membership = _membership()
-    candidate = TerminalTimeoutCandidate(
-        membership, _execution_receipt(membership=membership), 7
-    )
-    projection = TerminalLifecycleProjectionAuthority.create("result-1", ("req-guard",))
-    census = _census(registry, (membership, candidate.execution_receipt))
-    receipt = TerminalTimeoutSelectionReceipt.select(registry, census, projection)
-    assert receipt is not None
-    receipt.validate_against(registry, census, projection)
-    with pytest.raises(ValueError, match="registry authority differs"):
-        receipt.validate_against(ProducerStageRegistry(2, (_stage(),)), census, projection)
-    with pytest.raises(TypeError, match="factory/codec issued"):
-        replace(receipt, solver_event_sequence=8)
-
-
-def test_terminal_timeout_selection_normalizes_multi_solver_and_multi_requirement():
-    registry = _registry()
-    first_membership = _membership(requirement="req-a")
-    second_membership = _membership(requirement="req-b")
-    first = TerminalTimeoutCandidate(
-        first_membership, _execution_receipt(membership=first_membership), 3
-    )
-    first_latest = TerminalTimeoutCandidate(
-        first_membership, _execution_receipt(membership=first_membership), 5
-    )
-    second = TerminalTimeoutCandidate(
-        second_membership, _execution_receipt(membership=second_membership), 4
-    )
-    projection = TerminalLifecycleProjectionAuthority.create(
-        "result-1", ("req-a", "req-b")
-    )
-    census = _census(
-        registry,
-        (first_membership, first.execution_receipt),
-        (second_membership, second.execution_receipt),
-        (first_membership, first_latest.execution_receipt),
-    )
-    selected = TerminalTimeoutSelectionReceipt.select(registry, census, projection)
-    assert selected is not None
-    assert selected.candidate_set_digest == authority_digest(tuple(sorted(
-        (
-            TerminalTimeoutCandidate(first_membership, first_latest.execution_receipt, 3).identity_tuple(),
-            TerminalTimeoutCandidate(second_membership, second.execution_receipt, 2).identity_tuple(),
-        ), key=authority_digest
-    )))
-    assert selected.proof_requirement_id in {"req-a", "req-b"}
-
-
-def test_unknown_attempt_timeout_receipt_is_not_terminal_eligible():
-    registry = _registry()
-    membership = _membership(status="unknown")
-    candidate = TerminalTimeoutCandidate(
-        membership, _execution_receipt(status="timeout", membership=membership), 7
-    )
-    projection = TerminalLifecycleProjectionAuthority.create("result-1", ("req-guard",))
-    census = _census(registry, (membership, candidate.execution_receipt))
-    assert TerminalTimeoutSelectionReceipt.select(registry, census, projection) is None
-
-
-def test_later_non_timeout_event_in_census_invalidates_old_timeout():
-    registry = _registry()
-    timed_out = _membership(status="timeout", ordinal=1)
-    refuted = _membership(status="refuted", ordinal=2)
-    timeout_receipt = _execution_receipt(membership=timed_out)
-    sat_query = "(declare-const x Int)\n(assert (= x 1))\n(check-sat)"
-    sat_receipt = _execution_receipt(
-        status="sat", membership=refuted, model={"x": 1}, query=sat_query
-    )
-    census = _census(
-        registry, (timed_out, timeout_receipt), (refuted, sat_receipt)
-    )
-    projection = TerminalLifecycleProjectionAuthority.create("result-1", ("req-guard",))
-    assert TerminalTimeoutSelectionReceipt.select(registry, census, projection) is None
-
-
-def test_persisted_terminal_selection_recomputes_candidates_and_projection():
-    registry = _registry()
-    membership = _membership()
-    candidate = TerminalTimeoutCandidate(
-        membership, _execution_receipt(membership=membership), 7
-    )
-    projection = TerminalLifecycleProjectionAuthority.create("result-1", ("req-guard",))
-    selected = TerminalTimeoutSelectionReceipt.select(
-        registry, _census(registry, (membership, candidate.execution_receipt)), projection
-    )
-    census = _census(registry, (membership, candidate.execution_receipt))
-    selected = TerminalTimeoutSelectionReceipt.select(registry, census, projection)
-    decoded = decode_persisted_terminal_timeout_selection(
-        selected.to_authority_dict(),
-        registry=registry,
-        census=census,
-        projection=projection,
-    )
-    assert decoded == selected
-    forged = dict(selected.to_authority_dict())
-    forged["solver_event_sequence"] = 8
-    forged["selection_receipt_digest"] = authority_digest({
-        key: value for key, value in forged.items()
-        if key != "selection_receipt_digest"
-    })
-    with pytest.raises(ValueError, match="current authority"):
-        decode_persisted_terminal_timeout_selection(
-            forged,
-            registry=registry,
-            census=census,
-            projection=projection,
-        )
-
-
 def test_timeout_candidate_must_join_q_open_and_attempt_exactly():
     registry = _registry()
     membership = _membership()
@@ -745,27 +617,3 @@ def test_model_bound_refutation_requires_replay_model_output_and_exact_digest():
     with pytest.raises(TypeError, match="factory/codec issued"):
         replace(artifact.replay_receipt, replay_status="unchecked")
 
-
-def test_persisted_refutation_revalidates_pinned_replay_semantics():
-    artifact = _refutation()
-    registry = _registry()
-    membership = _membership(status="refuted")
-    persisted = artifact.to_authority_dict()
-    assert decode_persisted_refutation_artifact(
-        persisted, registry=registry, membership=membership
-    ).artifact_digest == artifact.artifact_digest
-    forged = copy.deepcopy(persisted)
-    forged_replay = forged["replay_receipt"]
-    forged_replay["replay_status"] = "unchecked"
-    forged_replay["replay_receipt_digest"] = authority_digest({
-        key: value for key, value in forged_replay.items()
-        if key != "replay_receipt_digest"
-    })
-    forged["artifact_digest"] = authority_digest({
-        key: value for key, value in forged.items()
-        if key != "artifact_digest"
-    })
-    with pytest.raises(ValueError, match="status is not validated"):
-        decode_persisted_refutation_artifact(
-            forged, registry=registry, membership=membership
-        )

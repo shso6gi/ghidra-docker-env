@@ -32,8 +32,6 @@ from scripts.function_tracer_pcode.equivalence.v2.decision import (
 from scripts.function_tracer_pcode.equivalence.v2.shadow_compare import (
     LegacyExpectedProjection,
     ShadowComparisonKind,
-    build_shadow_census_preview,
-    compare_shadow,
 )
 from scripts.function_tracer_pcode.equivalence.v2.stream import (
     CauseObservedEventAuthority,
@@ -196,13 +194,6 @@ def _forge_candidate_timeout_projection(candidate, *, observed, terminal):
     return forged
 
 
-@pytest.mark.parametrize("outcome", tuple(Outcome))
-def test_candidate_five_value_decision_is_derived_without_legacy(outcome):
-    candidate, _ = _candidate(outcome)
-    assert candidate.decision_receipt.outcome == outcome
-    assert compare_shadow(_legacy(candidate), candidate) == ShadowComparisonKind.MATCH
-
-
 def test_candidate_rejects_unrecorded_decisive_timeout_and_error_authority_as_error():
     candidate, reduction = _candidate(Outcome.UNKNOWN)
     forged = DecisiveProofReceipt.create(
@@ -358,169 +349,6 @@ def test_candidate_projection_cannot_be_forged_outside_builder():
             candidate.cli_batch_projection,
             candidate.projection_digest,
         )
-
-
-@pytest.mark.parametrize(
-    ("changes", "expected"),
-    (
-        ({"outcome": Outcome.ERROR}, ShadowComparisonKind.MISMATCH_DECISION_AUTHORITY),
-        ({"decisive_proof_receipt_digests": ("different",)}, ShadowComparisonKind.MISMATCH_DECISION_AUTHORITY),
-        ({"active_cause_ids": ("different",)}, ShadowComparisonKind.MISMATCH_LIFECYCLE),
-        ({"proof_backlog_keys": (("contract", 2, "req"),)}, ShadowComparisonKind.MISMATCH_LIFECYCLE),
-        ({"terminal_execution_event_digests": ("different",)}, ShadowComparisonKind.MISMATCH_EXECUTION_EVENT),
-        ({"retry_fallback_projection": ("different",)}, ShadowComparisonKind.MISMATCH_FALLBACK_POLICY),
-        ({"cli_batch_projection": ("different",)}, ShadowComparisonKind.MISMATCH_DECISION_AUTHORITY),
-        ({"ambiguity": True}, ShadowComparisonKind.MISMATCH_LEGACY_AMBIGUITY),
-    ),
-)
-def test_shadow_comparison_classifies_every_authority_difference(changes, expected):
-    candidate, _ = _candidate(Outcome.UNKNOWN)
-    assert compare_shadow(_legacy(candidate, **changes), candidate) == expected
-    assert compare_shadow(_legacy(candidate), None) == ShadowComparisonKind.SHADOW_EVIDENCE_INCOMPLETE
-    assert compare_shadow(
-        _legacy(candidate), candidate, evidence_incomplete=True
-    ) == ShadowComparisonKind.SHADOW_EVIDENCE_INCOMPLETE
-
-
-def test_shadow_census_join_is_post_receipt_and_all_or_nothing():
-    candidate, reduction, stream = _candidate(
-        Outcome.UNKNOWN, include_stream=True
-    )
-    entry = CensusEntry(
-        "result-1", ResultKind.V2_NATIVE, ("domain",), ("left", "right"),
-        ("f", "f"), reduction.snapshot.event_stream_authority_digest,
-        reduction.projection.lifecycle_projection_digest,
-        candidate.decision_receipt.receipt_digest, "artifact",
-    )
-    manifest = CensusManifest(
-        "manifest", CensusMode.V2_CANONICAL, "head", "config", (entry,)
-    )
-    row = reduction.projection.c_active_base[0]
-    coverage = CoverageInputs((ActiveOccurrenceMaterialization(
-        row.result_occurrence_id, row.occurrence_id, row.cause_id,
-        RecoveryAddressability.REQUIREMENT_REQUIRED,
-    ),))
-    valid = build_shadow_census_preview(
-        manifest, (candidate,), (reduction.projection,), (stream,),
-        coverage_inputs=coverage,
-    )
-    assert valid.status == CensusStatus.VALID
-    assert valid.canonical_metrics["affected_unknown_results_by_reason"] == {
-        "return_width_bridge_missing": 1
-    }
-    forged_nonterminal = _forge_candidate_timeout_projection(
-        candidate,
-        observed=("caller-supplied-timeout",),
-        terminal=(),
-    )
-    forged_nonterminal_result = build_shadow_census_preview(
-        manifest,
-        (forged_nonterminal,),
-        (reduction.projection,),
-        (stream,),
-        coverage_inputs=coverage,
-    )
-    assert forged_nonterminal_result.status == CensusStatus.INVALID
-    assert forged_nonterminal_result.canonical_metrics is None
-
-    timeout_candidate, timeout_reduction, timeout_stream = _candidate(
-        Outcome.TIMEOUT, include_stream=True
-    )
-    timeout_entry = replace(
-        entry,
-        event_stream_authority_digest=(
-            timeout_reduction.snapshot.event_stream_authority_digest
-        ),
-        lifecycle_projection_digest=(
-            timeout_reduction.projection.lifecycle_projection_digest
-        ),
-        decision_receipt_digest=(
-            timeout_candidate.decision_receipt.receipt_digest
-        ),
-    )
-    timeout_manifest = CensusManifest(
-        "timeout-manifest", CensusMode.V2_CANONICAL, "head", "config",
-        (timeout_entry,),
-    )
-    timeout_row = timeout_reduction.projection.c_active_base[0]
-    timeout_coverage = CoverageInputs((ActiveOccurrenceMaterialization(
-        timeout_row.result_occurrence_id,
-        timeout_row.occurrence_id,
-        timeout_row.cause_id,
-        RecoveryAddressability.REQUIREMENT_REQUIRED,
-    ),))
-    forged_terminal = _forge_candidate_timeout_projection(
-        timeout_candidate,
-        observed=("caller-supplied-terminal",),
-        terminal=("caller-supplied-terminal",),
-    )
-    forged_terminal_result = build_shadow_census_preview(
-        timeout_manifest,
-        (forged_terminal,),
-        (timeout_reduction.projection,),
-        (timeout_stream,),
-        coverage_inputs=timeout_coverage,
-    )
-    assert forged_terminal_result.status == CensusStatus.INVALID
-    assert forged_terminal_result.canonical_metrics is None
-    missing = build_shadow_census_preview(
-        manifest, (), (reduction.projection,), (stream,),
-        coverage_inputs=coverage,
-    )
-    assert missing.status == CensusStatus.INVALID
-    wrong_manifest = CensusManifest(
-        "wrong", CensusMode.V2_CANONICAL, "head", "config",
-        (replace(entry, decision_receipt_digest="wrong"),),
-    )
-    mismatched = build_shadow_census_preview(
-        wrong_manifest, (candidate,), (reduction.projection,), (stream,),
-        coverage_inputs=coverage,
-    )
-    assert mismatched.status == CensusStatus.INVALID
-
-    duplicate_decision = build_shadow_census_preview(
-        manifest, (candidate, candidate), (reduction.projection,), (stream,),
-        coverage_inputs=coverage,
-    )
-    assert duplicate_decision.status == CensusStatus.INVALID
-    assert duplicate_decision.canonical_metrics is None
-
-    duplicate_projection = build_shadow_census_preview(
-        manifest, (candidate,), (reduction.projection, reduction.projection), (stream,),
-        coverage_inputs=coverage,
-    )
-    assert duplicate_projection.status == CensusStatus.INVALID
-    assert duplicate_projection.canonical_metrics is None
-
-    orphan_reduction = _reducer().replay(_stream_for(
-        "result-2",
-        EventIntent(
-            EventType.CAUSE_OBSERVED,
-            CauseObservedEventAuthority(_authority()),
-        ),
-    ))
-    orphan_candidate = build_candidate_projection(orphan_reduction)
-    orphan_stream = _stream_for(
-        "result-2",
-        EventIntent(
-            EventType.CAUSE_OBSERVED,
-            CauseObservedEventAuthority(_authority()),
-        ),
-    )
-    orphan_decision = build_shadow_census_preview(
-        manifest, (candidate, orphan_candidate), (reduction.projection,),
-        (stream, orphan_stream),
-        coverage_inputs=coverage,
-    )
-    assert orphan_decision.status == CensusStatus.INVALID
-    assert orphan_decision.canonical_metrics is None
-    orphan_projection = build_shadow_census_preview(
-        manifest, (candidate,), (reduction.projection, orphan_reduction.projection),
-        (stream, orphan_stream),
-        coverage_inputs=coverage,
-    )
-    assert orphan_projection.status == CensusStatus.INVALID
-    assert orphan_projection.canonical_metrics is None
 
 
 def test_candidate_module_has_no_legacy_or_census_dependency():

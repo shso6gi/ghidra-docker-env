@@ -39,7 +39,6 @@ from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.validation.result_summary import (
     aggregate_validation_logs_by_function,
     build_run_health_summary,
-    classify_canonical_log_text,
     classify_result_payload,
     read_validation_log_record,
 )
@@ -186,80 +185,6 @@ def test_stage_fallback_consumes_the_all_five_policy(outcome):
         assert continues is False
 
 
-def test_cli_startup_error_emits_canonical_error_and_exit_four(monkeypatch, capsys):
-    from scripts.function_tracer_pcode.cli.commands import equivalence as cli
-
-    monkeypatch.setattr(cli, "apply_runtime_environment", lambda: SimpleNamespace())
-    monkeypatch.setattr(
-        cli, "load_pyghidra", lambda: (_ for _ in ()).throw(RuntimeError("startup"))
-    )
-    args = SimpleNamespace(
-        equiv=("left.o", "right.o"), binary_ids=None, output=None,
-        quiet=False, verbose=False, debug=False,
-    )
-
-    with pytest.raises(SystemExit) as stopped:
-        cli.run_equivalence_check(args)
-
-    assert stopped.value.code == CLI_EXIT_MATRIX[Outcome.ERROR] == 4
-    text = capsys.readouterr().out
-    assert classify_canonical_log_text(text, matrix_context=True) == "ERROR"
-
-
-def test_cli_no_solver_emits_canonical_error_and_exit_four(monkeypatch, capsys):
-    from scripts.function_tracer_pcode.cli.commands import equivalence as cli
-    import scripts.function_tracer_pcode.equivalence as equivalence_package
-    import scripts.function_tracer_pcode.equivalence.source_declarations as declarations
-
-    class FakeChecker:
-        def __init__(self, **_kwargs):
-            self.solver_runner = SimpleNamespace(get_available_solvers=lambda: [])
-
-    monkeypatch.setattr(cli, "apply_runtime_environment", lambda: SimpleNamespace(
-        ghidra_install_dir=None
-    ))
-    monkeypatch.setattr(cli, "load_pyghidra", lambda: object())
-    monkeypatch.setattr(cli, "start_headless_pyghidra", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(cli, "get_target_functions", lambda _args: ["f"])
-    monkeypatch.setattr(equivalence_package, "EquivalenceChecker", FakeChecker)
-    monkeypatch.setattr(declarations, "infer_adjacent_c_return_type", lambda *_args: None)
-    args = SimpleNamespace(
-        equiv=("left.o", "right.o"), binary_ids=None, output=None,
-        quiet=False, verbose=False, debug=False, equiv_timeout=1,
-    )
-
-    with pytest.raises(SystemExit) as stopped:
-        cli.run_equivalence_check(args)
-
-    assert stopped.value.code == CLI_EXIT_MATRIX[Outcome.ERROR] == 4
-    assert classify_canonical_log_text(
-        capsys.readouterr().out, matrix_context=True
-    ) == "ERROR"
-
-
-def test_cli_missing_function_emits_canonical_error_and_exit_four(monkeypatch, capsys):
-    from scripts.function_tracer_pcode.cli.commands import equivalence as cli
-
-    monkeypatch.setattr(cli, "apply_runtime_environment", lambda: SimpleNamespace(
-        ghidra_install_dir=None
-    ))
-    monkeypatch.setattr(cli, "load_pyghidra", lambda: object())
-    monkeypatch.setattr(cli, "start_headless_pyghidra", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(cli, "get_target_functions", lambda _args: [])
-    args = SimpleNamespace(
-        equiv=("left.o", "right.o"), binary_ids=None, output=None,
-        quiet=False, verbose=False, debug=False, equiv_timeout=1,
-    )
-
-    with pytest.raises(SystemExit) as stopped:
-        cli.run_equivalence_check(args)
-
-    assert stopped.value.code == CLI_EXIT_MATRIX[Outcome.ERROR] == 4
-    assert classify_canonical_log_text(
-        capsys.readouterr().out, matrix_context=True
-    ) == "ERROR"
-
-
 def test_timeout_requires_terminal_receipt_not_solver_row_heuristic():
     result = EquivalenceResult(
         is_equivalent=None,
@@ -289,18 +214,6 @@ def test_serialized_lifecycle_relations_remain_base_relations_without_outcome():
     assert len(payload["c_active_base"]) == 1
     assert payload["q_open_base"] == []
     assert "final_outcome" not in payload["c_active_base"][0]
-
-
-def test_canonical_matrix_parser_rejects_result_line_and_legacy_json():
-    assert classify_canonical_log_text("Result: TIMEOUT\n", matrix_context=True) == (
-        "INCOMPLETE"
-    )
-    legacy = "\n".join((
-        "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
-        '{"is_equivalent":null,"is_timeout":true}',
-        "=== EQUIVALENCE_RESULT_JSON_END ===",
-    ))
-    assert classify_canonical_log_text(legacy, matrix_context=True) == "INCOMPLETE"
 
 
 def test_canonical_summary_mode_never_uses_legacy_timeout_heuristics(tmp_path):

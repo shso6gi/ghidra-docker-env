@@ -363,34 +363,6 @@ def _readonly_ref_from_value(value) -> Optional[ReadonlyReductionRef]:
     return None
 
 
-def _readonly_ref_count_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
-    identity_fn = getattr(ref, "count_parameter_semantic_identity", None)
-    if callable(identity_fn):
-        try:
-            identity = identity_fn()
-        except (TypeError, ValueError):
-            identity = None
-        if identity is not None:
-            return identity
-    identity_fn = getattr(ref, "_count_parameter_semantic_identity", None)
-    if callable(identity_fn):
-        try:
-            identity = identity_fn()
-        except (TypeError, ValueError):
-            identity = None
-        if identity is not None:
-            return identity
-    if ref.count_parameter_index is None:
-        return None
-    try:
-        index = int(ref.count_parameter_index)
-    except (TypeError, ValueError):
-        return None
-    if index < 0:
-        return None
-    return ("parameter", index)
-
-
 def _readonly_ref_count_storage_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
     storage_key = getattr(ref, "count_parameter_storage_identity_key", None)
     if storage_key is None:

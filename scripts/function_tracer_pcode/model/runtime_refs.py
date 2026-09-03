@@ -3281,9 +3281,6 @@ class ReductionAccumulatorProof:
     def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
         return self._build_loop_summary_ref()
 
-    def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
-        return self.lower_to_loop_summary_ref()
-
     def with_runtime_evidence(
         self,
         *,
@@ -3437,14 +3434,8 @@ class ReductionAccumulatorProof:
         lowering = self.lower_to_readonly_reduction()
         return lowering.readonly_reduction if lowering is not None else None
 
-    def to_readonly_reduction_ref(self) -> Optional["ReadonlyReductionRef"]:
-        return self.lower_to_readonly_reduction_ref()
-
     def loop_var_unit(self) -> str:
         return "scalar_element_index" if self._scalar_lane_terms(require_witness_prefix=True) else "element_index"
-
-    def _pairwise_loop_var_unit(self) -> str:
-        return "scalar_element_index" if self._scalar_lane_terms(require_witness_prefix=False) else self.loop_var_unit()
 
     def _scalar_lane_terms(
         self,

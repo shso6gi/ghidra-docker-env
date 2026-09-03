@@ -12,6 +12,8 @@ from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
 from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    _UNKNOWN_REASON_REGISTRY,
+    _UNKNOWN_RECOVERY_PLAN_REGISTRY,
     UnknownCountKind,
     UnknownRecoveryAction,
     UnknownRecoveryActionStatus,
@@ -27,8 +29,6 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     make_internal_v2_reason_diagnostic,
     make_production_unknown_reason,
     summarize_unknown_recovery_backlog,
-    unknown_reason_registry_snapshot,
-    unknown_recovery_plan_registry_snapshot,
 )
 
 
@@ -408,8 +408,8 @@ def test_unknown_legacy_recovery_action_keeps_diagnostic_defaults():
 
 
 def test_recovery_kind_reasons_all_have_registered_plans():
-    definitions = unknown_reason_registry_snapshot()
-    plans = unknown_recovery_plan_registry_snapshot()
+    definitions = dict(_UNKNOWN_REASON_REGISTRY)
+    plans = dict(_UNKNOWN_RECOVERY_PLAN_REGISTRY)
 
     missing = sorted(
         reason_id

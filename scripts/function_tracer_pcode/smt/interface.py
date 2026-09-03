@@ -108,11 +108,6 @@ class SMTSolver(ABC):
         """
         pass
     
-    @abstractmethod
-    def get_model(self) -> Optional[Dict[str, Any]]:
-        """反例（モデル）を取得"""
-        pass
-    
     def _create_error_result(self, error_msg: str) -> SolverResult:
         """エラー結果を作成"""
         return SolverResult(

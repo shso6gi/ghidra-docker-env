@@ -318,33 +318,6 @@ class FormulaBuilder:
         self.variable_analyzer = VariableAnalyzer(debug=debug)
         self.ub_constraint_builder = UbConstraintBuilder(debug=debug)
     
-    def build_equivalence_formula(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-        func1_suffix: str = "_1",
-        func2_suffix: str = "_2",
-        extra_assertions: Optional[List[str]] = None,  # ★ NEW
-        canonical_return_observation_width: Optional[int] = None,
-    ) -> Tuple[str, str, str]:
-        """
-        2つの関数の等価性検証用SMT式を構築
-        
-        Args:
-            analysis1, analysis2: 各関数の解析結果
-            func1_suffix, func2_suffix: サフィックス
-            extra_assertions: 追加のアサート文（(check-sat)の直前に挿入）
-        
-        Returns:
-            (smt_formula, return_var1, return_var2)
-        """
-        result = self.build_equivalence_formula_extended(
-            analysis1, analysis2, func1_suffix, func2_suffix,
-            extra_assertions=extra_assertions,  # ★ NEW
-            canonical_return_observation_width=canonical_return_observation_width,
-        )
-        return result.formula, result.return_var1, result.return_var2
-    
     def build_equivalence_formula_extended(
         self,
         analysis1: FunctionReturnAnalysis,

@@ -380,5 +380,3 @@ class CVC5Solver(SMTSolver):
         
         return None
     
-    def get_model(self) -> Optional[Dict[str, Any]]:
-        return self._model

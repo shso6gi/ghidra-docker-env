@@ -1150,10 +1150,6 @@ def get_unknown_reason_definition(reason_id: Any) -> UnknownReasonDefinition:
     return _UNKNOWN_REASON_REGISTRY[UnknownReasonId.UNKNOWN.value]
 
 
-def unknown_reason_registry_snapshot() -> Dict[str, UnknownReasonDefinition]:
-    return dict(_UNKNOWN_REASON_REGISTRY)
-
-
 def get_unknown_recovery_plan(reason_id: Any) -> UnknownRecoveryPlan:
     normalized = normalize_unknown_reason_id(reason_id)
     plan = _UNKNOWN_RECOVERY_PLAN_REGISTRY.get(normalized)
@@ -1164,10 +1160,6 @@ def get_unknown_recovery_plan(reason_id: Any) -> UnknownRecoveryPlan:
         proof_obligations=(),
         target_regression=get_unknown_reason_definition(normalized).target_regression,
     )
-
-
-def unknown_recovery_plan_registry_snapshot() -> Dict[str, UnknownRecoveryPlan]:
-    return dict(_UNKNOWN_RECOVERY_PLAN_REGISTRY)
 
 
 def build_proof_obligation_id(

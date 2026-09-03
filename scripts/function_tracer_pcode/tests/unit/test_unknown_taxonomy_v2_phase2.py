@@ -244,31 +244,6 @@ def test_semantic_factory_validates_registry_target_and_binding_factory_is_typed
         })
 
 
-def test_legacy_reader_is_byte_for_byte_lossless_and_projection_is_non_authoritative():
-    raw = '{ "reason_id" : "old:timeout", "detail" : [1, 2] }\n'
-    record = LegacyRecord.read(raw)
-    assert record.write_lossless() == raw
-    mapping = SealedLegacyMappingRegistry.build((
-        ("old:timeout", None, LegacyMappingCertainty.UMBRELLA),
-    ))
-    projection = mapping.project(record)
-    assert projection.raw_reason_id == "old:timeout"
-    assert projection.mapped_reason_id is None
-    assert projection.mapping_certainty == LegacyMappingCertainty.UMBRELLA
-    assert projection.non_authoritative is True
-    unmapped = mapping.project(LegacyRecord.read('{"reason_id":"return_width_bridge_missing:suffix"}'))
-    assert unmapped.mapping_certainty == LegacyMappingCertainty.UNMAPPED
-    with pytest.raises(ValueError, match="factory-issued"):
-        SealedLegacyMappingRegistry({})
-    with pytest.raises(ValueError, match="duplicate"):
-        SealedLegacyMappingRegistry.build((
-            ("same", "one", LegacyMappingCertainty.EXACT),
-            ("same", "two", LegacyMappingCertainty.AMBIGUOUS),
-        ))
-    with pytest.raises(ValueError, match="lossless reader"):
-        LegacyRecord(raw, {"reason_id": "different"})
-
-
 def test_strict_codec_round_trips_event_projection_receipts_relations_and_manifest():
     codec = _codec()
     recorder = EventRecorder(

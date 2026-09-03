@@ -1621,16 +1621,6 @@ class SolverExecutionLedger:
                 raise ValueError("solver replay lifecycle is unbalanced")
             self._open_replays -= 1
 
-    def append_nonproduction_fixture(
-        self, membership: ProducerAttemptMembership,
-        execution_receipt: GenericSolverExecutionReceipt,
-    ) -> SolverExecutionEvent:
-        if self._execution_issuer_id != NONPRODUCTION_TEST_SOLVER_EXECUTION_ISSUER.issuer_id:
-            raise TypeError("fixture append is unavailable for production ledgers")
-        return self._append_from_issuer(
-            membership, execution_receipt, _issuer_token=_RUNNER_ISSUER_TOKEN
-        )
-
     def seal(self) -> SolverExecutionCensusAuthority:
         with self._lock:
             if self._sealed:
@@ -1656,17 +1646,6 @@ class SolverExecutionLedger:
             )
             census.validate(self._registry)
             return census
-
-
-def begin_solver_execution_ledger(
-    registry: ProducerStageRegistry, result_occurrence_id: str
-) -> SolverExecutionLedger:
-    issuer_ids = {item.execution_issuer_id for item in registry.contracts}
-    if issuer_ids != {NONPRODUCTION_TEST_SOLVER_EXECUTION_ISSUER.issuer_id}:
-        raise TypeError("production ledgers are owned by PinnedSolverExecutionIssuer")
-    return SolverExecutionLedger(
-        registry, result_occurrence_id, _factory_token=_SOLVER_LEDGER_TOKEN
-    )
 
 
 @dataclass(frozen=True, init=False)
@@ -2631,24 +2610,6 @@ class ModelBoundRelationalRefutationArtifact:
             raise ValueError("relational refutation artifact digest mismatch")
 
 
-def decode_persisted_terminal_timeout_selection(
-    payload: Mapping[str, Any],
-    *,
-    registry: ProducerStageRegistry,
-    census: SolverExecutionCensusAuthority,
-    projection: TerminalLifecycleProjectionAuthority,
-) -> TerminalTimeoutSelectionReceipt:
-    """Strict persisted ingress; selection is recomputed from current authority."""
-
-    return TerminalTimeoutSelectionReceipt.from_persisted(
-        payload,
-        registry=registry,
-        census=census,
-        projection=projection,
-        _codec_token=_SELECTION_CODEC_TOKEN,
-    )
-
-
 def decode_persisted_execution_receipt(
     payload: Mapping[str, Any]
 ) -> GenericSolverExecutionReceipt:
@@ -2658,20 +2619,3 @@ def decode_persisted_execution_receipt(
         payload, _codec_token=_EXECUTION_RECEIPT_CODEC_TOKEN
     )
 
-
-def decode_persisted_refutation_artifact(
-    payload: Mapping[str, Any],
-    *,
-    verifier: PinnedRelationalWitnessVerifier = PINNED_RELATIONAL_WITNESS_VERIFIER,
-    registry: ProducerStageRegistry,
-    membership: ProducerAttemptMembership,
-) -> ModelBoundRelationalRefutationArtifact:
-    """Strict persisted ingress for SAT execution, replay, and refutation joins."""
-
-    return ModelBoundRelationalRefutationArtifact.from_persisted(
-        payload,
-        verifier=verifier,
-        registry=registry,
-        membership=membership,
-        _codec_token=_REFUTATION_CODEC_TOKEN,
-    )

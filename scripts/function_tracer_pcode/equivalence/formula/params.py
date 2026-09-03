@@ -473,19 +473,6 @@ def merge_param_and_extra_vars(
     return result
 
 
-def replace_symbol_names(smt_expr: str, param_infos: List[ParameterInfo]) -> str:
-    """SMT式中のシンボル名を最終名へ置換する。
-
-    既存コードとの互換性のために残すヘルパー。
-    新規実装では AST の ``to_smt(symbol_name_mapping=...)`` を使う想定。
-    """
-    if not smt_expr:
-        return smt_expr
-
-    mapping = _build_symbol_name_mapping(param_infos)
-    return _replace_symbols_in_smt_text(smt_expr, mapping)
-
-
 def build_symbol_name_mapping(param_infos: List[ParameterInfo]) -> Mapping[str, str]:
     """最終 SMT シンボル名の写像を作る。"""
     mapping: Dict[str, str] = {}
@@ -493,35 +480,3 @@ def build_symbol_name_mapping(param_infos: List[ParameterInfo]) -> Mapping[str, 
         mapping[param.original_name] = param.smt_name
     return mapping
 
-
-def _build_symbol_name_mapping(param_infos: List[ParameterInfo]) -> Mapping[str, str]:
-    """旧内部実装の互換ラッパー（将来のリファクタ時に削除予定）。"""
-    return build_symbol_name_mapping(param_infos)
-
-
-def _replace_symbols_in_smt_text(smt_expr: str, mapping: Mapping[str, str]) -> str:
-    """トークン単位でSMT文字列中のシンボル名を置換する。
-
-    正規表現ではなく、識別子トークン境界での置換にする。
-    """
-    if not mapping:
-        return smt_expr
-
-    result: List[str] = []
-    i = 0
-    length = len(smt_expr)
-    while i < length:
-        ch = smt_expr[i]
-        if ch == "_" or ch.isalpha():
-            start = i
-            i += 1
-            while i < length and (smt_expr[i].isalnum() or smt_expr[i] == "_"):
-                i += 1
-            token = smt_expr[start:i]
-            result.append(mapping.get(token, token))
-            continue
-
-        result.append(ch)
-        i += 1
-
-    return "".join(result)

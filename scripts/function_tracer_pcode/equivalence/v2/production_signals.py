@@ -941,40 +941,6 @@ class CallEffectPrerequisiteProductionSignal:
         }
 
 
-class OutcomePartitionPilotEncoder:
-    """Typed production encoder; registry-issued cause creation stays injectable."""
-
-    def __init__(
-        self,
-        blocker_authority_factory: Callable[
-            [Any, OutcomePartitionProductionSignal], CauseOccurrenceAuthority
-        ],
-    ) -> None:
-        if not callable(blocker_authority_factory):
-            raise TypeError("outcome partition blocker authority factory must be callable")
-        self._blocker_authority_factory = blocker_authority_factory
-
-    def __call__(
-        self, session: Any, signal: OutcomePartitionProductionSignal
-    ) -> tuple[EventIntent, ...]:
-        if type(signal) is not OutcomePartitionProductionSignal:
-            raise TypeError("outcome partition encoder requires an exact typed signal")
-        authority_digest(signal._phase7_signal_authority())
-        if signal.producer_status == "proved":
-            return ()
-        authority = self._blocker_authority_factory(session, signal)
-        if type(authority) is not CauseOccurrenceAuthority:
-            raise TypeError("outcome partition factory returned non-authority")
-        if authority.occurrence.source_snapshot_fingerprint != (
-            session.identity.source_snapshot_fingerprint
-        ):
-            raise ValueError("outcome partition authority snapshot differs from session")
-        return (EventIntent(
-            EventType.CAUSE_OBSERVED,
-            CauseObservedEventAuthority(authority),
-        ),)
-
-
 class CompositeProductionSignalEncoder:
     """Exact-type router; an unregistered producer signal fails closed."""
 
@@ -1180,17 +1146,6 @@ class CompositeProductionSignalEncoder:
         if not callable(registrar):
             raise TypeError("ABI/width route lacks return-observation proof planning")
         registrar(session, projection_seed, assessment)
-
-    def build_abi_width_execution_context(
-        self, session: Any, blocker: Any, query: Any
-    ) -> Any:
-        from .abi_width_readonly import AbiWidthReadonlyBlockerSignal
-
-        encoder = self._routes.get(AbiWidthReadonlyBlockerSignal)
-        builder = getattr(encoder, "build_execution_context", None)
-        if not callable(builder):
-            raise TypeError("ABI/width route lacks execution-context authority")
-        return builder(session, blocker, query)
 
     def prepare_sat_safety_transformation(
         self, session: Any, signal: Any,
@@ -1641,73 +1596,6 @@ def register_return_observation_proof_plan(
     if not callable(registrar):
         return
     registrar(session, projection_seed, assessment)
-
-
-def execute_abi_width_readonly_solver_query(
-    blocker: Any,
-    query: Any,
-    proof_seed: Any,
-    dependency_artifacts: tuple[Any, ...],
-    *,
-    configured_timeout_ms: int,
-) -> int:
-    """Execute one exact slice-5 semantic query through the signed issuer."""
-
-    from .abi_width_readonly import (
-        ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY,
-        AbiWidthReadonlySolverExecutionBatchSignal,
-        AbiWidthReadonlySolverQueryAuthority,
-    )
-    from .execution_authority import PINNED_SOLVER_EXECUTION_ISSUER
-
-    if type(query) is not AbiWidthReadonlySolverQueryAuthority:
-        raise TypeError("ABI/width execution requires exact semantic query")
-    session = active_production_pilot_session()
-    if session is None:
-        return 0
-    builder = getattr(
-        session.domain_signal_encoder, "build_abi_width_execution_context", None
-    )
-    if not callable(builder):
-        return 0
-    context = builder(session, blocker, query)
-    membership = context.membership_for(query)
-    first_invocation_ordinal = int(session.domain_signal_state.get(
-        "abi_width_next_invocation_ordinal", 1
-    ))
-    receipts = PINNED_SOLVER_EXECUTION_ISSUER.execute(
-        registry=ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY,
-        result_occurrence_id=session.identity.result_occurrence_id,
-        membership=membership,
-        invocation_identity=(
-            session.identity.result_occurrence_id
-            + ":" + query.obligation_id + ":" + query.proof_stage
-        ),
-        first_invocation_ordinal=first_invocation_ordinal,
-        query=query.query_text,
-        configured_timeout_ms=configured_timeout_ms,
-        query_authority=query,
-        lifecycle_projection=context.lifecycle_projection,
-    )
-    session.domain_signal_state["abi_width_next_invocation_ordinal"] = (
-        max(receipt.invocation_ordinal for receipt in receipts) + 1
-    )
-    emitted = int(session.emit_domain_signal(
-        AbiWidthReadonlySolverExecutionBatchSignal.from_issuer_results(
-            blocker, query, proof_seed, dependency_artifacts,
-            membership, receipts, context.lifecycle_projection,
-        )
-    ))
-    pending = tuple(session.domain_signal_state.pop(
-        "abi_width_sat_safety_handoffs", ()
-    ))
-    if pending:
-        accepts = getattr(session.domain_signal_encoder, "accepts_signal_type", None)
-        if not callable(accepts) or not accepts(SatSafetyBlockerProductionSignal):
-            raise ValueError("ABI/width SAT lacks counterexample-safety route")
-        for handoff in pending:
-            emitted += int(session.emit_domain_signal(handoff))
-    return emitted
 
 
 def active_loop_requirement_for_signal(

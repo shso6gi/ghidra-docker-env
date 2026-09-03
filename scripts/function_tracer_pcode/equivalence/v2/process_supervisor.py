@@ -1472,12 +1472,6 @@ class ProcessSupervisorAuthorityFactory:
         ):
             raise ValueError("timeout bundle membership integrity mismatch")
 
-    def validated_timeout_terminal_event(
-        self, bundle: DurableTimeoutFinalizationBundle,
-    ) -> Any:
-        self.validate_timeout_bundle_membership(bundle)
-        return bundle.terminal_segment.composite_stream.events[-1]
-
     def _issue_operational_error(
         self, *, launch: SignedProcessAuthorityReceipt,
         error_kind: str, deadline_stage: str,
@@ -2396,21 +2390,6 @@ class DurableCheckpointStore:
             )
             self._replace_state_locked(resolved)
             return ready, resolved
-
-    def worker_publish_continuation(
-        self, *, active: SignedProcessAuthorityReceipt,
-        continuation: SignedProcessAuthorityReceipt,
-        prefix: EventStreamPrefixView,
-        continuation_stream: SealedEventStream,
-    ) -> None:
-        self.factory.validate(active)
-        with self._locked():
-            current = self.read_state()
-            if current.receipt_digest != active.receipt_digest:
-                raise ValueError("worker continuation lost checkpoint CAS")
-            self._publish_continuation_locked(
-                continuation, prefix, continuation_stream
-            )
 
     def supervisor_claim_timeout(
         self, *, active: SignedProcessAuthorityReceipt,

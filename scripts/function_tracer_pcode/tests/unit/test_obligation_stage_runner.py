@@ -109,25 +109,6 @@ def _run(checker, method_name):
     )
 
 
-def test_obligation_runner_matches_legacy_pairwise_unknown_monolithic_eq():
-    legacy_checker = _checker([_result(None), _result(True)])
-    first = _result(None)
-    first.call_effect_shadow_manifest = {"mode": "typed_relational_call_effect_proof"}
-    second = _result(True)
-    second.call_effect_shadow_manifest = None
-    obligation_checker = _checker([first, second])
-    legacy = _run(legacy_checker, "_run_stage_plan_legacy")
-    obligation = _run(obligation_checker, "_run_stage_plan")
-    comparison = ShadowComparisonReport.compare(legacy, obligation)
-    assert comparison.compatible, comparison.differences
-    assert obligation_checker._last_obligation_branch_trace.terminal_branch == "S_MONOLITHIC_FALLBACK"
-    assert obligation.call_effect_shadow_manifest == first.call_effect_shadow_manifest
-    assert [record.activation_state for record in obligation_checker._last_obligation_branch_trace.records] == [
-        ActivationState.COMPLETED,
-        ActivationState.COMPLETED,
-    ]
-
-
 def test_obligation_runner_short_circuits_after_pairwise_not_eq():
     checker = _checker([_result(False)])
     result = _run(checker, "_run_stage_plan")
@@ -143,23 +124,6 @@ def test_timeout_contradiction_cannot_short_circuit_as_equivalent() -> None:
     checker = _checker([stale, recovered])
 
     result = _run(checker, "_run_stage_plan")
-
-    assert checker.check.call_count == 2
-    assert stale.is_equivalent is None
-    assert stale.pairwise_debug_stats[
-        "timeout_decisive_state_contradiction"
-    ] == 1
-    assert result.is_equivalent is True
-    assert result.stage_path == ["S_PAIRWISE", "S_MONOLITHIC_FALLBACK"]
-
-
-def test_legacy_timeout_contradiction_cannot_short_circuit_as_equivalent() -> None:
-    stale = _result(True)
-    stale.is_timeout = lambda: True
-    recovered = _result(True)
-    checker = _checker([stale, recovered])
-
-    result = _run(checker, "_run_stage_plan_legacy")
 
     assert checker.check.call_count == 2
     assert stale.is_equivalent is None

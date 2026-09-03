@@ -883,19 +883,6 @@ CALL_EFFECT_ARTIFACT_CAPABILITY_REGISTRY = ArtifactCapabilityRegistry((
 ))
 
 
-def validate_unique_requirement_owners(
-    rows: Iterable[tuple[str, str, str]],
-) -> None:
-    """Validate (result occurrence, requirement) -> one active occurrence."""
-
-    owners: dict[tuple[str, str], str] = {}
-    for result_occurrence_id, proof_requirement_id, occurrence_id in rows:
-        key = (result_occurrence_id, proof_requirement_id)
-        previous = owners.setdefault(key, occurrence_id)
-        if previous != occurrence_id:
-            raise ValueError("active proof requirement has multiple occurrence owners")
-
-
 def summary_effect_prerequisite_signals_from_acceptance(
     analysis: Any, acceptance_result: Any
 ) -> tuple[SummaryEffectPrerequisiteProductionSignal, ...]:

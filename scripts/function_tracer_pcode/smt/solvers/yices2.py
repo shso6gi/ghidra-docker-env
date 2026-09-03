@@ -295,9 +295,6 @@ class Yices2Solver(SMTSolver):
         
         return None
     
-    def get_model(self) -> Optional[Dict[str, Any]]:
-        return self._model
-    
     def __del__(self):
         """クリーンアップ"""
         if self._initialized:

@@ -325,37 +325,6 @@ if OPERATIONAL_RECOVERY_REGISTRY_DIGEST != EXPECTED_OPERATIONAL_RECOVERY_REGISTR
     raise ValueError("operational recovery registry authority digest drift")
 
 
-def validate_operational_registry_conservation() -> None:
-    if tuple(OPERATIONAL_REASON_SPECS) != tuple(
-        sorted(OPERATIONAL_REASON_SPECS)
-    ):
-        raise ValueError("operational reason registry is not canonically ordered")
-    stages = tuple(row.proof_stage for row in OPERATIONAL_PRODUCER_STAGE_SPECS)
-    if stages != (
-        "subordinate_parent_authority",
-        "function_decompilation_artifact",
-        "high_function_ir_materialization",
-    ):
-        raise ValueError("operational producer stages differ from sealed contract")
-    for reason_id, spec in OPERATIONAL_REASON_SPECS.items():
-        definition = OPERATIONAL_REASON_REGISTRY.get(reason_id)
-        contract = OPERATIONAL_RECOVERY_REGISTRY.get(
-            spec.contract_definition_id, 1
-        )
-        if definition.allowed_proof_kinds != frozenset((spec.proof_kind,)):
-            raise ValueError("operational reason/proof-kind conservation failed")
-        if contract.requirement_slots[0].allowed_proof_kinds != frozenset((spec.proof_kind,)):
-            raise ValueError("operational recovery/proof-kind conservation failed")
-        proof_kind, producer_id, issuer_id = OPERATIONAL_REASON_PRODUCER_CONSERVATION[reason_id]
-        rows = tuple(row for row in OPERATIONAL_PRODUCER_STAGE_SPECS if (
-            row.proof_kind == proof_kind
-            and row.producer_contract_id == producer_id
-            and row.execution_issuer_id == issuer_id
-        ))
-        if proof_kind != spec.proof_kind or len(rows) != 1:
-            raise ValueError("operational reason/producer/issuer conservation failed")
-
-
 def _exact_string(name: str, value: Any) -> str:
     if type(value) is not str or not value:
         raise TypeError(f"{name} must be a non-empty exact string")
@@ -434,17 +403,6 @@ def _variable_storage_identity(variable: Any) -> Any:
     if varnodes is None:
         raise ValueError("variable storage lacks complete varnode census")
     return tuple(_varnode_projection_without_high(item) for item in varnodes)
-
-
-def _function_lookup_keys(function: Any) -> tuple[Any, ...]:
-    name = _call_noarg(function, "getName")
-    if type(name) is not str or not name:
-        raise ValueError("function lookup name identity is unavailable")
-    entry = _address_identity(_call_noarg(function, "getEntryPoint"))
-    return tuple(sorted((
-        canonical_value(("name", name)),
-        canonical_value(("entry", entry)),
-    ), key=authority_digest))
 
 
 _TARGET_TOKEN = object()
@@ -1477,69 +1435,6 @@ class FunctionLookupOutcome:
             raise TypeError("function lookup outcome must be factory-issued")
 
     @classmethod
-    def _found(
-        cls, function_object: Any, target: FunctionDecompilationTarget, *,
-        query_identity: Any, program_identity: Any,
-        source_snapshot_fingerprint: str,
-        program_seed_digest: Optional[str], _factory_token: object,
-    ) -> "FunctionLookupOutcome":
-        if _factory_token is not _LOOKUP_OUTCOME_TOKEN:
-            raise TypeError("function lookup outcome issuer is invalid")
-        if function_object is None or type(target) is not FunctionDecompilationTarget:
-            raise TypeError("FOUND lookup requires function object and typed target")
-        if _address_identity(_call_noarg(function_object, "getEntryPoint")) != target.function_entry:
-            raise ValueError("FOUND function object differs from target")
-        snapshot = _exact_string("lookup source snapshot", source_snapshot_fingerprint)
-        query = canonical_value(query_identity)
-        program = canonical_value(program_identity)
-        lookup_keys = _function_lookup_keys(function_object)
-        if query not in lookup_keys:
-            raise ValueError("FOUND function object does not match lookup query")
-        digest = authority_digest({
-            "status": "FOUND", "target_digest": target.target_digest,
-            "query_identity": query, "program_identity": program,
-            "source_snapshot_fingerprint": snapshot,
-            "matched_lookup_key": query,
-            "program_seed_digest": program_seed_digest,
-        })
-        return cls(
-            FunctionLookupStatus.FOUND, target, function_object,
-            query_identity=query, program_identity=program,
-            source_snapshot_fingerprint=snapshot,
-            program_seed_digest=program_seed_digest, outcome_digest=digest,
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-
-    @classmethod
-    def _missing(
-        cls, *, census_receipt: FunctionManagerCensusReceipt,
-        _factory_token: object,
-    ) -> "FunctionLookupOutcome":
-        if _factory_token is not _LOOKUP_OUTCOME_TOKEN or type(census_receipt) is not FunctionManagerCensusReceipt:
-            raise TypeError("lookup miss requires factory census receipt")
-        if not census_receipt.iteration_completed:
-            raise ValueError("lookup miss requires completed function census")
-        if any(
-            canonical_value(key) == canonical_value(census_receipt.query_identity)
-            for key, _target_digest in census_receipt.function_lookup_rows
-        ):
-            raise ValueError("lookup miss census contains an exact query match")
-        digest = authority_digest({
-            "status": "MISSING",
-            "census_receipt_digest": census_receipt.receipt_digest,
-            "program_seed_digest": census_receipt.program_seed_digest,
-        })
-        return cls(
-            FunctionLookupStatus.MISSING, None,
-            census_digest=census_receipt.receipt_digest,
-            query_identity=census_receipt.query_identity,
-            program_identity=census_receipt.program_identity,
-            source_snapshot_fingerprint=census_receipt.source_snapshot_fingerprint,
-            program_seed_digest=census_receipt.program_seed_digest,
-            outcome_digest=digest, _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-
-    @classmethod
     def _error(
         cls, *, catch_site_contract_id: str, exception: BaseException,
         query_identity: Any, program_identity: Any,
@@ -1616,15 +1511,6 @@ class OperationalExtractionAuthorityFactory:
         self._lookups: dict[int, FunctionLookupOutcome] = {}
         self._errors: dict[int, OperationalErrorArtifact] = {}
 
-    @classmethod
-    def for_testing(cls) -> "OperationalExtractionAuthorityFactory":
-        return cls(
-            result_occurrence_id="result-1",
-            source_snapshot_fingerprint="source-snapshot",
-            execution_identity_digest="execution-1",
-            allow_fixture_inputs=True,
-        )
-
     def target_from_ghidra(
         self, program_seed: GhidraProgramAuthoritySeed, function: Any,
     ) -> FunctionDecompilationTarget:
@@ -1676,26 +1562,6 @@ class OperationalExtractionAuthorityFactory:
         self._program_seeds[id(seed)] = seed
         return seed
 
-    def target_from_fixture(self, **kwargs: Any) -> FunctionDecompilationTarget:
-        if not self._allow_fixture_inputs:
-            raise ValueError("fixture target factory is disabled in production")
-        target = FunctionDecompilationTarget._issue(
-            **kwargs, _factory_token=_TARGET_TOKEN,
-        )
-        self._targets[id(target)] = target
-        return target
-
-    def input_surface_from_fixture(
-        self, **kwargs: Any
-    ) -> DecompilationAttemptInputSurface:
-        if not self._allow_fixture_inputs:
-            raise ValueError("fixture input-surface factory is disabled in production")
-        surface = DecompilationAttemptInputSurface._issue(
-            **kwargs, _factory_token=_INPUT_SURFACE_TOKEN,
-        )
-        self._surfaces[id(surface)] = surface
-        return surface
-
     def input_surface_from_ghidra(
         self, function: Any
     ) -> DecompilationAttemptInputSurface:
@@ -1730,22 +1596,6 @@ class OperationalExtractionAuthorityFactory:
         )
         self._surfaces[id(surface)] = surface
         return surface
-
-    def issue_invocation(
-        self, *, target: FunctionDecompilationTarget,
-        input_surface: DecompilationAttemptInputSurface,
-        proof_requirement_id: str, invocation_identity: str,
-        invocation_ordinal: int, configured_timeout_seconds: int,
-    ) -> DecompilationInvocationReceipt:
-        with self._issuance_lock:
-            return self._issue_invocation_locked(
-                target=target,
-                input_surface=input_surface,
-                proof_requirement_id=proof_requirement_id,
-                invocation_identity=invocation_identity,
-                invocation_ordinal=invocation_ordinal,
-                configured_timeout_seconds=configured_timeout_seconds,
-            )
 
     def issue_attempt_identity(
         self, *, target: FunctionDecompilationTarget,
@@ -1907,35 +1757,6 @@ class OperationalExtractionAuthorityFactory:
         self._invocation_censuses[id(census)] = census
         return census
 
-    def validate_invocation_census(
-        self, census: SealedDecompilationInvocationCensus,
-    ) -> None:
-        if (
-            type(census) is not SealedDecompilationInvocationCensus
-            or census._factory_token is not _INVOCATION_CENSUS_TOKEN
-            or self._invocation_censuses.get(id(census)) is not census
-        ):
-            raise TypeError("invocation census is not exact factory membership")
-        for invocation in self._invocations.values():
-            self.validate_invocation_membership(invocation)
-        digests = tuple(sorted(self._invocations))
-        payload = {
-            "result_occurrence_id": self.result_occurrence_id,
-            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
-            "execution_identity_digest": self.execution_identity_digest,
-            "invocation_receipt_digests": digests,
-            "census_schema": "decompilation-invocation-census-v1",
-        }
-        if (
-            census.result_occurrence_id != self.result_occurrence_id
-            or census.source_snapshot_fingerprint
-            != self.source_snapshot_fingerprint
-            or census.execution_identity_digest != self.execution_identity_digest
-            or census.invocation_receipt_digests != digests
-            or census.census_digest != authority_digest(payload)
-        ):
-            raise ValueError("decompilation invocation census is stale or invalid")
-
     def validate_attempt_membership(
         self, attempt: DecompilationAttemptReceipt,
     ) -> None:
@@ -2029,18 +1850,6 @@ class OperationalExtractionAuthorityFactory:
         self._artifacts[artifact.artifact_digest] = artifact
         return artifact
 
-    def consume_high_function(
-        self, *, artifact: DecompilationArtifactReceipt,
-        target: FunctionDecompilationTarget,
-        input_surface: DecompilationAttemptInputSurface,
-        proof_requirement_id: str,
-    ) -> Optional[HighFunctionObservationCapability]:
-        _high, capability = self.observe_high_function(
-            artifact=artifact, target=target, input_surface=input_surface,
-            proof_requirement_id=proof_requirement_id,
-        )
-        return capability
-
     def observe_high_function(
         self, *, artifact: DecompilationArtifactReceipt,
         target: FunctionDecompilationTarget,
@@ -2096,171 +1905,6 @@ class OperationalExtractionAuthorityFactory:
         self._ir_consumed.add(id(capability))
         self._ir_artifacts[id(artifact)] = artifact
         return artifact
-
-    def function_census_from_fixture(
-        self, *, query_identity: Any, program_identity: Any,
-        function_targets: Iterable[FunctionDecompilationTarget],
-        iteration_completed: bool,
-        function_lookup_rows: Iterable[tuple[Any, str]] = (),
-    ) -> FunctionManagerCensusReceipt:
-        if not self._allow_fixture_inputs:
-            raise ValueError("fixture function census is disabled in production")
-        if type(iteration_completed) is not bool:
-            raise TypeError("function census completion must be exact bool")
-        targets = tuple(function_targets)
-        if any(self._targets.get(id(item)) is not item for item in targets):
-            raise ValueError("function census contains non-factory target")
-        target_digests = tuple(sorted(item.target_digest for item in targets))
-        if len(target_digests) != len(set(target_digests)):
-            raise ValueError("function census contains duplicate target")
-        query = canonical_value(query_identity)
-        program = canonical_value(program_identity)
-        fixture_program_seed_digest = authority_digest({
-            "fixture_program_identity": program,
-            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
-            "fixture_program_seed_schema": "fixture-only-v1",
-        })
-        lookup_rows = tuple(sorted(
-            (
-                (
-                    canonical_value(key),
-                    _exact_string("fixture lookup target digest", digest),
-                )
-                for key, digest in function_lookup_rows
-            ),
-            key=lambda item: (authority_digest(item[0]), item[1]),
-        ))
-        if any(digest not in target_digests for _key, digest in lookup_rows):
-            raise ValueError("fixture lookup row target is outside census")
-        payload = {
-            "query_identity": query,
-            "program_identity": program,
-            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
-            "program_seed_digest": fixture_program_seed_digest,
-            "function_target_digests": target_digests,
-            "function_lookup_rows": lookup_rows,
-            "iteration_completed": iteration_completed,
-        }
-        receipt = FunctionManagerCensusReceipt(
-            query, program, self.source_snapshot_fingerprint,
-            fixture_program_seed_digest, target_digests, lookup_rows,
-            iteration_completed, authority_digest(payload),
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-        self._censuses[id(receipt)] = receipt
-        return receipt
-
-    def issue_function_census_from_manager(
-        self, *, program_seed: GhidraProgramAuthoritySeed,
-        query_identity: Any,
-    ) -> FunctionManagerCensusReceipt:
-        if self._program_seeds.get(id(program_seed)) is not program_seed:
-            raise ValueError("census program seed is not exact factory membership")
-        function_manager = program_seed.function_manager
-        get_functions = getattr(function_manager, "getFunctions", None)
-        if not callable(get_functions):
-            raise TypeError("FunctionManager complete iterator API is unavailable")
-        iterator = get_functions(True)
-        if iterator is None:
-            raise ValueError("FunctionManager iterator is unavailable")
-        targets = []
-        lookup_rows = []
-        for function in iterator:
-            if _call_noarg(function, "getProgram") != program_seed.program:
-                raise ValueError("FunctionManager yielded foreign-program function")
-            item_target = self.target_from_ghidra(
-                program_seed, function,
-            )
-            targets.append(item_target)
-            lookup_rows.extend(
-                (key, item_target.target_digest)
-                for key in _function_lookup_keys(function)
-            )
-        target_digests = tuple(sorted(item.target_digest for item in targets))
-        if len(target_digests) != len(set(target_digests)):
-            raise ValueError("FunctionManager census contains duplicate target")
-        query = canonical_value(query_identity)
-        program_key = canonical_value(program_seed.program_identity)
-        ordered_lookup_rows = tuple(sorted(
-            lookup_rows, key=lambda item: (authority_digest(item[0]), item[1])
-        ))
-        payload = {
-            "query_identity": query,
-            "program_identity": program_key,
-            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
-            "program_seed_digest": program_seed.seed_digest,
-            "function_target_digests": target_digests,
-            "function_lookup_rows": ordered_lookup_rows,
-            "iteration_completed": True,
-            "iterator_contract": "FunctionManager.getFunctions(forward=True)-exhausted-v1",
-        }
-        receipt = FunctionManagerCensusReceipt(
-            query, program_key, self.source_snapshot_fingerprint,
-            program_seed.seed_digest, target_digests, ordered_lookup_rows,
-            True, authority_digest(payload),
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-        self._censuses[id(receipt)] = receipt
-        return receipt
-
-    def lookup_found(
-        self, *, function_object: Any, target: FunctionDecompilationTarget,
-        query_identity: Any,
-        program_seed: Optional[GhidraProgramAuthoritySeed] = None,
-        program_identity: Any = None,
-    ) -> FunctionLookupOutcome:
-        if self._targets.get(id(target)) is not target:
-            raise ValueError("lookup target is not exact factory membership")
-        if program_seed is not None:
-            if self._program_seeds.get(id(program_seed)) is not program_seed:
-                raise ValueError("lookup program seed is not exact factory membership")
-            if (
-                _call_noarg(function_object, "getProgram") != program_seed.program
-                or target.program_identity != program_seed.program_identity
-            ):
-                raise ValueError("lookup function/target program differs from seed")
-            program_key = program_seed.program_identity
-            seed_digest = program_seed.seed_digest
-        elif self._allow_fixture_inputs:
-            program_key = canonical_value(program_identity)
-            seed_digest = None
-        else:
-            raise ValueError("production FOUND lookup requires program seed")
-        outcome = FunctionLookupOutcome._found(
-            function_object, target, query_identity=query_identity,
-            program_identity=program_key,
-            source_snapshot_fingerprint=self.source_snapshot_fingerprint,
-            program_seed_digest=seed_digest,
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-        self._lookups[id(outcome)] = outcome
-        return outcome
-
-    def lookup_missing(
-        self, census_receipt: FunctionManagerCensusReceipt,
-    ) -> FunctionLookupOutcome:
-        if self._censuses.get(id(census_receipt)) is not census_receipt:
-            raise ValueError("lookup census is not exact factory membership")
-        outcome = FunctionLookupOutcome._missing(
-            census_receipt=census_receipt,
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-        self._lookups[id(outcome)] = outcome
-        return outcome
-
-    def lookup_error(
-        self, *, catch_site_contract_id: str, exception: BaseException,
-        query_identity: Any, program_identity: Any,
-    ) -> FunctionLookupOutcome:
-        outcome = FunctionLookupOutcome._error(
-            catch_site_contract_id=catch_site_contract_id,
-            exception=exception, query_identity=query_identity,
-            program_identity=program_identity,
-            source_snapshot_fingerprint=self.source_snapshot_fingerprint,
-            _factory_token=_LOOKUP_OUTCOME_TOKEN,
-        )
-        self._lookups[id(outcome)] = outcome
-        return outcome
 
     def issue_error(self, **kwargs: Any) -> OperationalErrorArtifact:
         kwargs.setdefault("result_occurrence_id", self.result_occurrence_id)

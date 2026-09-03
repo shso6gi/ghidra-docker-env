@@ -200,13 +200,6 @@ class _AuthorityBlockedDecompileResults:
     def getHighFunction(self) -> Any:
         return None
 
-    def getErrorMessage(self) -> str:
-        return (
-            "subordinate decompilation was blocked by parent authority: "
-            f"{self.authority_diagnostic.diagnostic_kind}"
-        )
-
-
 _SUBORDINATE_PARENT_PROOF_DIAGNOSTIC_KINDS = frozenset({
     "PARENT_C_Q_AMBIGUOUS",
     "PARENT_C_Q_BINDING_MISMATCH",

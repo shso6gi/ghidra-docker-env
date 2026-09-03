@@ -307,5 +307,3 @@ class Z3Solver(SMTSolver):
         
         return result
     
-    def get_model(self) -> Optional[Dict[str, Any]]:
-        return self._extract_model() if self._model else None

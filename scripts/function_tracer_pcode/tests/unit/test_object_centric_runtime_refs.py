@@ -2219,7 +2219,7 @@ def test_reduction_accumulator_proof_preserves_independent_start_offset_in_loop_
         start_index=0,
         index_step=1,
         index_scale=4,
-    ).to_loop_summary_ref()
+    ).lower_to_loop_summary_ref()
     unshifted = ReductionAccumulatorProof(
         reduction_kind="memory_sum",
         pointer_base_ref=base_ref,
@@ -2233,7 +2233,7 @@ def test_reduction_accumulator_proof_preserves_independent_start_offset_in_loop_
         start_index=0,
         index_step=1,
         index_scale=4,
-    ).to_loop_summary_ref()
+    ).lower_to_loop_summary_ref()
 
     assert shifted is not None
     assert unshifted is not None
@@ -2559,8 +2559,8 @@ def test_readonly_reduction_semantic_key_scalarizes_proof_backed_vector_summary(
         signed_counter=True,
     )
 
-    scalar_ref = scalar_proof.to_readonly_reduction_ref()
-    vector_ref = vector_proof.to_readonly_reduction_ref()
+    scalar_ref = scalar_proof.lower_to_readonly_reduction_ref()
+    vector_ref = vector_proof.lower_to_readonly_reduction_ref()
 
     assert scalar_ref is not None
     assert vector_ref is not None

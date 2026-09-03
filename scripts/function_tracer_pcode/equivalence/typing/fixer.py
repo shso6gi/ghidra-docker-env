@@ -52,16 +52,6 @@ class TypeFixerConfig:
         "unsigned char": "char",
     })
 
-    def _legacy_pattern_to_size(self, pattern: Optional[str]) -> Optional[int]:
-        normalized = (pattern or "").strip().lower()
-        if normalized == "undefined":
-            return self.default_integral_size_bytes
-        if normalized.startswith("undefined"):
-            suffix = normalized[len("undefined"):]
-            if suffix.isdigit():
-                return int(suffix)
-        return None
-
     def is_suspicious_data_type(self, data_type_obj: Any = None) -> bool:
         return is_suspicious_undefined_data_type(
             data_type_obj,
@@ -132,31 +122,6 @@ class TypeFixer:
             type_obj = resolved.data_type_obj if resolved is not None else None
         return self.config.is_suspicious_data_type(type_obj)
         
-    def _is_unsigned_type(self, type_obj: Any = None, type_str: Optional[str] = None) -> bool:
-        if isinstance(type_obj, str) and type_str is None:
-            type_str = type_obj
-            resolved = resolve_type_spec(type_str, program=getattr(self, "program", None))
-            type_obj = resolved.data_type_obj if resolved is not None else None
-        return is_unsigned_data_type(type_obj, type_str)
-
-    def check_return_type_needs_fix(self, function) -> bool:
-        return_type = function.getReturnType() if hasattr(function, "getReturnType") else None
-        type_str = str(return_type) if return_type else ""
-        needs_fix = self._should_fix_type(return_type, type_str)
-        self._debug_print(
-            f"Return type of '{function.getName()}': '{type_str}' -> needs_fix={needs_fix}"
-        )
-        return needs_fix
-
-    def check_param_types_need_fix(self, function) -> List[int]:
-        indices = []
-        for i, param in enumerate(function.getParameters()):
-            data_type = param.getDataType() if hasattr(param, "getDataType") else None
-            type_str = str(data_type) if data_type else ""
-            if self._should_fix_type(data_type, type_str):
-                indices.append(i)
-        return indices
-
     def build_signature_hypothesis(
         self,
         signature: FunctionSignature,

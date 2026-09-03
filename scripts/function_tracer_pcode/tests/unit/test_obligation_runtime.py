@@ -153,25 +153,6 @@ def test_function_analysis_snapshot_field_inventory_is_complete():
     )
 
 
-def test_derived_view_tracks_artifact_independent_facts():
-    artifact_id = ("artifact", 1)
-    base_fact = ("guard", "g0")
-    derived_fact = ("guard", "g1")
-    view = DerivedAnalysisView.create(
-        snapshot_id=("snapshot",),
-        parent_view_id=None,
-        validated_proof_closure_id=("closure",),
-        normalization_policy_digest="policy",
-        view_builder_version="1",
-        semantic_surface={"guards": ("g0", "g1")},
-        fact_provenance={
-            base_fact: SemanticFactProvenance(base_fact, source_snapshot_fact_ids=(base_fact,)),
-            derived_fact: SemanticFactProvenance(derived_fact, source_artifact_ids=(artifact_id,)),
-        },
-    )
-    assert view.artifact_independent_fact_ids(artifact_id) == (base_fact,)
-
-
 def test_proof_closure_rejects_direct_and_transitive_cycles():
     requirement = _requirement()
     views = {("v0",): ViewPremiseRecord(("v0",), "p", (("a",), ("b",)))}
@@ -335,20 +316,6 @@ def test_proof_cache_rejects_duplicate_target_id_collection():
             target_view=ViewPremiseRecord(("v1",), "p1"),
             candidate_independent_premise_digest="p1",
         )
-
-
-def test_closure_digest_covers_every_semantic_field():
-    from dataclasses import replace
-
-    artifact = ProofArtifact(
-        ("a",), _requirement(), ("v0",), "p0", artifact_validation_status="validated"
-    )
-    closure = validate_proof_closure(
-        [artifact], [("a",)], {("v0",): ViewPremiseRecord(("v0",), "p0")}
-    )
-    assert closure.is_internally_consistent
-    assert not replace(closure, closure_id=("forged",)).is_internally_consistent
-    assert not replace(closure, transitive_dependency_ids=(("forged",),)).is_internally_consistent
 
 
 def test_artifact_applicability_checks_candidate_independent_premise():

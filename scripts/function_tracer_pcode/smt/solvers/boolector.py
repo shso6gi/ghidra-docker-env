@@ -324,5 +324,3 @@ class BoolectorSolver(SMTSolver):
         # Boolector のモデル取得は複雑なため、基本的な実装のみ
         return result
     
-    def get_model(self) -> Optional[Dict[str, Any]]:
-        return self._model
