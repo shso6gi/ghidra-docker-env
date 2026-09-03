@@ -19,102 +19,102 @@ from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 
 
 _REPRO_SOURCE = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "zext_or_repro"
     / "zext_or_repro.c"
 )
 _FUNCTION_NAME = "zext_or_repro_tail_index_probe"
 _HIGH_BIT_DELTA = 1 << 40
 _LOOP_METHOD_B_ARM64_GCC_O3 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O3"
 )
 _LOOP_METHOD_B_ARM64_CLANG_O0 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-clang-O0"
 )
 _LOOP_METHOD_B_ARM64_GCC_O2 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O2"
 )
 _LOOP_METHOD_B_ARM64_GCC_O0 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O0"
 )
 _LOOP_METHOD_B_ARM64_GCC_O1 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O1"
 )
 _LOOP_METHOD_B_ARM64_CLANG_O1 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-clang-O1"
 )
 _LOOP_METHOD_B_ARM64_CLANG_O2 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-clang-O2"
 )
 _LOOP_METHOD_B_ARM64_CLANG_O3 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-clang-O3"
 )
 _LOOP_METHOD_B_MIPS64_CLANG_O1 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O1"
 )
 _LOOP_METHOD_B_MIPS64_CLANG_O0 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O0"
 )
 _LOOP_METHOD_B_MIPS64_CLANG_O2 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O2"
 )
 _LOOP_METHOD_B_MIPS64_CLANG_O3 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O3"
 )
 _LOOP_METHOD_B_MIPS64_GCC_O1 = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
     / "targets"
-    / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-gcc-O1"
 )

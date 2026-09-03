@@ -37,4 +37,3 @@ targets/**/*-arm64-clang-O*
 targets/**/*-mips64-gcc-O*
 targets/**/*-mips64-clang-O*
 
-artifacts/baselines/*/raw/logs/

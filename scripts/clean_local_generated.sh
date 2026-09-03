@@ -14,7 +14,6 @@ paths=(
     "$REPO_ROOT/logs"
     "$REPO_ROOT/tmp"
     "$REPO_ROOT/output"
-    "$REPO_ROOT/artifacts/baselines/observed-v0@0a53352/raw/logs"
 )
 
 if [[ "$INCLUDE_UNUSED_RUNTIME" == "1" ]]; then

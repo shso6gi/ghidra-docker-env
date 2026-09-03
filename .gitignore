@@ -27,31 +27,11 @@ targets/**/*-mips64-gcc-O*
 targets/**/*-mips64-clang-O*
 targets/**/*.sh
 !targets/**/compile_all.sh
-targets/cate1/loop_recursion_test/
-targets/EqBench/*
-# 不要なソルバーのファイルを除外
-solver_boolector.py
-solver_yices2.py
-solver_cvc5.py
 *.txt
 !requirements-test.txt
 *.log
 *.pdf
-logs/equivalence_all/*/phase2_gate/*.json
-logs/equivalence_all/*/phase3_*_gate/*.json
-logs/equivalence_all/phase3_lane_index/*.json
 
-# Observed baseline artifacts: commit metadata, keep multi-GB raw logs external.
-artifacts/baselines/*/raw/logs/
 !artifacts/
-!artifacts/baselines/
-!artifacts/baselines/*/
-!artifacts/baselines/*/raw/
-!artifacts/baselines/*/raw/*.json
-!artifacts/baselines/*/raw/*.md
-!artifacts/baselines/*/raw/workspace_state/
-!artifacts/baselines/*/raw/workspace_state/*.json
-!artifacts/baselines/*/raw/workspace_state/*.txt
-!artifacts/baselines/*/raw/workspace_state/*.patch
-airy_Eq_new.sh
 targets/EqBench/
+hs_err_pid*.log

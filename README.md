@@ -87,17 +87,12 @@ Container.
 
 ## Target binaries
 
-`targets/**/*.c` and the active `targets/**/compile_all.sh` scripts are tracked.
-Generated target binaries are ignored and should be rebuilt in the container
-when needed. `targets/cate1/loop_recursion_test/` is currently ignored because
-it contains generated binaries without a tracked source file.
-
-Example:
-
-```bash
-cd targets/cate1/function_call_test
-./compile_all.sh
-```
+The analysis target is EqBench (`targets/EqBench/`, git-ignored; clone or copy
+the benchmark tree there). `eqbench_run_all_32jobs.sh` compiles every
+`Eq/newV.c` / `Eq/new.c` sample into `Eq/source/` with
+`scripts/eqbench/compile_all_arm_mips.sh` (arm64/mips64 x gcc/clang x O0-O3)
+before running the matrix, so no manual build step is needed. Set
+`EQBENCH_BUILD_POLICY=PREBUILT_ONLY` to reuse existing binaries only.
 
 ## Generated outputs
 
@@ -108,6 +103,7 @@ These paths are intentionally not git-managed:
 - `output/`
 - `.venv/`, `.venv-pyghidra/`
 - `.local-ghidra/`, `.local-ghidra-extract/`, `.local-jdk/`
+- `targets/EqBench/`
 
 In the current host setup, keep `.venv`, `.venv-pyghidra`,
 `.local-ghidra-extract/`, and `.local-jdk/` if you want Codex or other tools to
@@ -115,10 +111,9 @@ run PyGhidra outside the container. `.local-ghidra/` is not used unless it
 contains a valid `ghidraRun`; it is safe to remove when only partial license or
 support files are present.
 
-Baseline manifests and selected validation evidence under `artifacts/baselines/`
-are git-managed when scripts depend on them. This repository currently keeps
-some tracked `.log` and `.txt` evidence under `artifacts/`; top-level generated
-`logs/` and multi-GB raw baseline logs are excluded.
+Selected validation evidence under `artifacts/` (UNKNOWN taxonomy v2 receipts,
+refactor contracts, audits) is git-managed because `validation/*.py` and unit
+tests depend on it.
 
 To inspect ignored local outputs without deleting them:
 
@@ -126,8 +121,8 @@ To inspect ignored local outputs without deleting them:
 bash scripts/clean_local_generated.sh
 ```
 
-To remove generated logs/tmp/raw baseline logs after they are no longer needed
-and remove the unused `.local-ghidra/` cache if present:
+To remove generated logs/tmp after they are no longer needed and remove the
+unused `.local-ghidra/` cache if present:
 
 ```bash
 CLEAN_LOCAL_GENERATED_CONFIRM=1 bash scripts/clean_local_generated.sh
@@ -139,35 +134,45 @@ Required host runtime caches are preserved by default. To remove them too:
 CLEAN_LOCAL_GENERATED_CONFIRM=1 CLEAN_REQUIRED_HOST_RUNTIME=1 bash scripts/clean_local_generated.sh
 ```
 
-## Full rerun
+## EqBench runs
 
-Before a long rerun, require a clean tree:
+Before a long run, require a clean tree and a passing unit suite:
 
 ```bash
 git status --short
-./.venv/bin/python -B -m pytest \
-  scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py \
-  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_*.py -q
-bash -n phase2_run_function_call_pre_producer_final_result_preflight.sh
+python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
+bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh
 ```
 
-To check only the Phase 2 producer functions that contributed to the latest
-canonical-baseline gate failure, run the reduced matrix first:
+Full Eq matrix (results under `logs/EqBench/all_eq_matrix_current`):
 
 ```bash
-./phase2_run_function_call_pre_producer_reduced_matrix.sh
+./eqbench_run_all_32jobs.sh
+# representative subset / single sample
+EQBENCH_SAMPLE_FILTER='REVE/barthe2big' ./eqbench_run_all_32jobs.sh
+# validate configuration without running pairs
+DRY_RUN=1 ./eqbench_run_all_32jobs.sh
 ```
 
-Then run the full 20-function sequence. It enters the 20-function matrices
-directly after unit tests:
+Neq same-ISA closure (results under `logs/EqBench/all_neq_same_isa_closure_current`):
 
 ```bash
-./rerun_full_analysis.sh
+./neqbench_run_all_32jobs.sh
 ```
 
-For a short targeted check of Phase 2 producer reason-tuple movement, run the
-preflight manually:
+Re-run only the pairs that ended in ERROR in both trees:
 
 ```bash
-./phase2_run_function_call_pre_producer_final_result_preflight.sh
+./rerun_eqbench_errors.sh
 ```
+
+All runners are configured through environment variables (`PARALLEL_JOBS`,
+`OUTPUT_BASE_DIR`, `EQBENCH_RUN_SCOPE`, `EQBENCH_BUILD_POLICY`,
+`SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, timeouts); see the header of each
+script for the full list and defaults.
+
+## Branching
+
+`main` is the integration branch. Start every piece of work from the latest
+`main` (`git switch -c <topic> main`) and merge back when done; do not keep
+long-lived side branches.

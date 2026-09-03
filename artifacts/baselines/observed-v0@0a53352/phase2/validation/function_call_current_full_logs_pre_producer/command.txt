@@ -1,1 +1,0 @@
-python3 -m scripts.function_tracer_pcode.validation.result_summary --overall-summary --before-dir artifacts/baselines/observed-v0@0a53352/raw/logs/function_call --require-baseline-match /mnt/c/Users/saito/Git/ghidra-docker-env/logs/equivalence_all/function_call_test/fc_apply_indirect/fc_apply_indirect_B10_B11.log <2400 logs>
