@@ -1299,6 +1299,16 @@ def _validate_counterexample_model(
             "  Counterexample rejected: model contains no replay-target declarations"
         )
         return False
+    nan_parameters = counterexample_fp_nan_parameters(base_ctx, counterexample_raw)
+    if nan_parameters:
+        # A witness that only separates the functions on a NaN payload is not
+        # evidence of semantic inequivalence: NaN propagation and sign bits are
+        # implementation details the benchmarks do not fix (Issue #28).
+        strategy._debug_print(
+            "  Counterexample rejected: NaN input for floating-point parameter(s) "
+            + ", ".join(nan_parameters)
+        )
+        return False
 
     feasible_cases1 = _collect_feasible_cases_under_model(
         strategy,
@@ -1779,6 +1789,40 @@ def _build_value_equality_assertions(
         context="counterexample validation value equality",
     )
     return [f"(assert (= {value1_smt} {value2_smt}))"]
+
+
+def _bit_pattern_is_nan(value: int, bit_width: int) -> bool:
+    if bit_width == 64:
+        exponent_bits, mantissa_bits = 11, 52
+    elif bit_width == 32:
+        exponent_bits, mantissa_bits = 8, 23
+    else:
+        return False
+    value %= 1 << bit_width
+    exponent = (value >> mantissa_bits) & ((1 << exponent_bits) - 1)
+    mantissa = value & ((1 << mantissa_bits) - 1)
+    return exponent == (1 << exponent_bits) - 1 and mantissa != 0
+
+
+def counterexample_fp_nan_parameters(
+    base_ctx: Dict[str, Any],
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> Tuple[str, ...]:
+    """Names of floating-point parameters the model assigns a NaN bit pattern."""
+
+    if not counterexample_raw:
+        return ()
+    names: List[str] = []
+    for side in ("params1", "params2"):
+        for param in base_ctx.get(side, []) or []:
+            if getattr(param, "type_class", None) != "fp":
+                continue
+            raw_value = counterexample_raw.get(param.smt_name)
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                continue
+            if _bit_pattern_is_nan(raw_value, int(param.bit_width)):
+                names.append(param.smt_name)
+    return tuple(names)
 
 
 def _build_model_assertions(base_ctx: Dict[str, Any], counterexample_raw: Dict[str, Any]) -> List[str]:

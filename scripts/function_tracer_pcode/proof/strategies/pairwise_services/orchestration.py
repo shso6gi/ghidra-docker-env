@@ -202,7 +202,9 @@ def _impl_check(
         analysis1,
         analysis2,
     )
-    sat_unsafety_reasons.extend(coverage_unsafety_reasons)
+    sat_unsafety_reasons.extend(
+        self._sat_decisive_return_coverage_unsafety_reasons(coverage_unsafety_reasons)
+    )
     if "function1:return_coverage_gap" in sat_unsafety_reasons:
         if "return_case_coverage_gap" not in analysis1.analysis_notes:
             analysis1.analysis_notes.append("return_case_coverage_gap")
