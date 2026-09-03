@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List, Mapping, Optional, Sequence, Set, Tuple
 from ._shared import (
+    AnalysisFailure,
     Condition,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
     eval_constant_raw,
 )
 

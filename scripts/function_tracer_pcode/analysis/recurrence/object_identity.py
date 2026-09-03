@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionNormalizer,
+    CountedLoopAccumulator,
     Expression,
     ExpressionType,
     LoopVariableIdentityRef,
+    ReturnInfo,
     StorageInfo,
     _runtime_expression_signature,
     parameter_identity_key_from_descriptor,

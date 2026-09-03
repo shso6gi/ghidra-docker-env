@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     Condition,
     ConditionSMTOracle,
+    Expression,
+    FunctionReturnAnalysis,
     Mapping,
     ReturnCoverageCheckResult,
     UnknownReasonId,
+    UnknownReasonRecord,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
@@ -802,16 +805,6 @@ def prepare_unary_return_coverage_for_width(
         _prove_unary_outcome_for_analysis(self, base_ctx, analysis2, replace_fn2),
     )
     return all(proof is not None and proof.complete for proof in proofs)
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__collect_return_coverage_unsafety_reasons(
     self,

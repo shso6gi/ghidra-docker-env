@@ -8,13 +8,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from ....model.render_smt import expression_smt_bit_width
 
 
-def invoke(service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation = globals().get(f"_impl_{service_name}")
-    if implementation is None:
-        raise AttributeError(service_name)
-    return implementation(*args, **kwargs)
-
-
 def _impl__collect_condition_width_sign_metadata(
     cls,
     condition: Any,

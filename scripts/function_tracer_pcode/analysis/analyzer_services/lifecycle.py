@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, Tuple
 from ._shared import (
     ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     AnalysisFailure,
+    Condition,
+    ConditionTracker,
+    Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
 )
 
 def _impl__program_is_big_endian(self) -> Optional[bool]:

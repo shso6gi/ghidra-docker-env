@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     CallTargetRef,
+    Condition,
     ConditionNormalizer,
     ConditionSimplifier,
+    Expression,
     ExpressionType,
     coerce_call_target_ref,
     concretize_readonly_loads,
@@ -20,16 +22,6 @@ from ._api import (
     _resolve_function_ref_from_address,
     resolve_call_targets,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__resolve_call_targets_for_effect_summary(
     tracer,

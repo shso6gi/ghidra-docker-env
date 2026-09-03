@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
+    FunctionReturnAnalysis,
     Mapping,
     UnknownReasonId,
+    UnknownReasonRecord,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
@@ -21,16 +23,6 @@ from ...v2.sat_safety_sites import (
     SAT_SAFETY_BLOCKER_COMPLETED_SITE,
     SAT_SAFETY_BLOCKER_OBSERVED_SITE,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__collect_decisive_sat_unsafety_reasons(
     self,

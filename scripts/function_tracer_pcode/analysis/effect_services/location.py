@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     CanonicalLocation,
     Condition,
@@ -15,7 +15,9 @@ from ._shared import (
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
     PostStateReadRef,
+    PostStateSnapshotRef,
     PostStateValueRef,
+    StoreEffect,
 )
 from ._api import (
     _build_alias_representative_map,
@@ -68,16 +70,6 @@ from ._api import (
     substitute_expression,
     subtract_implied_conditions,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__canonicalize_expression_for_effect_value_identity(
     expr: Optional[Expression],

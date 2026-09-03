@@ -291,7 +291,7 @@ def _make_call(name, module_name):
         if callable(facade_call) and facade_call is not call:
             return facade_call(*args, **kwargs)
         module = importlib.import_module(f".{module_name}", __package__)
-        return module.invoke(name, *args, **kwargs)
+        return getattr(module, f"_impl_{name}")(*args, **kwargs)
     call.__name__ = name
     call.__qualname__ = name
     return call

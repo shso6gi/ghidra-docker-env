@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     CountedLoopSummaryRef,
+    Expression,
     ExpressionType,
+    ParameterInfo,
     ReadonlyReductionRef,
+    ReturnCase,
     _RuntimeShortcutDecision,
     compare_loop_summaries,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__intrinsic_runtime_values_equivalent(
     self,

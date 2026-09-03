@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionSMTOracle,

@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, Tuple
 from ._shared import (
+    FunctionReturnAnalysis,
     Mapping,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__unsupported_call_effect_proof_content_is_complete(
     cls,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     COUNTED_LOOP_SUM_OPCODE,
     ComposedLoopSummaryRef,
@@ -16,6 +16,7 @@ from ._shared import (
     CountedStateTransitionLoopSummaryRef,
     Expression,
     ExpressionType,
+    LocationBaseRef,
     LoopBodyEffectRef,
     LoopCaseRef,
     LoopSideEffectProfileRef,
@@ -24,7 +25,9 @@ from ._shared import (
     PcodeOpRef,
     ReadonlyAccumulatorPhiCandidate,
     ReductionAccumulatorProof,
+    ResidueLoopCase,
     ReturnInfo,
+    StateTransitionLoopModel,
     _reduce_expression_under_conditions,
     _runtime_conditions_signature,
     _runtime_expression_signature,

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List, Optional, Sequence, Tuple
 from ._shared import (
+    Condition,
+    CountedLoopUpdateCase,
     ExpressionType,
     ResidueLoopCase,
 )

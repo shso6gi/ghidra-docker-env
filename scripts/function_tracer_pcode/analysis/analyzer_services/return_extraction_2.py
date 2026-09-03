@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List, Optional, Set, Tuple
 from ._shared import (
+    Condition,
     ConditionSimplifier,
+    ReturnInfo,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     expression_contains_post_state_reads,

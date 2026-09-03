@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionConstraintSet,
@@ -11,10 +11,13 @@ from ._shared import (
     Counter,
     Expression,
     ExpressionType,
+    LocationBaseRef,
+    ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
     ReadonlyRoundedCountCandidate,
     ReductionAccumulatorProof,
+    ReturnInfo,
     _expressions_equivalent_under_conditions,
     _reduce_expression_under_conditions,
     canonicalize_location,

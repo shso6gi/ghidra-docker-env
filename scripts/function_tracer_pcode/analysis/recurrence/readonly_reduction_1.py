@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionConstraintSet,
@@ -13,7 +13,12 @@ from ._shared import (
     READONLY_SUM_OPCODE,
     ReadonlyAffineProgressionLiteral,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
+    ReductionAccumulatorProof,
+    ResidueLoopCase,
     ReturnInfo,
+    StateTransitionLoopModel,
     _runtime_conditions_signature,
     _runtime_expression_signature,
     is_pointer_data_type,

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     CallTargetRef,
+    Condition,
     ConditionSimplifier,
+    ConditionTracker,
     DivergenceOutcome,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    PcodeTracer,
     ReturnInfo,
     ReturnOutcome,
     UnknownOutcome,
+    _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expressions_equivalent,
     build_switch_dispatch_summaries,

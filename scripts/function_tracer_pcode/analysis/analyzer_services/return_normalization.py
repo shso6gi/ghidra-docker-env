@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 from ._shared import (
     Condition,
     ConditionSimplifier,
+    ConditionTracker,
+    Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
+    PcodeTracer,
+    StructuralKey,
     _PCODE_CALL_OPCODES,
     _PCODE_OPCODE_BY_MNEMONIC,
     _PCODE_VALUE_PASSTHROUGH_OPCODES,
     _SIGNED_COMPARE_TO_UNSIGNED,
+    _TrackedReturnValue,
     _UNSIGNED_COMPARE_TO_SIGNED,
     _expressions_equivalent,
     _reduce_expression_under_conditions,

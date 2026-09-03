@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-from ._shared import Mapping, UnknownRecoveryProofKind, build_proof_obligation_id
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
+from typing import Any, Dict, List, Optional, Tuple
+from ._shared import (
+    FunctionReturnAnalysis,
+    Mapping,
+    UnknownReasonRecord,
+    UnknownRecoveryProofKind,
+    build_proof_obligation_id,
+)
 
 def _impl__record_completed_call_effect_summary_proof_if_safe(
     self,

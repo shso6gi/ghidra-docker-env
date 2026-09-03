@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionSMTOracle,
     ConditionSimplifier,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
     Mapping,
+    ParameterInfo,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReturnCase,
     UnknownReasonId,
     _ExactReadonlyReductionProof,
     _ReadonlyLoopSummaryProofAdapter,
@@ -19,16 +23,6 @@ from ._shared import (
     expression_smt_bit_width,
     parameter_identity_key_from_expression,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__cases_have_equivalent_runtime_reductions(
     self,

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionSimplifier,
+    CountedLoopAccumulator,
     Expression,
     PcodeOpRef,
     ReturnInfo,

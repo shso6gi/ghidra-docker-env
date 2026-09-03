@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
     ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
@@ -13,11 +13,15 @@ from ._shared import (
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
+    EffectSummary,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
     Mapping,
     PcodeOpRef,
+    PcodeTracer,
+    ReturnInfo,
+    StructuralKey,
     _SIGNED_COMPARE_TO_UNSIGNED,
     _UNSIGNED_COMPARE_TO_SIGNED,
     _expressions_equivalent,

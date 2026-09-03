@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from ._shared import (
     CallTargetRef,
+    CanonicalLocation,
     Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
+    EffectSummary,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
     Iterable,
     ReadonlyReductionRef,
+    ReturnInfo,
     SignednessDetector,
     SignednessResult,
     StorageInfo,
+    StructuralKey,
+    StructuralRecurrenceSummarizer,
     UnknownValueRef,
     _PCODE_OPCODE_BY_MNEMONIC,
+    _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expression_location_ref,
     _expressions_equivalent,

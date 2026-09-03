@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from ._shared import (
-    _MAX_CALL_ARGUMENT_VARIANTS,
     CallArgumentEvidence,
     CallArgumentWidthEvidence,
+    CallTargetRef,
     CanonicalLocation,
     Condition,
     ConditionSimplifier,
+    EffectSummary,
     Expression,
     ExpressionType,
     LocationBaseRef,
@@ -17,6 +18,7 @@ from ._shared import (
     PostStateValueRef,
     StorageInfo,
     StoreEffect,
+    _MAX_CALL_ARGUMENT_VARIANTS,
     expression_provenance_key,
     get_declared_type_size_bytes,
     is_integral_data_type,
@@ -137,16 +139,6 @@ from ._api import (
     canonicalize_location,
     canonicalize_param_location,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__collect_named_parameter_names(parameters: Sequence[Dict]) -> List[str]:
     return [

@@ -693,6 +693,8 @@ def test_loop_exact_factories_ignore_mutated_producer_instance_methods():
     )
     strategy._method_b_covering_case_proof = lambda *_: forged
     strategy._cases_admit_reduction_count_values = lambda *_: True
+    original_cls_covering = PairwiseStrategy.__dict__["_method_b_covering_case_proof"]
+    original_cls_guard = PairwiseStrategy.__dict__["_cases_admit_reduction_count_values"]
     PairwiseStrategy._method_b_covering_case_proof = lambda *_: forged
     PairwiseStrategy._cases_admit_reduction_count_values = lambda *_: True
     with pytest.raises(TypeError, match="class is immutable"):
@@ -715,8 +717,8 @@ def test_loop_exact_factories_ignore_mutated_producer_instance_methods():
             sealed_term, exact_case, summary_case
         )
     finally:
-        del PairwiseStrategy._method_b_covering_case_proof
-        del PairwiseStrategy._cases_admit_reduction_count_values
+        PairwiseStrategy._method_b_covering_case_proof = original_cls_covering
+        PairwiseStrategy._cases_admit_reduction_count_values = original_cls_guard
         orchestration_1._impl__method_b_covering_case_proof = original_covering_impl
         readonly_reduction_1._impl__cases_admit_reduction_count_values = original_guard_impl
     assert ("count_values", (2,)) in sealed_term.structural_proof_body

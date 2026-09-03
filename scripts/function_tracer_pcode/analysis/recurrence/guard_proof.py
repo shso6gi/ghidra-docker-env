@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
     ConditionConstraintSet,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
+    CountedLoopGuard,
     Expression,
     ExpressionType,
+    ReturnInfo,
     SolverStatus,
+    StateTransitionLoopModel,
     Z3Solver,
     _runtime_conditions_signature,
     _runtime_expression_signature,

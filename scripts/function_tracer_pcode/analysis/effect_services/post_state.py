@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, FrozenSet, Optional, Sequence
 from ._shared import (
     AddressValueRef,
     CanonicalLocation,
@@ -94,16 +94,6 @@ from ._api import (
     rewrite_observed_loads_from_effects,
     subtract_implied_conditions,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl_default_post_state_snapshot_ref() -> PostStateSnapshotRef:
     return PostStateSnapshotRef.function_return()

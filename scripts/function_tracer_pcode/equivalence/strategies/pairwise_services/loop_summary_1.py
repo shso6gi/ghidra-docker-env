@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ._shared import (
     COUNTED_LOOP_SUM_OPCODE,
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
@@ -13,6 +13,10 @@ from ._shared import (
     Expression,
     ExpressionType,
     LoopSummaryComparisonResult,
+    LoopSummaryRef,
+    ParameterInfo,
+    ReadonlyReductionRef,
+    ReturnCase,
     UnknownReasonId,
     _RuntimeShortcutDecision,
     _counted_loop_sum_has_exact_lowering,
@@ -22,16 +26,6 @@ from ._shared import (
     json,
     parameter_identity_key_from_expression,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
     reason_text = str(reason or "")

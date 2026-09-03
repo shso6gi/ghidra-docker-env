@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     Condition,
     ConditionSimplifier,
+    ConditionTracker,
     Expression,
+    PcodeTracer,
+    ReturnInfo,
 )
 from ...model import CallTargetRef
 

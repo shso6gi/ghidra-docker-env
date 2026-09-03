@@ -36,6 +36,11 @@ from .analyzer_services._shared import (
 )
 # Re-exported for modules and tests that import these names from here.
 from .analyzer_services._shared import (  # noqa: F401
+    normalize_post_state_expression,
+    rewrite_observed_loads_from_effects,
+)
+# Re-exported for modules and tests that import these names from here.
+from .analyzer_services._shared import (  # noqa: F401
     ConditionTracker,
     PcodeTracer,
     StructuralRecurrenceSummarizer,

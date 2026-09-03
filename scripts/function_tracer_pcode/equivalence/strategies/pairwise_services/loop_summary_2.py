@@ -2,26 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
+    Condition,
     CountedLoopSummaryRef,
+    Expression,
     ExpressionType,
     LoopSummaryRef,
     LoopTermDescriptorRef,
+    ReturnCase,
+    _PendingLoopSummaryPair,
     compare_loop_summaries,
     expression_smt_bit_width,
     replace,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__counted_loop_refs_allow_value_proof(self, left_ref, right_ref) -> bool:
     if left_ref is None or right_ref is None:

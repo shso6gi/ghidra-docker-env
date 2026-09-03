@@ -24,6 +24,10 @@ from .recurrence import (
 )
 # Re-exported for modules and tests that import these names from here.
 from .recurrence._shared import (  # noqa: F401
+    canonicalize_location,
+)
+# Re-exported for modules and tests that import these names from here.
+from .recurrence._shared import (  # noqa: F401
     CountedLoopAccumulator,
     CountedLoopGuard,
     CountedLoopInduction,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ...cause_identity import ProofRequirementContract, ProofRequirementId
 from ...obligations.model import FunctionProofOutcome
 from ...obligations import (
@@ -43,14 +43,19 @@ from ._shared import (
     Expression,
     ExpressionSafetyChecker,
     ExpressionType,
+    FunctionReturnAnalysis,
     Mapping,
     ParameterInfo,
+    QueryResult,
+    ReadonlyReductionRef,
+    ReturnCase,
     SolverStatus,
     StorageInfo,
     StrategyResult,
     UnknownReasonId,
     UnknownRecoveryProofKind,
     Z3Solver,
+    _ExactReadonlyReductionProof,
     _MethodBCoveringCaseProof,
     _PendingLoopSummaryPair,
     align_return_value_extension_surfaces,
@@ -73,16 +78,6 @@ def validate_counterexample_across_cases(*args, **kwargs):
     """Preserve the documented module-level monkeypatch seam."""
     return _pairwise_facade.validate_counterexample_across_cases(*args, **kwargs)
 
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl_check(
     self,

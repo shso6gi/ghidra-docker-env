@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     Condition,
     ConditionSMTOracle,
     ConditionSimplifier,
+    CountedLoopAccumulator,
+    CountedLoopGuard,
+    CountedLoopInduction,
+    CountedLoopUpdateCase,
     CountedStateTransitionLoopModel,
     CountedStateTransitionLoopSummaryRef,
     Expression,
     ExpressionType,
+    LoopCaseRef,
     LoopSideEffectProfileRef,
     ResidueLoopCase,
     ReturnInfo,

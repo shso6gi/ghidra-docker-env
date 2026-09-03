@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from ._shared import (
     Condition,
+    CountedLoopGuard,
     Counter,
     Expression,
     ExpressionType,
@@ -13,6 +14,7 @@ from ._shared import (
     ParameterInfo,
     PcodeBlockRef,
     PcodeOpRef,
+    ReturnInfo,
     StorageInfo,
     _runtime_expression_signature,
     canonicalize_location,

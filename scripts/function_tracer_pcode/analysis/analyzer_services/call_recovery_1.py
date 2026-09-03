@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     AddressValueRef,
     BoundedCallRefiner,
@@ -10,15 +10,22 @@ from ._shared import (
     CallTargetRef,
     Condition,
     ConditionSimplifier,
+    ConditionTracker,
     DeferredCallInfo,
     DeferredCallRef,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    PcodeOpRef,
+    PcodeTracer,
     ReturnInfo,
     ReturnOutcome,
+    StorageInfo,
+    StructuralKey,
     UnknownOutcome,
+    UnknownValueRef,
     _PCODE_CALL_OPCODES,
+    _TrackedReturnValue,
     _build_parameter_replacements,
     _call_argument_evidence_storage_key,
     _enumerate_constant_expression_branches,

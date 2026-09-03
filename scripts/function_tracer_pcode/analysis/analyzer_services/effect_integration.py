@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from ._shared import (
     CallTargetRef,
+    Condition,
     ConditionSimplifier,
     EffectSummary,
+    Expression,
     ExpressionType,
     FunctionControlEffectProfile,
     PcodeBlockRef,
     PcodeOpRef,
+    PcodeTracer,
     PostStateValueRef,
+    ReturnInfo,
+    StructuralKey,
     _EffectRewritePrecision,
     _FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS,
     _PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS,
+    _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expression_reads_location,
     _expressions_equivalent,

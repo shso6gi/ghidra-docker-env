@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tuple
 from ._shared import (
-    _MAX_CALL_ARGUMENT_VARIANTS,
     AddressValueRef,
     CallArgumentWidthEvidence,
+    CanonicalLocation,
     Condition,
     ConditionSimplifier,
     EffectOrderUnavailable,
+    EffectSummary,
     Expression,
     ExpressionType,
+    LocationBaseRef,
     ObservedMemoryReadRef,
     PostStateReadRef,
+    PostStateSnapshotRef,
+    StorageInfo,
     _FIXED_PREFIX_FORMAT_CALL_TARGETS,
+    _MAX_CALL_ARGUMENT_VARIANTS,
     expression_key_or_identity,
     expression_key_safe,
     expression_provenance_key,
@@ -87,16 +92,6 @@ from ._api import (
     locations_match,
     subtract_implied_conditions,
 )
-
-def invoke(_service_name: str, *args: Any, **kwargs: Any) -> Any:
-    implementation_function = globals().get(f"_impl_{_service_name}")
-    if implementation_function is None:
-        raise AttributeError(_service_name)
-    return implementation_function(*args, **kwargs)
-
-
-def implementation(_service_name: str):
-    return globals().get(f"_impl_{_service_name}")
 
 def _impl__stable_target_expression_key(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
     if expr is None:

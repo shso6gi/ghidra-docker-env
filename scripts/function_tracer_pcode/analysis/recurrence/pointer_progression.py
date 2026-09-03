@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ._shared import (
+    CanonicalLocation,
     Condition,
+    CountedLoopAccumulator,
+    CountedLoopInduction,
     Expression,
     ExpressionType,
     LocationBaseRef,
     PcodeOpRef,
+    ReturnInfo,
     canonicalize_location,
     is_pointer_data_type,
 )
