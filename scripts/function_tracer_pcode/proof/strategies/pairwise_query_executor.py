@@ -1262,6 +1262,12 @@ def validate_counterexample_globally(
     )
 
 
+def counterexample_replay_targets(base_ctx: Dict[str, Any]) -> Tuple[Tuple[str, int], ...]:
+    """Declared symbols a replay must fix (parameters, extra vars, runtime unknowns)."""
+
+    return tuple(_iter_declared_symbols(base_ctx))
+
+
 def count_counterexample_model_assertions(
     base_ctx: Dict[str, Any],
     counterexample_raw: Optional[Dict[str, Any]],
@@ -1291,7 +1297,14 @@ def _validate_counterexample_model(
     decisive_pairs: Optional[Sequence[Tuple[int, int]]],
 ) -> bool:
     if not counterexample_raw:
-        return True
+        if not counterexample_replay_targets(base_ctx):
+            # A closed formula (no parameters, no extra or runtime symbols)
+            # has nothing to replay: the SAT query itself is the witness.
+            return True
+        # Otherwise a SAT without a concrete model can never be a validated
+        # witness (Issue #28): fail closed.
+        strategy._debug_print("  Counterexample rejected: no model to replay")
+        return False
 
     model_assertions = _build_model_assertions(base_ctx, counterexample_raw)
     if not model_assertions:
