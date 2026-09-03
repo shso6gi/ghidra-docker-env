@@ -1412,14 +1412,23 @@ def complete_observed_sat_safety_for_counterexample(
 
 
 def finalize_deferred_sat_safety_observations(session: Any) -> None:
+    """Emit every pairwise SAT-safety blocker that is still deferred.
+
+    Deferred observations describe analysis-level unsafety (incomplete control
+    flow, unproven outcome partition, ...) of the very analyses every later
+    strategy reuses.  A safe counterexample committed afterwards by the
+    monolithic fallback therefore does not make them moot: only a completion
+    bound to the exact witness (``complete_observed_sat_safety_for_counterexample``)
+    may retire one.  Dropping them here turned the blockers into a fail-open
+    NOT_EQ on Eq benchmarks (Issue #25), so they are always emitted and the
+    decision authority decides whether they block the counterexample.
+    """
     pending = session.domain_signal_state.pop(
         "sat_safety_deferred_observations", {}
     )
     if type(pending) is not dict:
         raise TypeError("deferred SAT safety ledger is not exact")
-    if not pending or session.domain_signal_state.get(
-        "sat_safety_safe_counterexample_committed"
-    ):
+    if not pending:
         return
     for occurrence_id in sorted(pending):
         signal, manifest_id = pending[occurrence_id]
