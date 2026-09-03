@@ -54,7 +54,6 @@ A few tests (`grep -l pyghidra tests/unit`) exercise real PyGhidra and skip/fail
 - `rerun_eqbench_errors.sh` — builds `logs/EqBench/error_rerun_manifest.tsv` via `scripts/eqbench/error_rerun_manifest.py` and re-runs only ERROR pairs through the two runners above.
 - Both runners `source scripts/validation_matrix_common.sh` (before/after snapshotting of `OUTPUT_BASE_DIR`, log classification, resume policy) and require bash ≥ 4.3 (`wait -n`).
 - Per-pair execution is wrapped by `equivalence.v2.process_supervisor_command`, which signs receipts with per-run worker/supervisor keys under `tmp/`; a pair's final status comes from `equivalence.v2.pair_status_authority` / `canonical_result`, never from grepping the log. Summaries come from `validation.result_summary`.
-- The many `validation/phase*_*.py` modules (and their tests) are the retired cate1-era gate layer; they are kept because the unit suite covers them, but nothing at the top level invokes them anymore.
 
 ## Architecture (scripts/function_tracer_pcode)
 
@@ -67,12 +66,12 @@ Pipeline for one function pair (`docs/equivalence_flow_diagrams.md` has mermaid 
 5. **`equivalence/`** — `checker.py` + `workflow.py` run a **phase plan** (`phases/handler.py`: `P0_BASE → P1_SIGNEDNESS → P2_PATTERN_INT`, plus off-path `P4A/P4B` MIPS64 ABI handling and `P4C` return-type fix via `typing/fixer.py`). Each phase runs a stage plan of **strategies** (`strategies/`): `PairwiseStrategy` (per-return-site obligations, `obligations/` worklist, `pairwise_services/`, `proof_gates/`) falling back to `MonolithicStrategy` on UNKNOWN/TIMEOUT. `normalize/` holds fact-based normalization; `formula/` builds solver formulas; `counterexample.py` validates SAT models.
 6. **`smt/`** — solver interface and `parallel.py` racing z3/cvc5/yices2/boolector backends.
 7. **`equivalence/v2/`** — "UNKNOWN Taxonomy v2": the **authority layer**. `contracts.py` defines the five-value `Outcome` (`EQUIVALENT | NOT_EQ | UNKNOWN | TIMEOUT | ERROR`), exit codes, and batch-resume dispositions; `phase8_cutover.py` projects a verified `DecisionReceipt` onto legacy fields. Consumers must read `final_outcome`/the receipt — solver rows and `is_equivalent` are never final authority. This package deliberately has no re-export surface: import the exact submodule. `registry.py` is the canonical reason-ID registry for UNKNOWN reasons.
-8. **`validation/`** — summary/receipt modules used by the runners (`result_summary`, `execution_identity`, `execution_receipt`, `eqbench_build_receipt`, `process_authority_cleanup`) plus the retired `phase*_*` gate modules; several are digest-bound to evidence under `artifacts/` (`unknown_taxonomy_v2/`, `refactor/`, `unknown_reason_audit/`).
+8. **`validation/`** — summary/receipt modules used by the runners: `result_summary` (log aggregation, EQ/NOT_EQ/UNKNOWN census), `execution_identity` / `execution_receipt` / `eqbench_build_receipt` (signed run identity), `process_authority_cleanup`, `run_health_summary`, `unknown_reason_summary`, `root_blocker_summary` (used by `obligations/shadow.py`), and `phase7_producer_manifest` (builds the producer-site manifest that `phase7_runtime` consumes).
 
 ## Project rules that matter
 
 - **Soundness rule** (from `docs/implementation-plan.md`): never reduce UNKNOWN by weakening an equivalence or disequivalence proof gate. A false EQUIVALENT is the worst failure; prefer UNKNOWN with a registered reason.
-- Tracked evidence under `artifacts/` is digest-pinned by `validation/*.py` and tests (e.g. `artifacts/unknown_taxonomy_v2/phase7/producer-sites.json` is read by `phase8_cutover.py`); don't edit or regenerate it casually.
+- `artifacts/unknown_taxonomy_v2/phase7/producer-sites.json` is the only tracked artifact; `phase8_cutover.py` reads it at runtime and `test_unknown_taxonomy_v2_phase7_producer_manifest.py` binds it to the current source, so regenerate it (`python3 -B -m scripts.function_tracer_pcode.validation.phase7_producer_manifest`) rather than hand-editing when producer sites change.
 - Don't commit generated outputs: `logs/`, `tmp/`, `output/`, `.venv*`, `.local-*`, `targets/EqBench/` (all git-ignored). EqBench binaries are rebuilt by the runner.
 - `docs/implementation-progress.md` and `docs/review-response-log.md` are the phase-status ledgers for the v2 taxonomy work; update them when completing a phase slice, not for ordinary fixes.
 - Code comments and docstrings are frequently Japanese; match the surrounding language in the file you edit.

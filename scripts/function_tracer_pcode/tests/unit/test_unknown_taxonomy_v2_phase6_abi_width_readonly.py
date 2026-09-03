@@ -1,6 +1,4 @@
-import base64
 from dataclasses import replace
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -1201,203 +1199,6 @@ def test_slice5_phase7_runtime_replay_rolls_back_activation_and_finalizes():
     assert session.phase7_runtime_result.decision_receipt.outcome is Outcome.ERROR
     assert session.phase7_runtime._signal_transactions == {}
     assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.ERROR
-
-
-def test_slice5_validation_artifact_is_source_result_and_relation_bound(monkeypatch):
-    from scripts.function_tracer_pcode.validation.unknown_taxonomy_audit import (
-        build_inventory_review_template,
-    )
-
-    root = Path(__file__).resolve().parents[4]
-    artifact_path = root / (
-        "artifacts/unknown_taxonomy_v2/phase6/"
-        "slice5_representative_validation.json"
-    )
-    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-    saved_digest = payload.pop("artifact_digest")
-    assert authority_digest(payload) == saved_digest
-    assert payload["status"] == "complete"
-
-    current = build_inventory_review_template(root)
-    inventory = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json"
-    )).read_text(encoding="utf-8"))
-    assert payload["source_inventory"]["current_source"] == {
-        "candidate_set_digest": current["candidate_set_digest"],
-        "candidate_count": len(current["entries"]),
-    }
-    assert payload["source_inventory"]["current_source"] == (
-        inventory["current_source"]
-    )
-    assert payload["source_inventory"]["live_delta"] == {
-        "added": 0,
-        "removed": 0,
-    }
-
-    contract = payload["sealed_contract"]
-    assert contract["reason_count"] == len(ABI_WIDTH_READONLY_REASON_SPECS) == 8
-    assert contract["producer_stage_count"] == len(
-        ABI_WIDTH_READONLY_PRODUCER_STAGE_SPECS
-    ) == 8
-    assert contract["full_registry_digest"] == (
-        ABI_WIDTH_READONLY_PRODUCER_STAGE_REGISTRY_DIGEST
-    )
-    assert contract["common_registry_digest"] == (
-        ABI_WIDTH_READONLY_COMMON_EXECUTION_STAGE_REGISTRY.normalized_registry_digest
-    )
-
-    lifecycle = payload["lifecycle_matrix"]
-    assert lifecycle == _rematerialize_slice5_lifecycle_matrix()
-
-    for source, expected in payload["files"].items():
-        assert hashlib.sha256((root / source).read_bytes()).hexdigest() == expected
-    for binary, expected in payload["binary_inputs"].items():
-        assert hashlib.sha256((root / binary).read_bytes()).hexdigest() == expected
-
-    compiled = payload["compiled_fixture_evidence"]["high_bit_near_miss"]
-    encoded_fixture = (root / compiled["stored_binary"]).read_bytes()
-    assert hashlib.sha256(encoded_fixture).hexdigest() == (
-        compiled["encoded_binary_sha256"]
-    )
-    fixture_binary = gzip.decompress(
-        base64.b64decode(b"".join(encoded_fixture.split()))
-    )
-    assert hashlib.sha256(fixture_binary).hexdigest() == compiled["binary_sha256"]
-    assert hashlib.sha256((root / compiled["source"]).read_bytes()).hexdigest() == (
-        compiled["source_sha256"]
-    )
-    assert compiled["source"] in compiled["compile_command"]
-    assert compiled["test_result"] == "1 passed"
-
-    high_bit = payload["compiled_fixture_evidence"][
-        "slice5_return_high_bit_near_miss"
-    ]
-    decoded_binaries = {}
-    for side in ("left", "right"):
-        stored = (root / high_bit[f"stored_{side}_binary"]).read_bytes()
-        assert hashlib.sha256(stored).hexdigest() == (
-            high_bit[f"encoded_{side}_binary_sha256"]
-        )
-        decoded = gzip.decompress(base64.b64decode(b"".join(stored.split())))
-        assert hashlib.sha256(decoded).hexdigest() == high_bit[f"{side}_binary_sha256"]
-        decoded_binaries[side] = decoded
-        source = high_bit[f"{side}_source"]
-        assert hashlib.sha256((root / source).read_bytes()).hexdigest() == (
-            high_bit[f"{side}_source_sha256"]
-        )
-    encoded_result = (root / high_bit["stored_result_output"]).read_bytes()
-    assert hashlib.sha256(encoded_result).hexdigest() == (
-        high_bit["encoded_result_sha256"]
-    )
-    raw_result = gzip.decompress(
-        base64.b64decode(b"".join(encoded_result.split()))
-    )
-    assert hashlib.sha256(raw_result).hexdigest() == high_bit["result_json_sha256"]
-    high_bit_result = json.loads(raw_result)
-    assert high_bit_result["binary1_content_identity"] == [
-        "sha256", high_bit["left_binary_sha256"]
-    ]
-    assert high_bit_result["binary2_content_identity"] == [
-        "sha256", high_bit["right_binary_sha256"]
-    ]
-    assert high_bit_result["function1_name"] == high_bit_result["function2_name"] == (
-        "slice5_high_bit_projection"
-    )
-    assert high_bit_result["is_equivalent"] is None
-    assert high_bit_result["pairwise_debug_stats"]["return_width_bridge_missing"] == 2
-    bridge_rows = [
-        row for row in high_bit_result["unknown_reasons"]
-        if row["reason_id"] == "return_width_bridge_missing"
-    ]
-    assert bridge_rows
-    assert any(row["object_target_key"][-2:] == [32, 64] for row in bridge_rows)
-    assert high_bit["typed_slice5_test"] == (
-        "test_high_bit_solver_sat_keeps_q_live_and_hands_off_model_safety"
-    )
-    rematerialized_chain = _run_fixture_bound_high_bit_sat_authority(
-        monkeypatch, high_bit, "slice5-highbit-artifact-authority"
-    )
-    assert rematerialized_chain == high_bit["shared_authority_chain"]
-    assert rematerialized_chain["raw_return_widths"] == [32, 64]
-    assert rematerialized_chain["normalized_storage_widths"] == [64, 64]
-    assert high_bit["left_binary_sha256"] in json.dumps(
-        rematerialized_chain["projection_source_snapshot_pair"]
-    )
-    assert high_bit["right_binary_sha256"] in json.dumps(
-        rematerialized_chain["projection_source_snapshot_pair"]
-    )
-
-    for case_id, evidence in payload["stored_run_outputs"].items():
-        encoded = (root / evidence["path"]).read_bytes()
-        assert hashlib.sha256(encoded).hexdigest() == evidence["encoded_sha256"]
-        raw = gzip.decompress(base64.b64decode(b"".join(encoded.split())))
-        assert hashlib.sha256(raw).hexdigest() == evidence["result_json_sha256"]
-        result = json.loads(raw)
-        expected = evidence["expected_projection"]
-        stats = result["pairwise_debug_stats"]
-        assert result["is_equivalent"] is True
-        assert result["is_timeout"] is False
-        assert result["unknown_reasons"] == []
-        assert result["solver_results"]["first_definitive"]["status"] == "UNSAT"
-        binding = evidence["input_binding"]
-        left_path = binding["binary1_path"]
-        right_path = binding["binary2_path"]
-        assert result["binary1_name"] == Path(left_path).name
-        assert result["binary2_name"] == Path(right_path).name
-        assert result["binary1_content_identity"] == [
-            "sha256", payload["binary_inputs"][left_path]
-        ]
-        assert result["binary2_content_identity"] == [
-            "sha256", payload["binary_inputs"][right_path]
-        ]
-        assert result["function1_name"] == binding["function1"]
-        assert result["function2_name"] == binding["function2"]
-        command = next(
-            row["command"] for row in payload["current_head_real_binary_runs"]
-            if row["case_id"] == case_id
-        )
-        assert left_path in command and right_path in command
-        assert "--binary-ids " + " ".join(binding["binary_ids"]) in command
-        assert "-f " + binding["function1"] in command
-        assert {
-            key: stats.get(key, 0)
-            for key in expected["pairwise_debug_stats"]
-        } == expected["pairwise_debug_stats"]
-        assert case_id in {
-            row["case_id"] for row in payload["current_head_real_binary_runs"]
-        }
-
-    aggregation = payload["aggregation_gates"]
-    assert aggregation == _rematerialize_slice5_aggregation_gates(monkeypatch)
-    assert aggregation["canonical_manifest"]["manifest_entry_count"] == 4
-    assert aggregation["canonical_manifest"][
-        "exactly_one_decision_receipt_per_result"
-    ] is True
-    assert aggregation["canonical_manifest"][
-        "all_q_open_foreign_keys_resolve_to_c_active"
-    ] is True
-    assert aggregation["canonical_metrics"]["decision_counts"] == {
-        "EQUIVALENT": 1,
-        "NOT_EQ": 0,
-        "UNKNOWN": 2,
-        "TIMEOUT": 1,
-        "ERROR": 0,
-    }
-    assert aggregation["conservation"] == {
-        "sum_decision_counts_equals_manifest_entries": True,
-        "terminal_timeout_events_equals_final_timeout_results": True,
-    }
-    assert payload["default_off_preservation"]["current_head_run_count"] == 2
-    coverage = payload["representative_coverage"]
-    assert set(coverage) == {
-        "return_width_bridge_activation_and_discharge",
-        "high_bit_near_miss",
-        "summary_return_width_missing_and_mismatch",
-        "two_distinct_readonly_objects",
-        "readonly_correspondence_discharge",
-        "conservative_negative",
-    }
-    assert all(row["status"] == "covered" for row in coverage.values())
 
 
 def test_slice5_production_source_coverage_is_conserved():
@@ -3736,9 +3537,9 @@ def _run_fixture_bound_high_bit_sat_authority(
 
 
 def test_high_bit_solver_sat_atomically_replaces_q_with_model_safety(monkeypatch):
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[1]
     payload = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase6/"
+        "fixtures/unknown_taxonomy_v2/phase6/"
         "slice5_representative_validation.json"
     )).read_text(encoding="utf-8"))
     high_bit = payload["compiled_fixture_evidence"][
@@ -3757,9 +3558,9 @@ def test_high_bit_solver_sat_atomically_replaces_q_with_model_safety(monkeypatch
 
 
 def test_high_bit_sat_append_failure_preserves_original_cause_and_q(monkeypatch):
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[1]
     payload = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase6/"
+        "fixtures/unknown_taxonomy_v2/phase6/"
         "slice5_representative_validation.json"
     )).read_text(encoding="utf-8"))
     high_bit = payload["compiled_fixture_evidence"][
@@ -3773,9 +3574,9 @@ def test_high_bit_sat_append_failure_preserves_original_cause_and_q(monkeypatch)
 
 
 def test_high_bit_sat_commit_failure_preserves_original_cause_and_q(monkeypatch):
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[1]
     payload = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase6/"
+        "fixtures/unknown_taxonomy_v2/phase6/"
         "slice5_representative_validation.json"
     )).read_text(encoding="utf-8"))
     high_bit = payload["compiled_fixture_evidence"][
@@ -3789,9 +3590,9 @@ def test_high_bit_sat_commit_failure_preserves_original_cause_and_q(monkeypatch)
 
 
 def test_high_bit_sat_partial_commit_failure_rolls_back_every_ledger(monkeypatch):
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[1]
     payload = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase6/"
+        "fixtures/unknown_taxonomy_v2/phase6/"
         "slice5_representative_validation.json"
     )).read_text(encoding="utf-8"))
     high_bit = payload["compiled_fixture_evidence"][

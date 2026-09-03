@@ -66,7 +66,7 @@ from scripts.function_tracer_pcode.equivalence.obligations import (
     SolverQueryExecutionReceipt,
 )
 
-from scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety import (
+from scripts.function_tracer_pcode.tests.unit._object_target_key_specificity import (
     _object_target_key_is_specific,
 )
 

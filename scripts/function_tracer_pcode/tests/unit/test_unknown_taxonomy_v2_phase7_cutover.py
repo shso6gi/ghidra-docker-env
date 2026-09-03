@@ -95,10 +95,6 @@ from scripts.function_tracer_pcode.equivalence.v2.stream import (
     ReceiptBoundSolverExecutionEventAuthority,
     outcome_stage_requirement_id,
 )
-from scripts.function_tracer_pcode.validation.phase7_cutover_validation import (
-    build_phase7_cutover_validation,
-    validate_phase7_cutover_validation,
-)
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_call_effect import (
     _execution_receipt,
     _membership,
@@ -338,49 +334,6 @@ def test_retired_reason_set_is_exact_and_does_not_include_typed_domain_reasons()
         "method_b_closure_blocked",
     }
     assert "typed-semantic-cause" not in RETIRED_UMBRELLA_REASON_IDS
-
-
-def test_phase7_stored_cutover_artifact_is_current_and_closes_coverage():
-    root = Path(__file__).resolve().parents[4]
-    path = root / "artifacts/unknown_taxonomy_v2/phase7/cutover-validation.json"
-    stored = json.loads(path.read_text(encoding="utf-8"))
-    validate_phase7_cutover_validation(root, stored)
-    assert stored == json.loads(json.dumps(build_phase7_cutover_validation(root)))
-    assert stored["production_umbrella_generation"] == 0
-    assert stored["production_umbrella_routing"] == 0
-    assert stored["status"] == "phase7_integration_validation_pending_fixed_review"
-    assert stored["contract_fixture_coverage"]["eligible_cause_slot_count"] == 6
-    assert stored["contract_fixture_coverage"]["v2_native_typed_cause_coverage"] == 1.0
-    assert stored["production_runtime_coverage"][
-        "v2_native_typed_cause_coverage"
-    ] == 1.0
-    assert stored["production_runtime_coverage"]["eligible_cause_slot_count"] == 2
-    assert len(stored["fixture_domains"]) == 6
-    assert stored["production_runtime_unknown"]["final_outcome"] == "UNKNOWN"
-    assert stored["production_runtime_unknown"]["active_cause_count"] == 1
-    assert stored["production_runtime_unknown"]["open_requirement_count"] == 1
-    assert stored["production_runtime_unknown"][
-        "terminal_timeout_assignment_count"
-    ] == 0
-    assert stored["production_runtime_timeout"]["final_outcome"] == "TIMEOUT"
-    assert stored["production_runtime_timeout"]["terminal_timeout_event_count"] == 1
-    assert stored["production_runtime_timeout"]["timeout_derived_reason_count"] == 0
-    declared_skips = stored["cross_slice_validation"][
-        "declared_external_fixture_skips"
-    ]
-    assert len(declared_skips) == 3
-    assert {
-        row["reason"] for row in declared_skips
-    } == {"requires the external 411-summary legacy diagnostic fixture"}
-
-
-def test_phase7_cutover_artifact_rejects_tampered_coverage():
-    root = Path(__file__).resolve().parents[4]
-    stored = build_phase7_cutover_validation(root)
-    tampered = copy.deepcopy(stored)
-    tampered["contract_fixture_coverage"]["covered_cause_slot_count"] = 5
-    with pytest.raises(ValueError, match="artifact drifted"):
-        validate_phase7_cutover_validation(root, tampered)
 
 
 def test_real_sat_producer_activation_issues_factory_owned_projection():

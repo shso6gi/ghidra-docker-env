@@ -53,7 +53,6 @@ from scripts.function_tracer_pcode.equivalence.obligations.outcome_partition imp
     requirement_for_stage,
 )
 from scripts.function_tracer_pcode.equivalence.cause_identity import ProofRequirementId
-from scripts.function_tracer_pcode.validation.unknown_taxonomy_audit import build_inventory_review_template
 
 
 _WITNESSES = (
@@ -1340,27 +1339,3 @@ def test_actual_timeout_then_same_session_proved_completion_is_nonterminal():
     )) == 1
 
 
-def test_slice2_inventory_delta_exactly_matches_current_source():
-    root = Path(__file__).resolve().parents[4]
-    frozen = json.loads(
-        (root / "artifacts/unknown_reason_audit/current-head/inventory-review.json").read_text()
-    )
-    slice1 = json.loads(
-        (root / "artifacts/unknown_taxonomy_v2/phase6/slice1_inventory_delta.json").read_text()
-    )
-    delta = json.loads(
-        (root / "artifacts/unknown_taxonomy_v2/phase6/slice2_inventory_delta.json").read_text()
-    )
-    current = build_inventory_review_template(root)
-    previous_ids = {row["site_id"] for row in frozen["entries"]}
-    previous_ids -= {row["site_id"] for row in slice1["removed"]}
-    previous_ids |= {row["site_id"] for row in slice1["added"]}
-    current_ids = {row["site_id"] for row in current["entries"]}
-    assert delta["previous_slice"] == slice1["current_source"]
-    assert delta["current_source"] == {
-        "candidate_set_digest": current["candidate_set_digest"],
-        "candidate_count": len(current_ids),
-    }
-    assert {row["site_id"] for row in delta["added"]} == current_ids - previous_ids
-    assert {row["site_id"] for row in delta["removed"]} == previous_ids - current_ids
-    assert all(row["review_status"] == "reviewed_by_main_pending_fixed_review" for row in delta["added"])

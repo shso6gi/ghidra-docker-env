@@ -2,7 +2,6 @@
 
 from unittest.mock import Mock
 from dataclasses import replace
-import hashlib
 import json
 from pathlib import Path
 
@@ -37,10 +36,73 @@ from scripts.function_tracer_pcode.equivalence.v2.sat_safety import (
     SAT_SAFETY_RECOVERY_REGISTRY,
     SatSafetyPilotEncoder,
 )
-from scripts.function_tracer_pcode.tests.unit.test_phase3_sat_unsafety_lane5 import _case
-from scripts.function_tracer_pcode.validation.unknown_taxonomy_audit import (
-    build_inventory_review_template,
-)
+from scripts.function_tracer_pcode.model import Condition
+from scripts.function_tracer_pcode.model import PcodeOpRef
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+
+
+def _param(name: str, index: int = 0, size: int = 4):
+    return {
+        "name": name,
+        "index": index,
+        "size": size,
+        "data_type": "int",
+        "is_signed": True,
+    }
+
+def _pcode(binary_id: str, offset: int, mnemonic: str = "RETURN") -> PcodeOpRef:
+    return PcodeOpRef(
+        address_offset=offset,
+        seq_time=offset,
+        seq_order=1,
+        block_index=0,
+        mnemonic=mnemonic,
+        input_sizes=(8, 4),
+        output_size=4,
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=offset - 0x20,
+        target_space="ram",
+        target_offset=offset,
+        opcode=62,
+        local_op_ordinal=0,
+    )
+
+def _case(binary_id: str, entry: int, index: int) -> tuple[FunctionReturnAnalysis, ReturnCase]:
+    x = Expression.parameter("x", 0, size=4)
+    ret = ReturnInfo(
+        address=hex(entry + 0x20),
+        value=Expression.constant(index, 4),
+        conditions=[
+            Condition(
+                Expression.binary_op("INT_EQUAL", x, Expression.constant(index, 4)),
+                False,
+            )
+        ],
+        pcode_identity=f"{binary_id}:return:{index}",
+        pcode_order=index,
+        pcode_time=entry + 0x20,
+        pcode_op_ref=_pcode(binary_id, entry + 0x20),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_is_even",
+        entry_point=hex(entry),
+        parameters=[_param("x")],
+        returns=[ret],
+        return_type="int",
+        binary_id=binary_id,
+    )
+    case = ReturnCase(
+        index=index,
+        conditions=ret.conditions,
+        value_expr=ret.value,
+        return_info=ret,
+        return_type="int",
+        parameters=analysis.parameters,
+        source_indices=[index],
+        comparison_surface=analysis.get_comparison_surface(),
+    )
+    return analysis, case
 
 
 class _LegacyResult:
@@ -864,50 +926,3 @@ def test_invalid_counterexample_safety_never_emits_decisive_event():
         session.recorder.seal()
 
 
-def test_slice1_inventory_delta_remains_a_frozen_historical_transition():
-    root = Path(__file__).resolve().parents[4]
-    frozen = json.loads(
-        (root / "artifacts/unknown_reason_audit/current-head/inventory-review.json").read_text()
-    )
-    delta = json.loads(
-        (root / "artifacts/unknown_taxonomy_v2/phase6/slice1_inventory_delta.json").read_text()
-    )
-    frozen_ids = {row["site_id"] for row in frozen["entries"]}
-    added_ids = {row["site_id"] for row in delta["added"]}
-    removed_ids = {row["site_id"] for row in delta["removed"]}
-    assert delta["frozen_phase0"] == {
-        "candidate_set_digest": frozen["candidate_set_digest"],
-        "candidate_count": len(frozen_ids),
-    }
-    assert delta["current_source"]["candidate_count"] == (
-        len(frozen_ids) - len(removed_ids) + len(added_ids)
-    )
-    assert added_ids.isdisjoint(frozen_ids)
-    assert removed_ids <= frozen_ids
-    assert all(row["review_status"] == "reviewed_by_main_pending_fixed_review" for row in delta["added"])
-
-
-def test_representative_result_is_repo_local_and_bound_by_slice_evidence():
-    root = Path(__file__).resolve().parents[4]
-    relative_path = "artifacts/unknown_taxonomy_v2/phase6/slice1_representative_result.json"
-    result_path = root / relative_path
-    result_bytes = result_path.read_bytes()
-    result = json.loads(result_bytes)
-    slice_evidence = json.loads(
-        (root / "artifacts/unknown_taxonomy_v2/phase6/slice1_sat_safety.json").read_text()
-    )
-    assert slice_evidence["representative_current_source_run"]["result_artifact"] == {
-        "path": relative_path,
-        "sha256": hashlib.sha256(result_bytes).hexdigest(),
-    }
-    assert result["decision"] == "NOT_EQ"
-    assert result["process_exit_code"] == 1
-    assert result["result_payload_projection"]["is_timeout"] is False
-    assert result["result_payload_projection"]["unknown_reasons"] == []
-    assert result["result_payload_projection"]["pairwise_stats"] == {
-        "total_pairs": 4,
-        "unsat_pairs": 3,
-        "sat_pairs": 1,
-        "unknown_pairs": 0,
-        "error_pairs": 0,
-    }

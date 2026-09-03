@@ -29,7 +29,6 @@ from scripts.function_tracer_pcode.equivalence.v2.phase8_cutover import (
     attach_canonical_decision,
     attach_canonical_relations,
     outcome_from_payload,
-    rematerialize_process_timeout_decision,
 )
 from scripts.function_tracer_pcode.equivalence.v2.pair_status_authority import (
     PAIR_STATUS_PUBLIC_KEY_FILE,
@@ -444,35 +443,6 @@ def test_canonical_summary_keeps_only_final_receipt_bound_payload(tmp_path):
 
     assert summary.overall.records[0].payloads == (canonical,)
     assert "legacy_contamination" not in health["unknown_by_reason"]
-
-
-def test_process_timeout_is_rematerialized_from_durable_terminal_bundle(tmp_path):
-    root = Path(__file__).resolve().parents[4]
-    payload = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase7/real-process-timeout.json"
-    )).read_text(encoding="utf-8"))
-    durable = payload["durable_store"]
-    store_root = tmp_path / "store"
-    directory = store_root / durable["execution_nonce"]
-    directory.mkdir(parents=True)
-    for name, content in durable["files"].items():
-        (directory / name).write_text(content, encoding="utf-8")
-    supervisor_key = tmp_path / "supervisor.key"
-    worker_key = tmp_path / "worker.key"
-    supervisor_key.write_bytes(bytes.fromhex(durable["supervisor_signing_key_hex"]))
-    worker_key.write_bytes(bytes.fromhex(durable["worker_signing_key_hex"]))
-
-    receipt = rematerialize_process_timeout_decision(
-        checkpoint_root=store_root,
-        execution_nonce=durable["execution_nonce"],
-        supervisor_signing_key_id=durable["supervisor_signing_key_id"],
-        supervisor_signing_key_file=supervisor_key,
-        worker_signing_key_id=durable["worker_signing_key_id"],
-        worker_signing_key_file=worker_key,
-    )
-
-    assert receipt.outcome is Outcome.TIMEOUT
-    assert receipt.receipt_digest == payload["decision_receipt"]["receipt_digest"]
 
 
 def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(

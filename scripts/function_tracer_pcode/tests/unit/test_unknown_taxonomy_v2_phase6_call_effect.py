@@ -3,8 +3,6 @@
 from dataclasses import replace
 import ast
 import copy
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -598,21 +596,6 @@ def test_generic_execution_event_round_trip_revalidates_signed_receipt():
         GenericReceiptBoundSolverExecutionEventAuthority(
             "forged-requirement", payload, True
         )
-
-
-def test_slice3_representative_validation_artifact_is_source_bound():
-    path = Path(
-        "artifacts/unknown_taxonomy_v2/phase6/"
-        "slice3_representative_validation.json"
-    )
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    saved_digest = payload.pop("artifact_digest")
-    assert authority_digest(payload) == saved_digest
-    assert payload["status"] == "fixed_review_go"
-    assert len(payload["representative_cases"]) == 5
-    assert payload["cross_phase_test"]["result"] == "295 passed"
-    for source, expected in payload["files"].items():
-        assert hashlib.sha256(Path(source).read_bytes()).hexdigest() == expected
 
 
 def test_attempt_membership_rejects_unsealed_status_and_stage():

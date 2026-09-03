@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import replace
-import hashlib
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,7 +30,6 @@ from scripts.function_tracer_pcode.equivalence.v2.contracts import (
     TransformationKind,
     all_of,
     any_of,
-    authority_digest,
     requirement_slot,
 )
 from scripts.function_tracer_pcode.equivalence.v2.pilot import (
@@ -758,21 +754,6 @@ def test_difference_manifest_binds_each_unique_result_and_rejects_duplicates():
     forged = replace(rows[0], candidate_outcome=Outcome.ERROR)
     with pytest.raises(ValueError, match="entry digest"):
         forged.validate()
-
-
-def test_saved_difference_manifest_is_digest_and_source_bound():
-    path = Path("artifacts/unknown_taxonomy_v2/phase5/difference_manifest.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    saved_digest = payload.pop("manifest_digest")
-    assert authority_digest(payload) == saved_digest
-    regenerated = _materialized_phase5_difference_manifest()
-    assert payload["typed_difference_manifest"] == regenerated["typed_difference_manifest"]
-    assert payload["legacy_outcome_observation_receipts"] == (
-        regenerated["legacy_outcome_observation_receipts"]
-    )
-    assert len(regenerated["typed_difference_manifest"]["entries"]) == 13
-    for source, expected in payload["files"].items():
-        assert hashlib.sha256(Path(source).read_bytes()).hexdigest() == expected
 
 
 def test_pilot_receipt_validation_rederives_coverage_and_v1_preservation():

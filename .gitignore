@@ -1,37 +1,36 @@
-__pycache__
-*.pytest_cache
-*.egg-info
-.venv
+# Python
+__pycache__/
+*.pyc
+*.pytest_cache/
+*.egg-info/
+
+# Host runtime caches (see README "Host PyGhidra Environment")
 .venv/
-.venv-pyghidra
 .venv-pyghidra/
-.local-jdk
 .local-jdk/
-.local-jdk.bak-*
+.local-jdk.bak-*/
 .local-ghidra/
 .local-ghidra-extract/
-*.smt*
-output
+
+# Generated run outputs
 logs/
 tmp/
+output/
+*.smt*
+hs_err_pid*.log
+
+# Per-run signing keys and process-authority checkpoints written by the EqBench runners
+**/.process-authority/
 **/.process-authority-keys/
 **/.phase8-execution-authority/
 artifacts/**/*.key
-**/.process-authority/
-# targets配下のバイナリファイルを除外
+
+# Target binaries: the EqBench tree is not git-managed; compiled objects anywhere under targets/ are rebuilt
+targets/EqBench/
 targets/**/*-x86_64-gcc-O*
 targets/**/*-x86_64-clang-O*
 targets/**/*-arm64-gcc-O*
 targets/**/*-arm64-clang-O*
 targets/**/*-mips64-gcc-O*
 targets/**/*-mips64-clang-O*
-targets/**/*.sh
-!targets/**/compile_all.sh
-*.txt
-!requirements-test.txt
-*.log
-*.pdf
-
-!artifacts/
-targets/EqBench/
-hs_err_pid*.log
+targets/**/*.compile.log
