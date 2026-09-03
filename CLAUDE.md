@@ -81,6 +81,8 @@ Known remaining upward dependencies to work off (tracked as tech debt, not bugs)
 
 ## Project rules that matter
 
+- **Ask, don't assume.** When something is unclear (an ambiguous requirement, a design choice with material consequences, an Issue that is insufficient or contradictory), do not state a guess as fact: present the options and confirm with the user before proceeding. Facts that can be established from the code or by running it should be established that way first.
+- **General, extensible fixes over ad-hoc patches.** The analysis program is meant to grow: fix the class of problem in the layer that owns it (e.g. a memory-resolution rule, a proof gate, a registered UNKNOWN reason), not the one benchmark case that exposed it. Avoid special-casing sample names, string matching on rendered output, or hard-coded constants; prefer a mechanism that other producers/consumers can reuse.
 - **Soundness rule** (from `docs/implementation-plan.md`): never reduce UNKNOWN by weakening an equivalence or disequivalence proof gate. A false EQUIVALENT is the worst failure; prefer UNKNOWN with a registered reason.
 - `artifacts/unknown_taxonomy_v2/phase7/producer-sites.json` is the only tracked artifact; `phase8_cutover.py` reads it at runtime and `test_unknown_taxonomy_v2_phase7_producer_manifest.py` binds it to the current source, so regenerate it (`python3 -B -m scripts.function_tracer_pcode.reporting.phase7_producer_manifest`) rather than hand-editing when producer sites change.
 - Don't commit generated outputs: `logs/`, `tmp/`, `output/`, `.venv*`, `.local-*`, `targets/EqBench/` (all git-ignored). EqBench binaries are rebuilt by the runner.
