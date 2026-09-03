@@ -1,15 +1,19 @@
+# Usage:
+#   docker compose build
+#   docker compose run --rm ghidra-dev                      # interactive shell
+#   docker compose run --rm ghidra-dev python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
+#   docker compose run --rm ghidra-dev ./eqbench_run_all_32jobs.sh
+# Set DOCKER_UID / DOCKER_GID (default 1000) when your host user is different,
+# so files written under the bind mount stay owned by you.
 services:
   ghidra-dev:
-    build:
-      context: .
-      dockerfile: .devcontainer/Dockerfile
+    build: .
+    image: ghidra-docker-env:latest
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     working_dir: /workspace
-    environment:
-      GHIDRA_HOME: /opt/ghidra
-      GHIDRA_INSTALL_DIR: /opt/ghidra
-      JAVA_HOME: /usr/lib/jvm/temurin-21-jdk-amd64
-      PYTHONDONTWRITEBYTECODE: "1"
-      DISPLAY: ""
     volumes:
       - .:/workspace
-    command: bash
+    environment:
+      DISPLAY: ""
+    stdin_open: true
+    tty: true

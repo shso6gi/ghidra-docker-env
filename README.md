@@ -2,70 +2,42 @@
 
 Validation workspace for Ghidra/PyGhidra based semantic equivalence checks.
 
-## Git-managed workflow
+## Container workflow
 
-Use git for source, scripts, manifests, and test definitions. Do not sync local
-runtime caches or generated outputs.
+All analysis runs inside the image defined by `Dockerfile`, driven through
+`docker-compose.yml`. Use git for source, scripts, manifests, and test
+definitions; do not sync local runtime caches or generated outputs.
 
-The primary container entrypoint is `.devcontainer/devcontainer.json`. After a
-`git pull`, rebuild the Dev Container when `.devcontainer/Dockerfile` or
-`requirements-test.txt` changes. Reopening an existing container is not enough
-to pick up image dependency changes.
-
-Recommended Dev Containers flow:
+One-time setup so files written into the bind mount stay owned by you:
 
 ```bash
-git pull
-# VS Code: Dev Containers: Rebuild and Reopen in Container
+printf 'DOCKER_UID=%s\nDOCKER_GID=%s\n' "$(id -u)" "$(id -g)" > .env
+docker compose build
 ```
 
-Equivalent CLI flow with the Dev Containers CLI:
+Rebuild the image after a `git pull` whenever `Dockerfile` or
+`requirements-test.txt` changed. Then:
 
 ```bash
-git pull
-devcontainer up --workspace-folder .
+docker compose run --rm ghidra-dev                    # interactive shell in /workspace
+docker compose run --rm ghidra-dev python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 ```
 
-`docker-compose.yml` is optional for non-VS Code runs and uses the same
-Dockerfile:
+The image installs:
 
-```bash
-git pull
-docker compose build ghidra-dev
-docker compose run --rm ghidra-dev bash
-```
-
-Inside the container:
-
-```bash
-python3 -B -m pytest \
-  scripts/function_tracer_pcode/tests/unit/test_validation_result_summary.py \
-  scripts/function_tracer_pcode/tests/unit/test_sat_decisiveness_*.py -q
-
-VALIDATION_RUNNER_DRY_RUN=1 \
-./phase2_run_function_call_pre_producer_final_result_preflight.sh
-```
-
-The devcontainer uses the same image definition. It mounts the repository at
-`/workspace`.
-
-## Runtime dependencies
-
-The Docker image installs:
-
-- Ghidra under `/opt/ghidra`
+- Ghidra 12.0.1 under `/opt/ghidra` (zip verified by SHA-256)
 - Temurin JDK 21 under `/usr/lib/jvm/temurin-21-jdk-amd64`
-- Python dependencies from `requirements-test.txt`
-- the `z3` CLI package and Python `z3-solver`
+- clang plus the GNU arm64/mips64 cross toolchains used to build EqBench
+- Python dependencies from `requirements-test.txt`, the `z3` CLI, and GNU `time`
 
-Python package versions are pinned in `requirements-test.txt`. The Ghidra zip
-download is verified by SHA-256 in the Dockerfile. Apt packages, the Adoptium
-repository, and the Ubuntu package index are still time-dependent; rebuild the
-image from the same commit before comparing long rerun results across machines.
+Python package versions are pinned in `requirements-test.txt`. Apt packages,
+the Adoptium repository, and the Ubuntu package index are still
+time-dependent; rebuild the image from the same commit before comparing long
+rerun results across machines.
 
 ## Host PyGhidra Environment
 
-The preferred runtime is the Dev Container. If Codex or another tool must run
+The preferred runtime is the container above. If Codex or another tool must run
 PyGhidra directly on the host, create a local venv on each machine instead of
 copying one from another PC:
 
@@ -136,7 +108,9 @@ CLEAN_LOCAL_GENERATED_CONFIRM=1 CLEAN_REQUIRED_HOST_RUNTIME=1 bash scripts/clean
 
 ## EqBench runs
 
-Before a long run, require a clean tree and a passing unit suite:
+Run everything below inside the container (`docker compose run --rm ghidra-dev <command>`
+or from an interactive shell). Before a long run, require a clean tree and a
+passing unit suite:
 
 ```bash
 git status --short

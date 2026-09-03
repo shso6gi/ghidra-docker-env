@@ -34,3 +34,6 @@ targets/EqBench/
 *-mips64-gcc-O[0-3]
 *-mips64-clang-O[0-3]
 *.compile.log
+
+# Local docker-compose overrides (DOCKER_UID / DOCKER_GID)
+.env

@@ -10,7 +10,7 @@ A validation workspace for a Ghidra/PyGhidra-based **semantic equivalence checke
 
 ## Environment and commands
 
-The intended runtime is the Dev Container (`.devcontainer/`, Ghidra at `/opt/ghidra`, Temurin JDK 21, deps from `requirements-test.txt`, `z3` CLI). Rebuild the container whenever `.devcontainer/Dockerfile` or `requirements-test.txt` changes. The bare host usually has **no** `pytest`/`z3`/`pyghidra`; to run on the host, create the venv first:
+The intended runtime is the container from `Dockerfile` via `docker-compose.yml` (Ghidra at `/opt/ghidra`, Temurin JDK 21, deps from `requirements-test.txt`, `z3` CLI, GNU `time`). It runs as the host uid/gid from `.env` (`DOCKER_UID`/`DOCKER_GID`, git-ignored) so bind-mount outputs stay user-owned; rebuild (`docker compose build`) whenever `Dockerfile` or `requirements-test.txt` changes. Prefix commands with `docker compose run --rm ghidra-dev`. The bare host usually has **no** `pytest`/`z3`/`pyghidra`; to run on the host instead, create the venv first:
 
 ```bash
 bash scripts/setup_host_pyghidra_venv.sh     # creates .venv-pyghidra (+ .venv symlink)
@@ -42,7 +42,7 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
 # Shell script syntax check before touching a runner
 bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh rerun_eqbench_errors.sh
 
-# No pytest on the host? Run the suite in the dev-container image instead
+# Same, inside the container
 docker compose run --rm ghidra-dev python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 ```
 
