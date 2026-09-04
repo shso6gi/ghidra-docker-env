@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import Condition, Expression, StorageInfo
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     CallArgumentWidthEvidence,
-    Condition,
     ConditionSimplifier,
-    Expression,
-    StorageInfo,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _coerce_storage_info,

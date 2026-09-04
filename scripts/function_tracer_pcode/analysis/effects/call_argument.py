@@ -3,29 +3,33 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.effects._shared import (
-    CallArgumentEvidence,
-    CallArgumentWidthEvidence,
+import re
+from itertools import product
+from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
     Condition,
-    ConditionSimplifier,
-    EffectSummary,
     Expression,
     ExpressionType,
     LocationBaseRef,
     PostStateReadRef,
     PostStateValueRef,
     StorageInfo,
-    StoreEffect,
-    _MAX_CALL_ARGUMENT_VARIANTS,
     expression_provenance_key,
+)
+from scripts.function_tracer_pcode.core.signature import (
     get_declared_type_size_bytes,
     is_integral_data_type,
     is_pointer_data_type,
     is_undefined_data_type,
-    product,
-    re,
+)
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    CallArgumentEvidence,
+    CallArgumentWidthEvidence,
+    ConditionSimplifier,
+    EffectSummary,
+    StoreEffect,
+    _MAX_CALL_ARGUMENT_VARIANTS,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _bind_location_to_parameter_refs,
@@ -140,15 +144,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     canonicalize_param_location,
 )
 from typing import Dict, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.effects._shared import (
-    CanonicalLocation,
-    Condition,
-    Expression,
-    ExpressionType,
-    LocationBaseRef,
-    PostStateReadRef,
-    StorageInfo,
-)
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _collect_parameter_replacements_from_conditions,
     _expression_contains_parameter_identity,

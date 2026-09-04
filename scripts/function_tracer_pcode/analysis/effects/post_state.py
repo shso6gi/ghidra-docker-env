@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 from typing import Any, Dict, FrozenSet, Optional, Sequence
-from scripts.function_tracer_pcode.analysis.effects._shared import (
+import re
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CanonicalLocation,
     Condition,
-    ConditionSimplifier,
-    EffectSummary,
     Expression,
     ExpressionType,
     ObservedMemoryReadRef,
     PostStateReadRef,
     PostStateSnapshotRef,
     PostStateValueRef,
+)
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    ConditionSimplifier,
+    EffectSummary,
     StoreEffect,
-    re,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _all_residual_guards_empty,

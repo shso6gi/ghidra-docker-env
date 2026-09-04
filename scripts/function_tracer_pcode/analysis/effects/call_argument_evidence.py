@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.core import AddressValueRef, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.effects._shared import (
-    AddressValueRef,
-    Expression,
-    ExpressionType,
     _FIXED_PREFIX_FORMAT_CALL_TARGETS,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (

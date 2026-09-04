@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.effects._shared import (
+from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     Condition,
-    ConditionSimplifier,
     Expression,
     ExpressionType,
+)
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    ConditionSimplifier,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _apply_binary_constant_op,
