@@ -65,6 +65,25 @@ class RewriteInfo:
         }
 
 
+def _format_stage_seconds(diagnostics: Any) -> str:
+    """診断ブロックの段階別時間を 1 行に整形する（無ければ空文字）。"""
+    try:
+        stages = (diagnostics or {}).get("stages") or {}
+        seconds = stages.get("seconds") or {}
+        if not seconds:
+            return ""
+        parts = [f"{stage}={float(value):.3f}" for stage, value in seconds.items()]
+        age = stages.get("process_age_at_start_seconds")
+        if age is not None:
+            parts.insert(0, f"process_startup={float(age):.3f}")
+        boundary = (diagnostics or {}).get("boundary_seconds") or {}
+        for key, value in boundary.items():
+            parts.append(f"boundary.{key}={float(value):.3f}")
+        return "Stage seconds: " + " ".join(parts)
+    except Exception:
+        return ""
+
+
 @dataclass
 class EquivalenceResult:
     """等価性判定の結果"""
@@ -515,6 +534,9 @@ class EquivalenceResult:
         
         lines.append("-" * 70)
         lines.append(f"Total time: {self.total_time:.3f} seconds")
+        stage_line = _format_stage_seconds(getattr(self, "diagnostics", None))
+        if stage_line:
+            lines.append(stage_line)
         
         if verbose and self.solver_results:
             lines.append("")

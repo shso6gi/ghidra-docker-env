@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
+from collections.abc import Mapping as _AbcMapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
@@ -11,8 +13,14 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
 SCHEMA_VERSION = 2
 
+# canonical_value の fast path 用。Enum は str/int のサブクラスになり得るので、
+# 型が「ちょうど」これらのときだけ即返す（Enum は type が一致しない）。
+_PRIMITIVE_TYPES = frozenset({str, int, float, bool})
+
 
 def canonical_value(value: Any) -> Any:
+    if value is None or type(value) in _PRIMITIVE_TYPES:
+        return value
     if isinstance(value, Enum):
         return value.value
     if hasattr(value, "to_authority_dict"):
@@ -21,7 +29,7 @@ def canonical_value(value: Any) -> Any:
         return tuple(
             (item.name, canonical_value(getattr(value, item.name))) for item in fields(value)
         )
-    if isinstance(value, Mapping):
+    if isinstance(value, _AbcMapping):
         return tuple(
             (str(key), canonical_value(child))
             for key, child in sorted(value.items(), key=lambda item: str(item[0]))
@@ -41,6 +49,40 @@ def authority_digest(value: Any) -> str:
         canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class ValidatedOnceRegistry:
+    """封印済み（frozen）authority オブジェクトの validate() 結果をプロセス内で
+    1 回だけ有効にする識別子ベースの記録（Issue #14）。
+
+    ``SealedEventStream`` / ``CauseLifecycleSnapshot`` /
+    ``VerifiedLifecycleProjection`` は封印後に変化しない値オブジェクトだが、
+    producer-site の projection を発行するたびに全イベントを再ダイジェストして
+    いたため、finalize が O(sites × events) になっていた。同一オブジェクトの
+    2 回目以降の validate() を O(1) にする。オブジェクトは弱参照で追跡し、回収
+    されれば記録も消えるので id の再利用で誤判定しない。
+    """
+
+    def __init__(self) -> None:
+        self._refs: dict[int, weakref.ref] = {}
+
+    def is_validated(self, obj: Any) -> bool:
+        ref = self._refs.get(id(obj))
+        return ref is not None and ref() is obj
+
+    def mark(self, obj: Any) -> None:
+        key = id(obj)
+        try:
+            self._refs[key] = weakref.ref(obj, lambda _ref, key=key: self._refs.pop(key, None))
+        except TypeError:
+            # 弱参照を取れないオブジェクトは記録しない（毎回検証する）。
+            return
+
+    def __len__(self) -> int:
+        return len(self._refs)
+
+
+VALIDATED_ONCE = ValidatedOnceRegistry()
 
 
 class IdentityScope(str, Enum):
@@ -913,6 +955,8 @@ class VerifiedLifecycleProjection:
         )
 
     def validate(self) -> None:
+        if VALIDATED_ONCE.is_validated(self):
+            return
         rebuilt = VerifiedLifecycleProjection.seal(
             result_occurrence_id=self.result_occurrence_id,
             snapshot_digest=self.snapshot_digest,
@@ -923,6 +967,7 @@ class VerifiedLifecycleProjection:
         )
         if rebuilt != self:
             raise ValueError("verified lifecycle projection digest or relation mismatch")
+        VALIDATED_ONCE.mark(self)
 
 
 _PREFIX_PROJECTION_FACTORY_TOKEN = object()

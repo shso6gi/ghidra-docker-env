@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
+    VALIDATED_ONCE,
     BlockerEligibilityBaseRow,
     CActiveBaseRow,
     CauseOccurrenceAuthority,
@@ -140,6 +141,8 @@ class CauseLifecycleSnapshot:
         )
 
     def validate(self) -> None:
+        if VALIDATED_ONCE.is_validated(self):
+            return
         rebuilt = CauseLifecycleSnapshot.seal(
             result_occurrence_id=self.result_occurrence_id,
             source_snapshot_fingerprint=self.source_snapshot_fingerprint,
@@ -158,6 +161,7 @@ class CauseLifecycleSnapshot:
         )
         if rebuilt != self:
             raise ValueError("lifecycle snapshot digest/fields mismatch")
+        VALIDATED_ONCE.mark(self)
 
 
 @dataclass(frozen=True)

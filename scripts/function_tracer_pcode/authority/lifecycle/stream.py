@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     SCHEMA_VERSION,
+    VALIDATED_ONCE,
     authority_digest,
     canonical_value,
 )
@@ -492,6 +493,8 @@ class SealedEventStream:
     events: Tuple[RecordedEvent, ...]
 
     def validate(self) -> None:
+        if VALIDATED_ONCE.is_validated(self):
+            return
         if not self.envelope.sealed or not self.events:
             raise ValueError("event stream is empty or unsealed")
         if type(self.envelope.schema_version) is not int or self.envelope.schema_version != SCHEMA_VERSION:
@@ -551,6 +554,7 @@ class SealedEventStream:
             raise ValueError("event stream count mismatch")
         if self.envelope.authority_chain_digest != predecessor:
             raise ValueError("event stream chain digest mismatch")
+        VALIDATED_ONCE.mark(self)
 
 
 _PREFIX_STREAM_VIEW_TOKEN = object()

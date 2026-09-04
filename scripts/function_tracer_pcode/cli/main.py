@@ -28,12 +28,33 @@ __all__ = [
 ]
 
 
+def _line_buffer_stdio() -> None:
+    """ログへリダイレクトされた stdout/stderr を行バッファにする（Issue #14）。
+
+    ブロックバッファのままだと、ペアプロセスが wall-clock timeout で SIGTERM
+    される際に未 flush の進捗（ヘッダや解析ログ）が失われ、JVM のバナーしか
+    残らない「出力ゼロ」のログになる。
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if not stream.isatty():
+                reconfigure(line_buffering=True)
+        except Exception:
+            continue
+
+
 def main():
     """メインエントリーポイント。"""
     if IN_GHIDRA:
         run_ghidra_mode()
         return
 
+    _line_buffer_stdio()
     args = parse_arguments()
     run_pyghidra_mode(args)
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Dict
 
 from scripts.function_tracer_pcode.checker.workflow import (
     run_check_from_binaries as _run_legacy_check_from_binaries,
@@ -143,6 +144,52 @@ def _operational_binary_content_identity(value: Any) -> str:
     raise ValueError("binary content identity is not canonical")
 
 
+def _profiled_finish(connector: Any, session: Any, result: Any) -> Any:
+    """``connector.finish`` を呼ぶ。環境変数
+    ``UNKNOWN_TAXONOMY_V2_PROFILE_FINISH_DIR`` が設定されていれば cProfile の
+    統計をそのディレクトリへ書く（診断専用、判定には影響しない）。"""
+    import os
+
+    profile_dir = os.environ.get("UNKNOWN_TAXONOMY_V2_PROFILE_FINISH_DIR")
+    if not profile_dir:
+        return connector.finish(
+            session, result, case_id=session.identity.result_occurrence_id
+        )
+    import cProfile
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    try:
+        return connector.finish(
+            session, result, case_id=session.identity.result_occurrence_id
+        )
+    finally:
+        profiler.disable()
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+            profiler.dump_stats(
+                os.path.join(
+                    profile_dir,
+                    f"finish-{session.identity.result_occurrence_id}.pstats",
+                )
+            )
+        except Exception:
+            pass
+
+
+def _attach_boundary_seconds(result: Any, seconds: Dict[str, float]) -> None:
+    """authority 境界（session begin / 判定本体 / finish）の所要秒を診断ブロックへ
+    残す（Issue #14、署名対象外・fail-open）。"""
+    try:
+        diagnostics = dict(getattr(result, "diagnostics", None) or {})
+        diagnostics["boundary_seconds"] = {
+            key: round(float(value), 6) for key, value in seconds.items()
+        }
+        result.diagnostics = diagnostics
+    except Exception:
+        return
+
+
 def run_check_from_binaries_with_v2_pilot(
     checker: Any,
     program1: Any,
@@ -176,6 +223,8 @@ def run_check_from_binaries_with_v2_pilot(
         "declared_return_type2": kwargs.get("declared_return_type2"),
         "observation_contract_id": checker.observation_contract.contract_id,
     }
+    boundary_seconds: Dict[str, float] = {}
+    begin_started = time.monotonic()
     try:
         session = connector.begin(execution_payload)
     except Exception as exc:
@@ -255,7 +304,9 @@ def run_check_from_binaries_with_v2_pilot(
     checker._active_v2_dual_write_pilot_session = session
     checker.emit_v2_dual_write_pilot_event = session.emit
     checker.terminalize_v2_dual_write_pilot_timeout = session.terminalize
+    boundary_seconds["session_begin"] = time.monotonic() - begin_started
     try:
+        check_started = time.monotonic()
         with production_signal_scope(session):
             result = _run_legacy_check_from_binaries(
                 checker,
@@ -265,6 +316,8 @@ def run_check_from_binaries_with_v2_pilot(
                 function_name2,
                 **kwargs,
             )
+        boundary_seconds["check_body"] = time.monotonic() - check_started
+        _attach_boundary_seconds(result, boundary_seconds)
         if getattr(result, "error_message", None):
             session.closed = True
             error_artifact = _issue_legacy_boundary_error(session, result)
@@ -293,12 +346,9 @@ def run_check_from_binaries_with_v2_pilot(
                 "non_authoritative_shadow": False,
             }
             return result
+        finish_started = time.monotonic()
         try:
-            evidence = connector.finish(
-                session,
-                result,
-                case_id=session.identity.result_occurrence_id,
-            )
+            evidence = _profiled_finish(connector, session, result)
         except Exception as exc:
             if session.phase7_runtime is not None:
                 result.legacy_unknown_reasons = list(
@@ -380,6 +430,8 @@ def run_check_from_binaries_with_v2_pilot(
                 # complete; sealing this earlier produced durable null
                 # identities that no later digest rebound could repair.
                 result._canonical_finalization_context = (evidence, session)
+        boundary_seconds["finish"] = time.monotonic() - finish_started
+        _attach_boundary_seconds(result, boundary_seconds)
         return result
     finally:
         if previous_session is None:
