@@ -14,7 +14,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
     phi_origins as _svc_phi_origins,
-    placeholder_algebra as _svc_placeholder_algebra,
     stack_protector as _svc_stack_protector,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -24,6 +23,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
     RegionFacts,
     input_is_nondata_operand,
@@ -67,6 +67,13 @@ class ReturnAnalyzer:
             constant_int_value=lambda expr: self._constant_int_value(expr),
             decompose_comparison_condition=lambda condition: self._decompose_comparison_condition(condition),
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
+        )
+        self._placeholder_algebra = PlaceholderAlgebraService(
+            condition_logic=self._condition_logic,
+            current_parameters=lambda: self._current_parameters,
+            constant_int_value=lambda *a, **kw: self._constant_int_value(*a, **kw),
+            condition_identity_key=lambda *a, **kw: self._condition_identity_key(*a, **kw),
+            branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
         )
         self._current_effect_summary: Optional[EffectSummary] = None
         self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
@@ -480,17 +487,26 @@ class ReturnAnalyzer:
     @staticmethod
     def _expression_has_param(expr, param_name):
         return ConditionLogicService.expression_has_param(expr, param_name)
-    _expression_is_placeholder_minus_one = _svc_placeholder_algebra._impl__expression_is_placeholder_minus_one
-    _expression_is_placeholder_minus_one_under_conditions = _svc_placeholder_algebra._impl__expression_is_placeholder_minus_one_under_conditions
-    _expression_is_placeholder_minus_one_unit_condition = _svc_placeholder_algebra._impl__expression_is_placeholder_minus_one_unit_condition
-    _expression_is_placeholder_plus_constant = _svc_placeholder_algebra._impl__expression_is_placeholder_plus_constant
-    _expression_is_placeholder_plus_one = _svc_placeholder_algebra._impl__expression_is_placeholder_plus_one
-    _expression_is_placeholder_plus_one_under_conditions = _svc_placeholder_algebra._impl__expression_is_placeholder_plus_one_under_conditions
-    _expression_is_placeholder_plus_unit_condition = _svc_placeholder_algebra._impl__expression_is_placeholder_plus_unit_condition
-    _expression_is_placeholder_plus_zero_under_conditions = _svc_placeholder_algebra._impl__expression_is_placeholder_plus_zero_under_conditions
+    def _expression_is_placeholder_minus_one(self, expr, placeholder):
+        return self._placeholder_algebra.expression_is_placeholder_minus_one(expr, placeholder)
+    def _expression_is_placeholder_minus_one_under_conditions(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(expr, placeholder, conditions)
+    def _expression_is_placeholder_minus_one_unit_condition(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.expression_is_placeholder_minus_one_unit_condition(expr, placeholder, conditions)
+    def _expression_is_placeholder_plus_constant(self, expr, placeholder, constant):
+        return self._placeholder_algebra.expression_is_placeholder_plus_constant(expr, placeholder, constant)
+    def _expression_is_placeholder_plus_one(self, expr, placeholder):
+        return self._placeholder_algebra.expression_is_placeholder_plus_one(expr, placeholder)
+    def _expression_is_placeholder_plus_one_under_conditions(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.expression_is_placeholder_plus_one_under_conditions(expr, placeholder, conditions)
+    def _expression_is_placeholder_plus_unit_condition(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.expression_is_placeholder_plus_unit_condition(expr, placeholder, conditions)
+    def _expression_is_placeholder_plus_zero_under_conditions(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(expr, placeholder, conditions)
     def _expression_is_zero_constant(self, expr):
         return self._condition_logic.expression_is_zero_constant(expr)
-    _expression_is_zero_under_conditions = _svc_placeholder_algebra._impl__expression_is_zero_under_conditions
+    def _expression_is_zero_under_conditions(self, expr, conditions):
+        return self._placeholder_algebra.expression_is_zero_under_conditions(expr, conditions)
     _extract_difference_pair = _svc_stack_protector._impl__extract_difference_pair
     _extract_indirect_probe = _svc_stack_protector._impl__extract_indirect_probe
     _extract_stack_protector_compare_pair = _svc_stack_protector._impl__extract_stack_protector_compare_pair
@@ -500,7 +516,8 @@ class ReturnAnalyzer:
     _high_function_cyclic_sccs = _svc_divergence_proofs._impl__high_function_cyclic_sccs
     _is_zero_constant = _svc_stack_protector._impl__is_zero_constant
     _merge_parameter_descriptors = _svc_parameters._impl__merge_parameter_descriptors
-    _negated_unit_condition_key_for_expression = _svc_placeholder_algebra._impl__negated_unit_condition_key_for_expression
+    def _negated_unit_condition_key_for_expression(self, expr, conditions):
+        return self._placeholder_algebra.negated_unit_condition_key_for_expression(expr, conditions)
     _parameter_descriptor_from_expression = _svc_parameters._impl__parameter_descriptor_from_expression
     _parameter_descriptor_key = _svc_parameters._impl__parameter_descriptor_key
     _pcode_op_identity_key = _svc_pcode_sites._impl__pcode_op_identity_key
@@ -509,8 +526,10 @@ class ReturnAnalyzer:
     _pcode_ops_match = _svc_pcode_sites._impl__pcode_ops_match
     _phase1_body_contains_address = staticmethod(_svc_analyze_function._impl__phase1_body_contains_address)
     _phi_circular_origin_stable_keys = _svc_phi_origins._impl__phi_circular_origin_stable_keys
-    _placeholder_minus_one_unit_condition_guard_key = _svc_placeholder_algebra._impl__placeholder_minus_one_unit_condition_guard_key
-    _placeholder_plus_unit_condition_guard_key = _svc_placeholder_algebra._impl__placeholder_plus_unit_condition_guard_key
+    def _placeholder_minus_one_unit_condition_guard_key(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions)
+    def _placeholder_plus_unit_condition_guard_key(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions)
     _prove_scc_must_diverge_under_guard = _svc_divergence_proofs._impl__prove_scc_must_diverge_under_guard
     _prove_single_guard_nonprogress_region_must_diverge = _svc_divergence_proofs._impl__prove_single_guard_nonprogress_region_must_diverge
     _reads_share_stack_protector_probe = _svc_stack_protector._impl__reads_share_stack_protector_probe
@@ -533,10 +552,13 @@ class ReturnAnalyzer:
     _single_guard_condition_matches = _svc_divergence_proofs._impl__single_guard_condition_matches
     _single_guard_conditions_are_contradictory = _svc_divergence_proofs._impl__single_guard_conditions_are_contradictory
     _strip_stack_protector_only_conditions = _svc_stack_protector._impl__strip_stack_protector_only_conditions
-    _strip_transparent_unary = staticmethod(_svc_placeholder_algebra._impl__strip_transparent_unary)
+    @staticmethod
+    def _strip_transparent_unary(expr):
+        return PlaceholderAlgebraService.strip_transparent_unary(expr)
     _synchronize_parameters_with_referenced_parameter_expressions = _svc_parameters._impl__synchronize_parameters_with_referenced_parameter_expressions
     _tuple_field_from_structural_proof = staticmethod(_svc_divergence_proofs._impl__tuple_field_from_structural_proof)
-    _unit_condition_key_for_expression = _svc_placeholder_algebra._impl__unit_condition_key_for_expression
+    def _unit_condition_key_for_expression(self, expr, conditions):
+        return self._placeholder_algebra.unit_condition_key_for_expression(expr, conditions)
     _varnode_guard_dependency_key = _svc_divergence_proofs._impl__varnode_guard_dependency_key
     _varnodes_same_storage = _svc_pcode_sites._impl__varnodes_same_storage
     analyze_function = _svc_analyze_function._impl_analyze_function
@@ -566,7 +588,8 @@ class ReturnAnalyzer:
         return self._condition_logic.condition_is_constant_equality_guard(condition)
     def _condition_is_param_equal_const(self, condition, param, value):
         return self._condition_logic.condition_is_param_equal_const(condition, param, value)
-    _condition_is_param_minus_one_nonpositive = _svc_placeholder_algebra._impl__condition_is_param_minus_one_nonpositive
+    def _condition_is_param_minus_one_nonpositive(self, condition, param, target_conditions=()):
+        return self._placeholder_algebra.condition_is_param_minus_one_nonpositive(condition, param, target_conditions)
     def _condition_is_signed_less_than_one_of_param(self, condition, param):
         return self._condition_logic.condition_is_signed_less_than_one_of_param(condition, param)
     def _condition_is_signed_nonpositive_of_param(self, condition, param):
@@ -621,8 +644,10 @@ class ReturnAnalyzer:
     _expression_contains_phi_circular_marker = _svc_phi_origins._impl__expression_contains_phi_circular_marker
     def _expression_has_nontrivial_location_wrapper(self, expr, location):
         return self._expression_cases.expression_has_nontrivial_location_wrapper(expr, location)
-    _expression_is_one_under_conditions = _svc_placeholder_algebra._impl__expression_is_one_under_conditions
-    _expression_is_param_minus_one = _svc_placeholder_algebra._impl__expression_is_param_minus_one
+    def _expression_is_one_under_conditions(self, expr, target_conditions):
+        return self._placeholder_algebra.expression_is_one_under_conditions(expr, target_conditions)
+    def _expression_is_param_minus_one(self, expr, param):
+        return self._placeholder_algebra.expression_is_param_minus_one(expr, param)
     _expression_is_positive_after_unit_progress_guard = _svc_divergence_proofs._impl__expression_is_positive_after_unit_progress_guard
     def _expression_is_same_parameter(self, expr, param):
         return self._condition_logic.expression_is_same_parameter(expr, param)
@@ -692,7 +717,8 @@ class ReturnAnalyzer:
         return self._expression_cases.runtime_ref_guard_conditions(runtime_ref)
     def _signed_positive_condition(self, expr):
         return self._condition_logic.signed_positive_condition(expr)
-    _signed_unit_constant_matches = _svc_placeholder_algebra._impl__signed_unit_constant_matches
+    def _signed_unit_constant_matches(self, value, expected, size):
+        return self._placeholder_algebra.signed_unit_constant_matches(value, expected, size)
     _single_parameter_expression_in_conditions = _svc_phi_origins._impl__single_parameter_expression_in_conditions
     _split_small_finite_parameter_reachability_conditions = _svc_phi_origins._impl__split_small_finite_parameter_reachability_conditions
     _state_phi_feeds_positive_loop_guard = _svc_divergence_proofs._impl__state_phi_feeds_positive_loop_guard
