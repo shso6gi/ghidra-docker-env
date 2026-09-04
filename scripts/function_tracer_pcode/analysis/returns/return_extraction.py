@@ -2,37 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    CallTargetRef,
-    Condition,
-    ConditionSimplifier,
-    ConditionTracker,
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
+from dataclasses import replace
+from functools import cmp_to_key
+from scripts.function_tracer_pcode.core.analysis import (
     DivergenceOutcome,
-    EffectSummary,
-    Expression,
-    ExpressionType,
     FunctionReturnAnalysis,
-    Iterable,
-    Optional,
-    PcodeOpRef,
-    PcodeTracer,
     ReturnInfo,
     ReturnOutcome,
     SignednessResult,
-    StorageInfo,
-    StructuralKey,
     UnknownOutcome,
+)
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
+from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
+from scripts.function_tracer_pcode.analysis.returns._shared import (
+    ConditionSimplifier,
+    ConditionTracker,
+    EffectSummary,
+    PcodeTracer,
     _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expressions_equivalent,
     attach_quarantined_recurrence_proposal,
-    cast,
-    cmp_to_key,
     expression_contains_post_state_reads,
-    expression_contains_unsupported_smt_ops,
-    expression_key_safe,
-    replace,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import (
@@ -52,14 +48,11 @@ from scripts.function_tracer_pcode.core.structural import (
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from typing import Any, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionSimplifier,
-    ReturnInfo,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     expression_contains_post_state_reads,
     lower_post_state_expression_for_smt,
-    replace,
 )
 
 

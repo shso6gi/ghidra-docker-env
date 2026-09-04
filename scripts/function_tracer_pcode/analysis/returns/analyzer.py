@@ -21,22 +21,14 @@ from scripts.function_tracer_pcode.analysis.returns import (
     region_facts as _svc_region_facts,
     stack_protector as _svc_stack_protector,
 )
+from typing import Any, Dict, List, Optional, Set, Tuple
+from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
+from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
     AnalysisSession,
-    Any,
-    BOUNDED_CALL_MAX_CASES,
-    BOUNDED_CALL_REFINEMENT_ENABLED,
-    BOUNDED_CALL_UNROLL_LIMIT,
-    Condition,
-    DeferredCallInfo,
-    Dict,
     EffectSummary,
-    FunctionReturnAnalysis,
-    List,
-    Optional,
-    Set,
-    Tuple,
 )
 # Re-exported for modules and tests that import these names from here.
 from scripts.function_tracer_pcode.analysis.returns._shared import (

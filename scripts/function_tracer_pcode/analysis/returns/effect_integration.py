@@ -4,21 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.core.analysis import ComparisonSurface, ReturnInfo
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.runtime_refs import PcodeBlockRef, PcodeOpRef, PostStateValueRef
+from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    ComparisonSurface,
-    CallTargetRef,
-    Condition,
     ConditionSimplifier,
     EffectSummary,
-    Expression,
-    ExpressionType,
     FunctionControlEffectProfile,
-    PcodeBlockRef,
-    PcodeOpRef,
     PcodeTracer,
-    PostStateValueRef,
-    ReturnInfo,
-    StructuralKey,
     _EffectRewritePrecision,
     _FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS,
     _PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS,

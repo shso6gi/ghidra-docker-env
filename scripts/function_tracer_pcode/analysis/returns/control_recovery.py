@@ -2,35 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    CallTargetRef,
-    Condition,
-    ConditionSimplifier,
-    ConditionTracker,
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
+from scripts.function_tracer_pcode.core.analysis import (
     DivergenceOutcome,
-    Expression,
-    ExpressionType,
     FunctionReturnAnalysis,
-    PcodeTracer,
     ReturnInfo,
     ReturnOutcome,
     UnknownOutcome,
+)
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.analysis.returns._shared import (
+    ConditionSimplifier,
+    ConditionTracker,
+    PcodeTracer,
     _TrackedReturnValue,
     _expression_contains_observed_loads,
     _expressions_equivalent,
     build_switch_dispatch_summaries,
-    cast,
     expression_contains_post_state_reads,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionSimplifier,
     ConditionTracker,
-    Expression,
     PcodeTracer,
-    ReturnInfo,
 )
 from scripts.function_tracer_pcode.core import CallTargetRef
 
