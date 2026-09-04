@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "18160523a7dca1590ad46815466c26bad8e0edb83a005c01d4b643ad9934b7e6",
+  "manifest_digest": "6443b76738c6bc462d6d3049ff286dba788dedbac9b3e8ffa4624d37694cf8c6",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -151,10 +151,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "check",
       "expected_cause_slots": [],
-      "line": 884,
+      "line": 871,
       "path": "scripts/function_tracer_pcode/checker/checker.py",
       "producer_site_manifest_id": "checker-recurrence-validation-completed",
-      "source_sha256": "50527f54db35c36551d1e3293285cb6267db1e73031534f5bec6b921b0fff201"
+      "source_sha256": "14a42e315edbe6e63d4b1e1819445cd870ea133281da69dc290c84c01d924175"
     },
     {
       "allowed_dispositions": [
@@ -183,7 +183,7 @@
       "line": 1144,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "115b3cc6d77583cb33074b19ecf76abd6a36c8c2a6a1bc83f3acdd6c9f75e7ad"
+      "source_sha256": "3da01e7be6674c086f2fb0c4a974921732ed799ad0ab47f86972fadcb9cf36f9"
     },
     {
       "allowed_dispositions": [
@@ -442,10 +442,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 778,
+      "line": 777,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "e0672c1908fc2ae31dbdb713e6eaf40038b9f6c5b9d42ef9823e45d7bdc46ed0"
+      "source_sha256": "9db99848ff7fc76fcc3730543b7d53164cad66d2f7a81d5095aa768243a84e29"
     },
     {
       "allowed_dispositions": [
@@ -460,10 +460,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
       "expected_cause_slots": [],
-      "line": 129,
+      "line": 127,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-guard-completed",
-      "source_sha256": "ff1587aab14a9a42dd8d12f573eaf00a49d1d5e5eefd77d5e5a0298114ad0005"
+      "source_sha256": "919f38468aeffc164de3bc7ecbe1d2f819cc90dab439132c2f680b45b1931263"
     },
     {
       "allowed_dispositions": [
@@ -517,10 +517,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
       "expected_cause_slots": [],
-      "line": 85,
+      "line": 83,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-term-completed",
-      "source_sha256": "ff1587aab14a9a42dd8d12f573eaf00a49d1d5e5eefd77d5e5a0298114ad0005"
+      "source_sha256": "919f38468aeffc164de3bc7ecbe1d2f819cc90dab439132c2f680b45b1931263"
     },
     {
       "allowed_dispositions": [
@@ -576,10 +576,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1678,
+      "line": 1677,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "e0672c1908fc2ae31dbdb713e6eaf40038b9f6c5b9d42ef9823e45d7bdc46ed0"
+      "source_sha256": "9db99848ff7fc76fcc3730543b7d53164cad66d2f7a81d5095aa768243a84e29"
     },
     {
       "allowed_dispositions": [
@@ -605,10 +605,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 844,
+      "line": 843,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "e0672c1908fc2ae31dbdb713e6eaf40038b9f6c5b9d42ef9823e45d7bdc46ed0"
+      "source_sha256": "9db99848ff7fc76fcc3730543b7d53164cad66d2f7a81d5095aa768243a84e29"
     },
     {
       "allowed_dispositions": [
@@ -634,10 +634,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 821,
+      "line": 820,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "e0672c1908fc2ae31dbdb713e6eaf40038b9f6c5b9d42ef9823e45d7bdc46ed0"
+      "source_sha256": "9db99848ff7fc76fcc3730543b7d53164cad66d2f7a81d5095aa768243a84e29"
     },
     {
       "allowed_dispositions": [
@@ -1083,10 +1083,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_ambiguity_if_observed",
       "expected_cause_slots": [],
-      "line": 1244,
+      "line": 1243,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-completed",
-      "source_sha256": "f152d54738350f860849846630fa9f5acafdf0a5fc66d8251afa9720d8663966"
+      "source_sha256": "31cff73551e67dec14abe34bf7555330f165e0d18244b152a168f61b2f280e05"
     },
     {
       "allowed_dispositions": [
@@ -1112,10 +1112,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1223,
+      "line": 1222,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-observed",
-      "source_sha256": "f152d54738350f860849846630fa9f5acafdf0a5fc66d8251afa9720d8663966"
+      "source_sha256": "31cff73551e67dec14abe34bf7555330f165e0d18244b152a168f61b2f280e05"
     },
     {
       "allowed_dispositions": [
@@ -1130,10 +1130,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_blockers_completed_if_observed",
       "expected_cause_slots": [],
-      "line": 1203,
+      "line": 1202,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-completed",
-      "source_sha256": "f152d54738350f860849846630fa9f5acafdf0a5fc66d8251afa9720d8663966"
+      "source_sha256": "31cff73551e67dec14abe34bf7555330f165e0d18244b152a168f61b2f280e05"
     },
     {
       "allowed_dispositions": [
@@ -1169,10 +1169,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1179,
+      "line": 1178,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-observed",
-      "source_sha256": "f152d54738350f860849846630fa9f5acafdf0a5fc66d8251afa9720d8663966"
+      "source_sha256": "31cff73551e67dec14abe34bf7555330f165e0d18244b152a168f61b2f280e05"
     },
     {
       "allowed_dispositions": [
