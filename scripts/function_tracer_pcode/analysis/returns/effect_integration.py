@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
+    ComparisonSurface,
     CallTargetRef,
     Condition,
     ConditionSimplifier,
@@ -1691,3 +1693,100 @@ def _impl__read_memory_value(self, address_value: int, size_bytes: int) -> Optio
         return result
     except Exception:
         return None
+
+
+OBSERVABLE_EFFECT_SURFACE_SOURCE = "observable_effects_and_return_value"
+
+
+def observable_store_effects(effect_summary: Any) -> List[Any]:
+    """Stores a caller can observe: through parameter pointers or globals.
+
+    Stack-frame stores die with the frame and are not part of the observable
+    behaviour; everything else (parameter-based, storage/global) is.
+    """
+    observable: List[Any] = []
+    for effect in getattr(effect_summary, "effects", None) or ():
+        location = getattr(effect, "location", None)
+        base_ref = getattr(location, "base_ref", None)
+        if getattr(base_ref, "kind", None) == "stack_frame":
+            continue
+        observable.append(effect)
+    return observable
+
+
+def _impl__apply_observable_effect_surface(
+    self,
+    result: FunctionReturnAnalysis,
+    return_type_obj: Any,
+    return_type: Optional[str],
+) -> bool:
+    """Compare non-void functions on ``stores ⊕ return value`` (Issue #13).
+
+    A function that writes through a parameter pointer (or to a global) and
+    returns something is observable through both; comparing the return value
+    alone let two functions that only differ in what they store come out
+    EQUIVALENT (raytrace constructors returning the sret pointer).  This is
+    the void ``memory_effect`` surface generalised: the packed store summary
+    (per-location presence flag and value, conditional on the store's path
+    conditions) is concatenated with each return case's value, and the
+    comparison surface becomes ``memory_effect`` with the combined width.
+
+    When the effect summary is not trustworthy (unsupported call, incomplete
+    coverage) the surface is not built; the existing equivalence-blocking
+    reasons already keep such functions away from EQUIVALENT.
+    """
+    if result is None or not result.returns:
+        return False
+    if return_type_obj is not None and self._is_void_type(return_type_obj):
+        return False
+    if getattr(result, "comparison_surface", None) is not None:
+        return False
+    effect_summary = getattr(result, "effect_summary", None)
+    if effect_summary is None:
+        return False
+    if getattr(effect_summary, "has_unsupported_call", False):
+        return False
+    effects = observable_store_effects(effect_summary)
+    if not effects:
+        return False
+    from scripts.function_tracer_pcode.analysis.effects.summary import (
+        _concat as concat_expressions,
+        build_void_effect_summary_expr,
+    )
+
+    effects_expr = build_void_effect_summary_expr(effects)
+    if effects_expr is None:
+        return False
+    effect_bits = int(effects_expr.get_bit_width() or 0)
+    return_bits = max(
+        (int(ret.value.get_bit_width() or 0) for ret in result.returns if ret.value is not None),
+        default=0,
+    )
+    if effect_bits <= 0 or return_bits <= 0:
+        return False
+    rewritten = []
+    for ret in result.returns:
+        if ret.value is None:
+            return False
+        combined = concat_expressions(effects_expr, ret.value)
+        rewritten.append(replace(ret, value=combined))
+    result.returns = rewritten
+    result.comparison_surface = ComparisonSurface(
+        kind="memory_effect",
+        explicit_bit_width=effect_bits + return_bits,
+        use_sign_extension=False,
+        evidence={
+            "source": OBSERVABLE_EFFECT_SURFACE_SOURCE,
+            "effect_count": len(effects),
+            "effect_bits": effect_bits,
+            "return_bits": return_bits,
+            "declared_return_type": return_type,
+        },
+    )
+    if "observable_effect_surface" not in result.analysis_notes:
+        result.analysis_notes.append("observable_effect_surface")
+    self._debug_print(
+        f"Observable effect surface: {len(effects)} store effect(s) ({effect_bits} bits) "
+        f"combined with the {return_bits}-bit return value"
+    )
+    return True
