@@ -321,3 +321,83 @@ def test_monolithic_reason_with_binding_only_completes_with_matching_bound_proof
         reason, analysis1, analysis2, current_counterexample_raw=model,
         expected_binding=binding, expected_execution_receipt_digest="s" * 64,
     ) is False
+
+
+def _open_formula_analysis(name, delta):
+    x = Expression.parameter("x", 0, data_type="int", size=4)
+    return FunctionReturnAnalysis(
+        function_name=name, entry_point="0x1000",
+        parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[ReturnInfo("0x1010", Expression.binary_op("INT_ADD", x, Expression.constant(delta, size=4)), [])],
+        return_type="int",
+    )
+
+
+def _run_monolithic_with_pending_unsafety(prior_evidence=None, *, disable_self_record=False):
+    """Drive MonolithicStrategy.check() through the checker (dispatch frame, typed
+    evidence, safety receipt) with an analysis-level unsafety obligation pending."""
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+
+    checker = EquivalenceChecker(strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False)
+    strategy = checker.monolithic_strategy
+    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: ["function1:incomplete_control_flow"]
+    if disable_self_record:
+        strategy._record_completed_sat_counterexample_replay_proof = lambda *a, **k: None
+    analysis1, analysis2 = _open_formula_analysis("left", 7), _open_formula_analysis("right", 8)
+    if prior_evidence is not None:
+        analysis1.completed_recovery_proof_evidence = tuple(prior_evidence)
+    result = checker.check(analysis1, analysis2)
+    evidence = [e for e in (analysis1.completed_recovery_proof_evidence or ()) if isinstance(e, dict)]
+    return result, evidence
+
+
+def test_monolithic_prior_proof_with_same_binding_but_other_receipt_does_not_complete():
+    """Issue #39 regression: a prior proof whose formula/model/premise/pair match the
+    current witness but whose receipt digest differs must not make the SAT decisive."""
+    import copy
+
+    first, recorded = _run_monolithic_with_pending_unsafety()
+    assert first.is_equivalent is False
+    assert len(recorded) == 1
+    replay = recorded[0]["proof_content"]["counterexample_replay"]
+    assert replay["proof_source" if "proof_source" in replay else "replay_source"].startswith(
+        "monolithic-counterexample-safety-receipt:"
+    )
+    assert len(replay["solver_execution_receipt_digest"]) == 64
+    assert replay["pair_key"] == ("monolithic", "0:0") or list(replay["pair_key"]) == ["monolithic", "0:0"]
+
+    # Same witness, same receipt: the prior proof completes this execution's obligation.
+    same, _ = _run_monolithic_with_pending_unsafety(recorded, disable_self_record=True)
+    assert same.is_equivalent is False
+
+    # Same formula/model/premise/pair, different receipt: fail closed.
+    other_receipt = copy.deepcopy(recorded)
+    other_receipt[0]["proof_content"]["counterexample_replay"]["solver_execution_receipt_digest"] = "f" * 64
+    rejected, _ = _run_monolithic_with_pending_unsafety(other_receipt, disable_self_record=True)
+    assert rejected.is_equivalent is None
+    assert rejected.counterexample_raw is None
+    assert [r.reason_id for r in rejected.unknown_reasons] == ["counterexample_analysis_safety_unproven"]
+
+
+def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
+    """Direct strategy use has no dispatch frame and therefore no safety receipt: even a
+    fully matching prior proof cannot complete the obligation (fail-closed)."""
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+    from scripts.function_tracer_pcode.smt import ParallelSolverRunner
+
+    _, recorded = _run_monolithic_with_pending_unsafety()
+    strategy = MonolithicStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5))
+    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: ["function1:incomplete_control_flow"]
+    analysis1, analysis2 = _open_formula_analysis("left", 7), _open_formula_analysis("right", 8)
+    analysis1.completed_recovery_proof_evidence = tuple(recorded)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    # Both obligations (analysis unsafety, bound replay) stay open without a receipt.
+    assert {r.reason_id for r in result.unknown_reasons} == {
+        "counterexample_analysis_safety_unproven",
+        "counterexample_same_function_replay_unproven",
+    }

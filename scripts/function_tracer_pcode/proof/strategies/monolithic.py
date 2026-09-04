@@ -464,6 +464,8 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             unknown_reasons = []
             sat_unsafety_reason = None
             sat_unsafety_resolution_pending = False
+            sat_replay_reason = None
+            sat_replay_resolution_pending = False
             sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
                 source_analysis1,
                 source_analysis2,
@@ -673,24 +675,17 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     stage="S_MONOLITHIC_FALLBACK",
                     counterexample_binding=sat_counterexample_binding,
                 )
-                if sat_counterexample_binding is None or not self._sat_unsafety_resolution_proof_is_complete(
-                    sat_unsafety_reason,
-                    analysis1,
-                    analysis2,
-                    current_counterexample_raw=counterexample_raw,
-                    expected_binding=sat_counterexample_binding,
-                ):
-                    # Keep the SAT candidate alive until Monolithic's own
-                    # whole-surface replay and typed gate receipt have had a
-                    # chance to discharge the same V2 safety obligation.
-                    # Pairwise has a per-case recovery callback; Monolithic
-                    # previously stopped at its strategy-local receipt and
-                    # left the V2 requirement open.
-                    sat_unsafety_resolution_pending = True
-                    self._debug_print(
-                        "Monolithic SAT pending typed counterexample safety receipt "
-                        f"({', '.join(sat_unsafety_reasons)})"
-                    )
+                # Never consult prior proofs here: this execution's
+                # counterexample safety receipt does not exist yet, and a proof
+                # from another execution (same formula/model/premise/pair,
+                # different receipt) must not discharge the obligation
+                # (Issue #39).  Completion happens only after the receipt is
+                # issued, with the receipt digest verified.
+                sat_unsafety_resolution_pending = True
+                self._debug_print(
+                    "Monolithic SAT pending typed counterexample safety receipt "
+                    f"({', '.join(sat_unsafety_reasons)})"
+                )
             counterexample_is_decisive = True
             if final_is_equivalent is False:
                 replay_collector = None
@@ -806,20 +801,13 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     stage="S_MONOLITHIC_FALLBACK",
                     counterexample_binding=sat_counterexample_binding,
                 )
-                if sat_counterexample_binding is None or not self._sat_unsafety_resolution_proof_is_complete(
-                    sat_replay_reason,
-                    analysis1,
-                    analysis2,
-                    current_counterexample_raw=counterexample_raw,
-                    expected_binding=sat_counterexample_binding,
-                ):
-                    unknown_reasons.append(sat_replay_reason)
-                    self._debug_print(
-                        "Monolithic SAT downgraded to UNKNOWN until same-function "
-                        "counterexample replay is completed"
-                    )
-                    final_is_equivalent = None
-                    counterexample_raw = None
+                # Same rule as the unsafety obligation: no prior proof is
+                # accepted before this execution's receipt exists; the replay
+                # proof is recorded and verified (binding + receipt) below.
+                sat_replay_resolution_pending = True
+                self._debug_print(
+                    "Monolithic SAT pending bound counterexample replay proof"
+                )
             # A solver UNKNOWN/TIMEOUT remains on the captured execution
             # receipt.  It must never manufacture a semantic reason row.
             
@@ -1035,7 +1023,28 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                             ),
                         ))
                         strategy_result.unknown_reasons = unknown_reasons
-                if sat_unsafety_resolution_pending:
+                pending_reasons = [
+                    reason for reason, pending in (
+                        (sat_unsafety_reason, sat_unsafety_resolution_pending),
+                        (sat_replay_reason, sat_replay_resolution_pending),
+                    )
+                    if pending and reason is not None
+                ]
+                if pending_reasons:
+                    unresolved = list(pending_reasons)
+                    if not (
+                        strategy_result.is_equivalent is False
+                        and counterexample_safety_receipt is not None
+                        and counterexample_raw is not None
+                        and sat_counterexample_binding is not None
+                    ):
+                        self._debug_print(
+                            "Monolithic proof recording skipped: "
+                            f"sat={strategy_result.is_equivalent is False} "
+                            f"receipt={counterexample_safety_receipt is not None} "
+                            f"model={counterexample_raw is not None} "
+                            f"binding={sat_counterexample_binding is not None}"
+                        )
                     if (
                         strategy_result.is_equivalent is False
                         and counterexample_safety_receipt is not None
@@ -1044,37 +1053,46 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     ):
                         try:
                             receipt_digest = str(counterexample_safety_receipt.receipt_digest)
-                            self._record_completed_sat_counterexample_replay_proof(
-                                sat_unsafety_reason,
-                                analysis1,
-                                analysis2,
-                                counterexample_raw=counterexample_raw,
-                                fixed_model_assertion_count=max(
-                                    1,
-                                    typed_counterexample_evidence.fixed_model_assertion_count,
-                                ),
-                                replay_source=(
-                                    "monolithic-counterexample-safety-receipt:"
-                                    f"{receipt_digest}"
-                                ),
-                                evidence_binding=sat_counterexample_binding,
-                                execution_receipt_digest=receipt_digest,
-                            )
-                            sat_unsafety_resolution_pending = not (
-                                self._sat_unsafety_resolution_proof_is_complete(
-                                    sat_unsafety_reason,
+                            unresolved = []
+                            for pending_reason in pending_reasons:
+                                self._record_completed_sat_counterexample_replay_proof(
+                                    pending_reason,
+                                    analysis1,
+                                    analysis2,
+                                    counterexample_raw=counterexample_raw,
+                                    fixed_model_assertion_count=max(
+                                        1,
+                                        typed_counterexample_evidence.fixed_model_assertion_count,
+                                    ),
+                                    replay_source=(
+                                        "monolithic-counterexample-safety-receipt:"
+                                        f"{receipt_digest}"
+                                    ),
+                                    evidence_binding=sat_counterexample_binding,
+                                    execution_receipt_digest=receipt_digest,
+                                )
+                                if not self._sat_unsafety_resolution_proof_is_complete(
+                                    pending_reason,
                                     analysis1,
                                     analysis2,
                                     current_counterexample_raw=counterexample_raw,
                                     expected_binding=sat_counterexample_binding,
                                     expected_execution_receipt_digest=receipt_digest,
-                                )
-                            )
+                                ):
+                                    unresolved.append(pending_reason)
                         except (RuntimeError, ValueError, TypeError, AttributeError):
-                            sat_unsafety_resolution_pending = True
-                    if sat_unsafety_resolution_pending:
-                        if sat_unsafety_reason not in unknown_reasons:
-                            unknown_reasons.append(sat_unsafety_reason)
+                            unresolved = list(pending_reasons)
+                    sat_unsafety_resolution_pending = sat_unsafety_reason in unresolved
+                    sat_replay_resolution_pending = sat_replay_reason in unresolved
+                    if unresolved:
+                        for pending_reason in unresolved:
+                            if pending_reason not in unknown_reasons:
+                                unknown_reasons.append(pending_reason)
+                        self._debug_print(
+                            "Monolithic SAT downgraded to UNKNOWN: bound counterexample "
+                            "proof incomplete for "
+                            + ", ".join(reason.reason_id for reason in unresolved)
+                        )
                         strategy_result.is_equivalent = None
                         strategy_result.counterexample_raw = None
                         counterexample_raw = None
@@ -1293,6 +1311,25 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         ),
                     )
                 strategy_result.comparison_execution_receipt = comparison_receipt
+            # Fail closed on every path (also without a dispatch frame): an
+            # obligation that this execution's receipt did not discharge
+            # cannot leave a NOT_EQ behind (Issue #39).
+            if strategy_result.is_equivalent is False and (
+                sat_unsafety_resolution_pending or sat_replay_resolution_pending
+            ):
+                for pending_reason, pending in (
+                    (sat_unsafety_reason, sat_unsafety_resolution_pending),
+                    (sat_replay_reason, sat_replay_resolution_pending),
+                ):
+                    if pending and pending_reason is not None and pending_reason not in unknown_reasons:
+                        unknown_reasons.append(pending_reason)
+                self._debug_print(
+                    "Monolithic SAT downgraded to UNKNOWN: counterexample proof "
+                    "obligation was not discharged by this execution"
+                )
+                strategy_result.is_equivalent = None
+                strategy_result.counterexample_raw = None
+                strategy_result.unknown_reasons = unknown_reasons
             return strategy_result
         
         except ReturnWidthMismatchError as e:
