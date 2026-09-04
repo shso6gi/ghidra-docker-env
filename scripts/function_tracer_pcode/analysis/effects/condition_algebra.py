@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from typing import Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.effects._shared import (
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Condition,
-    ConditionSimplifier,
     Expression,
     ExpressionType,
     LocationBaseRef,
     expression_key_safe,
+)
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    ConditionSimplifier,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _additive_signature,

@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.effects._shared import (
+from itertools import product
+from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Condition,
-    ConditionSimplifier,
-    EffectOrderUnavailable,
-    EffectSummary,
     Expression,
     ExpressionType,
     ObservedMemoryReadRef,
     PostStateReadRef,
     PostStateSnapshotRef,
-    _MAX_CALL_ARGUMENT_VARIANTS,
     expression_key_or_identity,
     expression_provenance_key,
-    product,
+)
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    ConditionSimplifier,
+    EffectOrderUnavailable,
+    EffectSummary,
+    _MAX_CALL_ARGUMENT_VARIANTS,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _all_non_none_expressions,
