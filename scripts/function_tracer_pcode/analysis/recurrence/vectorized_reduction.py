@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from collections import Counter
+from scripts.function_tracer_pcode.core import (
     Condition,
-    Counter,
     Expression,
     ExpressionType,
     PcodeOpRef,
     ReadonlyReductionTermRef,
-    ResidueLoopCase,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.core.signature import is_integral_data_type
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ResidueLoopCase,
     _reduce_expression_under_conditions,
-    is_integral_data_type,
 )
 
 def _impl__try_summarize_vectorized_affine_progression_sum(

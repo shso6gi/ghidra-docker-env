@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     ExpressionType,
     LoopBodyEffectRef,
     LoopSideEffectProfileRef,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     canonicalize_location,
 )
 

@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    CanonicalLocation,
+from scripts.function_tracer_pcode.core import (
     Condition,
-    CountedLoopAccumulator,
-    CountedLoopInduction,
     Expression,
     ExpressionType,
     LocationBaseRef,
     PcodeOpRef,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.core.signature import is_pointer_data_type
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    CanonicalLocation,
+    CountedLoopAccumulator,
+    CountedLoopInduction,
     canonicalize_location,
-    is_pointer_data_type,
 )
 
 def _impl__store_address_space_ref_for_op(self, op):

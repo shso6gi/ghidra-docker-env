@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from typing import Any, Iterable, List, Optional, Tuple
+from scripts.function_tracer_pcode.core import Expression, ExpressionType, StorageInfo
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    Expression,
-    ExpressionType,
-    StorageInfo,
     parameter_identity_key_from_expression,
 )
 

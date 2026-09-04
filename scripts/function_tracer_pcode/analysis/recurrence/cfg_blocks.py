@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import re
+from scripts.function_tracer_pcode.core import PcodeBlockRef, PcodeOpRef
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     CountedLoopGuard,
-    PcodeBlockRef,
-    PcodeOpRef,
-    re,
 )
 
 

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionSMTOracle,
     Expression,
     ExpressionType,
     PcodeOpRef,
     ReturnInfo,
-    SolverStatus,
     StorageInfo,
-    UnknownValueRef,
-    Z3Solver,
+)
+from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.smt.interface import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionSMTOracle,
     _reduce_expression_under_conditions,
     _runtime_conditions_signature,
     _runtime_expression_signature,

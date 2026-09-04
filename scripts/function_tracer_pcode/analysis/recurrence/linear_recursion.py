@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,
     ReturnInfo,
-    UnknownValueRef,
+)
+from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _expressions_equivalent_under_conditions,
 )
 from scripts.function_tracer_pcode.core.recurrence_contracts import (

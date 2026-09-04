@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import Condition, ExpressionType
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    Condition,
     CountedLoopUpdateCase,
-    ExpressionType,
     ResidueLoopCase,
 )
 

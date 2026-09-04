@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionNormalizer,
-    CountedLoopAccumulator,
     Expression,
     ExpressionType,
     LoopVariableIdentityRef,
     ReturnInfo,
     StorageInfo,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionNormalizer,
+    CountedLoopAccumulator,
     _runtime_expression_signature,
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
