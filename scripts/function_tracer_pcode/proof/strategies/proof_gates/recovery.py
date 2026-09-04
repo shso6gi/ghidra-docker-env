@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    FunctionReturnAnalysis,
-    Mapping,
-    Sequence,
     UnknownReasonId,
     UnknownReasonRecord,
     UnknownRecoveryProofKind,

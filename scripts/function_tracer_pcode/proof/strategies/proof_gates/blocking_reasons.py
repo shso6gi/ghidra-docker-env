@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Set, Tuple
-from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
+from typing import Any, List, Mapping, Optional, Sequence, Set, Tuple
+from types import SimpleNamespace
+from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    Mapping,
-    Sequence,
-    SimpleNamespace,
+)
+from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
+from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownReasonId,
     UnknownReasonRecord,
-    expression_contains_unsupported_smt_ops,
 )
 
 

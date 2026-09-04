@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+import hashlib
+from scripts.function_tracer_pcode.core import Condition, Expression, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    Condition,
     ConditionSMTOracle,
-    Expression,
-    FunctionReturnAnalysis,
-    Mapping,
     ReturnCoverageCheckResult,
     UnknownReasonId,
     UnknownReasonRecord,
@@ -17,8 +16,6 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     build_proof_obligation_id,
     build_unknown_recovery_actions,
     coerce_value_to_bitvec_width,
-    expression_smt_bit_width,
-    hashlib,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.proof.obligations import (

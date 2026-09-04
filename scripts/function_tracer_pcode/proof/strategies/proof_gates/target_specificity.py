@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import Mapping
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 def _impl__readonly_identity_target_is_specific(cls, object_target_key: Any) -> bool:

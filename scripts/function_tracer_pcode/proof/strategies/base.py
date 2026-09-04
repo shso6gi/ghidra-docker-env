@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Compatibility facade for CheckStrategy."""
 
+from abc import ABC, abstractmethod
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates import (
     call_effect as _svc_call_effect,
     recovery as _svc_recovery,
@@ -13,11 +15,8 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates import (
     target_specificity as _svc_target_specificity,
 )
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    ABC,
-    FunctionReturnAnalysis,
     StrategyResult,
     UnknownReasonId,
-    abstractmethod,
 )
 # Re-exported for modules and tests that import these names from here.
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (

@@ -1,25 +1,9 @@
 """Shared dependencies for CheckStrategy services."""
 
-from abc import ABC, abstractmethod
-import hashlib
-import json
-import re
-from types import SimpleNamespace
-from typing import Optional, Dict, Any, List, Mapping, Sequence, Set, Tuple
+from typing import Optional, Dict, Any, List, Set, Tuple
 from dataclasses import dataclass, field
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-from scripts.function_tracer_pcode.core import (
-    Condition,
-    Expression,
-    FunctionReturnAnalysis,
-    ReadonlyReductionRef,
-    expression_provenance_key,
-)
-from scripts.function_tracer_pcode.core import ExpressionType
-from scripts.function_tracer_pcode.core.render_smt import (
-    expression_contains_unsupported_smt_ops,
-    expression_smt_bit_width,
-)
+from scripts.function_tracer_pcode.core import ReadonlyReductionRef
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import coerce_value_to_bitvec_width
 from scripts.function_tracer_pcode.checker.unknown_reason import (
@@ -70,4 +54,4 @@ class ReturnCoverageCheckResult:
     coverage_proof_method: Optional[str] = None
     solver_status: Optional[str] = None
 
-__all__ = ('ABC', 'Any', 'Condition', 'ConditionSMTOracle', 'Dict', 'Expression', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'Mapping', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Sequence', 'Set', 'SimpleNamespace', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'abstractmethod', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_provenance_key', 'expression_smt_bit_width', 'field', 'hashlib', 'json', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 're')
+__all__ = ('Any', 'ConditionSMTOracle', 'Dict', 'List', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Set', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'field', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason')
