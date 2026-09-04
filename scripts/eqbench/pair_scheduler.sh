@@ -24,13 +24,17 @@
 #     variable name given to pair_scheduler_init), exactly like the previous
 #     `wait -n` bookkeeping did.
 #
-# Which job `wait -n` reaped is taken from `wait -n -p` on bash >= 5.1 and,
-# on older bash, by scanning the tracked PIDs with `kill -0` (a reaped PID no
-# longer exists, while an unreaped finished child is still a zombie and
-# therefore still answers).  PAIR_SCHEDULER_WAIT_PID_MODE=auto|wait-p|scan
-# overrides the detection (used by the unit test to exercise both paths).
+# Which job finished is taken from `wait -n -p` on bash >= 5.1.  On older bash
+# the scheduler never uses `wait -n`: it polls the tracked PIDs through
+# /proc/<pid>/stat (state Z or gone) and reaps the finished one with
+# `wait "$pid"`, so the exit status is always the status of that PID and a
+# background child the scheduler does not track can neither be mistaken for
+# a pair job nor contribute its status.  PAIR_SCHEDULER_WAIT_PID_MODE=auto|
+# wait-p|scan overrides the detection (used by the unit test to exercise
+# both paths); PAIR_SCHEDULER_POLL_INTERVAL_SECONDS tunes the scan poll.
 #
-# Requires bash >= 4.3 (wait -n, namerefs).
+# Requires bash >= 4.3 (wait -n, namerefs); scan mode additionally needs
+# /proc (Linux).
 
 pair_scheduler_init() {
     local max_jobs="$1" on_group_complete="$2" failure_counter="$3"
@@ -80,6 +84,11 @@ pair_scheduler_init() {
             return 1
             ;;
     esac
+    PAIR_SCHEDULER_POLL_INTERVAL_SECONDS="${PAIR_SCHEDULER_POLL_INTERVAL_SECONDS:-0.05}"
+    if [[ "$PAIR_SCHEDULER_WAIT_PID_MODE_EFFECTIVE" == "scan" && ! -r /proc/self/stat ]]; then
+        echo "pair_scheduler_init: scan mode needs /proc/<pid>/stat (bash >= 5.1 provides wait -n -p instead)" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -198,6 +207,18 @@ _pair_scheduler_job_done() {
     fi
 }
 
+# True when the tracked child has exited (zombie or already gone) so that a
+# `wait "$pid"` returns immediately with its status.
+_pair_scheduler_pid_finished() {
+    local pid="$1" stat state
+    if ! read -r stat 2>/dev/null < "/proc/$pid/stat"; then
+        return 0
+    fi
+    state="${stat##*) }"
+    state="${state%% *}"
+    [[ "$state" == "Z" ]]
+}
+
 # Reap one tracked job.  Returns 1 only when no tracked job can be reaped any
 # more (no children left), after accounting the orphans as failures.
 _pair_scheduler_reap_one() {
@@ -206,30 +227,38 @@ _pair_scheduler_reap_one() {
         pid=""
         if [[ "$PAIR_SCHEDULER_WAIT_PID_MODE_EFFECTIVE" == "wait-p" ]]; then
             if wait -n -p pid; then status=0; else status=$?; fi
-        else
-            if wait -n; then status=0; else status=$?; fi
-            for tracked in "${!PAIR_SCHEDULER_JOB_GROUP[@]}"; do
-                if ! kill -0 "$tracked" 2>/dev/null; then
-                    pid="$tracked"
-                    break
-                fi
-            done
+            if (( status == 127 )) && [[ -z "$pid" ]]; then
+                # No child left to wait for while jobs are still tracked: the
+                # bookkeeping can no longer be trusted, so count them as failed.
+                echo "pair_scheduler: wait -n found no children with $PAIR_SCHEDULER_ACTIVE_JOBS job(s) tracked" >&2
+                for tracked in "${!PAIR_SCHEDULER_JOB_GROUP[@]}"; do
+                    _pair_scheduler_job_done "$tracked" 1
+                done
+                return 1
+            fi
+            if [[ -n "$pid" && -n "${PAIR_SCHEDULER_JOB_GROUP[$pid]+x}" ]]; then
+                _pair_scheduler_job_done "$pid" "$status"
+                return 0
+            fi
+            # Either an untracked child was reaped or the wait was
+            # interrupted by a signal (status > 128 without a pid); keep
+            # waiting.
+            continue
         fi
-        if (( status == 127 )) && [[ -z "$pid" ]]; then
-            # No child left to wait for while jobs are still tracked: the
-            # bookkeeping can no longer be trusted, so count them as failed.
-            echo "pair_scheduler: wait -n found no children with $PAIR_SCHEDULER_ACTIVE_JOBS job(s) tracked" >&2
-            for tracked in "${!PAIR_SCHEDULER_JOB_GROUP[@]}"; do
-                _pair_scheduler_job_done "$tracked" 1
-            done
-            return 1
-        fi
-        if [[ -n "$pid" && -n "${PAIR_SCHEDULER_JOB_GROUP[$pid]+x}" ]]; then
+        # scan mode: find a finished tracked PID and wait for exactly that
+        # one, so its status can never come from an untracked child.
+        for tracked in "${!PAIR_SCHEDULER_JOB_GROUP[@]}"; do
+            if _pair_scheduler_pid_finished "$tracked"; then
+                pid="$tracked"
+                break
+            fi
+        done
+        if [[ -n "$pid" ]]; then
+            if wait "$pid"; then status=0; else status=$?; fi
             _pair_scheduler_job_done "$pid" "$status"
             return 0
         fi
-        # Either an untracked child was reaped or the wait was interrupted by
-        # a signal (status > 128 without a pid); keep waiting.
+        sleep "$PAIR_SCHEDULER_POLL_INTERVAL_SECONDS"
     done
     return 1
 }

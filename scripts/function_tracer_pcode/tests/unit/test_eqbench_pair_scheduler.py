@@ -91,11 +91,16 @@ def _events(tmp_path: Path) -> list[str]:
 def test_jobs_run_across_groups_and_hooks_fire_after_group_drains(tmp_path, mode):
     script = COMMON + r"""
 pair_scheduler_init 6 on_group_complete FAILURES
+# f1's jobs are short and the later groups' jobs long, so that when f1
+# completes the already-scheduled f2 jobs are still running regardless of
+# host load.
 for group in f1 f2 f3; do
     pair_scheduler_open_group "$group" "ctx-$group"
+    sleep_for=1.5
+    [[ "$group" == f1 ]] && sleep_for=0.3
     for index in 1 2 3 4; do
         pair_scheduler_wait_for_slot
-        job "$group" "$index" 0.6 &
+        job "$group" "$index" "$sleep_for" &
         pair_scheduler_start_job "$group" "$!"
     done
     pair_scheduler_close_group "$group"
@@ -196,21 +201,50 @@ printf 'completed=%s active=%s\n' "$PAIR_SCHEDULER_COMPLETED_GROUPS" "$PAIR_SCHE
 
 @pytest.mark.parametrize("mode", WAIT_PID_MODES)
 def test_untracked_children_do_not_disturb_accounting(tmp_path, mode):
-    # A background process the scheduler does not know about is reaped by
-    # `wait -n` too; it must be ignored rather than decrement a group.
+    # Background processes the scheduler does not know about finish (with a
+    # non-zero status) while pair jobs are in flight.  They must neither be
+    # attributed to a group nor counted as pair failures: only tracked B
+    # (exit 3) may increment the counter, so the expected failure count is 1.
     script = COMMON + r"""
 pair_scheduler_init 2 on_group_complete FAILURES
-sleep 0.05 &
+(sleep 0.05; exit 7) &
 pair_scheduler_open_group g "ctx"
 pair_scheduler_wait_for_slot
-job g 1 0.4 &
+job g A 0.4 0 &
 pair_scheduler_start_job g "$!"
 pair_scheduler_wait_for_slot
-job g 2 0.4 &
+job g B 0.4 3 &
 pair_scheduler_start_job g "$!"
-sleep 0.01 &
+(sleep 0.01; exit 7) &
 pair_scheduler_wait_for_slot
-job g 3 0.1 &
+job g C 0.1 0 &
+pair_scheduler_start_job g "$!"
+pair_scheduler_close_group g
+pair_scheduler_finalize
+printf 'failures=%s completed=%s active=%s\n' "$FAILURES" "$PAIR_SCHEDULER_COMPLETED_GROUPS" "$PAIR_SCHEDULER_ACTIVE_JOBS"
+"""
+    proc = _run_harness(tmp_path, script, mode)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "failures=1 completed=1 active=0"
+    assert _events(tmp_path) == ["complete key=g context=ctx done=3 started=3 others_running=0"]
+
+
+@pytest.mark.parametrize("mode", WAIT_PID_MODES)
+def test_untracked_failure_before_first_slot_wait_is_not_counted(tmp_path, mode):
+    # The untracked child has already exited (exit 7) by the time the
+    # scheduler waits for a slot; the tracked job A exits 0.  A scheduler that
+    # reaped "any" child and attributed the status to a tracked PID would
+    # report failures=1 here.
+    script = COMMON + r"""
+pair_scheduler_init 1 on_group_complete FAILURES
+(exit 7) &
+sleep 0.2
+pair_scheduler_open_group g "ctx"
+pair_scheduler_wait_for_slot
+job g A 0.3 0 &
+pair_scheduler_start_job g "$!"
+pair_scheduler_wait_for_slot
+job g B 0.1 0 &
 pair_scheduler_start_job g "$!"
 pair_scheduler_close_group g
 pair_scheduler_finalize
@@ -219,7 +253,6 @@ printf 'failures=%s completed=%s active=%s\n' "$FAILURES" "$PAIR_SCHEDULER_COMPL
     proc = _run_harness(tmp_path, script, mode)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip().splitlines()[-1] == "failures=0 completed=1 active=0"
-    assert _events(tmp_path) == ["complete key=g context=ctx done=3 started=3 others_running=0"]
 
 
 def test_init_rejects_bad_arguments(tmp_path):
