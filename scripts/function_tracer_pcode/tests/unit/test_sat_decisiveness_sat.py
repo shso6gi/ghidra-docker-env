@@ -225,7 +225,7 @@ def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown(
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
 
-def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch):
+def test_monolithic_sat_requires_counterexample_replay(monkeypatch):
     class _SatSolverRunner:
         def __init__(self):
             self.timeout = 5
@@ -280,7 +280,7 @@ def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == "counterexample_same_function_replay_unproven"
+    assert reason.reason_id == "counterexample_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert not any(
         evidence.get("proof_source") == "monolithic_global_counterexample_validation"
@@ -351,9 +351,9 @@ def test_monolithic_sat_rejects_prior_replay_proof_without_witness_binding(monke
 
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
-    assert result.unknown_reasons[0].reason_id == "counterexample_same_function_replay_unproven"
+    assert result.unknown_reasons[0].reason_id == "counterexample_replay_unproven"
 
-def test_monolithic_same_function_sat_with_unfixed_model_is_unknown():
+def test_monolithic_sat_with_unfixed_model_is_unknown():
     class _ReturnOnlySatSolverRunner:
         def __init__(self):
             self.timeout = 5
@@ -792,7 +792,7 @@ def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisiv
     assert replay["premise_digest"] and tuple(replay["pair_key"]) == (0, 0)
     assert len(replay["solver_execution_receipt_digest"]) == 64
 
-def test_pairwise_same_function_sat_without_model_still_requires_counterexample_replay(monkeypatch):
+def test_pairwise_sat_without_model_still_requires_counterexample_replay(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -850,12 +850,12 @@ def test_pairwise_same_function_sat_without_model_still_requires_counterexample_
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == "counterexample_same_function_replay_unproven"
+    assert reason.reason_id == "counterexample_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.proof_obligation_id is not None
 
-def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexample_replay(monkeypatch):
+def test_pairwise_sat_with_unfixed_model_still_requires_counterexample_replay(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -915,7 +915,7 @@ def test_pairwise_same_function_sat_with_unfixed_model_still_requires_counterexa
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
     reason = result.unknown_reasons[0]
-    assert reason.reason_id == "counterexample_same_function_replay_unproven"
+    assert reason.reason_id == "counterexample_replay_unproven"
     assert reason.evidence_refs == ("counterexample_replay_missing",)
     assert not any(
         evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"

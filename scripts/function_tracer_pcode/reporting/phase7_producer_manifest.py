@@ -276,7 +276,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
     },
     "pairwise-loop-sat-safety-observed": (
         "counterexample_analysis_safety_unproven",
-        "counterexample_same_function_replay_unproven",
+        "counterexample_replay_unproven",
     ),
 }
 
@@ -292,7 +292,7 @@ _REASON_IDENTITY_SCOPES = {
     },
     "counterexample_analysis_safety_unproven": "RELATIONAL",
     "counterexample_partition_replay_ambiguous": "RELATIONAL",
-    "counterexample_same_function_replay_unproven": "RELATIONAL",
+    "counterexample_replay_unproven": "RELATIONAL",
     "comparison_equivalence_closure_unproven": "RELATIONAL",
 }
 

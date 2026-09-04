@@ -61,7 +61,7 @@ class RecurrenceStageMixin:
             return None
         sat_reason_ids = {
             "counterexample_analysis_safety_unproven",
-            "counterexample_same_function_replay_unproven",
+            "counterexample_replay_unproven",
             "counterexample_partition_replay_ambiguous",
             "sat_counterexample_ambiguous",
         }
