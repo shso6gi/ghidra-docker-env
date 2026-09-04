@@ -1639,7 +1639,7 @@ def _impl__resolve_local_return_expression(
     current_function=None,
 ) -> Expression:
     if pcode_op.getNumInputs() >= 2:
-        return self._evaluate_local_varnode_expression(
+        return self._local_values.evaluate_varnode(
             pcode_op.getInput(1),
             tracer,
             local_values,
@@ -1648,7 +1648,7 @@ def _impl__resolve_local_return_expression(
         )
 
     for return_varnode in self._get_function_return_varnodes(current_function):
-        expr = self._evaluate_local_varnode_expression(
+        expr = self._local_values.evaluate_varnode(
             return_varnode,
             tracer,
             local_values,

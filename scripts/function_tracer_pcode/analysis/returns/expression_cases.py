@@ -64,8 +64,13 @@ def _impl__expression_contains_equivalent_subexpr(
     return False
 
 
+def clone_expression(expr: Expression) -> Expression:
+    """Deep-copy an expression tree (pure; no facade state)."""
+    return expr.clone_with(operands=[clone_expression(op) for op in expr.operands])
+
+
 def _impl__clone_expression(self, expr: Expression) -> Expression:
-    return expr.clone_with(operands=[self._clone_expression(op) for op in expr.operands])
+    return clone_expression(expr)
 
 
 def _impl__collect_expression_object_keys(
