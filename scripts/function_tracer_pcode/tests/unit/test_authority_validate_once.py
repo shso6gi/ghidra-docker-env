@@ -239,22 +239,6 @@ def test_sealed_stream_content_cannot_be_changed_after_seal():
     sealed.validate()
 
 
-def test_immutable_primitive_subclasses_are_accepted():
-    # JPype's JInt / JString are int / str subclasses (immutable); canonical
-    # target keys carry them in production streams.
-    class _JInt(int):
-        pass
-
-    @dataclass(frozen=True)
-    class _Key:
-        parts: tuple
-
-    key = _Key((_JInt(3), "x", 2.5, True, None))
-    assert_deep_immutable(key)
-    registry = ValidatedOnceRegistry()
-    assert registry.mark(key) is True
-
-
 # ---- mapping keys must be deep-immutable too ----
 
 class _MutableKey:
@@ -345,24 +329,77 @@ def test_int_subclass_key_with_mutable_str_is_rejected_and_not_cached():
     assert authority_digest(proxy) != before
 
 
-def test_primitive_subclass_values_are_digest_stable_and_accepted():
-    # As a *value* the same object is harmless: json canonicalisation uses the
-    # base int data, so mutating its label cannot change the digest.
+def test_primitive_subclass_values_are_normalised_at_the_boundary():
+    # freeze / canonical_value replace primitive subclasses by the exact base
+    # value (the data json hashes), so the frozen payload holds plain ints and
+    # later mutation of the original object cannot reach it.
     value = _MutableIntKey(7, "before")
     frozen = freeze_authority_value({"k": value})
+    assert type(frozen["k"]) is int and frozen["k"] == 7
     assert_deep_immutable(frozen)
     before = authority_digest(frozen)
     value.label = "after"
-    assert authority_digest(frozen) == before
-    assert authority_digest(frozen) == authority_digest({"k": 7})
+    assert authority_digest(frozen) == before == authority_digest({"k": 7})
 
     class _Str(str):
         def __str__(self):
             return "overridden"
 
     frozen_str = freeze_authority_value({"k": _Str("raw")})
-    assert_deep_immutable(frozen_str)
+    assert type(frozen_str["k"]) is str and frozen_str["k"] == "raw"
     assert authority_digest(frozen_str) == authority_digest({"k": "raw"})
+
+
+def test_primitive_subclasses_are_not_deep_immutable():
+    # Without normalisation a primitive subclass is refused: canonical_value
+    # dispatches to_authority_dict / dataclass / Mapping *before* the primitive
+    # branch, so such an object can carry a mutable canonical representation.
+    class _MutableInt(int):
+        def __new__(cls, value, tag):
+            obj = int.__new__(cls, value)
+            obj.tag = tag
+            return obj
+
+        def to_authority_dict(self):
+            return {"tag": self.tag}
+
+    @dataclass(frozen=True)
+    class _Holder:
+        payload: object
+
+    x = _MutableInt(7, "before")
+    holder = _Holder((x,))
+    with pytest.raises(TypeError, match="primitive subclass"):
+        assert_deep_immutable(holder)
+    assert ValidatedOnceRegistry().mark(holder) is False
+    before = authority_digest(holder)
+    x.tag = "after"
+    assert authority_digest(holder) != before   # the threat that motivates the rule
+
+
+def test_canonical_value_and_keys_normalise_external_runtime_integers():
+    from scripts.function_tracer_pcode.authority.contracts import ProofRequirement, exact_primitive
+
+    class _JInt(int):          # shaped like JPype's JInt: int subclass with overrides
+        def __int__(self):
+            return 999
+
+        def __repr__(self):
+            return "JInt"
+
+    class _JStr(str):
+        def __str__(self):
+            return "override"
+
+    assert exact_primitive(_JInt(3)) == 3 and type(exact_primitive(_JInt(3))) is int
+    assert exact_primitive(_JStr("raw")) == "raw" and type(exact_primitive(_JStr("raw"))) is str
+    assert canonical_value((_JInt(3), {"k": _JStr("raw")})) == (3, (("k", "raw"),))
+    assert authority_digest((_JInt(3),)) == authority_digest((3,))
+    # a key built through canonical_value holds exact ints, hence is cacheable
+    requirement = ProofRequirement("req", "bridge", ("target", _JInt(5)))
+    assert requirement.semantic_target_key == ("target", 5)
+    assert type(requirement.semantic_target_key[1]) is int
+    assert_deep_immutable(requirement)
 
 
 def test_enum_values_must_be_deep_immutable():

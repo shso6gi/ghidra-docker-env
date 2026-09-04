@@ -19,6 +19,29 @@ SCHEMA_VERSION = 2
 _PRIMITIVE_TYPES = frozenset({str, int, float, bool})
 
 
+def exact_primitive(value: Any) -> Any:
+    """str/int/float のサブクラス（JPype の JInt / JLong / JString 等、外部
+    ランタイム由来の値）を Python の「ちょうどの」基底型へ正規化する。
+
+    サブクラスが上書きし得る ``__int__`` / ``__str__`` / ``__repr__`` を経由せず、
+    基底型のデータだけを取る（``int.__index__`` / ``str.__str__`` /
+    ``float.__repr__``）。これは ``json`` が値を符号化するときに使うデータと
+    同じなので、既存の digest は変わらない。authority payload に入る値は
+    この境界で正規化し、authority graph の中に外部ランタイム型を持ち込まない。
+    """
+    if type(value) in _PRIMITIVE_TYPES or value is None:
+        return value
+    if isinstance(value, bool):  # bool はサブクラス化できないが念のため
+        return bool(value)
+    if isinstance(value, int):
+        return int.__index__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, float):
+        return float(float.__repr__(value))
+    return value
+
+
 def canonical_value(value: Any) -> Any:
     if value is None or type(value) in _PRIMITIVE_TYPES:
         return value
@@ -40,8 +63,9 @@ def canonical_value(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         children = [canonical_value(child) for child in value]
         return tuple(sorted(children, key=authority_digest))
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
+    if isinstance(value, (str, int, float, bool)):
+        # 基底型のサブクラスは exact な基底型の値へ正規化する（digest 不変）。
+        return exact_primitive(value)
     raise TypeError(f"unsupported authority value: {type(value).__name__}")
 
 
@@ -63,6 +87,8 @@ def freeze_authority_value(value: Any) -> Any:
     """
     if value is None or type(value) in _PRIMITIVE_TYPES or isinstance(value, Enum):
         return value
+    if isinstance(value, (str, int, float)):
+        return exact_primitive(value)
     if isinstance(value, _AbcMapping):
         return MappingProxyType({
             key: freeze_authority_value(child) for key, child in value.items()
@@ -83,13 +109,6 @@ def assert_deep_immutable(value: Any, path: str = "$") -> None:
     ないので、内部に dict / list / set が残っていればここで弾く。
     """
     if value is None or type(value) in _PRIMITIVE_TYPES:
-        return
-    if isinstance(value, (str, int, float)):
-        # str/int/float のサブクラス（JPype の JInt / JLong など）。digest は
-        # json による canonical 化で基底型のデータ（int.__repr__ / str の
-        # 内容 / float.__repr__）から計算され、サブクラスが持つ属性や
-        # __str__ の上書きは値としての digest に届かないので不変扱いでよい。
-        # （mapping の key は str(key) を経由するため別扱い: 下記）
         return
     if isinstance(value, Enum):
         # Enum は canonical 化で .value になるので、その値が深く不変であること。
@@ -123,6 +142,13 @@ def assert_deep_immutable(value: Any, path: str = "$") -> None:
         for item in fields(value):
             assert_deep_immutable(getattr(value, item.name), f"{path}.{item.name}")
         return
+    if isinstance(value, (str, int, float)):
+        # 基底型のサブクラスは canonical_value の dispatch（to_authority_dict /
+        # dataclass / Mapping が先に評価される）と整合しないため、キャッシュの
+        # 前提としては認めない。境界で exact_primitive に正規化すること。
+        raise TypeError(
+            f"authority value is a primitive subclass at {path}: {type(value).__name__}"
+        )
     raise TypeError(f"authority value is mutable at {path}: {type(value).__name__}")
 
 
