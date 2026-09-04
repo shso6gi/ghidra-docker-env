@@ -122,6 +122,10 @@ Default settings for benchmark runs on this host are `PARALLEL_JOBS=20` with
 resource admission disabled (`EQBENCH_RESOURCE_ADMISSION=0`); the baseline trees
 under `logs/EqBench/*_current` were produced with them. Both runners record the
 effective values in `run_manifest.txt`.
+Pair jobs are scheduled across functions by `scripts/eqbench/pair_scheduler.sh`,
+so `PARALLEL_JOBS` pairs stay in flight even when one function contributes fewer
+pairs; each function's `results_summary.txt` is still written as soon as its last
+pair finishes, and the run prints the peak concurrency at the end.
 
 Full Eq matrix (results under `logs/EqBench/all_eq_matrix_current`):
 
