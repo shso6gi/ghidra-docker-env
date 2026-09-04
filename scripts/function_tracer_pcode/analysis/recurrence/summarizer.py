@@ -185,7 +185,7 @@ class StructuralRecurrenceSummarizer:
     _varnode_size_bits = _svc_varnode_algebra._impl__varnode_size_bits
     _varnode_unsigned_constant_value = _svc_varnode_algebra._impl__varnode_unsigned_constant_value
     try_summarize_function = _svc_coordinator._impl_try_summarize_function
-    # recurrence.coordinator_2
+    # recurrence.coordinator
     _bit_width_from_low_bit_mask = _svc_coordinator._impl__bit_width_from_low_bit_mask
     _build_closed_form = _svc_coordinator._impl__build_closed_form
     _build_parity_split_loop_value = _svc_coordinator._impl__build_parity_split_loop_value
@@ -214,7 +214,7 @@ class StructuralRecurrenceSummarizer:
     _triangular = _svc_coordinator._impl__triangular
     _truncate_to_width = _svc_coordinator._impl__truncate_to_width
     _zero_extend_bitpattern = _svc_coordinator._impl__zero_extend_bitpattern
-    # recurrence.counted_loop_1
+    # recurrence.counted_loop
     _accumulator_backedge_indices = _svc_counted_loop._impl__accumulator_backedge_indices
     _accumulator_phi_candidates_can_group = _svc_counted_loop._impl__accumulator_phi_candidates_can_group
     _analysis_is_safe_for_counted_scalar_summary = _svc_counted_loop._impl__analysis_is_safe_for_counted_scalar_summary
@@ -266,7 +266,7 @@ class StructuralRecurrenceSummarizer:
     _varnode_aliases_accumulator_object = _svc_counted_loop._impl__varnode_aliases_accumulator_object
     _varnode_is_accumulator_update_for_phi = _svc_counted_loop._impl__varnode_is_accumulator_update_for_phi
     try_summarize_pre_return_counted_scalar_loop = _svc_counted_loop._impl_try_summarize_pre_return_counted_scalar_loop
-    # recurrence.counted_loop_2
+    # recurrence.counted_loop (continued)
     _accumulator_load_group_signature = _svc_counted_loop._impl__accumulator_load_group_signature
     _choose_return_reaching_accumulator = _svc_counted_loop._impl__choose_return_reaching_accumulator
     _try_summarize_branch_accumulator_loop = _svc_counted_loop._impl__try_summarize_branch_accumulator_loop
@@ -487,7 +487,7 @@ class StructuralRecurrenceSummarizer:
     _summary_symbol_spec_from_expression = _svc_proof_utils._impl__summary_symbol_spec_from_expression
     _terms_equivalent = _svc_proof_utils._impl__terms_equivalent
     _trace_varnode_expression = _svc_proof_utils._impl__trace_varnode_expression
-    # recurrence.readonly_reduction_1
+    # recurrence.readonly_reduction
     _address_points_to_readonly_data = _svc_readonly_reduction._impl__address_points_to_readonly_data
     _base_witnesses_exactly_cover_region = _svc_readonly_reduction._impl__base_witnesses_exactly_cover_region
     _collect_readonly_prefix_accumulator_proofs = _svc_readonly_reduction._impl__collect_readonly_prefix_accumulator_proofs
@@ -533,7 +533,7 @@ class StructuralRecurrenceSummarizer:
     _synthesize_exact_returns_from_readonly_witnesses = _svc_readonly_reduction._impl__synthesize_exact_returns_from_readonly_witnesses
     _try_summarize_readonly_pointer_reduction = _svc_readonly_reduction._impl__try_summarize_readonly_pointer_reduction
     _zero_base_return_witnesses_for_region = _svc_readonly_reduction._impl__zero_base_return_witnesses_for_region
-    # recurrence.readonly_reduction_2
+    # recurrence.readonly_reduction (continued)
     _adjust_readonly_load_signature_access = _svc_readonly_reduction._impl__adjust_readonly_load_signature_access
     _build_readonly_reduction_expression_from_terms = _svc_readonly_reduction._impl__build_readonly_reduction_expression_from_terms
     _build_readonly_reduction_semantic_witnesses = _svc_readonly_reduction._impl__build_readonly_reduction_semantic_witnesses
@@ -630,7 +630,7 @@ class StructuralRecurrenceSummarizer:
     _varnode_reaches_return = _svc_return_region._impl__varnode_reaches_return
     _zero_iteration_exit_region_mnemonic_is_safe = staticmethod(_svc_return_region._impl__zero_iteration_exit_region_mnemonic_is_safe)
     has_summary_candidate = _svc_return_region._impl_has_summary_candidate
-    # recurrence.state_transition_1
+    # recurrence.state_transition
     _add_state_transition_accumulator_seed = _svc_state_transition._impl__add_state_transition_accumulator_seed
     _build_counted_state_transition_value = _svc_state_transition._impl__build_counted_state_transition_value
     _build_multiplicative_state_transition_loop_value = _svc_state_transition._impl__build_multiplicative_state_transition_loop_value
@@ -673,7 +673,7 @@ class StructuralRecurrenceSummarizer:
     _try_build_state_transition_model_for_phi = _svc_state_transition._impl__try_build_state_transition_model_for_phi
     _try_summarize_proved_return_region_state_transition_composition = _svc_state_transition._impl__try_summarize_proved_return_region_state_transition_composition
     _try_summarize_state_transition_loop = _svc_state_transition._impl__try_summarize_state_transition_loop
-    # recurrence.state_transition_2
+    # recurrence.state_transition (continued)
     _build_state_transition_loop_side_effect_profile = _svc_state_transition._impl__build_state_transition_loop_side_effect_profile
     _collect_state_transition_loop_blocks = _svc_state_transition._impl__collect_state_transition_loop_blocks
     _collect_state_transition_loop_phi_ops = _svc_state_transition._impl__collect_state_transition_loop_phi_ops

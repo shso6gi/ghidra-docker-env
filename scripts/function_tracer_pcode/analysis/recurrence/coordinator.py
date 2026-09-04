@@ -676,8 +676,7 @@ def _impl__find_one_step_cases(
     return even_case, odd_case
 
 
-# ---- merged from coordinator_2
-
+# ---- one-step case synthesis from effects
 def _impl__synthesize_one_step_cases_from_effects(
     self,
     analysis,

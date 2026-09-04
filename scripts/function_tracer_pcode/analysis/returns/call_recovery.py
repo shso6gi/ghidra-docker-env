@@ -41,23 +41,12 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     substitute_condition,
     substitute_expression,
 )
-from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    CallTargetRef,
-    Condition,
-    ConditionTracker,
     EffectSummary,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    PcodeTracer,
-    ReturnInfo,
-    _enumerate_constant_expression_branches,
     _expression_contains_observed_loads,
     _expressions_equivalent_under_conditions,
     _resolve_call_target_ref,
     canonicalize_expr_read_location,
-    coerce_call_target_ref,
     expression_contains_post_state_reads,
     lower_post_state_expression_for_smt,
     promote_effect_value_match_to_post_state_read,

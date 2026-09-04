@@ -133,14 +133,6 @@ class StageSpec:
     strategy: str  # "pairwise" or "monolithic"
 
 
-# デフォルトの Stage plan
-DEFAULT_STAGE_PLAN: List[StageSpec] = [
-    StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
-    StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
-    StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
-]
-
-
 class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, RecoveryProofMixin, RecurrenceStageMixin):
     """等価性判定を行うクラス"""
     

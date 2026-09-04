@@ -2,16 +2,7 @@
 """Compatibility facade for PairwiseStrategy."""
 
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
-    pair_cases as _pair_cases,
-    readonly_reduction as _readonly_reduction,
-    loop_summary as _loop_summary,
-    parameter_identity as _parameter_identity,
-    opaque_unknowns as _opaque_unknowns,
-    case_conditions as _case_conditions,
-    method_b_closure as _method_b_closure,
-    orchestration as _orchestration,
     auxiliary_smt as _svc_auxiliary_smt,
-    loop_summary as _svc_loop_summary,
     loop_summary as _svc_loop_summary,
     case_conditions as _svc_case_conditions,
     method_b_closure as _svc_method_b_closure,
@@ -19,7 +10,6 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
     orchestration as _svc_orchestration,
     parameter_identity as _svc_parameter_identity,
     pair_cases as _svc_pair_cases,
-    readonly_reduction as _svc_readonly_reduction,
     readonly_reduction as _svc_readonly_reduction,
     runtime_shortcut as _svc_runtime_shortcut,
     unresolved_lowering as _svc_unresolved_lowering,
@@ -141,7 +131,7 @@ class PairwiseStrategy(CheckStrategy):
     _solver_rewrite_side_object_key = _svc_auxiliary_smt._impl__solver_rewrite_side_object_key
     _try_solver_proven_rewrite_equivalence = _svc_auxiliary_smt._impl__try_solver_proven_rewrite_equivalence
     _unsupported_smt_op_keys = _svc_auxiliary_smt._impl__unsupported_smt_op_keys
-    # pairwise_services.loop_summary_1
+    # pairwise_services.loop_summary
     _bounded_state_transition_iteration_count_from_conditions = _svc_loop_summary._impl__bounded_state_transition_iteration_count_from_conditions
     _bounded_state_transition_trip_count_is_proved = _svc_loop_summary._impl__bounded_state_transition_trip_count_is_proved
     _canonical_counted_state_transition_outer_start_key = _svc_loop_summary._impl__canonical_counted_state_transition_outer_start_key
@@ -211,7 +201,7 @@ class PairwiseStrategy(CheckStrategy):
     _unknown_reason_id_for_loop_fallback = _svc_loop_summary._impl__unknown_reason_id_for_loop_fallback
     _unroll_counted_state_transition_value = _svc_loop_summary._impl__unroll_counted_state_transition_value
     _value_contains_originated_phi_circular = classmethod(_svc_loop_summary._impl__value_contains_originated_phi_circular)
-    # pairwise_services.loop_summary_2
+    # pairwise_services.loop_summary (continued)
     _case_pair_can_defer_loop_summary_proof = _svc_loop_summary._impl__case_pair_can_defer_loop_summary_proof
     _clone_auxiliary_counted_loop_summary_ref = _svc_loop_summary._impl__clone_auxiliary_counted_loop_summary_ref
     _clone_auxiliary_loop_summary_ref = _svc_loop_summary._impl__clone_auxiliary_loop_summary_ref
@@ -224,7 +214,7 @@ class PairwiseStrategy(CheckStrategy):
     _phi_circular_expression_shape_key = _svc_loop_summary._impl__phi_circular_expression_shape_key
     _resolve_pending_loop_summary_pairs_with_partition_proof = _svc_loop_summary._impl__resolve_pending_loop_summary_pairs_with_partition_proof
     _unknown_expression_is_originated_phi_circular = classmethod(_svc_loop_summary._impl__unknown_expression_is_originated_phi_circular)
-    # pairwise_services.orchestration_1
+    # pairwise_services.orchestration
     _accumulator_proof_count_surface_expressions = _svc_method_b_closure._impl__accumulator_proof_count_surface_expressions
     _accumulator_proof_supports_count_bit_width = _svc_method_b_closure._impl__accumulator_proof_supports_count_bit_width
     _append_blocking_unknown_reasons = classmethod(_svc_orchestration._impl__append_blocking_unknown_reasons)
@@ -304,7 +294,7 @@ class PairwiseStrategy(CheckStrategy):
     _unknown_reason_dedup_key = staticmethod(_svc_orchestration._impl__unknown_reason_dedup_key)
     _unsupported_ops_include_memory_or_effect = staticmethod(_svc_opaque_unknowns._impl__unsupported_ops_include_memory_or_effect)
     check = _svc_orchestration._impl_check
-    # pairwise_services.orchestration_2
+    # pairwise_services.orchestration (continued)
     _build_fragment_extension_expr = _svc_pair_cases._impl__build_fragment_extension_expr
     _cases_are_contradictory = _svc_pair_cases._impl__cases_are_contradictory
     _clear_pairwise_extra_assertions = _svc_pair_cases._impl__clear_pairwise_extra_assertions
@@ -331,7 +321,7 @@ class PairwiseStrategy(CheckStrategy):
     _rewrite_expr_with_parameter_fragments = _svc_pair_cases._impl__rewrite_expr_with_parameter_fragments
     _solve_canonical_return_observation = _svc_pair_cases._impl__solve_canonical_return_observation
     _try_normalization_equivalence = _svc_pair_cases._impl__try_normalization_equivalence
-    # pairwise_services.readonly_reduction_1
+    # pairwise_services.readonly_reduction
     _case_allows_reduction_count = _svc_readonly_reduction._impl__case_allows_reduction_count
     _case_has_direct_reduction_count_equality = _svc_readonly_reduction._impl__case_has_direct_reduction_count_equality
     _case_implies_reduction_count = _svc_readonly_reduction._impl__case_implies_reduction_count
@@ -408,7 +398,7 @@ class PairwiseStrategy(CheckStrategy):
     _solve_reduction_count_affine_equality_between_expressions = _svc_readonly_reduction._impl__solve_reduction_count_affine_equality_between_expressions
     _solve_reduction_count_masked_equality = _svc_readonly_reduction._impl__solve_reduction_count_masked_equality
     _value_contains_readonly_ref = classmethod(_svc_readonly_reduction._impl__value_contains_readonly_ref)
-    # pairwise_services.readonly_reduction_2
+    # pairwise_services.readonly_reduction (continued)
     _exact_reduction_count_constant = _svc_readonly_reduction._impl__exact_reduction_count_constant
     _expression_contains_reduction_count_surface_at_width = _svc_readonly_reduction._impl__expression_contains_reduction_count_surface_at_width
     _extract_readonly_reduction_term_descriptor = _svc_readonly_reduction._impl__extract_readonly_reduction_term_descriptor

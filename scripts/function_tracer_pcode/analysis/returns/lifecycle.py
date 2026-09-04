@@ -195,8 +195,7 @@ def _impl__find_function_by_name(self, function_name: str):
     return None
 
 
-# ---- merged from session_helpers_1, session_helpers_2, session_helpers_3
-
+# ---- session helpers
 def _impl__debug_print(self, msg: str, indent: int = 0):
     if self.debug:
         prefix = "  " * indent
