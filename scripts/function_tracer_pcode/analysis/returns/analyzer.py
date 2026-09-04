@@ -12,7 +12,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     analyze_function as _svc_analyze_function,
     condition_logic as _svc_condition_logic,
     divergence_proofs as _svc_divergence_proofs,
-    expression_cases as _svc_expression_cases,
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
     phi_origins as _svc_phi_origins,
@@ -24,6 +23,7 @@ from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
+from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
     RegionFacts,
     input_is_nondata_operand,
@@ -60,6 +60,9 @@ class ReturnAnalyzer:
         self._decompiler = None
         self._analysis_session = AnalysisSession()
         self._current_parameters: List[Dict] = []
+        self._expression_cases = ExpressionCaseService(
+            current_parameters=lambda: self._current_parameters,
+        )
         self._current_effect_summary: Optional[EffectSummary] = None
         self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
         self._effect_summary_parameter_cache: Dict[Tuple[Any, ...], List[Dict]] = {}
@@ -463,7 +466,8 @@ class ReturnAnalyzer:
     _debug_print = _svc_lifecycle._impl__debug_print
     _describe_pcode_site = _svc_pcode_sites._impl__describe_pcode_site
     _edge_condition_for_successor = _svc_divergence_proofs._impl__edge_condition_for_successor
-    _expression_contains_equivalent_subexpr = _svc_expression_cases._impl__expression_contains_equivalent_subexpr
+    def _expression_contains_equivalent_subexpr(self, expr, target):
+        return self._expression_cases.expression_contains_equivalent_subexpr(expr, target)
     _expression_has_param = staticmethod(_svc_condition_logic._impl__expression_has_param)
     _expression_is_placeholder_minus_one = _svc_placeholder_algebra._impl__expression_is_placeholder_minus_one
     _expression_is_placeholder_minus_one_under_conditions = _svc_placeholder_algebra._impl__expression_is_placeholder_minus_one_under_conditions
@@ -533,11 +537,13 @@ class ReturnAnalyzer:
     _augment_parameters_with_implicit_passthrough = _svc_parameters._impl__augment_parameters_with_implicit_passthrough
     _build_condition_signature_set = _svc_condition_logic._impl__build_condition_signature_set
     _choose_richer_parameter_descriptors = _svc_parameters._impl__choose_richer_parameter_descriptors
-    _clone_expression = _svc_expression_cases._impl__clone_expression
+    def _clone_expression(self, expr):
+        return self._expression_cases.clone_expression(expr)
     _coerce_expression_size = _svc_condition_logic._impl__coerce_expression_size
     _coerce_order_key = _svc_condition_logic._impl__coerce_order_key
     _coerce_wrapper_storage_info = _svc_parameters._impl__coerce_wrapper_storage_info
-    _collect_expression_object_keys = _svc_expression_cases._impl__collect_expression_object_keys
+    def _collect_expression_object_keys(self, expr, out):
+        return self._expression_cases.collect_expression_object_keys(expr, out)
     _collect_parameters = _svc_parameters._impl__collect_parameters
     _condition_contradicts_any = _svc_condition_logic._impl__condition_contradicts_any
     _condition_is_constant_equality_guard = _svc_condition_logic._impl__condition_is_constant_equality_guard
@@ -546,7 +552,8 @@ class ReturnAnalyzer:
     _condition_is_signed_less_than_one_of_param = _svc_condition_logic._impl__condition_is_signed_less_than_one_of_param
     _condition_is_signed_nonpositive_of_param = _svc_condition_logic._impl__condition_is_signed_nonpositive_of_param
     _condition_is_signed_positive_of_param = _svc_condition_logic._impl__condition_is_signed_positive_of_param
-    _condition_lists_equivalent = _svc_expression_cases._impl__condition_lists_equivalent
+    def _condition_lists_equivalent(self, left, right):
+        return self._expression_cases.condition_lists_equivalent(left, right)
     _condition_logical_operator = _svc_condition_logic._impl__condition_logical_operator
     _condition_set_conjunction_expression = _svc_condition_logic._impl__condition_set_conjunction_expression
     _condition_sets_are_complementary = _svc_condition_logic._impl__condition_sets_are_complementary
@@ -555,14 +562,20 @@ class ReturnAnalyzer:
     _conditions_equivalent = _svc_condition_logic._impl__conditions_equivalent
     _conditions_imply = _svc_condition_logic._impl__conditions_imply
     _conditions_overlap = _svc_condition_logic._impl__conditions_overlap
-    _count_object_centric_unknowns = _svc_expression_cases._impl__count_object_centric_unknowns
-    _count_opaque_unknowns = _svc_expression_cases._impl__count_opaque_unknowns
-    _count_phi_nodes = _svc_expression_cases._impl__count_phi_nodes
-    _count_unresolved_value_nodes = _svc_expression_cases._impl__count_unresolved_value_nodes
-    _deduplicate_expression_cases = _svc_expression_cases._impl__deduplicate_expression_cases
+    def _count_object_centric_unknowns(self, expr):
+        return self._expression_cases.count_object_centric_unknowns(expr)
+    def _count_opaque_unknowns(self, expr):
+        return self._expression_cases.count_opaque_unknowns(expr)
+    def _count_phi_nodes(self, expr):
+        return self._expression_cases.count_phi_nodes(expr)
+    def _count_unresolved_value_nodes(self, expr):
+        return self._expression_cases.count_unresolved_value_nodes(expr)
+    def _deduplicate_expression_cases(self, cases):
+        return self._expression_cases.deduplicate_expression_cases(cases)
     _deduplicate_storage_infos = _svc_parameters._impl__deduplicate_storage_infos
     _detect_signedness = _svc_parameters._impl__detect_signedness
-    _direct_expression_runtime_guard_conditions = _svc_expression_cases._impl__direct_expression_runtime_guard_conditions
+    def _direct_expression_runtime_guard_conditions(self, expr):
+        return self._expression_cases.direct_expression_runtime_guard_conditions(expr)
     # LocalValueResolver collaborator (Phase 5): thin delegators for existing
     # callers and tests.
     def _evaluate_local_pcode_expression(self, pcode_op, tracer, local_values, local_storages, local_memory, visiting=None):
@@ -570,24 +583,31 @@ class ReturnAnalyzer:
 
     def _evaluate_local_varnode_expression(self, varnode, tracer, local_values, local_storages, local_memory, visiting=None):
         return self._local_values.evaluate_varnode(varnode, tracer, local_values, local_storages, local_memory, visiting)
-    _expand_boolean_expression_cases = _svc_expression_cases._impl__expand_boolean_expression_cases
-    _expand_object_centric_expression_cases = _svc_expression_cases._impl__expand_object_centric_expression_cases
+    def _expand_boolean_expression_cases(self, expr, base_conditions):
+        return self._expression_cases.expand_boolean_expression_cases(expr, base_conditions)
+    def _expand_object_centric_expression_cases(self, expr, base_conditions):
+        return self._expression_cases.expand_object_centric_expression_cases(expr, base_conditions)
     _expression_contains_phi = _svc_phi_origins._impl__expression_contains_phi
     _expression_contains_phi_circular = _svc_phi_origins._impl__expression_contains_phi_circular
     _expression_contains_phi_circular_marker = _svc_phi_origins._impl__expression_contains_phi_circular_marker
-    _expression_has_nontrivial_location_wrapper = _svc_expression_cases._impl__expression_has_nontrivial_location_wrapper
+    def _expression_has_nontrivial_location_wrapper(self, expr, location):
+        return self._expression_cases.expression_has_nontrivial_location_wrapper(expr, location)
     _expression_is_one_under_conditions = _svc_placeholder_algebra._impl__expression_is_one_under_conditions
     _expression_is_param_minus_one = _svc_placeholder_algebra._impl__expression_is_param_minus_one
     _expression_is_positive_after_unit_progress_guard = _svc_divergence_proofs._impl__expression_is_positive_after_unit_progress_guard
     _expression_is_same_parameter = _svc_condition_logic._impl__expression_is_same_parameter
     _expression_is_same_parameter_ignoring_subpiece = _svc_condition_logic._impl__expression_is_same_parameter_ignoring_subpiece
-    _expression_references_allowed_subtrees = _svc_expression_cases._impl__expression_references_allowed_subtrees
-    _expression_references_only_allowed_objects = _svc_expression_cases._impl__expression_references_only_allowed_objects
-    _expression_runtime_guard_conditions = _svc_expression_cases._impl__expression_runtime_guard_conditions
+    def _expression_references_allowed_subtrees(self, expr, allowed_subtrees):
+        return self._expression_cases.expression_references_allowed_subtrees(expr, allowed_subtrees)
+    def _expression_references_only_allowed_objects(self, expr, args):
+        return self._expression_cases.expression_references_only_allowed_objects(expr, args)
+    def _expression_runtime_guard_conditions(self, expr):
+        return self._expression_cases.expression_runtime_guard_conditions(expr)
     _expressions_equal_under_conditions_smt = _svc_condition_logic._impl__expressions_equal_under_conditions_smt
     _expressions_same_key = _svc_condition_logic._impl__expressions_same_key
     _extend_active_functions = _svc_lifecycle._impl__extend_active_functions
-    _fold_constant_expression = _svc_expression_cases._impl__fold_constant_expression
+    def _fold_constant_expression(self, expr, *, fallback_expr=None):
+        return self._expression_cases.fold_constant_expression(expr, fallback_expr=fallback_expr)
     _function_cache_key = _svc_lifecycle._impl__function_cache_key
     _get_function_manager = _svc_lifecycle._impl__get_function_manager
     _get_instruction_with_fallback = _svc_lifecycle._impl__get_instruction_with_fallback
@@ -595,12 +615,15 @@ class ReturnAnalyzer:
     _get_storage_info = _svc_parameters._impl__get_storage_info
     _has_non_parameter_symbol_for_storage = _svc_parameters._impl__has_non_parameter_symbol_for_storage
     _high_function_has_cfg_cycle = _svc_divergence_proofs._impl__high_function_has_cfg_cycle
-    _is_boolean_expression = _svc_expression_cases._impl__is_boolean_expression
-    _is_direct_location_carrier = _svc_expression_cases._impl__is_direct_location_carrier
+    def _is_boolean_expression(self, expr):
+        return self._expression_cases.is_boolean_expression(expr)
+    def _is_direct_location_carrier(self, expr):
+        return self._expression_cases.is_direct_location_carrier(expr)
     _is_signed_type = _svc_parameters._impl__is_signed_type
     _is_void_type = _svc_parameters._impl__is_void_type
     _is_zero_constant_varnode = _svc_pcode_sites._impl__is_zero_constant_varnode
-    _iter_expression_nodes_for_unconditional_runtime_guards = _svc_expression_cases._impl__iter_expression_nodes_for_unconditional_runtime_guards
+    def _iter_expression_nodes_for_unconditional_runtime_guards(self, expr):
+        return self._expression_cases.iter_expression_nodes_for_unconditional_runtime_guards(expr)
     def _local_varnode_key(self, varnode):
         return self._local_values.varnode_key(varnode)
 
@@ -628,8 +651,10 @@ class ReturnAnalyzer:
     _readonly_reduction_contract_priority_score = _svc_phi_origins._impl__readonly_reduction_contract_priority_score
     _readonly_reduction_ref_contract_priority_score = _svc_phi_origins._impl__readonly_reduction_ref_contract_priority_score
     _resolve_function_from_address = _svc_lifecycle._impl__resolve_function_from_address
-    _resolve_precise_object_state_value = _svc_expression_cases._impl__resolve_precise_object_state_value
-    _runtime_ref_guard_conditions = _svc_expression_cases._impl__runtime_ref_guard_conditions
+    def _resolve_precise_object_state_value(self, value, conditions, effect_summary):
+        return self._expression_cases.resolve_precise_object_state_value(value, conditions, effect_summary)
+    def _runtime_ref_guard_conditions(self, runtime_ref):
+        return self._expression_cases.runtime_ref_guard_conditions(runtime_ref)
     _signed_positive_condition = _svc_condition_logic._impl__signed_positive_condition
     _signed_unit_constant_matches = _svc_placeholder_algebra._impl__signed_unit_constant_matches
     _single_parameter_expression_in_conditions = _svc_phi_origins._impl__single_parameter_expression_in_conditions
@@ -639,14 +664,17 @@ class ReturnAnalyzer:
     _synthesize_implicit_passthrough_parameter = _svc_parameters._impl__synthesize_implicit_passthrough_parameter
     _varnode_location_key = staticmethod(_svc_pcode_sites._impl__varnode_location_key)
     _varnodes_may_alias = classmethod(_svc_pcode_sites._impl__varnodes_may_alias)
-    _wrapper_preserves_collapsed_operand = _svc_expression_cases._impl__wrapper_preserves_collapsed_operand
+    def _wrapper_preserves_collapsed_operand(self, operator, shared_operand, *, kept_operand_index):
+        return self._expression_cases.wrapper_preserves_collapsed_operand(operator, shared_operand, kept_operand_index=kept_operand_index)
     # session helpers (continued)
     _active_conditions_imply_all = _svc_condition_logic._impl__active_conditions_imply_all
     _condition_truth_under_parameter_assignments = _svc_condition_logic._impl__condition_truth_under_parameter_assignments
     _conditions_conjunction_is_false_under_assignments = _svc_condition_logic._impl__conditions_conjunction_is_false_under_assignments
-    _contains_multiequal = _svc_expression_cases._impl__contains_multiequal
+    def _contains_multiequal(self, varnode, depth=0):
+        return self._expression_cases.contains_multiequal(varnode, depth)
     _evaluate_expression_under_parameter_assignments = _svc_condition_logic._impl__evaluate_expression_under_parameter_assignments
-    _expression_contains_unresolved_value = _svc_expression_cases._impl__expression_contains_unresolved_value
+    def _expression_contains_unresolved_value(self, expr):
+        return self._expression_cases.expression_contains_unresolved_value(expr)
     _reduce_phi_expression_under_conditions_with_smt = _svc_condition_logic._impl__reduce_phi_expression_under_conditions_with_smt
     _substitute_parameter_constants = _svc_condition_logic._impl__substitute_parameter_constants
     get_last_analysis_failure = _svc_lifecycle._impl_get_last_analysis_failure
