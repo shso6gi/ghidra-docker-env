@@ -18,13 +18,17 @@ from scripts.function_tracer_pcode.analysis.returns import (
     pcode_sites as _svc_pcode_sites,
     phi_origins as _svc_phi_origins,
     placeholder_algebra as _svc_placeholder_algebra,
-    region_facts as _svc_region_facts,
     stack_protector as _svc_stack_protector,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition
+from scripts.function_tracer_pcode.analysis.returns.region_facts import (
+    RegionFacts,
+    input_is_nondata_operand,
+    parameter_index_for_location,
+)
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
     AnalysisSession,
@@ -48,6 +52,7 @@ class ReturnAnalyzer:
 
     def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True):
         self.program = program
+        self._region_facts = RegionFacts(program)
         self.debug = debug
         self._binary_id = binary_id
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
@@ -494,10 +499,18 @@ class ReturnAnalyzer:
     _reads_share_stack_protector_probe = _svc_stack_protector._impl__reads_share_stack_protector_probe
     _record_scalar_signedness_from_expression = _svc_parameters._impl__record_scalar_signedness_from_expression
     _recursive_scc_certificate = _svc_divergence_proofs._impl__recursive_scc_certificate
-    _region_address_is_code = _svc_region_facts._impl__region_address_is_code
-    _region_input_is_nondata_operand = staticmethod(_svc_region_facts._impl__region_input_is_nondata_operand)
-    _region_live_in_key = _svc_region_facts._impl__region_live_in_key
-    _region_parameter_index_for_location = staticmethod(_svc_region_facts._impl__region_parameter_index_for_location)
+    # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
+    # delegators for existing callers and tests.
+    def _region_address_is_code(self, address) -> bool:
+        return self._region_facts.address_is_code(address)
+
+    def _region_live_in_key(self, varnode, *, mnemonic, input_index, parameters):
+        return self._region_facts.live_in_key(
+            varnode, mnemonic=mnemonic, input_index=input_index, parameters=parameters
+        )
+
+    _region_input_is_nondata_operand = staticmethod(input_is_nondata_operand)
+    _region_parameter_index_for_location = staticmethod(parameter_index_for_location)
     _repair_mixed_scalar_signedness = _svc_parameters._impl__repair_mixed_scalar_signedness
     _scc_preserves_guard_dependencies = _svc_divergence_proofs._impl__scc_preserves_guard_dependencies
     _single_guard_condition_matches = _svc_divergence_proofs._impl__single_guard_condition_matches
