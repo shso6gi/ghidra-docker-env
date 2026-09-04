@@ -71,21 +71,18 @@ run_half() {
     return "$ec"
 }
 
-# Each production runner keeps at most 8 pairs (one function) in flight at a
-# time, so the two halves run concurrently (8 + 8 slots <= PARALLEL_JOBS=20)
-# and their console output goes to $OUTPUT_BASE_DIR/<half>.log.
+# The production runners schedule pairs across functions (Issue #26), so a
+# single runner already fills PARALLEL_JOBS slots.  The halves therefore run
+# one after the other: running them concurrently would put up to
+# 2 x PARALLEL_JOBS pair processes on the host.  Console output of each half
+# goes to $OUTPUT_BASE_DIR/<half>.log.
 status=0
 halves=()
 [[ "$SUBSET_SCOPE" == "eq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(eq)
 [[ "$SUBSET_SCOPE" == "neq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(neq)
-declare -A half_pid=()
-for half in "${halves[@]}"; do
-    run_half "$half" > "$OUTPUT_BASE_DIR/$half.log" 2>&1 &
-    half_pid["$half"]=$!
-done
 for half in "${halves[@]}"; do
     half_status=0
-    wait "${half_pid[$half]}" || half_status=$?
+    run_half "$half" > "$OUTPUT_BASE_DIR/$half.log" 2>&1 || half_status=$?
     echo "Subset $half elapsed: $(cat "$OUTPUT_BASE_DIR/$half.elapsed")s (exit $half_status, log: $OUTPUT_BASE_DIR/$half.log)"
     (( half_status == 0 )) || status=$half_status
 done

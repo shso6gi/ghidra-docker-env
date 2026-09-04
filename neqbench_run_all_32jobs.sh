@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh"
+source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh"
 
 default_value() {
     local name="$1" value="$2"
@@ -502,18 +503,14 @@ run_pair() {
         "$left_id" "$right_id" "$status"
     return "$ec"
 }
-wait_slot() {
-    if (( ACTIVE_JOBS >= PARALLEL_JOBS )); then
-        if ! wait -n; then RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1)); fi
-        ACTIVE_JOBS=$((ACTIVE_JOBS - 1))
-    fi
+# Per-function summary, produced by the cross-function pair scheduler once
+# every pair job of the function directory (the group key) has been reaped.
+write_function_results_summary() {
+    local function_dir="$1" function="$2"
+    find "$function_dir" -maxdepth 1 -type f -name '*.log' -print0 > "$function_dir/.summary-log-paths.list0"
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary --function-summary --canonical-only --function-name "$function" --summary-level compact --log-list0 "$function_dir/.summary-log-paths.list0" > "$function_dir/results_summary.txt" || true
 }
-wait_all() {
-    while (( ACTIVE_JOBS > 0 )); do
-        if ! wait -n; then RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1)); fi
-        ACTIVE_JOBS=$((ACTIVE_JOBS - 1))
-    done
-}
+pair_scheduler_init "$PARALLEL_JOBS" write_function_results_summary RUN_PAIR_FAILURES
 
 ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
@@ -619,7 +616,6 @@ printf '[PROGRESS] planned samples=%s functions=%s pair_jobs=%s pairs_per_functi
     "$TOTAL_PLANNED_PAIR_JOBS" "$EXPECTED_PAIRS_PER_FUNCTION" \
     "$TOTAL_PLANNED_PAIR_JOBS"
 
-ACTIVE_JOBS=0
 RUN_PAIR_FAILURES=0
 RUN_COMPILE_FAILURES=0
 FUNCTION_CENSUS_FAILURES=0
@@ -713,6 +709,7 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
             printf '[%s] [%s] ERROR-only summary: selected %s/%s ERROR pair(s): %s\n' \
                 "$sample" "$function" "${#SUMMARY_ERROR_PAIRS[@]}" "$total" "$error_pair_list"
         fi
+        pair_scheduler_open_group "$function_dir" "$function"
         for pair in "${ANALYSIS_PAIR_IDS[@]}"; do
             pair_selected "$pair" || continue
             rerun_target_selected "$sample" "$function" "$pair" || continue
@@ -750,18 +747,18 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
                 progress_update "$sample" "$function" "$left_id" "$right_id" "SKIPPED"
                 continue
             fi
-            wait_slot
+            pair_scheduler_wait_for_slot
             TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
             run_pair "$sample" "$function" "$left_id" "$right_id" "$left" "$right" "$function_dir" "$count" "$total" "$target" \
                 "$CURRENT_SAMPLE_INDEX" "$function_position" "$function_total" &
-            ACTIVE_JOBS=$((ACTIVE_JOBS + 1))
+            pair_scheduler_start_job "$function_dir" "$!"
         done
-        wait_all
-        find "$function_dir" -maxdepth 1 -type f -name '*.log' -print0 > "$function_dir/.summary-log-paths.list0"
-        "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary --function-summary --canonical-only --function-name "$function" --summary-level compact --log-list0 "$function_dir/.summary-log-paths.list0" > "$function_dir/results_summary.txt" || true
+        # results_summary.txt is written by the scheduler's completion hook
+        # once the last pair of this function has been reaped.
+        pair_scheduler_close_group "$function_dir"
     done < "$functions_file"
 done < "$CENSUS"
-wait_all
+pair_scheduler_finalize
 find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'run_stdout.log' -print0 > "$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0"
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
     --overall-summary --canonical-only --summary-level "$VALIDATION_SUMMARY_LEVEL" \
@@ -793,4 +790,5 @@ if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT 
 fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "./neqbench_run_all_32jobs.sh"
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
+echo "Peak concurrent pair jobs: $PAIR_SCHEDULER_PEAK_ACTIVE_JOBS (PARALLEL_JOBS=$PARALLEL_JOBS)"
 exit "$exit_status"

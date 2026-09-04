@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
+source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh" || exit 1
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "Error: bash 4.3 or newer is required for wait -n" >&2
@@ -184,7 +185,6 @@ declare -A OPT_BY_ID=(
     [B13]=O0 [B14]=O1 [B15]=O2 [B16]=O3
 )
 
-active_jobs=0
 RUN_PAIR_FAILURES=0
 RUN_COMPILE_FAILURES=0
 FUNCTION_CENSUS_FAILURES=0
@@ -688,22 +688,27 @@ run_pair() {
     return "$run_pair_ec"
 }
 
-wait_for_slot() {
-    if (( active_jobs >= PARALLEL_JOBS )); then
-        if ! wait -n; then
-            RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
-        fi
-        active_jobs=$((active_jobs - 1))
+# Per-function summary, produced by the cross-function pair scheduler once
+# every pair job of the function directory (the group key) has been reaped.
+write_function_results_summary() {
+    local output_function_dir="$1" function_name="$2"
+    local -a function_logs
+    local function_log_list
+    shopt -s nullglob
+    function_logs=("$output_function_dir"/*.log)
+    shopt -u nullglob
+    if (( ${#function_logs[@]} == 0 )); then
+        return 0
     fi
-}
-
-wait_for_all_jobs() {
-    while (( active_jobs > 0 )); do
-        if ! wait -n; then
-            RUN_PAIR_FAILURES=$((RUN_PAIR_FAILURES + 1))
-        fi
-        active_jobs=$((active_jobs - 1))
-    done
+    function_log_list="$output_function_dir/.summary-log-paths.list0"
+    write_log_list0 "$function_log_list" "${function_logs[@]}"
+    write_summary_file "$output_function_dir/results_summary.txt" \
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
+            --function-summary \
+            --canonical-only \
+            --function-name "$function_name" \
+            --summary-level "$VALIDATION_SUMMARY_LEVEL" \
+            --log-list0 "$function_log_list"
 }
 
 binary_name_for_id() {
@@ -745,6 +750,8 @@ write_log_list0() {
     shift
     printf '%s\0' "$@" > "$output_file"
 }
+
+pair_scheduler_init "$PARALLEL_JOBS" write_function_results_summary RUN_PAIR_FAILURES
 
 mapfile -t ALL_SAMPLE_SOURCES < <(
     find "$EQBENCH_ROOT" \
@@ -1245,6 +1252,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             error_pair_list="$(printf '%s\n' "${!SUMMARY_ERROR_PAIRS[@]}" | sort | paste -sd, -)"
             echo "[$sample_label] [$function_name] ERROR-only summary: selected ${#SUMMARY_ERROR_PAIRS[@]}/$total_pairs ERROR pair(s): $error_pair_list"
         fi
+        pair_scheduler_open_group "$output_function_dir" "$function_name"
         for ((i = 0; i < ${#IDS[@]} - 1; i++)); do
             left_id="${IDS[$i]}"
             left_name="$(binary_name_for_id "$source_base" "$left_id")"
@@ -1300,7 +1308,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     continue
                 fi
 
-                wait_for_slot
+                pair_scheduler_wait_for_slot
                 if [[ -s "$PROCESS_AUTHORITY_CLEANUP_STOP_FILE" ]]; then
                     echo "Stopping new pair scheduling after process-authority cleanup failure." >&2
                     break 2
@@ -1309,7 +1317,7 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                 run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
                     "$left_bin" "$right_bin" "$output_function_dir" "$pair_count" "$total_pairs" \
                     "$pair_target_file" &
-                active_jobs=$((active_jobs + 1))
+                pair_scheduler_start_job "$output_function_dir" "$!"
             done
         done
 
@@ -1317,26 +1325,14 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
             echo "[$sample_label] [$function_name] Skipped completed pairs: $skipped_completed_pairs/$total_pairs"
         fi
 
-        wait_for_all_jobs
-
-        shopt -s nullglob
-        function_logs=("$output_function_dir"/*.log)
-        shopt -u nullglob
-        if (( ${#function_logs[@]} > 0 )); then
-            function_log_list="$output_function_dir/.summary-log-paths.list0"
-            write_log_list0 "$function_log_list" "${function_logs[@]}"
-            write_summary_file "$output_function_dir/results_summary.txt" \
-                "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.result_summary \
-                    --function-summary \
-                    --canonical-only \
-                    --function-name "$function_name" \
-                    --summary-level "$VALIDATION_SUMMARY_LEVEL" \
-                    --log-list0 "$function_log_list"
-        fi
+        # The function summary is written by the scheduler's completion hook
+        # once the last pair of this function has been reaped; pairs of the
+        # following functions are scheduled meanwhile.
+        pair_scheduler_close_group "$output_function_dir"
     done
 done
 
-wait_for_all_jobs
+pair_scheduler_finalize
 
 PROCESS_AUTHORITY_CLEANUP_FAILURES="$(
     awk 'NF { count += 1 } END { print count + 0 }' \
@@ -1425,6 +1421,7 @@ echo "EqBench all-sample matrix finished."
 echo "Output directory: $OUTPUT_BASE_DIR"
 echo "Overall summary: $OUTPUT_BASE_DIR/overall_summary.txt"
 echo "Run manifest: $OUTPUT_BASE_DIR/run_manifest.txt"
+echo "Peak concurrent pair jobs: $PAIR_SCHEDULER_PEAK_ACTIVE_JOBS (PARALLEL_JOBS=$PARALLEL_JOBS)"
 
 if (( FINAL_RUN_EXIT_STATUS > 0 )); then
     echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification or run-health checks." >&2
