@@ -3,47 +3,40 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from collections import Counter
+from dataclasses import replace
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionConstraintSet,
-    ConditionSMTOracle,
-    ConditionSimplifier,
-    Expression,
-    ExpressionType,
-    READONLY_SUM_OPCODE,
-    ReadonlyAffineProgressionLiteral,
-    ReadonlyReductionRef,
-    ReadonlyReductionTermRef,
-    ReadonlyReductionWitness,
-    ReductionAccumulatorProof,
-    ResidueLoopCase,
-    ReturnInfo,
-    StateTransitionLoopModel,
-    _runtime_conditions_signature,
-    _runtime_expression_signature,
-    is_pointer_data_type,
-    replace,
-)
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    Condition,
-    ConditionConstraintSet,
-    ConditionSMTOracle,
-    ConditionSimplifier,
-    Counter,
     Expression,
     ExpressionType,
     LocationBaseRef,
+    READONLY_SUM_OPCODE,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
-    ReadonlyRoundedCountCandidate,
     ReductionAccumulatorProof,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness, is_pointer_data_type
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionConstraintSet,
+    ConditionSMTOracle,
+    ConditionSimplifier,
+    ReadonlyAffineProgressionLiteral,
+    ResidueLoopCase,
+    StateTransitionLoopModel,
+    _runtime_conditions_signature,
+    _runtime_expression_signature,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionConstraintSet,
+    ConditionSMTOracle,
+    ConditionSimplifier,
+    ReadonlyRoundedCountCandidate,
     _expressions_equivalent_under_conditions,
     _reduce_expression_under_conditions,
     canonicalize_location,
-    expression_smt_bit_width,
-    get_declared_type_signedness,
 )
 
 

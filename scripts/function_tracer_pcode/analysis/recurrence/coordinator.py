@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections import Counter
+from scripts.function_tracer_pcode.core import (
     Condition,
-    Counter,
     Expression,
     ExpressionType,
-    ParameterInfo,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness, is_integral_data_type
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ParameterInfo,
     _runtime_expression_signature,
-    get_declared_type_signedness,
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
 )
 from ._shared import ConditionSimplifier
-from ._shared import Iterable
 from ._shared import _reduce_expression_under_conditions
 from ._shared import _runtime_conditions_signature
 from ._shared import eval_constant_raw
-from ._shared import is_integral_data_type
 
 
 def _impl_try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:

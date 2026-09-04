@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from dataclasses import replace
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionSMTOracle,
     Expression,
     ExpressionType,
     LoopSideEffectProfileRef,
-    ResidueLoopCase,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionSMTOracle,
+    ResidueLoopCase,
     _runtime_conditions_signature,
     _runtime_expression_signature,
-    replace,
 )
 
 def _impl__try_summarize_multiplicative_phi_return_region(

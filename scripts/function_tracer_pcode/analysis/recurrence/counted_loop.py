@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from dataclasses import replace
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     ComposedLoopSummaryRef,
     Condition,
-    ConditionSimplifier,
-    CountedLoopAccumulator,
-    CountedLoopGuard,
-    CountedLoopInduction,
     CountedLoopSummaryRef,
-    CountedLoopUpdateCase,
     CountedStateTransitionLoopSummaryRef,
     Expression,
     ExpressionType,
@@ -23,23 +19,25 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     LoopSummaryRef,
     LoopTermDescriptorRef,
     PcodeOpRef,
-    ReadonlyAccumulatorPhiCandidate,
     ReductionAccumulatorProof,
-    ResidueLoopCase,
     ReturnInfo,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+    ConditionSimplifier,
+    CountedLoopAccumulator,
+    CountedLoopGuard,
+    CountedLoopInduction,
+    CountedLoopUpdateCase,
+    ReadonlyAccumulatorPhiCandidate,
+    ResidueLoopCase,
     StateTransitionLoopModel,
     _reduce_expression_under_conditions,
     _runtime_conditions_signature,
     _runtime_expression_signature,
-    replace,
 )
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    Condition,
     ConditionSimplifier,
     CountedLoopAccumulator,
-    Expression,
-    PcodeOpRef,
-    ReturnInfo,
 )
 
 

@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
+from scripts.function_tracer_pcode.core import (
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     Condition,
+    CountedStateTransitionLoopSummaryRef,
+    Expression,
+    ExpressionType,
+    LoopCaseRef,
+    LoopSideEffectProfileRef,
+    ReturnInfo,
+    STATE_TRANSITION_LOOP_COUNT_OPCODE,
+    StateTransitionLoopSummaryRef,
+)
+from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionSMTOracle,
     ConditionSimplifier,
     CountedLoopAccumulator,
@@ -13,16 +23,8 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     CountedLoopInduction,
     CountedLoopUpdateCase,
     CountedStateTransitionLoopModel,
-    CountedStateTransitionLoopSummaryRef,
-    Expression,
-    ExpressionType,
-    LoopCaseRef,
-    LoopSideEffectProfileRef,
     ResidueLoopCase,
-    ReturnInfo,
-    STATE_TRANSITION_LOOP_COUNT_OPCODE,
     StateTransitionLoopModel,
-    StateTransitionLoopSummaryRef,
     _UNSUPPORTED_STATE_TRANSITION_CONDITION,
     _reduce_expression_under_conditions,
     _runtime_conditions_signature,
@@ -30,9 +32,6 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
 )
 from typing import Any, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    Expression,
-    ExpressionType,
-    LoopSideEffectProfileRef,
     StateTransitionLoopModel,
 )
 
