@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core import (
 from scripts.function_tracer_pcode.core.signature import get_declared_type_size_bits
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseResult
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer
 from scripts.function_tracer_pcode.checker.result_factory import (
     create_context_error_result,
     create_context_unknown_result,
@@ -35,6 +36,8 @@ def analyze_and_check_with_analysis(
     from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
     start_time = time.time()
+    timer = AnalysisTimer()
+    checker._analysis_timer = timer
 
     checker._debug_print(f"Analyzing function '{ctx.function_name1}' in {ctx.binary1_name}...")
     analyzer1 = ReturnAnalyzer(
@@ -44,9 +47,11 @@ def analyze_and_check_with_analysis(
         enable_completed_recovery_proofs=getattr(checker, "enable_completed_recovery_proofs", True),
     )
     try:
-        analysis1 = analyzer1.analyze_function_by_name(
-            ctx.function_name1, ctx.decompile_timeout
+        analysis1 = timer.timed(
+            "function1",
+            lambda: analyzer1.analyze_function_by_name(ctx.function_name1, ctx.decompile_timeout),
         )
+        timer.record_analysis("function1", analysis1)
         if analysis1 is None:
             failure = analyzer1.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -83,9 +88,11 @@ def analyze_and_check_with_analysis(
         enable_completed_recovery_proofs=getattr(checker, "enable_completed_recovery_proofs", True),
     )
     try:
-        analysis2 = analyzer2.analyze_function_by_name(
-            ctx.function_name2, ctx.decompile_timeout
+        analysis2 = timer.timed(
+            "function2",
+            lambda: analyzer2.analyze_function_by_name(ctx.function_name2, ctx.decompile_timeout),
         )
+        timer.record_analysis("function2", analysis2)
         if analysis2 is None:
             failure = analyzer2.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -148,6 +155,7 @@ def analyze_and_check_with_analysis(
         original_signature1=ctx.original_signature1,
         original_signature2=ctx.original_signature2,
     )
+    _attach_analysis_diagnostics(checker, result)
 
     return analysis1, analysis2, result
 
@@ -259,10 +267,14 @@ def selective_reanalysis_and_check(
             checker._debug_print(
                 f"Fresh reanalysis requested for {binary_name} after signature-changing retry phase"
             )
-            fresh_analysis = analyzer.analyze_function_by_name(
-                function_name,
-                ctx.decompile_timeout,
+            side = "function1" if program is ctx.program1 else "function2"
+            timer = getattr(checker, "_analysis_timer", None) or AnalysisTimer()
+            checker._analysis_timer = timer
+            fresh_analysis = timer.timed(
+                side,
+                lambda: analyzer.analyze_function_by_name(function_name, ctx.decompile_timeout),
             )
+            timer.record_analysis(side, fresh_analysis)
             if fresh_analysis is None:
                 failure = analyzer.get_last_analysis_failure()
                 failure_status = getattr(failure, "status", None)
@@ -373,5 +385,14 @@ def selective_reanalysis_and_check(
         original_signature1=ctx.original_signature1,
         original_signature2=ctx.original_signature2,
     )
+    _attach_analysis_diagnostics(checker, result)
 
     return analysis1, analysis2, result
+
+
+def _attach_analysis_diagnostics(checker, result) -> None:
+    """解析時間と式サイズを結果に添付する（非署名の診断領域）。"""
+    timer = getattr(checker, "_analysis_timer", None)
+    if timer is None or result is None:
+        return
+    result.diagnostics = timer.snapshot()

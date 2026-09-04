@@ -103,6 +103,8 @@ class UnknownValidationSummary:
     operational_unknown_by_reason: Dict[str, int] = field(default_factory=dict)
     operational_unknown_by_class: Dict[str, int] = field(default_factory=dict)
     root_blocker_summary: Dict[str, Any] = field(default_factory=dict)
+    unknown_by_reason_detail: Dict[str, int] = field(default_factory=dict)
+    diagnostics_stats: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -110,6 +112,8 @@ class UnknownValidationSummary:
             "unknown_results": self.unknown_results,
             "unknown_units": self.unknown_units,
             "final_result_counts": dict(self.final_result_counts),
+            "unknown_by_reason_detail": dict(self.unknown_by_reason_detail),
+            "diagnostics_stats": dict(self.diagnostics_stats),
             "validation_unknown_unit_multiset": _tuple_multiset_to_dict(
                 self.validation_unknown_unit_multiset
             ),
@@ -210,10 +214,13 @@ def summarize_validation_unknowns(
     proof_backlog_by_action_status: Dict[str, int] = {}
     operational_unknown_by_reason: Dict[str, int] = {}
     operational_unknown_by_class: Dict[str, int] = {}
+    unknown_by_reason_detail: Dict[str, int] = {}
+    diagnostics_collector = _DiagnosticsCollector()
 
     for payload in selected_payloads:
         total_results += 1
         _inc(final_result_counts, _payload_final_result(payload))
+        diagnostics_collector.add(payload)
         if not _payload_is_unknown(payload):
             continue
         unknown_results += 1
@@ -226,9 +233,12 @@ def summarize_validation_unknowns(
                     UnknownReasonId.UNKNOWN,
                     stage=_payload_stage(payload),
                     pair_or_case=_payload_pair_or_case(payload),
+                    detail="result payload carries no unknown_reasons record",
                 ),
             )
         unknown_units += len(records)
+        for record in records:
+            _inc(unknown_by_reason_detail, _reason_detail_key(record))
 
         for record in extracted_records or records:
             _inc(
@@ -281,6 +291,8 @@ def summarize_validation_unknowns(
         operational_unknown_by_reason=operational_unknown_by_reason,
         operational_unknown_by_class=operational_unknown_by_class,
         root_blocker_summary=summarize_root_blockers(selected_payloads).to_dict(),
+        unknown_by_reason_detail=unknown_by_reason_detail,
+        diagnostics_stats=diagnostics_collector.snapshot(),
     )
 
 
@@ -495,6 +507,14 @@ def format_validation_unknown_summary(
             max_items=max_items,
         )
     _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent, max_items=max_items)
+    _append_count_block(
+        lines,
+        "UNKNOWN by reason detail",
+        summary.unknown_by_reason_detail,
+        indent,
+        max_items=max_items,
+    )
+    _append_diagnostics_block(lines, summary.diagnostics_stats, indent)
     _append_count_block(
         lines,
         "UNKNOWN by decision_effect",
@@ -1182,6 +1202,87 @@ def _format_delta(value: int) -> str:
     if value > 0:
         return f"+{value}"
     return str(value)
+
+
+def _reason_detail_key(record: Any) -> str:
+    """`reason_id | detail` aggregation key (detail-less records are marked)."""
+    detail = getattr(record, "detail", None)
+    return f"{record.reason_id} | {detail if detail else '(no detail)'}"
+
+
+class _DiagnosticsCollector:
+    """Aggregate the non-signed `diagnostics` block across result payloads."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.total_seconds: list = []
+        self.analysis_seconds: list = []
+        self.solver_seconds: list = []
+        self.node_counts: list = []
+        self.max_depths: list = []
+
+    def add(self, payload: Mapping[str, Any]) -> None:
+        diagnostics = payload.get("diagnostics") if isinstance(payload, Mapping) else None
+        if not isinstance(diagnostics, Mapping):
+            return
+        self.count += 1
+        timings = diagnostics.get("timings") or {}
+        self._push(self.total_seconds, timings.get("total_seconds"))
+        analysis = timings.get("analysis_seconds") or {}
+        if analysis:
+            self._push(self.analysis_seconds, sum(float(v or 0) for v in analysis.values()))
+        self._push(self.solver_seconds, timings.get("solver_seconds"))
+        for stats in (diagnostics.get("expressions") or {}).values():
+            self._push(self.node_counts, (stats or {}).get("node_count"))
+            self._push(self.max_depths, (stats or {}).get("max_depth"))
+
+    @staticmethod
+    def _push(bucket: list, value: Any) -> None:
+        try:
+            if value is not None:
+                bucket.append(float(value))
+        except (TypeError, ValueError):
+            return
+
+    @staticmethod
+    def _stats(values: list) -> Dict[str, float]:
+        if not values:
+            return {}
+        return {
+            "count": len(values),
+            "mean": round(sum(values) / len(values), 6),
+            "max": round(max(values), 6),
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        if not self.count:
+            return {}
+        return {
+            "results_with_diagnostics": self.count,
+            "total_seconds": self._stats(self.total_seconds),
+            "analysis_seconds": self._stats(self.analysis_seconds),
+            "solver_seconds": self._stats(self.solver_seconds),
+            "expression_node_count": self._stats(self.node_counts),
+            "expression_max_depth": self._stats(self.max_depths),
+        }
+
+
+def _append_diagnostics_block(lines: list, stats: Mapping[str, Any], indent: str) -> None:
+    lines.append(f"{indent}  Diagnostics (per-result timings / expression size):")
+    if not stats:
+        lines.append(f"{indent}    (none)")
+        return
+    lines.append(f"{indent}    results with diagnostics: {stats.get('results_with_diagnostics', 0)}")
+    for key in (
+        "total_seconds", "analysis_seconds", "solver_seconds",
+        "expression_node_count", "expression_max_depth",
+    ):
+        item = stats.get(key) or {}
+        if item:
+            lines.append(
+                f"{indent}    {key}: mean={item.get('mean')} max={item.get('max')} (n={item.get('count')})"
+            )
+
 
 
 if __name__ == "__main__":

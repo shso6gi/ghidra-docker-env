@@ -124,6 +124,8 @@ class EquivalenceResult:
     canonical_result_finalization_bundle: Optional[Mapping[str, Any]] = field(
         default=None, repr=False, compare=False
     )
+    # 非署名の診断（Issue #17）: 解析時間・式サイズ。to_dict で結果統計と合成する。
+    diagnostics: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -250,6 +252,9 @@ class EquivalenceResult:
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
+        from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
+
+        result["diagnostics"] = result_diagnostics_payload(self)
         if self.canonical_result_finalization_bundle is not None:
             result["canonical_result_finalization_bundle"] = dict(
                 self.canonical_result_finalization_bundle

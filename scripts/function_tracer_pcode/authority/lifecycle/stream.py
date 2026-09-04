@@ -685,6 +685,11 @@ class EventRecorder:
     def event_count(self) -> int:
         return len(self._events)
 
+    @property
+    def recorded_events(self) -> Tuple[RecordedEvent, ...]:
+        """Read-only view of the events recorded so far (diagnostics only)."""
+        return tuple(self._events)
+
     def append(self, intent: EventIntent) -> RecordedEvent:
         return self.append_many((intent,))[0]
 

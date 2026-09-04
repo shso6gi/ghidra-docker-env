@@ -428,6 +428,13 @@ def test_real_sat_producer_activation_issues_factory_owned_projection():
     assert result.legacy_unknown_reasons[0].typed_cause_key["authority_class"] == (
         "LEGACY_DIAGNOSTIC"
     )
+    # Issue #17: the projected reason is enriched from its cause occurrence and
+    # the legacy record instead of carrying only digests.
+    projected = result.unknown_reasons[0]
+    assert projected.detail
+    assert projected.object_target_key is not None
+    assert projected.object_evidence["cause"]["missing_semantic_fact"] is not None
+    assert projected.object_evidence["legacy"][0]["evidence_refs"] == ["analysis_safety_gap"]
 
 
 def test_discovered_activation_rejects_reason_owned_by_another_sat_site():

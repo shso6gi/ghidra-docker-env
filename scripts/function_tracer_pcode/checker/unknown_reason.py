@@ -1477,11 +1477,110 @@ def make_internal_v2_reason_diagnostic(
     )
 
 
+def build_projection_diagnostic(
+    receipt: Any,
+    *,
+    cause_occurrence: Any = None,
+    legacy_reasons: Sequence[Any] = (),
+    function_names: Mapping[str, Any] = None,
+    binary_names: Mapping[str, Any] = None,
+) -> Dict[str, Any]:
+    """Human-readable, machine-aggregatable facts for one projected v2 cause.
+
+    The projected record only carried digests (Issue #17).  This collects, in
+    priority order, the typed cause occurrence (what semantic fact is missing,
+    on which target kind and scope, from which producer site), the matching
+    legacy strategy reason (site / case pair / free-text detail), and the
+    function/binary names of the compared pair.  It is diagnostic data, not
+    authority: no digest or receipt is derived from it.
+    """
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+
+    diagnostic: Dict[str, Any] = {
+        "schema": "unknown-reason-diagnostic-v1",
+        "reason_id": getattr(receipt, "reason_id", None),
+        "functions": {
+            "function1": (function_names or {}).get("function1"),
+            "function2": (function_names or {}).get("function2"),
+        },
+        "binaries": {
+            "binary1": (binary_names or {}).get("binary1"),
+            "binary2": (binary_names or {}).get("binary2"),
+        },
+    }
+    if cause_occurrence is not None:
+        cause_id = getattr(cause_occurrence, "cause_id", None)
+        scope = getattr(cause_occurrence, "identity_scope", None)
+        diagnostic["cause"] = {
+            "occurrence_id": getattr(cause_occurrence, "occurrence_id", None),
+            "target_kind": getattr(cause_occurrence, "target_kind", None),
+            "identity_scope": getattr(scope, "value", scope),
+            "producer_id": getattr(cause_occurrence, "producer_id", None),
+            "evidence_kind": getattr(cause_occurrence, "evidence_kind", None),
+            "evidence_refs": list(getattr(cause_occurrence, "evidence_refs", ()) or ()),
+            "canonical_target_key": canonical_value(
+                getattr(cause_id, "canonical_target_key", None)
+            ),
+            "missing_semantic_fact": canonical_value(
+                getattr(cause_id, "missing_semantic_fact", None)
+            ),
+        }
+    legacy_matches = []
+    for record in legacy_reasons or ():
+        if getattr(record, "reason_id", None) != diagnostic["reason_id"]:
+            continue
+        legacy_matches.append({
+            "stage": getattr(record, "stage", None),
+            "pair_or_case": getattr(record, "pair_or_case", None),
+            "detail": getattr(record, "detail", None),
+            "evidence_refs": list(getattr(record, "evidence_refs", ()) or ()),
+            "object_target_key": canonical_value(getattr(record, "object_target_key", None)),
+        })
+    if legacy_matches:
+        diagnostic["legacy"] = legacy_matches
+    return diagnostic
+
+
+def format_projection_detail(diagnostic: Mapping[str, Any]) -> str:
+    """One-line summary: functions, cause target/scope, missing fact, legacy detail."""
+    functions = diagnostic.get("functions") or {}
+    parts = [
+        f"{functions.get('function1') or '?'} vs {functions.get('function2') or '?'}"
+    ]
+    cause = diagnostic.get("cause") or {}
+    if cause:
+        parts.append(
+            f"{cause.get('producer_id') or 'producer?'}/{cause.get('target_kind') or 'target?'}"
+            f" ({cause.get('identity_scope') or 'scope?'})"
+        )
+        missing = cause.get("missing_semantic_fact")
+        if missing is not None:
+            parts.append(f"missing {_flatten_fact(missing)}")
+    legacy = diagnostic.get("legacy") or ()
+    for item in legacy[:2]:
+        site = item.get("pair_or_case")
+        detail = item.get("detail")
+        if site:
+            parts.append(f"at {site}")
+        if detail:
+            parts.append(str(detail))
+    return "; ".join(parts)
+
+
+def _flatten_fact(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "/".join(_flatten_fact(item) for item in value)
+    if isinstance(value, Mapping):
+        return ",".join(f"{key}={_flatten_fact(item)}" for key, item in value.items())
+    return str(value)
+
+
 def make_production_unknown_reason(
     projection_receipt: Any,
     *,
     projection_factory: Any,
     detail: Optional[str] = None,
+    diagnostic: Optional[Mapping[str, Any]] = None,
 ) -> UnknownReasonRecord:
     """Project one factory-owned active v2 cause to compatibility data."""
 
@@ -1535,8 +1634,24 @@ def make_production_unknown_reason(
             "receipt_digest": receipt.receipt_digest,
         },
         target_regression=receipt.reason_id,
-        detail=detail,
+        detail=detail if detail is not None else (
+            format_projection_detail(diagnostic) if diagnostic else None
+        ),
+        pair_or_case=_first_legacy_field(diagnostic, "pair_or_case"),
+        object_target_key=(
+            (diagnostic.get("cause") or {}).get("canonical_target_key")
+            if diagnostic else None
+        ),
+        object_evidence=dict(diagnostic) if diagnostic else None,
     )
+
+
+def _first_legacy_field(diagnostic: Optional[Mapping[str, Any]], field_name: str) -> Any:
+    for item in (diagnostic or {}).get("legacy") or ():
+        value = item.get(field_name)
+        if value is not None:
+            return value
+    return None
 
 
 def coerce_unknown_reason_record(value: Any) -> UnknownReasonRecord:
