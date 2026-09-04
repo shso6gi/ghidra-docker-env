@@ -641,25 +641,28 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         "Monolithic UNSAT accepted after completed call-effect summary proof "
                         f"({', '.join(equivalence_blocking_reasons)})"
                     )
-            if final_is_equivalent is False and sat_unsafety_reasons:
+            # Evidence binding of the monolithic witness: whole-surface replay
+            # formula digest, model digest, replay contract digest and the SAT
+            # region.  Every replay/unsafety proof of this witness must carry
+            # it and completion verifies it (Issue #39); without typed
+            # evidence no proof can be recorded and the SAT stays UNKNOWN.
+            sat_counterexample_binding = None
+            if final_is_equivalent is False and typed_counterexample_evidence is not None:
                 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                     SatCounterexampleEvidenceBinding,
                 )
-                sat_counterexample_binding = (
-                    SatCounterexampleEvidenceBinding(
-                        typed_counterexample_evidence.legacy_replay_receipt
-                        .contract.formula_digest,
-                        typed_counterexample_evidence.model_digest,
-                        typed_counterexample_evidence.legacy_replay_receipt
-                        .contract.contract_digest,
-                        (
-                            "monolithic",
-                            typed_counterexample_evidence.sat_region_id,
-                        ),
-                    )
-                    if typed_counterexample_evidence is not None
-                    else None
+                sat_counterexample_binding = SatCounterexampleEvidenceBinding(
+                    typed_counterexample_evidence.legacy_replay_receipt
+                    .contract.formula_digest,
+                    typed_counterexample_evidence.model_digest,
+                    typed_counterexample_evidence.legacy_replay_receipt
+                    .contract.contract_digest,
+                    (
+                        "monolithic",
+                        typed_counterexample_evidence.sat_region_id,
+                    ),
                 )
+            if final_is_equivalent is False and sat_unsafety_reasons:
                 sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
                     sat_unsafety_reasons,
                     analysis1,
@@ -670,11 +673,12 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     stage="S_MONOLITHIC_FALLBACK",
                     counterexample_binding=sat_counterexample_binding,
                 )
-                if not self._sat_unsafety_resolution_proof_is_complete(
+                if sat_counterexample_binding is None or not self._sat_unsafety_resolution_proof_is_complete(
                     sat_unsafety_reason,
                     analysis1,
                     analysis2,
                     current_counterexample_raw=counterexample_raw,
+                    expected_binding=sat_counterexample_binding,
                 ):
                     # Keep the SAT candidate alive until Monolithic's own
                     # whole-surface replay and typed gate receipt have had a
@@ -800,12 +804,14 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     case2=None,
                     pair_id="monolithic",
                     stage="S_MONOLITHIC_FALLBACK",
+                    counterexample_binding=sat_counterexample_binding,
                 )
-                if not self._sat_unsafety_resolution_proof_is_complete(
+                if sat_counterexample_binding is None or not self._sat_unsafety_resolution_proof_is_complete(
                     sat_replay_reason,
                     analysis1,
                     analysis2,
                     current_counterexample_raw=counterexample_raw,
+                    expected_binding=sat_counterexample_binding,
                 ):
                     unknown_reasons.append(sat_replay_reason)
                     self._debug_print(
@@ -1034,8 +1040,10 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         strategy_result.is_equivalent is False
                         and counterexample_safety_receipt is not None
                         and counterexample_raw is not None
+                        and sat_counterexample_binding is not None
                     ):
                         try:
+                            receipt_digest = str(counterexample_safety_receipt.receipt_digest)
                             self._record_completed_sat_counterexample_replay_proof(
                                 sat_unsafety_reason,
                                 analysis1,
@@ -1047,8 +1055,10 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                                 ),
                                 replay_source=(
                                     "monolithic-counterexample-safety-receipt:"
-                                    f"{counterexample_safety_receipt.receipt_digest}"
+                                    f"{receipt_digest}"
                                 ),
+                                evidence_binding=sat_counterexample_binding,
+                                execution_receipt_digest=receipt_digest,
                             )
                             sat_unsafety_resolution_pending = not (
                                 self._sat_unsafety_resolution_proof_is_complete(
@@ -1056,6 +1066,8 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                                     analysis1,
                                     analysis2,
                                     current_counterexample_raw=counterexample_raw,
+                                    expected_binding=sat_counterexample_binding,
+                                    expected_execution_receipt_digest=receipt_digest,
                                 )
                             )
                         except (RuntimeError, ValueError, TypeError, AttributeError):

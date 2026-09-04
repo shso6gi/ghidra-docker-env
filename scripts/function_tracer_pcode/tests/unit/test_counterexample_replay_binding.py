@@ -289,3 +289,35 @@ def test_pairwise_sat_on_pair_with_blocked_width_observation_is_unknown(monkeypa
     reason = result.unknown_reasons[0]
     assert reason.reason_id == "counterexample_analysis_safety_unproven"
     assert "function1:return_width_observation_blocked" in reason.evidence_refs
+
+
+def test_monolithic_reason_with_binding_only_completes_with_matching_bound_proof():
+    """Issue #39: the monolithic self-recorded proof carries the witness binding and
+    the safety-receipt digest; a proof for another witness does not complete it."""
+    from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+    strategy = MonolithicStrategy(Mock(), Mock(), debug=False)
+    analysis1, analysis2 = _analysis("f"), _analysis("f")
+    binding = _binding(pair=("monolithic", "region:0"))
+    reason = strategy._make_sat_unsafety_unknown_reason(
+        ("counterexample_replay_missing",), analysis1, analysis2,
+        case1=None, case2=None, pair_id="monolithic", stage="S_MONOLITHIC_FALLBACK",
+        counterexample_binding=binding,
+    )
+    model = {"x_1": 0, "x_2": 0}
+    strategy._record_completed_sat_counterexample_replay_proof(
+        reason, analysis1, analysis2, counterexample_raw=model, fixed_model_assertion_count=2,
+        replay_source="monolithic-counterexample-safety-receipt:" + "r" * 64,
+        evidence_binding=binding, execution_receipt_digest="r" * 64,
+    )
+    assert strategy._sat_unsafety_resolution_proof_is_complete(
+        reason, analysis1, analysis2, current_counterexample_raw=model,
+        expected_binding=binding, expected_execution_receipt_digest="r" * 64,
+    ) is True
+    assert strategy._sat_unsafety_resolution_proof_is_complete(
+        reason, analysis1, analysis2, current_counterexample_raw=model,
+        expected_binding=_binding(pair=("monolithic", "region:1")), expected_execution_receipt_digest="r" * 64,
+    ) is False
+    assert strategy._sat_unsafety_resolution_proof_is_complete(
+        reason, analysis1, analysis2, current_counterexample_raw=model,
+        expected_binding=binding, expected_execution_receipt_digest="s" * 64,
+    ) is False
