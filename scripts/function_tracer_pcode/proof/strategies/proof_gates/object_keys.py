@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Set, Tuple
+import hashlib
+import json
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, expression_provenance_key
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    FunctionReturnAnalysis,
-    Mapping,
     ParallelResult,
-    Sequence,
-    expression_provenance_key,
-    hashlib,
-    json,
 )
 
 

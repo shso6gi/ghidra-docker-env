@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
-from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    FunctionReturnAnalysis,
-    Mapping,
-)
+from typing import Any, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 
 
 def _impl__deterministic_function_identity(

@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    FunctionReturnAnalysis,
-    Mapping,
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
-)
-from typing import Any, Optional, Tuple
-from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
-    FunctionReturnAnalysis,
-    Mapping,
 )
 
 
