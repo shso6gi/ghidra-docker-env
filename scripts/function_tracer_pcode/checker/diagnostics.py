@@ -14,36 +14,50 @@ DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
 
 def expression_stats(analysis: Any) -> Dict[str, int]:
-    """戻り値式とガード条件の総ノード数・最大深さ・return case 数。"""
+    """戻り値式とガード条件の総ノード数・最大深さ・return case 数。
+
+    明示スタックによる反復走査（再帰しない）。深い式でも RecursionError を
+    起こさず、走査中に何か失敗しても診断は判定本体に影響しない（fail-open で
+    ``error`` を残す）。
+    """
     node_count = 0
     max_depth = 0
     seen: set = set()
-
-    def walk(expr: Any, depth: int) -> None:
-        nonlocal node_count, max_depth
-        if expr is None:
-            return
-        key = id(expr)
-        if key in seen:
-            return
-        seen.add(key)
-        node_count += 1
-        max_depth = max(max_depth, depth)
-        for child in getattr(expr, "operands", None) or ():
-            walk(child, depth + 1)
-        branches = getattr(expr, "value", None)
-        if isinstance(branches, (list, tuple)):
-            for item in branches:
-                if isinstance(item, tuple) and len(item) == 2:
-                    cond, value = item
-                    walk(getattr(cond, "expression", None), depth + 1)
-                    walk(value, depth + 1)
-
+    stack: list = []
     returns = tuple(getattr(analysis, "returns", ()) or ())
     for ret in returns:
-        walk(getattr(ret, "value", None), 1)
+        stack.append((getattr(ret, "value", None), 1))
         for cond in getattr(ret, "conditions", ()) or ():
-            walk(getattr(cond, "expression", None), 1)
+            stack.append((getattr(cond, "expression", None), 1))
+    try:
+        while stack:
+            expr, depth = stack.pop()
+            if expr is None:
+                continue
+            if depth > max_depth:
+                max_depth = depth
+            key = id(expr)
+            if key in seen:
+                # shared sub-expression: depth already accounted, do not re-expand
+                continue
+            seen.add(key)
+            node_count += 1
+            for child in getattr(expr, "operands", None) or ():
+                stack.append((child, depth + 1))
+            branches = getattr(expr, "value", None)
+            if isinstance(branches, (list, tuple)):
+                for item in branches:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        cond, value = item
+                        stack.append((getattr(cond, "expression", None), depth + 1))
+                        stack.append((value, depth + 1))
+    except Exception as exc:  # diagnostics never fail the verdict
+        return {
+            "return_case_count": len(returns),
+            "node_count": node_count,
+            "max_depth": max_depth,
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
     return {
         "return_case_count": len(returns),
         "node_count": node_count,
@@ -63,17 +77,28 @@ class AnalysisTimer:
         try:
             return run()
         finally:
-            self.seconds[side] = self.seconds.get(side, 0.0) + (time.perf_counter() - started)
+            try:
+                self.seconds[side] = self.seconds.get(side, 0.0) + (time.perf_counter() - started)
+            except Exception:
+                pass
 
     def record_analysis(self, side: str, analysis: Any) -> None:
-        if analysis is not None:
+        """Fail-open: a diagnostics failure must never surface to the caller."""
+        if analysis is None:
+            return
+        try:
             self.stats[side] = expression_stats(analysis)
+        except Exception as exc:
+            self.stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
-            "analysis_seconds": {side: round(value, 6) for side, value in self.seconds.items()},
-            "expressions": {side: dict(stats) for side, stats in self.stats.items()},
-        }
+        try:
+            return {
+                "analysis_seconds": {side: round(value, 6) for side, value in self.seconds.items()},
+                "expressions": {side: dict(stats) for side, stats in self.stats.items()},
+            }
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def _solver_rows(container: Any) -> Iterable[Any]:
@@ -94,7 +119,17 @@ def _elapsed(row: Any) -> float:
 
 
 def result_diagnostics_payload(result: Any) -> Dict[str, Any]:
-    """`EquivalenceResult.to_dict()` 用に、解析時の記録と結果の統計を合成する。"""
+    """`EquivalenceResult.to_dict()` 用に、解析時の記録と結果の統計を合成する。
+
+    診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す。
+    """
+    try:
+        return _result_diagnostics_payload(result)
+    except Exception as exc:
+        return {"schema": DIAGNOSTICS_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
     base = dict(getattr(result, "diagnostics", None) or {})
     attempts_out = []
     solver_seconds = 0.0

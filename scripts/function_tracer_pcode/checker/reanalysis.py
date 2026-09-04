@@ -395,4 +395,7 @@ def _attach_analysis_diagnostics(checker, result) -> None:
     timer = getattr(checker, "_analysis_timer", None)
     if timer is None or result is None:
         return
-    result.diagnostics = timer.snapshot()
+    try:
+        result.diagnostics = timer.snapshot()
+    except Exception:  # diagnostics never fail the verdict
+        return

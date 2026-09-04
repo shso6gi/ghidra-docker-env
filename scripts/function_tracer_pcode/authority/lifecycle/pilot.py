@@ -1264,21 +1264,31 @@ class ProductionDualWritePilotConnector:
                 "binary1": getattr(result, "binary1_name", None),
                 "binary2": getattr(result, "binary2_name", None),
             }
+            projection_receipts = tuple(
+                session.phase7_runtime_result.projection_receipts
+            )
+            projected_reason_counts: Dict[str, int] = {}
+            for receipt in projection_receipts:
+                projected_reason_counts[receipt.reason_id] = (
+                    projected_reason_counts.get(receipt.reason_id, 0) + 1
+                )
             result.unknown_reasons = [
                 make_production_unknown_reason(
                     receipt,
                     projection_factory=(
                         session.phase7_runtime_result.projection_factory
                     ),
-                    diagnostic=build_projection_diagnostic(
+                    diagnostic=_safe_projection_diagnostic(
+                        build_projection_diagnostic,
                         receipt,
                         cause_occurrence=occurrences.get(receipt.occurrence_id),
                         legacy_reasons=result.legacy_unknown_reasons,
                         function_names=function_names,
                         binary_names=binary_names,
+                        projected_reason_counts=projected_reason_counts,
                     ),
                 )
-                for receipt in session.phase7_runtime_result.projection_receipts
+                for receipt in projection_receipts
             ]
             result.unknown_reason_projection_mode = "V2_CANONICAL"
         stream = session.recorder.seal()
@@ -1507,3 +1517,15 @@ def _recorded_cause_occurrences(session: Any) -> Dict[str, Any]:
         if occurrence_id and occurrence_id not in occurrences:
             occurrences[occurrence_id] = occurrence
     return occurrences
+
+
+def _safe_projection_diagnostic(builder: Any, receipt: Any, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    """Diagnostics are best effort: a failure here must not touch the verdict."""
+    try:
+        return builder(receipt, **kwargs)
+    except Exception as exc:
+        return {
+            "schema": "unknown-reason-diagnostic-v1",
+            "reason_id": getattr(receipt, "reason_id", None),
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }

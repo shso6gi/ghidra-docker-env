@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     format_projection_detail,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.core import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     format_validation_unknown_summary,
     summarize_validation_unknowns,
@@ -92,7 +92,9 @@ def test_projection_diagnostic_carries_functions_cause_and_legacy_site():
         receipt, cause_occurrence=_occurrence(), legacy_reasons=[legacy],
         function_names={"function1": "snippet", "function2": "snippet"},
         binary_names={"binary1": "newV-arm64-clang-O0", "binary2": "newV-arm64-clang-O1"},
+        projected_reason_counts={UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value: 1},
     )
+    assert diagnostic["legacy_match"] == "unique"
     assert diagnostic["functions"] == {"function1": "snippet", "function2": "snippet"}
     assert diagnostic["cause"]["target_kind"] == "function_decompilation"
     assert diagnostic["cause"]["identity_scope"] == "UNARY"
@@ -124,3 +126,109 @@ def test_summary_aggregates_reason_detail_and_diagnostics_and_marks_generic_unkn
     assert summary.diagnostics_stats["expression_node_count"]["max"] == 10.0
     text = format_validation_unknown_summary(summary)
     assert "UNKNOWN by reason detail" in text and "Diagnostics (per-result timings" in text
+
+
+
+def _deep_chain(depth):
+    expr = Expression.constant(1, size=4)
+    for _ in range(depth):
+        expr = Expression(ExpressionType.UNARY_OP, operator="INT_2COMP", operands=[expr], size=4)
+    return expr
+
+
+def test_expression_stats_walks_ten_thousand_deep_expressions_without_recursion():
+    analysis = FunctionReturnAnalysis(
+        function_name="deep", entry_point="0x1000", parameters=[],
+        returns=[ReturnInfo("0x1010", _deep_chain(10_000), [])], return_type="int",
+    )
+    stats = expression_stats(analysis)
+    assert stats["node_count"] == 10_001
+    assert stats["max_depth"] == 10_001
+    assert "error" not in stats
+
+    timer = AnalysisTimer()
+    timer.record_analysis("function1", analysis)  # must not raise
+    assert timer.snapshot()["expressions"]["function1"]["node_count"] == 10_001
+
+
+def test_diagnostics_are_fail_open_and_never_raise():
+    class _Poisoned:
+        @property
+        def returns(self):
+            raise RuntimeError("diagnostics must not propagate this")
+
+    timer = AnalysisTimer()
+    timer.record_analysis("function1", _Poisoned())
+    assert timer.snapshot()["expressions"]["function1"]["error"].startswith("RuntimeError")
+
+    class _BrokenResult:
+        diagnostics = None
+        total_time = 1.0
+        pairwise_stats = None
+        stage_path = ()
+        solver_results = None
+
+        @property
+        def debug_trace(self):
+            raise ValueError("broken trace")
+
+    payload = result_diagnostics_payload(_BrokenResult())
+    assert payload["schema"] == "result-diagnostics-v1"
+    assert payload["error"].startswith("ValueError")
+
+
+def _legacy(reason_id, target, pair, detail):
+    return make_unknown_reason(
+        reason_id, stage="S_PAIRWISE", pair_or_case=pair, detail=detail,
+        evidence_refs=("analysis_safety_gap",), object_target_key=target,
+    )
+
+
+def _cause_with_target(target):
+    occurrence = _occurrence()
+    occurrence.cause_id = SimpleNamespace(canonical_target_key=target, missing_semantic_fact=("fact",))
+    occurrence.evidence_refs = ("analysis_safety_gap",)
+    return occurrence
+
+
+def test_legacy_reason_matching_is_exact_or_unique_never_a_sibling_site():
+    reason = UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS
+    site_a = ("counterexample_safety_gate", ("pair", "(0,1)"))
+    site_b = ("counterexample_safety_gate", ("pair", "(2,3)"))
+    legacy = [
+        _legacy(reason, site_a, "(0,1)", "site A detail"),
+        _legacy(reason, site_b, "(2,3)", "site B detail"),
+    ]
+    receipt = SimpleNamespace(reason_id=reason.value, occurrence_id="occ-1")
+    names = {"function1": "f", "function2": "f"}
+
+    # Exact: the cause target equals site B's object target key -> only site B.
+    exact = build_projection_diagnostic(
+        receipt, cause_occurrence=_cause_with_target(site_b), legacy_reasons=legacy,
+        function_names=names, projected_reason_counts={reason.value: 2},
+    )
+    assert exact["legacy_match"] == "exact"
+    assert [item["pair_or_case"] for item in exact["legacy"]] == ["(2,3)"]
+    assert "site A detail" not in format_projection_detail(exact)
+
+    # Ambiguous: two candidate sites, cause target matches neither -> no legacy attached.
+    ambiguous = build_projection_diagnostic(
+        receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy,
+        function_names=names, projected_reason_counts={reason.value: 2},
+    )
+    assert "legacy" not in ambiguous
+    assert "site" not in format_projection_detail(ambiguous)
+
+    # Unique 1:1: one legacy record and one projected cause for the reason.
+    unique = build_projection_diagnostic(
+        receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy[:1],
+        function_names=names, projected_reason_counts={reason.value: 1},
+    )
+    assert unique["legacy_match"] == "unique"
+
+    # One legacy record but two projected causes: still ambiguous.
+    not_unique = build_projection_diagnostic(
+        receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy[:1],
+        function_names=names, projected_reason_counts={reason.value: 2},
+    )
+    assert "legacy" not in not_unique
