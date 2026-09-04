@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
-    ParameterInfo,
     ReadonlyReductionRef,
+    compare_loop_summaries,
+)
+from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    ParameterInfo,
     ReturnCase,
     _RuntimeShortcutDecision,
-    compare_loop_summaries,
 )
 
 def _impl__intrinsic_runtime_values_equivalent(

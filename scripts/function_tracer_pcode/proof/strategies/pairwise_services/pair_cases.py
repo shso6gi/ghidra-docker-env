@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionSMTOracle,
-    ConditionSimplifier,
     Expression,
-    ExpressionSafetyChecker,
     ExpressionType,
     FunctionReturnAnalysis,
+)
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    ConditionSMTOracle,
+    ConditionSimplifier,
+    ExpressionSafetyChecker,
     NormalizationContext,
     NormalizationRuleApplication,
-    ParallelResult,
     QueryResult,
     ReturnCase,
     SignFacts,
-    SolverResult,
-    SolverStatus,
     StrategyResult,
     UnknownReasonId,
     are_structurally_equivalent,
     build_canonical_return_observation_query,
-    expression_smt_bit_width,
     extract_return_cases,
     extract_upper_bound_facts,
     get_structural_summary,

@@ -37,23 +37,22 @@ from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers impo
     validate_readonly_identity_candidate,
     validate_runtime_reduction_candidate,
 )
+import time
+from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.smt import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Expression,
     ExpressionSafetyChecker,
-    FunctionReturnAnalysis,
     QueryResult,
     ReturnCase,
-    SolverStatus,
     StrategyResult,
     UnknownReasonId,
-    Z3Solver,
     _PendingLoopSummaryPair,
     align_return_value_extension_surfaces,
     build_symbol_replacer,
     infer_parameter_semantics,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
-    time,
 )
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     register_builtin_receipt_executor,

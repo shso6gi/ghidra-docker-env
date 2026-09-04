@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+import json
+from scripts.function_tracer_pcode.core import Condition, ExpressionType, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Condition,
-    ExpressionType,
-    FunctionReturnAnalysis,
     ReturnCase,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
     _UnresolvedDeferredCallLowering,
-    expression_contains_unsupported_smt_ops,
-    expression_smt_bit_width,
-    json,
 )
 
 def _impl__unresolved_expression_object_target_key(
