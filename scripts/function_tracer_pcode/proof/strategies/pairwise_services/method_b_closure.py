@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import CountedLoopSummaryRef, FunctionReturnAnalysis, ReadonlyReductionRef
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    CountedLoopSummaryRef,
-    FunctionReturnAnalysis,
-    ReadonlyReductionRef,
     ReturnCase,
     UnknownRecoveryProofKind,
     _ExactReadonlyReductionProof,

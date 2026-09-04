@@ -1,46 +1,13 @@
 """Shared dependencies for PairwiseStrategy services."""
 
-from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-import hashlib
-import json
-import time
-from scripts.function_tracer_pcode.core import (
-    COUNTED_LOOP_SUM_OPCODE,
-    COUNTED_STATE_TRANSITION_VALUE_OPCODE,
-    Condition,
-    CountedStateTransitionLoopSummaryRef,
-    CountedLoopSummaryRef,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    LoopSummaryRef,
-    LoopTermDescriptorRef,
-    LoopSummaryComparisonResult,
-    ReadonlyReductionRef,
-    ReadonlyReductionTermRef,
-    StorageInfo,
-    compare_loop_summaries,
-)
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
+from scripts.function_tracer_pcode.core import ReadonlyReductionTermRef
 from scripts.function_tracer_pcode.core.runtime_refs import _loop_summary_term_at_index
 from scripts.function_tracer_pcode.analysis.effects.summary import canonicalize_location
-from scripts.function_tracer_pcode.core.render_smt import (
-    collect_float_predicate_smt_declarations,
-    collect_intrinsic_smt_declarations,
-    collect_unknown_smt_declarations,
-    expression_contains_unsupported_smt_ops,
-    expression_node_has_unsupported_smt_ops,
-    expression_uses_smt_float_theory,
-    expression_uses_smt_uf,
-    expression_smt_bit_width,
-    smt_logic_name,
-    _counted_loop_sum_has_exact_lowering,
-)
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.base import CheckStrategy, StrategyResult
 from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.proof.strategies.pairwise_normalization import (
@@ -214,4 +181,4 @@ class _PendingLoopSummaryPair:
     right_case: ReturnCase
     reason: str
 
-__all__ = ('Any', 'COUNTED_LOOP_SUM_OPCODE', 'COUNTED_STATE_TRANSITION_VALUE_OPCODE', 'CheckStrategy', 'Condition', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'CountedLoopSummaryRef', 'CountedStateTransitionLoopSummaryRef', 'Dict', 'Expression', 'ExpressionSafetyChecker', 'ExpressionType', 'FunctionReturnAnalysis', 'List', 'LoopSummaryComparisonResult', 'LoopSummaryRef', 'LoopTermDescriptorRef', 'Mapping', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'Optional', 'ParallelResult', 'ParameterInfo', 'QueryResult', 'ReadonlyReductionRef', 'ReadonlyReductionTermRef', 'ReturnCase', 'Sequence', 'SignFacts', 'SolverResult', 'SolverStatus', 'StorageInfo', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'Z3Solver', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', '_counted_loop_sum_has_exact_lowering', '_loop_summary_term_at_index', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_parameter_semantic_constraints', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'collect_float_predicate_smt_declarations', 'collect_intrinsic_smt_declarations', 'collect_unknown_smt_declarations', 'compare_loop_summaries', 'contains_udiv', 'dataclass', 'expression_contains_unsupported_smt_ops', 'expression_node_has_unsupported_smt_ops', 'expression_smt_bit_width', 'expression_uses_smt_float_theory', 'expression_uses_smt_uf', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'hashlib', 'infer_parameter_semantics', 'json', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'replace', 'save_unknown_query', 'smt_logic_name', 'solve_query_internal', 'solve_query_twostage', 'time', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')
+__all__ = ('CheckStrategy', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'ExpressionSafetyChecker', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'ParameterInfo', 'QueryResult', 'ReturnCase', 'SignFacts', 'StrategyResult', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_parameter_semantic_constraints', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'contains_udiv', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'infer_parameter_semantics', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'save_unknown_query', 'solve_query_internal', 'solve_query_twostage', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')

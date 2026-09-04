@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import Expression, ExpressionType, StorageInfo
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Expression,
-    ExpressionType,
-    Mapping,
     ParameterInfo,
-    StorageInfo,
-    expression_smt_bit_width,
 )
 
 

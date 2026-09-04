@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.smt import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Condition,
     ConditionSMTOracle,
     ConditionSimplifier,
-    Expression,
-    ExpressionType,
     ReturnCase,
-    SolverStatus,
-    Z3Solver,
-    expression_smt_bit_width,
 )
 
 

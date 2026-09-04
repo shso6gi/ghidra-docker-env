@@ -3,42 +3,36 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+import hashlib
+import json
+from dataclasses import replace
+from scripts.function_tracer_pcode.core import (
     COUNTED_LOOP_SUM_OPCODE,
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     Condition,
-    ConditionNormalizer,
     CountedLoopSummaryRef,
     CountedStateTransitionLoopSummaryRef,
     Expression,
     ExpressionType,
     LoopSummaryComparisonResult,
     LoopSummaryRef,
-    ParameterInfo,
+    LoopTermDescriptorRef,
     ReadonlyReductionRef,
+    compare_loop_summaries,
+)
+from scripts.function_tracer_pcode.core.render_smt import _counted_loop_sum_has_exact_lowering, expression_smt_bit_width
+from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    ConditionNormalizer,
+    ParameterInfo,
     ReturnCase,
     UnknownReasonId,
     _RuntimeShortcutDecision,
-    _counted_loop_sum_has_exact_lowering,
-    compare_loop_summaries,
-    expression_smt_bit_width,
-    hashlib,
-    json,
     parameter_identity_key_from_expression,
 )
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Condition,
-    CountedLoopSummaryRef,
-    Expression,
-    ExpressionType,
-    LoopSummaryRef,
-    LoopTermDescriptorRef,
     ReturnCase,
     _PendingLoopSummaryPair,
-    compare_loop_summaries,
-    expression_smt_bit_width,
-    replace,
 )
 
 

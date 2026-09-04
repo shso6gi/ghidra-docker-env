@@ -14,11 +14,11 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services import (
     runtime_shortcut as _svc_runtime_shortcut,
     unresolved_lowering as _svc_unresolved_lowering,
 )
+from typing import Optional
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     CheckStrategy,
-    FunctionReturnAnalysis,
     NormalizationSettings,
-    Optional,
 )
 # Re-exported for modules and tests that import these names from here.
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (

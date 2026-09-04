@@ -2,35 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core import (
     Condition,
-    ConditionSMTOracle,
-    ConditionSimplifier,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    Mapping,
-    ParameterInfo,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
+)
+from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    ConditionSMTOracle,
+    ConditionSimplifier,
+    ParameterInfo,
     ReturnCase,
     UnknownReasonId,
     _ExactReadonlyReductionProof,
     _ReadonlyLoopSummaryProofAdapter,
     _RuntimeShortcutDecision,
     build_unknown_recovery_actions,
-    expression_smt_bit_width,
     parameter_identity_key_from_expression,
 )
 from typing import Any, Dict, List, Optional, Sequence
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    Expression,
-    ExpressionType,
-    ReadonlyReductionTermRef,
     ReturnCase,
     canonicalize_location,
-    expression_smt_bit_width,
 )
 
 
