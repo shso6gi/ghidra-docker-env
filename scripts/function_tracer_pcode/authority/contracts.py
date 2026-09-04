@@ -86,7 +86,10 @@ def assert_deep_immutable(value: Any, path: str = "$") -> None:
         # str/int/float/bool のサブクラス（JPype の JInt など）も不変。
         return
     if isinstance(value, MappingProxyType):
+        # キーも検査する: hashable でも可変な独自オブジェクトをキーに持つ
+        # mapping は封印後に内容が変わり得るので、キャッシュ対象にしない。
         for key, child in value.items():
+            assert_deep_immutable(key, f"{path}.<key>")
             assert_deep_immutable(child, f"{path}.{key}")
         return
     if type(value) is tuple:

@@ -253,3 +253,59 @@ def test_immutable_primitive_subclasses_are_accepted():
     assert_deep_immutable(key)
     registry = ValidatedOnceRegistry()
     assert registry.mark(key) is True
+
+
+# ---- mapping keys must be deep-immutable too ----
+
+class _MutableKey:
+    """Hashable (by identity) but mutable: a valid dict key whose content
+    can change after sealing."""
+
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+
+def test_mapping_with_string_keys_is_cacheable():
+    @dataclass(frozen=True)
+    class _Holder:
+        payload: object
+
+    frozen = freeze_authority_value({"b": 1, "a": ("x", 2)})
+    assert_deep_immutable(frozen)
+    # (a bare mappingproxy cannot be weakly referenced; sealed objects are
+    # frozen dataclasses holding it)
+    assert ValidatedOnceRegistry().mark(_Holder(frozen)) is True
+
+
+def test_mapping_with_mutable_object_key_is_rejected_and_not_cached():
+    mutable_key = _MutableKey("k")
+    proxy = MappingProxyType({mutable_key: "v"})
+    with pytest.raises(TypeError, match=r"\$\.<key>"):
+        assert_deep_immutable(proxy)
+
+    @dataclass(frozen=True)
+    class _Holder:
+        payload: object
+
+    holder = _Holder(proxy)
+    registry = ValidatedOnceRegistry()
+    assert registry.mark(holder) is False
+    assert not registry.is_validated(holder)
+    # freeze_authority_value keeps keys as they are (no key rewriting), so the
+    # object stays uncacheable rather than silently changing meaning.
+    refrozen = freeze_authority_value({mutable_key: "v"})
+    assert list(refrozen)[0] is mutable_key
+
+
+def test_key_check_keeps_existing_digests():
+    receipt = {"query_digest": "q", "elapsed_ms": 3, "nested": {"k": [1, 2]}}
+    expected = authority_digest(receipt)
+    frozen = freeze_authority_value(receipt)
+    assert_deep_immutable(frozen)
+    assert authority_digest(frozen) == expected
