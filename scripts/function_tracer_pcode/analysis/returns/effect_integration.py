@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.runtime_refs import PcodeBlockRef, PcodeOpRef, PostStateValueRef
 from scripts.function_tracer_pcode.core.structural import StructuralKey
+from scripts.function_tracer_pcode.analysis.returns.region_facts import input_is_nondata_operand
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     EffectSummary,
@@ -220,7 +221,7 @@ def _impl__build_function_control_effect_profile(
                 except Exception:
                     region_identity_complete = False
                     continue
-                input_key, input_status = self._region_live_in_key(
+                input_key, input_status = self._region_facts.live_in_key(
                     input_varnode,
                     mnemonic=mnemonic,
                     input_index=input_index,
@@ -267,7 +268,7 @@ def _impl__build_function_control_effect_profile(
             if mnemonic == "RETURN":
                 saw_return = True
                 for input_index in range(max(0, num_inputs)):
-                    if self._region_input_is_nondata_operand(mnemonic, input_index):
+                    if input_is_nondata_operand(mnemonic, input_index):
                         continue
                     try:
                         return_input = op.getInput(input_index)
