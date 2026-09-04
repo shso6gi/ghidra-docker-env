@@ -2,12 +2,6 @@
 """Compatibility facade for CheckStrategy."""
 
 from scripts.function_tracer_pcode.proof.strategies.proof_gates import (
-    call_effect as _call_effect,
-    function_identity as _function_identity,
-    target_specificity as _target_specificity,
-    object_keys as _object_keys,
-    blocking_reasons as _blocking_reasons,
-    call_effect as _svc_call_effect,
     call_effect as _svc_call_effect,
     recovery as _svc_recovery,
     return_coverage as _svc_return_coverage,
@@ -151,7 +145,7 @@ class CheckStrategy(ABC):
         pass
 
     # ---- service implementations (bound explicitly; see <pkg>/*.py) ----
-    # proof_gates.call_effect_1
+    # proof_gates.call_effect
     _analysis_for_call_effect_object_target = staticmethod(_svc_call_effect._impl__analysis_for_call_effect_object_target)
     _bounded_call_refinement_content_is_complete = _svc_call_effect._impl__bounded_call_refinement_content_is_complete
     _bounded_call_refinement_evidence_for_call_argument_target = _svc_call_effect._impl__bounded_call_refinement_evidence_for_call_argument_target
@@ -212,7 +206,7 @@ class CheckStrategy(ABC):
     _unsupported_call_effects_semantically_match = _svc_call_effect._impl__unsupported_call_effects_semantically_match
     _unsupported_call_output_use_fingerprint = _svc_call_effect._impl__unsupported_call_output_use_fingerprint
     _validated_call_effect_blocker_selected_candidate = classmethod(_svc_call_effect._impl__validated_call_effect_blocker_selected_candidate)
-    # proof_gates.call_effect_2
+    # proof_gates.call_effect (continued)
     _analysis_has_active_call_effect_proof_blockers = classmethod(_svc_call_effect._impl__analysis_has_active_call_effect_proof_blockers)
     _call_argument_evidence_object_key = _svc_call_effect._impl__call_argument_evidence_object_key
     _call_effect_blocking_object_target_key = _svc_call_effect._impl__call_effect_blocking_object_target_key

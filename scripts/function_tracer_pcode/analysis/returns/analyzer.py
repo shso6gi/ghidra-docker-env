@@ -3,59 +3,16 @@
 from contextlib import contextmanager
 
 from scripts.function_tracer_pcode.analysis.returns import (
-    return_extraction as _return_extraction,
-    control_recovery as _control_recovery,
-    call_recovery as _call_recovery,
-    local_values as _local_values,
-    placeholder_algebra as _placeholder_algebra,
-    phi_origins as _phi_origins,
-    stack_protector as _stack_protector,
-    divergence_proofs as _divergence_proofs,
-    region_facts as _region_facts,
-    analyze_function as _analyze_function,
-    condition_logic as _condition_logic,
-    expression_cases as _expression_cases,
-    pcode_sites as _pcode_sites,
-    parameters as _parameters,
-    lifecycle as _lifecycle,
     call_recovery as _svc_call_recovery,
-    call_recovery as _svc_call_recovery,
-    control_recovery as _svc_control_recovery,
     control_recovery as _svc_control_recovery,
     effect_integration as _svc_effect_integration,
     lifecycle as _svc_lifecycle,
-    return_extraction as _svc_return_extraction,
     return_extraction as _svc_return_extraction,
     return_normalization as _svc_return_normalization,
     analyze_function as _svc_analyze_function,
     condition_logic as _svc_condition_logic,
     divergence_proofs as _svc_divergence_proofs,
     expression_cases as _svc_expression_cases,
-    lifecycle as _svc_lifecycle,
-    local_values as _svc_local_values,
-    parameters as _svc_parameters,
-    pcode_sites as _svc_pcode_sites,
-    phi_origins as _svc_phi_origins,
-    placeholder_algebra as _svc_placeholder_algebra,
-    region_facts as _svc_region_facts,
-    stack_protector as _svc_stack_protector,
-    analyze_function as _svc_analyze_function,
-    condition_logic as _svc_condition_logic,
-    divergence_proofs as _svc_divergence_proofs,
-    expression_cases as _svc_expression_cases,
-    lifecycle as _svc_lifecycle,
-    local_values as _svc_local_values,
-    parameters as _svc_parameters,
-    pcode_sites as _svc_pcode_sites,
-    phi_origins as _svc_phi_origins,
-    placeholder_algebra as _svc_placeholder_algebra,
-    region_facts as _svc_region_facts,
-    stack_protector as _svc_stack_protector,
-    analyze_function as _svc_analyze_function,
-    condition_logic as _svc_condition_logic,
-    divergence_proofs as _svc_divergence_proofs,
-    expression_cases as _svc_expression_cases,
-    lifecycle as _svc_lifecycle,
     local_values as _svc_local_values,
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
@@ -80,7 +37,6 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     Optional,
     Set,
     Tuple,
-    contextmanager,
 )
 # Re-exported for modules and tests that import these names from here.
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -222,7 +178,7 @@ class ReturnAnalyzer:
             self._current_function_entry_address_value = previous_function_entry_address
 
     # ---- service implementations (bound explicitly; see <pkg>/*.py) ----
-    # analyzer_services.call_recovery_1
+    # call_recovery
     _align_deferred_call_arguments_for_recording = _svc_call_recovery._impl__align_deferred_call_arguments_for_recording
     _apply_bounded_call_refinement = _svc_call_recovery._impl__apply_bounded_call_refinement
     _apply_effect_call_argument_evidence_to_deferred_calls = _svc_call_recovery._impl__apply_effect_call_argument_evidence_to_deferred_calls
@@ -282,7 +238,7 @@ class ReturnAnalyzer:
     _target_active_key = _svc_call_recovery._impl__target_active_key
     _tracked_values_match_call_output = _svc_call_recovery._impl__tracked_values_match_call_output
     _try_apply_triangular_mod_caller_outcomes = _svc_call_recovery._impl__try_apply_triangular_mod_caller_outcomes
-    # analyzer_services.call_recovery_2
+    # call_recovery (continued)
     _clear_resolved_call_effect_blockers = _svc_call_recovery._impl__clear_resolved_call_effect_blockers
     _expression_contains_deferred_call_value = _svc_call_recovery._impl__expression_contains_deferred_call_value
     _find_terminal_call_before_return = _svc_call_recovery._impl__find_terminal_call_before_return
@@ -290,7 +246,7 @@ class ReturnAnalyzer:
     _recover_implicit_return_from_terminal_call = _svc_call_recovery._impl__recover_implicit_return_from_terminal_call
     _resolve_function_from_call_target_ref = _svc_call_recovery._impl__resolve_function_from_call_target_ref
     _resolve_object_centric_transfer_targets = _svc_call_recovery._impl__resolve_object_centric_transfer_targets
-    # analyzer_services.control_recovery_1
+    # control_recovery
     _address_offset_for_block_endpoint = _svc_control_recovery._impl__address_offset_for_block_endpoint
     _block_debug_key = _svc_control_recovery._impl__block_debug_key
     _block_has_return_op = _svc_control_recovery._impl__block_has_return_op
@@ -343,7 +299,7 @@ class ReturnAnalyzer:
     _synthesize_branch_guarded_affine_initial_count_return = _svc_control_recovery._impl__synthesize_branch_guarded_affine_initial_count_return
     _try_apply_branch_guarded_while_outcomes = _svc_control_recovery._impl__try_apply_branch_guarded_while_outcomes
     _validate_branch_guarded_structural_proof = _svc_control_recovery._impl__validate_branch_guarded_structural_proof
-    # analyzer_services.control_recovery_2
+    # control_recovery (continued)
     _blocks_match = _svc_control_recovery._impl__blocks_match
     _filter_noreturn_return_path_entries = _svc_control_recovery._impl__filter_noreturn_return_path_entries
     _find_block_index_on_path = _svc_control_recovery._impl__find_block_index_on_path
@@ -399,7 +355,7 @@ class ReturnAnalyzer:
     _program_userop_name = _svc_lifecycle._impl__program_userop_name
     _resolve_function_from_program_offset = _svc_lifecycle._impl__resolve_function_from_program_offset
     analyze_function_by_name = _svc_lifecycle._impl_analyze_function_by_name
-    # analyzer_services.return_extraction_1
+    # return_extraction
     _acc_phi_flows_to_return_origin_phi = _svc_return_extraction._impl__acc_phi_flows_to_return_origin_phi
     _analysis_has_ambiguous_condition_region_returns = _svc_return_extraction._impl__analysis_has_ambiguous_condition_region_returns
     _analysis_has_positive_region_outcome_obligation = _svc_return_extraction._impl__analysis_has_positive_region_outcome_obligation
@@ -466,7 +422,7 @@ class ReturnAnalyzer:
     _try_apply_single_guard_nonprogress_loop_outcomes = _svc_return_extraction._impl__try_apply_single_guard_nonprogress_loop_outcomes
     _try_apply_triangular_mod_optimized_outcomes = _svc_return_extraction._impl__try_apply_triangular_mod_optimized_outcomes
     _try_pre_return_counted_loop_summary = _svc_return_extraction._impl__try_pre_return_counted_loop_summary
-    # analyzer_services.return_extraction_2
+    # return_extraction (continued)
     _can_safely_collapse_complementary_return_pair = _svc_return_extraction._impl__can_safely_collapse_complementary_return_pair
     _make_merged_return_info = _svc_return_extraction._impl__make_merged_return_info
     _merge_return_info_pair = _svc_return_extraction._impl__merge_return_info_pair
@@ -482,7 +438,7 @@ class ReturnAnalyzer:
     _rewrite_single_tracked_return_value_for_op = _svc_return_normalization._impl__rewrite_single_tracked_return_value_for_op
     _rewrite_tracked_return_values_for_op = _svc_return_normalization._impl__rewrite_tracked_return_values_for_op
     _should_replay_canonicalized_return = _svc_return_normalization._impl__should_replay_canonicalized_return
-    # analyzer_services.session_helpers_1
+    # lifecycle / analyze_function / condition_logic / ... (session helpers)
     _address_like_keys = _svc_pcode_sites._impl__address_like_keys
     _address_space_name = _svc_pcode_sites._impl__address_space_name
     _apply_structural_recurrence_summary = _svc_analyze_function._impl__apply_structural_recurrence_summary
@@ -563,7 +519,7 @@ class ReturnAnalyzer:
     _varnodes_same_storage = _svc_pcode_sites._impl__varnodes_same_storage
     analyze_function = _svc_analyze_function._impl_analyze_function
     dispose = _svc_lifecycle._impl_dispose
-    # analyzer_services.session_helpers_2
+    # session helpers (continued)
     _analysis_is_fully_argument_specialized = _svc_analyze_function._impl__analysis_is_fully_argument_specialized
     _analysis_needs_wrapper_recovery = _svc_analyze_function._impl__analysis_needs_wrapper_recovery
     _analysis_scope_key = _svc_lifecycle._impl__analysis_scope_key
@@ -668,7 +624,7 @@ class ReturnAnalyzer:
     _varnode_location_key = staticmethod(_svc_pcode_sites._impl__varnode_location_key)
     _varnodes_may_alias = classmethod(_svc_pcode_sites._impl__varnodes_may_alias)
     _wrapper_preserves_collapsed_operand = _svc_expression_cases._impl__wrapper_preserves_collapsed_operand
-    # analyzer_services.session_helpers_3
+    # session helpers (continued)
     _active_conditions_imply_all = _svc_condition_logic._impl__active_conditions_imply_all
     _condition_truth_under_parameter_assignments = _svc_condition_logic._impl__condition_truth_under_parameter_assignments
     _conditions_conjunction_is_false_under_assignments = _svc_condition_logic._impl__conditions_conjunction_is_false_under_assignments
