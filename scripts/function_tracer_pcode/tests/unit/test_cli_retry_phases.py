@@ -135,8 +135,6 @@ def test_equiv_check_propagates_retry_flag():
     mock_args.quiet = True
     mock_args.verbose = False
     mock_args.output = None
-    mock_args.no_rewrite = False
-    mock_args.rewrite_direction = 'to_modulo'
     mock_args.strategy = 'pairwise'
     mock_args.pairwise_timeout = 5
     mock_args.pairwise_timeout_hard = 30
@@ -217,8 +215,6 @@ def test_equiv_check_propagates_no_retry_flag():
     mock_args.quiet = True
     mock_args.verbose = False
     mock_args.output = None
-    mock_args.no_rewrite = False
-    mock_args.rewrite_direction = 'to_modulo'
     mock_args.strategy = 'pairwise'
     mock_args.pairwise_timeout = 5
     mock_args.pairwise_timeout_hard = 30
@@ -294,8 +290,6 @@ def test_cli_output_shows_retry_phases_status():
     mock_args.quiet = False  # quiet を False にして出力をキャプチャ
     mock_args.verbose = False
     mock_args.output = None
-    mock_args.no_rewrite = False
-    mock_args.rewrite_direction = 'to_modulo'
     mock_args.strategy = 'pairwise'
     mock_args.pairwise_timeout = 5
     mock_args.pairwise_timeout_hard = 30
@@ -380,8 +374,6 @@ def test_cli_output_shows_retry_phases_disabled():
     mock_args.quiet = False
     mock_args.verbose = False
     mock_args.output = None
-    mock_args.no_rewrite = False
-    mock_args.rewrite_direction = 'to_modulo'
     mock_args.strategy = 'pairwise'
     mock_args.pairwise_timeout = 5
     mock_args.pairwise_timeout_hard = 30
@@ -465,8 +457,6 @@ def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
     mock_args.quiet = True
     mock_args.verbose = False
     mock_args.output = None
-    mock_args.no_rewrite = False
-    mock_args.rewrite_direction = 'to_modulo'
     mock_args.strategy = 'pairwise'
     mock_args.pairwise_timeout = 5
     mock_args.pairwise_timeout_hard = 30

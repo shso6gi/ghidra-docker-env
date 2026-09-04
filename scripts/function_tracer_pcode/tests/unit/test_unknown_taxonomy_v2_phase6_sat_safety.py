@@ -430,7 +430,6 @@ def test_monolithic_strategy_publishes_safe_counterexample_to_v2():
         strategy="monolithic",
         timeout=5,
         monolithic_timeout=5,
-        enable_rewrite=False,
     )
     with production_signal_scope(session):
         result = checker.check(

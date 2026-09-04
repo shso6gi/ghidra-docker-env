@@ -559,7 +559,6 @@ def test_real_solver_checker_unknown_uses_all_site_activation_census(tmp_path):
 
     checker = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,
-        enable_rewrite=False,
     )
     with production_signal_scope(session):
         result = checker.check(

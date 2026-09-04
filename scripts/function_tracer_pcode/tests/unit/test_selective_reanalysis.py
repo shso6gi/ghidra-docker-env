@@ -23,7 +23,6 @@ class TestSelectiveReanalysis:
         return EquivalenceChecker(
             timeout=5,
             debug=True,
-            enable_rewrite=False,
             strategy="pairwise",
             canonical_decision_cutover=False,
         )
@@ -355,7 +354,6 @@ class TestSelectiveReanalysisIntegration:
         return EquivalenceChecker(
             timeout=5,
             debug=True,
-            enable_rewrite=False,
             strategy="pairwise",
             canonical_decision_cutover=False,
         )

@@ -403,8 +403,6 @@ def run_equivalence_check(args):
         )
 
     type_fixer_config = TypeFixerConfig()
-    enable_rewrite = not getattr(args, "no_rewrite", False)
-    rewrite_direction = getattr(args, "rewrite_direction", "to_modulo")
     pairwise_timeout = getattr(args, "pairwise_timeout", 5)
     pairwise_timeout_hard = getattr(args, "pairwise_timeout_hard", 30)
     monolithic_timeout = getattr(args, "monolithic_timeout", None)
@@ -423,8 +421,6 @@ def run_equivalence_check(args):
         timeout=args.equiv_timeout,
         debug=args.debug,
         type_fixer_config=type_fixer_config,
-        enable_rewrite=enable_rewrite,
-        rewrite_direction=rewrite_direction,
         strategy=strategy,
         pairwise_timeout=pairwise_timeout,
         pairwise_timeout_hard=pairwise_timeout_hard,

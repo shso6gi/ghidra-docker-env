@@ -395,8 +395,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
 
     with production_signal_scope(session):
         trusted_result = EquivalenceChecker(
-            strategy="monolithic", timeout=5, monolithic_timeout=5,
-            enable_rewrite=False, canonical_decision_cutover=False,
+            strategy="monolithic", timeout=5, monolithic_timeout=5, canonical_decision_cutover=False,
         ).check(_analysis("left", 7), _analysis("right", 7))
     frame = trusted_result._prepared_dispatch_frame
     receipt = frame.receipt
@@ -571,8 +570,7 @@ def test_pending_eq_revalidates_from_immutable_post_cleanup_receipt_only():
     session = connector.begin({"case": "phase10-stale-pending-eq"})
     with production_signal_scope(session):
         trusted_result = EquivalenceChecker(
-            strategy="monolithic", timeout=5, monolithic_timeout=5,
-            enable_rewrite=False, canonical_decision_cutover=False,
+            strategy="monolithic", timeout=5, monolithic_timeout=5, canonical_decision_cutover=False,
         ).check(_analysis("left", 7), _analysis("right", 7))
     frame = trusted_result._prepared_dispatch_frame
     issue_pending_eq_closure_authority(session, frame.receipt, frame)

@@ -338,7 +338,7 @@ def _run_monolithic_with_pending_unsafety(prior_evidence=None, *, disable_self_r
     evidence, safety receipt) with an analysis-level unsafety obligation pending."""
     from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 
-    checker = EquivalenceChecker(strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(strategy="monolithic", timeout=5, monolithic_timeout=5)
     strategy = checker.monolithic_strategy
     strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: ["function1:incomplete_control_flow"]
     if disable_self_record:

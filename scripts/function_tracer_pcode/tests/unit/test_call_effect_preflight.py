@@ -542,7 +542,7 @@ def test_preflight_does_not_self_certify_monkeypatched_normalizer(monkeypatch):
         raising=False,
     )
 
-    result = EquivalenceChecker(timeout=5, enable_rewrite=False).check(
+    result = EquivalenceChecker(timeout=5).check(
         left,
         right,
         "left",
@@ -587,7 +587,7 @@ def test_override_cannot_forge_receipt_after_consuming_dispatch(monkeypatch):
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
     issuer_failures = []
 
     def forged_override(a1, a2, _save_formula=False):

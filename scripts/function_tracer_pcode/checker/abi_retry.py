@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
-from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult, RewriteInfo
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
@@ -50,11 +50,9 @@ class AbiRetryMixin:
         
         rewrite_info = None
         try:
-            # リライトを適用
-            analysis1, analysis2, rewrite_info = self._apply_rewrite(
-                ctx.analysis1, ctx.analysis2
-            )
-            
+            analysis1, analysis2 = ctx.analysis1, ctx.analysis2
+            rewrite_info = RewriteInfo()  # リライト段階は廃止済み（互換の定数）
+
             # ABI制約セクションを FormulaBuilder に完全委譲
             abi_assertion_section = self.formula_builder.build_abi_assertion_section(
                 abi_constraints, "_1", "_2"

@@ -1068,7 +1068,6 @@ def test_checker_check_bridges_strategy_unknown_reasons_to_equivalence_result():
     checker = EquivalenceChecker(
         timeout=1,
         debug=False,
-        enable_rewrite=False,
         strategy="pairwise",
     )
 
@@ -1103,7 +1102,6 @@ def test_checker_check_builds_reason_selected_recovery_actions():
     checker = EquivalenceChecker(
         timeout=1,
         debug=False,
-        enable_rewrite=False,
         strategy="pairwise",
     )
 
