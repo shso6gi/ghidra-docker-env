@@ -45,11 +45,43 @@ int caller(int x) { return callee(x); }
     assert selected == ["callee", "caller"]
 
 
-def test_selection_finds_nested_changed_function_before_entry_caller():
-    root = Path("targets/EqBench/benchmarks/REVE/triangularMod/Neq")
+# REVE/triangularMod/Neq from EqBench, inlined so the test does not depend on
+# the git-ignored benchmark checkout (oldV drops the loop increment).
+_TRIANGULAR_NEW = """
+int tr(int n) {
+    int result;
+    int i;
+    i = 0;
+    result = 0;
+    while (i < n) {
+        result = result + i;
+        i = i +1;
+    }
+    return result;
+}
+int f(int m) {
+    int result;
+    if (m > 0) {
+        result = tr(m - 1);
+        result = result + m;
+    } else {
+        result = 0;
+    }
+    return result;
+}
+"""
+_TRIANGULAR_OLD = _TRIANGULAR_NEW.replace("        i = i +1;\n", "")
+
+
+def test_selection_finds_nested_changed_function_before_entry_caller(tmp_path):
+    new_source = tmp_path / "newV.c"
+    old_source = tmp_path / "oldV.c"
+    new_source.write_text(_TRIANGULAR_NEW, encoding="utf-8")
+    old_source.write_text(_TRIANGULAR_OLD, encoding="utf-8")
+    assert _TRIANGULAR_OLD != _TRIANGULAR_NEW
 
     all_names, changed, caller_closure, selected = select_functions(
-        root / "newV.c", root / "oldV.c"
+        new_source, old_source
     )
 
     assert all_names == ["tr", "f"]

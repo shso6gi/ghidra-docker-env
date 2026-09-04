@@ -1,0 +1,52 @@
+name: unit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: import check, compileall, unit suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-test.txt
+
+      # Layer packages re-export lazily (PEP 562); importing each one must not
+      # need Ghidra/Java and must not create an import cycle. An import-layer
+      # test can be added to the unit suite later without touching this job.
+      - name: Package import check
+        run: |
+          python3 -B - <<'PY'
+          import importlib
+          layers = (
+              "core", "smt", "config", "ghidra", "analysis", "semantics",
+              "proof", "authority", "checker", "reporting", "cli",
+          )
+          importlib.import_module("scripts.function_tracer_pcode")
+          for layer in layers:
+              importlib.import_module(f"scripts.function_tracer_pcode.{layer}")
+          print("imported:", ", ".join(layers))
+          PY
+
+      - name: compileall
+        run: python3 -B -m compileall -q scripts
+
+      - name: Unit suite
+        run: python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q -p no:cacheprovider
