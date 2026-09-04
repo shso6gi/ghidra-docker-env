@@ -11,24 +11,25 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     _expressions_equivalent_under_conditions,
     eval_constant_raw,
 )
+from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 
 
 class ConditionLogicService:
     """ReturnAnalyzer から切り出した条件論理（含意・矛盾・等価判定、パラメータ定数代入）の collaborator。
 
-    facade 状態は読まない。family 外の 3 つの helper（``constant_int_value`` / ``decompose_comparison_condition`` /
-    ``fold_constant_expression``）は所有 family が別なので、facade 経由で遅延 dispatch する callable として
-    注入する（facade 上の class-level patch が従来どおり効く）。
+    facade 状態は読まない。``constant_int_value`` は所有 collaborator ``StackProtectorService`` を直接依存として
+    受け取る。未抽出 family が所有する 2 helper（``decompose_comparison_condition`` / ``fold_constant_expression``）は
+    facade 経由で遅延 dispatch する callable として注入する（facade 上の class-level patch が従来どおり効く）。
     """
 
     def __init__(
         self,
         *,
-        constant_int_value: Callable[..., Any],
+        stack_protector: StackProtectorService,
         decompose_comparison_condition: Callable[..., Any],
         fold_constant_expression: Callable[..., Any],
     ) -> None:
-        self.constant_int_value = constant_int_value
+        self.stack_protector = stack_protector
         self.decompose_comparison_condition = decompose_comparison_condition
         self.fold_constant_expression = fold_constant_expression
 
@@ -263,7 +264,7 @@ class ConditionLogicService:
         if len(operands) != 2:
             return False
         left, right = operands
-        return self.constant_int_value(left) == 0 and self.expression_is_same_parameter_ignoring_subpiece(right, param)
+        return self.stack_protector.constant_int_value(left) == 0 and self.expression_is_same_parameter_ignoring_subpiece(right, param)
 
     def condition_is_signed_positive_of_param(self, condition: Condition, param: Expression) -> bool:
         if condition is None or getattr(condition, "negated", False):
@@ -275,7 +276,7 @@ class ConditionLogicService:
         if len(operands) != 2:
             return False
         left, right = operands
-        return self.constant_int_value(left) == 0 and self.expression_is_same_parameter_ignoring_subpiece(right, param)
+        return self.stack_protector.constant_int_value(left) == 0 and self.expression_is_same_parameter_ignoring_subpiece(right, param)
 
     def condition_is_signed_less_than_one_of_param(self, condition: Condition, param: Expression) -> bool:
         if condition is None or getattr(condition, "negated", False):
@@ -287,7 +288,7 @@ class ConditionLogicService:
         if len(operands) != 2:
             return False
         left, right = operands
-        return self.expression_is_same_parameter_ignoring_subpiece(left, param) and self.constant_int_value(right) == 1
+        return self.expression_is_same_parameter_ignoring_subpiece(left, param) and self.stack_protector.constant_int_value(right) == 1
 
     def condition_is_param_equal_const(self, condition: Condition, param: Expression, value: int) -> bool:
         if condition is None:
@@ -309,11 +310,11 @@ class ConditionLogicService:
         left, right = operands
         if (
             self.expression_is_same_parameter_ignoring_subpiece(left, param)
-        ) and self.constant_int_value(right) == value:
+        ) and self.stack_protector.constant_int_value(right) == value:
             return True
         if (
             self.expression_is_same_parameter_ignoring_subpiece(right, param)
-        ) and self.constant_int_value(left) == value:
+        ) and self.stack_protector.constant_int_value(left) == value:
             return True
         return False
 
