@@ -161,7 +161,8 @@ Eq + Neq subset (8 Eq sources and 10 Neq sources, one function and 8 pairs each)
 checker behaviour before and after a change. `eqbench_run_subset.sh` runs it
 with the settings stored in the manifest (`PARALLEL_JOBS=20`,
 `EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`,
-`PAIR_PROCESS_TIMEOUT=240s`), running the Eq and Neq halves concurrently, and finishes in under 10 minutes:
+`PAIR_PROCESS_TIMEOUT=240s`), running the Eq half and then the Neq half (each runner
+already fills `PARALLEL_JOBS` slots on its own):
 
 ```bash
 OUTPUT_BASE_DIR=logs/EqBench/subset_before ./eqbench_run_subset.sh   # e.g. on main
