@@ -13,7 +13,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     divergence_proofs as _svc_divergence_proofs,
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
-    phi_origins as _svc_phi_origins,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
@@ -22,6 +21,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
@@ -82,6 +82,14 @@ class ReturnAnalyzer:
             stack_protector=self._stack_protector,
             condition_identity_key=lambda *a, **kw: self._condition_identity_key(*a, **kw),
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
+        )
+        self._phi_origins = PhiOriginService(
+            condition_logic=self._condition_logic,
+            stack_protector=self._stack_protector,
+            pcode_op_stable_key=lambda *a, **kw: self._pcode_op_stable_key(*a, **kw),
+            normalize_expanded_return_value=lambda *a, **kw: self._normalize_expanded_return_value(*a, **kw),
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_flag=lambda: self.debug,
         )
         self._current_effect_summary: Optional[EffectSummary] = None
         self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
@@ -463,7 +471,8 @@ class ReturnAnalyzer:
     _address_like_keys = _svc_pcode_sites._impl__address_like_keys
     _address_space_name = _svc_pcode_sites._impl__address_space_name
     _apply_structural_recurrence_summary = _svc_analyze_function._impl__apply_structural_recurrence_summary
-    _candidate_phi_origin_keys_from_summary_source_key = _svc_phi_origins._impl__candidate_phi_origin_keys_from_summary_source_key
+    def _candidate_phi_origin_keys_from_summary_source_key(self, value):
+        return self._phi_origins.candidate_phi_origin_keys_from_summary_source_key(value)
     def _classify_param_condition(self, condition, param_name):
         return self._condition_logic.classify_param_condition(condition, param_name)
     _coerce_optional_int = _svc_pcode_sites._impl__coerce_optional_int
@@ -539,7 +548,8 @@ class ReturnAnalyzer:
     _pcode_op_stable_key = _svc_pcode_sites._impl__pcode_op_stable_key
     _pcode_ops_match = _svc_pcode_sites._impl__pcode_ops_match
     _phase1_body_contains_address = staticmethod(_svc_analyze_function._impl__phase1_body_contains_address)
-    _phi_circular_origin_stable_keys = _svc_phi_origins._impl__phi_circular_origin_stable_keys
+    def _phi_circular_origin_stable_keys(self, expr):
+        return self._phi_origins.phi_circular_origin_stable_keys(expr)
     def _placeholder_minus_one_unit_condition_guard_key(self, expr, placeholder, conditions):
         return self._placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions)
     def _placeholder_plus_unit_condition_guard_key(self, expr, placeholder, conditions):
@@ -655,9 +665,12 @@ class ReturnAnalyzer:
         return self._expression_cases.expand_boolean_expression_cases(expr, base_conditions)
     def _expand_object_centric_expression_cases(self, expr, base_conditions):
         return self._expression_cases.expand_object_centric_expression_cases(expr, base_conditions)
-    _expression_contains_phi = _svc_phi_origins._impl__expression_contains_phi
-    _expression_contains_phi_circular = _svc_phi_origins._impl__expression_contains_phi_circular
-    _expression_contains_phi_circular_marker = _svc_phi_origins._impl__expression_contains_phi_circular_marker
+    def _expression_contains_phi(self, expr):
+        return self._phi_origins.expression_contains_phi(expr)
+    def _expression_contains_phi_circular(self, expr):
+        return self._phi_origins.expression_contains_phi_circular(expr)
+    def _expression_contains_phi_circular_marker(self, expr):
+        return self._phi_origins.expression_contains_phi_circular_marker(expr)
     def _expression_has_nontrivial_location_wrapper(self, expr, location):
         return self._expression_cases.expression_has_nontrivial_location_wrapper(expr, location)
     def _expression_is_one_under_conditions(self, expr, target_conditions):
@@ -710,22 +723,29 @@ class ReturnAnalyzer:
     def _parameter_constant_assignments_from_conditions(self, conditions):
         return self._condition_logic.parameter_constant_assignments_from_conditions(conditions)
     _parameter_descriptor_quality = _svc_parameters._impl__parameter_descriptor_quality
-    _parameter_equals_condition = _svc_phi_origins._impl__parameter_equals_condition
+    def _parameter_equals_condition(self, parameter, value):
+        return self._phi_origins.parameter_equals_condition(parameter, value)
     _parameter_expression = _svc_parameters._impl__parameter_expression
     _parameter_storages_match_for_passthrough = _svc_parameters._impl__parameter_storages_match_for_passthrough
     _parameter_storages_overlap_for_passthrough = _svc_parameters._impl__parameter_storages_overlap_for_passthrough
     _pcode_op_affects_tracked_storage = _svc_pcode_sites._impl__pcode_op_affects_tracked_storage
     _pcode_op_debug_name = _svc_pcode_sites._impl__pcode_op_debug_name
-    _phi_circular_additive_signature = _svc_phi_origins._impl__phi_circular_additive_signature
-    _phi_expression_key_set = _svc_phi_origins._impl__phi_expression_key_set
-    _phi_free_finite_fallback_candidates = _svc_phi_origins._impl__phi_free_finite_fallback_candidates
-    _phi_origin_keys_from_varnode_defs = _svc_phi_origins._impl__phi_origin_keys_from_varnode_defs
+    def _phi_circular_additive_signature(self, expr):
+        return self._phi_origins.phi_circular_additive_signature(expr)
+    def _phi_expression_key_set(self, expr):
+        return self._phi_origins.phi_expression_key_set(expr)
+    def _phi_free_finite_fallback_candidates(self, fallback_value, conditions):
+        return self._phi_origins.phi_free_finite_fallback_candidates(fallback_value, conditions)
+    def _phi_origin_keys_from_varnode_defs(self, varnode, *, max_depth=8):
+        return self._phi_origins.phi_origin_keys_from_varnode_defs(varnode, max_depth=max_depth)
     _propagate_passthrough_input_from_op = _svc_parameters._impl__propagate_passthrough_input_from_op
     def _pruning_conditions_signature(self, conditions):
         return self._condition_logic.pruning_conditions_signature(conditions)
     _reachable_cycle_keys = _svc_divergence_proofs._impl__reachable_cycle_keys
-    _readonly_reduction_contract_priority_score = _svc_phi_origins._impl__readonly_reduction_contract_priority_score
-    _readonly_reduction_ref_contract_priority_score = _svc_phi_origins._impl__readonly_reduction_ref_contract_priority_score
+    def _readonly_reduction_contract_priority_score(self, info):
+        return self._phi_origins.readonly_reduction_contract_priority_score(info)
+    def _readonly_reduction_ref_contract_priority_score(self, runtime_ref):
+        return self._phi_origins.readonly_reduction_ref_contract_priority_score(runtime_ref)
     _resolve_function_from_address = _svc_lifecycle._impl__resolve_function_from_address
     def _resolve_precise_object_state_value(self, value, conditions, effect_summary):
         return self._expression_cases.resolve_precise_object_state_value(value, conditions, effect_summary)
@@ -735,8 +755,10 @@ class ReturnAnalyzer:
         return self._condition_logic.signed_positive_condition(expr)
     def _signed_unit_constant_matches(self, value, expected, size):
         return self._placeholder_algebra.signed_unit_constant_matches(value, expected, size)
-    _single_parameter_expression_in_conditions = _svc_phi_origins._impl__single_parameter_expression_in_conditions
-    _split_small_finite_parameter_reachability_conditions = _svc_phi_origins._impl__split_small_finite_parameter_reachability_conditions
+    def _single_parameter_expression_in_conditions(self, conditions):
+        return self._phi_origins.single_parameter_expression_in_conditions(conditions)
+    def _split_small_finite_parameter_reachability_conditions(self, conditions, *, search_min=-8, search_max=64, max_cases=16):
+        return self._phi_origins.split_small_finite_parameter_reachability_conditions(conditions, search_min=search_min, search_max=search_max, max_cases=max_cases)
     _state_phi_feeds_positive_loop_guard = _svc_divergence_proofs._impl__state_phi_feeds_positive_loop_guard
     def _substitute_parameter_constants_under_conditions(self, expr, conditions):
         return self._condition_logic.substitute_parameter_constants_under_conditions(expr, conditions)
