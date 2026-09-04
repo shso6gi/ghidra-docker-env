@@ -720,7 +720,9 @@ def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
         )
         assert expected_ref in result.unknown_reasons[0].evidence_refs
 
-def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexample_replay(monkeypatch):
+def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisive(monkeypatch):
+    """Issue #28: the pairwise case-partition replay, bound to the terminal query,
+    model, premise and pair, is the replay evidence; a SAT with a fixed model is decisive."""
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -774,16 +776,19 @@ def test_pairwise_same_function_sat_with_model_still_requires_prior_counterexamp
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is None
-    assert result.sat_pairs == 0
-    assert result.unknown_pairs == 1
-    reason = result.unknown_reasons[0]
-    assert reason.reason_id == "counterexample_same_function_replay_unproven"
-    assert reason.evidence_refs == ("counterexample_replay_missing",)
-    assert not any(
-        evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
-        for evidence in analysis1.completed_recovery_proof_evidence
-    )
+    assert result.is_equivalent is False
+    assert result.sat_pairs == 1
+    assert result.unknown_pairs == 0
+    proofs = [
+        evidence for evidence in analysis1.completed_recovery_proof_evidence
+        if evidence.get("proof_source") == "pairwise_case_split_counterexample_validation"
+    ]
+    assert len(proofs) == 1
+    replay = proofs[0]["proof_content"]["counterexample_replay"]
+    assert replay["fixed_model_assertion_count"] >= 1
+    assert len(replay["formula_digest"]) == 64 and len(replay["model_digest"]) == 64
+    assert replay["premise_digest"] and tuple(replay["pair_key"]) == (0, 0)
+    assert len(replay["solver_execution_receipt_digest"]) == 64
 
 def test_pairwise_same_function_sat_without_model_still_requires_counterexample_replay(monkeypatch):
     formula_builder = Mock()

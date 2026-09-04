@@ -320,6 +320,9 @@ def _impl_check(
         "legacy_width_bridge_queries": 0,
     }
     unknown_reasons = []
+    # (kind, evidence_refs, case1, case2, pair_id, reason) of SAT candidates whose
+    # witness was rejected; retired if a later pair yields a validated witness.
+    rejected_witnesses = []
     self._active_normalization_stats = normalization_stats
     query_execution_records = []
 
@@ -360,6 +363,7 @@ def _impl_check(
     # Stage 1 is a real prepass: every logical guard edge is materialized
     # before return-width/value preparation or any legacy value shortcut.
     from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+    counterexample_replay_targets,
         execute_guard_overlap,
     )
 
@@ -1052,7 +1056,8 @@ def _impl_check(
                     _pair_id=pair_id,
                     _case1=case1,
                     _case2=case2,
-                    _sat_unsafety_reasons=tuple(sat_unsafety_reasons),
+                    _sat_unsafety_reasons=tuple(sat_unsafety_reasons)
+                    + tuple(self._pair_return_width_unsafety_reasons(base_ctx, pair_id)),
                     _analysis1=analysis1,
                     _analysis2=analysis2,
                 ):
@@ -1270,8 +1275,11 @@ def _impl_check(
                         "the terminal solver query is unavailable"
                     )
                     continue
-                analysis_safety_validated = not sat_unsafety_reasons
-                if sat_unsafety_reasons:
+                pair_sat_unsafety_reasons = list(sat_unsafety_reasons) + list(
+                    self._pair_return_width_unsafety_reasons(base_ctx, pair_id)
+                )
+                analysis_safety_validated = not pair_sat_unsafety_reasons
+                if pair_sat_unsafety_reasons:
                     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                         SatCounterexampleEvidenceBinding,
                     )
@@ -1286,7 +1294,7 @@ def _impl_check(
                         (i, j),
                     )
                     sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
-                        sat_unsafety_reasons,
+                        pair_sat_unsafety_reasons,
                         analysis1,
                         analysis2,
                         case1=case1,
@@ -1306,7 +1314,7 @@ def _impl_check(
                         self._debug_print(
                             "  Pair "
                             f"{pair_id}: SAT downgraded to UNKNOWN due to unsafe analysis "
-                            f"summary ({', '.join(sat_unsafety_reasons)})"
+                            f"summary ({', '.join(pair_sat_unsafety_reasons)})"
                         )
                         continue
                     analysis_safety_validated = True
@@ -1323,17 +1331,20 @@ def _impl_check(
                 )
                 if not is_decisive:
                     unknown_count += 1
-                    unknown_reasons.append(
-                        self._make_sat_counterexample_ambiguous_unknown_reason(
-                            (result.pair_stage or "unknown",),
-                            analysis1,
-                            analysis2,
-                            case1=case1,
-                            case2=case2,
-                            pair_id=pair_id,
-                            stage="S_PAIRWISE",
-                        )
+                    ambiguous_reason = self._make_sat_counterexample_ambiguous_unknown_reason(
+                        (result.pair_stage or "unknown",),
+                        analysis1,
+                        analysis2,
+                        case1=case1,
+                        case2=case2,
+                        pair_id=pair_id,
+                        stage="S_PAIRWISE",
                     )
+                    unknown_reasons.append(ambiguous_reason)
+                    rejected_witnesses.append((
+                        "ambiguity", (result.pair_stage or "unknown",),
+                        case1, case2, pair_id, ambiguous_reason,
+                    ))
                     self._debug_print(
                         f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
                     )
@@ -1345,7 +1356,31 @@ def _impl_check(
                     analysis2,
                 )
                 same_function_replay_validated = not same_function_replay_reasons
+                if same_function_replay_reasons and not counterexample_replay_targets(base_ctx):
+                    # Closed formula: no symbol to fix, nothing to replay; the
+                    # validated SAT query is the complete witness.
+                    same_function_replay_reasons = ()
+                    same_function_replay_validated = True
                 if same_function_replay_reasons:
+                    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+                        SatCounterexampleEvidenceBinding,
+                    )
+                    # Bind the replay obligation to this exact witness: the
+                    # terminal SAT query, its model, the ledger premise and the
+                    # case pair.  The proof recorded below carries the same
+                    # binding plus the solver execution receipt digest, so it
+                    # cannot discharge any other counterexample (Issue #28).
+                    replay_binding = SatCounterexampleEvidenceBinding(
+                        hashlib.sha256(sat_terminal_query.encode("utf-8")).hexdigest(),
+                        hashlib.sha256(
+                            repr(result.counterexample_raw).encode("utf-8")
+                        ).hexdigest(),
+                        ledger_binding.premise_digest,
+                        (i, j),
+                    )
+                    replay_receipt_digest = getattr(
+                        solver_execution_receipt, "authority_digest", None
+                    )
                     sat_replay_reason = self._make_sat_unsafety_unknown_reason(
                         same_function_replay_reasons,
                         analysis1,
@@ -1354,15 +1389,32 @@ def _impl_check(
                         case2=case2,
                         pair_id=pair_id,
                         stage="S_PAIRWISE",
+                        counterexample_binding=replay_binding,
+                    )
+                    self._record_pairwise_counterexample_replay_proof(
+                        sat_replay_reason,
+                        analysis1,
+                        analysis2,
+                        base_ctx=base_ctx,
+                        counterexample_raw=result.counterexample_raw,
+                        binding=replay_binding,
+                        execution_receipt_digest=replay_receipt_digest,
+                        pair_id=pair_id,
                     )
                     if not self._sat_unsafety_resolution_proof_is_complete(
                         sat_replay_reason,
                         analysis1,
                         analysis2,
                         current_counterexample_raw=result.counterexample_raw,
+                        expected_binding=replay_binding,
+                        expected_execution_receipt_digest=replay_receipt_digest,
                     ):
                         unknown_count += 1
                         unknown_reasons.append(sat_replay_reason)
+                        rejected_witnesses.append((
+                            "replay", tuple(same_function_replay_reasons),
+                            case1, case2, pair_id, sat_replay_reason,
+                        ))
                         self._debug_print(
                             "  Pair "
                             f"{pair_id}: SAT downgraded to UNKNOWN until same-function "
@@ -1381,6 +1433,27 @@ def _impl_check(
                     same_function_replay_safe=same_function_replay_validated,
                 )
                 sat_safety_receipt = safety_receipt
+                for kind, refs, r_case1, r_case2, r_pair_id, r_reason in rejected_witnesses:
+                    if r_pair_id == pair_id:
+                        continue
+                    self._supersede_rejected_witness_blocker(
+                        kind,
+                        refs,
+                        analysis1,
+                        analysis2,
+                        case1=r_case1,
+                        case2=r_case2,
+                        pair_id=r_pair_id,
+                        reason_record=r_reason,
+                        decisive_binding=safety_receipt,
+                    )
+                    if r_reason in unknown_reasons:
+                        unknown_reasons.remove(r_reason)
+                    self._debug_print(
+                        f"  Pair {r_pair_id}: rejected witness superseded by validated "
+                        f"witness of pair {pair_id}"
+                    )
+                rejected_witnesses = []
                 sat_query_execution_receipt = solver_execution_receipt
 
                 sat_count += 1

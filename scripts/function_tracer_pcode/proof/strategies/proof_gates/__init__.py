@@ -31,6 +31,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
 
     return {
         "_complete_v2_sat_counterexample_ambiguity_if_observed": _sat_safety._impl__complete_v2_sat_counterexample_ambiguity_if_observed,
+        "_supersede_rejected_witness_blocker": _sat_safety._impl__supersede_rejected_witness_blocker,
         "_observe_v2_sat_counterexample_ambiguity": _sat_safety._impl__observe_v2_sat_counterexample_ambiguity,
         "_all_recovery_actions_have_completed_proofs": _recovery._impl__all_recovery_actions_have_completed_proofs,
         "_analysis_binary_id": _object_keys._impl__analysis_binary_id,
@@ -211,6 +212,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_record_completed_call_effect_summary_proof_if_safe": _call_effect._impl__record_completed_call_effect_summary_proof_if_safe,
         "_record_completed_return_coverage_proof": _return_coverage._impl__record_completed_return_coverage_proof,
         "_record_completed_sat_counterexample_replay_proof": _sat_safety._impl__record_completed_sat_counterexample_replay_proof,
+        "_record_pairwise_counterexample_replay_proof": _sat_safety._impl__record_pairwise_counterexample_replay_proof,
         "_recovery_proof_is_complete": _recovery._impl__recovery_proof_is_complete,
         "_return_case_object_key": _object_keys._impl__return_case_object_key,
         "_return_case_partition_member_object_key": _return_coverage._impl__return_case_partition_member_object_key,
@@ -251,6 +253,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_rewrite_atom_encoded_program_identity_key": _object_keys._impl__rewrite_atom_encoded_program_identity_key,
         "_rewrite_program_identity_keys": _object_keys._impl__rewrite_program_identity_keys,
         "_same_function_counterexample_replay_reasons": _sat_safety._impl__same_function_counterexample_replay_reasons,
+        "_pair_return_width_unsafety_reasons": _sat_safety._impl__pair_return_width_unsafety_reasons,
         "_sat_counterexample_ambiguous_object_target_key": _sat_safety._impl__sat_counterexample_ambiguous_object_target_key,
         "_sat_unsafety_object_evidence": _sat_safety._impl__sat_unsafety_object_evidence,
         "_sat_unsafety_object_target_key": _sat_safety._impl__sat_unsafety_object_target_key,

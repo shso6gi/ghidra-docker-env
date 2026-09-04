@@ -777,6 +777,20 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                             analysis2,
                         )
                     )
+                    if same_function_replay_reasons:
+                        from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+                            counterexample_replay_targets,
+                        )
+                        try:
+                            replay_targets = counterexample_replay_targets(
+                                self.formula_builder.build_base_context(analysis1, analysis2)
+                            )
+                        except Exception:
+                            replay_targets = None
+                        if replay_targets is not None and not replay_targets:
+                            # Closed formula: nothing to replay, the SAT query
+                            # itself is the complete witness.
+                            same_function_replay_reasons = ()
             if final_is_equivalent is False and same_function_replay_reasons:
                 sat_replay_reason = self._make_sat_unsafety_unknown_reason(
                     same_function_replay_reasons,

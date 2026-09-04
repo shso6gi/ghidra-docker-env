@@ -324,6 +324,7 @@ class CheckStrategy(ABC):
     _return_pcode_value_input_width_bits = staticmethod(_svc_return_metadata._impl__return_pcode_value_input_width_bits)
     # proof_gates.sat_safety
     _complete_v2_sat_counterexample_ambiguity_if_observed = _svc_sat_safety._impl__complete_v2_sat_counterexample_ambiguity_if_observed
+    _supersede_rejected_witness_blocker = _svc_sat_safety._impl__supersede_rejected_witness_blocker
     _observe_v2_sat_counterexample_ambiguity = _svc_sat_safety._impl__observe_v2_sat_counterexample_ambiguity
     _collect_decisive_sat_unsafety_reasons = _svc_sat_safety._impl__collect_decisive_sat_unsafety_reasons
     _collect_equivalence_blocking_unsafety_reasons = _svc_sat_safety._impl__collect_equivalence_blocking_unsafety_reasons
@@ -333,7 +334,9 @@ class CheckStrategy(ABC):
     _make_sat_unsafety_unknown_reason = _svc_sat_safety._impl__make_sat_unsafety_unknown_reason
     _normalize_counterexample_model_value = classmethod(_svc_sat_safety._impl__normalize_counterexample_model_value)
     _record_completed_sat_counterexample_replay_proof = _svc_sat_safety._impl__record_completed_sat_counterexample_replay_proof
+    _record_pairwise_counterexample_replay_proof = _svc_sat_safety._impl__record_pairwise_counterexample_replay_proof
     _same_function_counterexample_replay_reasons = _svc_sat_safety._impl__same_function_counterexample_replay_reasons
+    _pair_return_width_unsafety_reasons = _svc_sat_safety._impl__pair_return_width_unsafety_reasons
     _sat_counterexample_ambiguous_object_target_key = _svc_sat_safety._impl__sat_counterexample_ambiguous_object_target_key
     _sat_unsafety_object_evidence = _svc_sat_safety._impl__sat_unsafety_object_evidence
     _sat_unsafety_object_target_key = _svc_sat_safety._impl__sat_unsafety_object_target_key

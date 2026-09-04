@@ -36,15 +36,75 @@ def _impl__collect_decisive_sat_unsafety_reasons(
             reasons.append(f"{label}:{reason}")
     return reasons
 
+def _impl__pair_return_width_unsafety_reasons(
+    self,
+    base_ctx: Mapping[str, Any],
+    pair_id: str,
+) -> List[str]:
+    """SAT-safety blockers from an unproven return-width observation of a pair.
+
+    The canonical return-width observation proves which bits of the compared
+    values are semantic (ABI return slot, parameter correspondence across
+    different register widths).  Equal raw widths do not establish that: a
+    128-bit ``q0`` surface carrying a 64-bit double compares caller-owned
+    upper bits.  When the observation for this pair is blocked, a SAT on it
+    may only separate non-semantic bits, so it must not be decisive
+    (Issue #28, airy/Sign B1_B2).
+    """
+    prepared = (base_ctx.get("return_width_observations_by_pair") or {}).get(pair_id)
+    if prepared is None or getattr(prepared, "proven", False):
+        return []
+    semantic_blockers = [
+        item for item in (getattr(prepared, "blockers", ()) or ())
+        if str(getattr(item, "blocker_kind", "")) in SEMANTIC_RETURN_WIDTH_BLOCKER_KINDS
+    ]
+    if not semantic_blockers:
+        # Only artifact/closure plumbing is missing (proof bundle, contract
+        # sealing, query lowering); the compared bits themselves are bound.
+        return []
+    detail = ", ".join(
+        f"{item.blocker_kind}:{getattr(item, 'missing_slot', 'unknown')}"
+        for item in semantic_blockers
+    )
+    self._debug_print(
+        f"  Pair {pair_id}: return-width observation blocked ({detail}); SAT is not decisive"
+    )
+    return ["function1:return_width_observation_blocked"]
+
+
+# Width blockers that mean the *inputs* of the compared queries are not
+# semantically bound or the compared widths are incompatible: parameters of
+# different register widths bound only on their overlap (airy/Sign: a 64-bit
+# double against the whole 128-bit q0), arity/bijection failures, width
+# alignment.  Incomplete unary return-width seeds and missing proof plumbing
+# (bundle, contract seal, query lowering) already gate EQUIVALENT and the
+# width bridge for unequal return widths; they are not in this set so that
+# equal-width constant-return witnesses stay decisive.
+SEMANTIC_RETURN_WIDTH_BLOCKER_KINDS = frozenset({
+    "input_correspondence",
+    "top_level_parameters",
+    "parameter_arity",
+    "parameter_index_bijection",
+    "pair_width_compatibility",
+    "canonical_width_alignment",
+    "call_site_return_width",
+    "return_coverage",
+})
+
+
 def _impl__same_function_counterexample_replay_reasons(
     self,
     analysis1: FunctionReturnAnalysis,
     analysis2: FunctionReturnAnalysis,
 ) -> Tuple[str, ...]:
-    """Require replay evidence before accepting same-function SAT as NOT_EQ."""
-    function1 = str(getattr(analysis1, "function_name", "") or "")
-    function2 = str(getattr(analysis2, "function_name", "") or "")
-    if not function1 or function1 != function2:
+    """Require bound replay evidence before accepting any SAT as NOT_EQ.
+
+    Whether the two functions share a name is unrelated to semantic soundness,
+    so the requirement is uniform (Issue #28): every decisive counterexample
+    must carry a replay proof bound to its query, model, premise and pair.
+    The reason id keeps its historical name until it is renamed separately.
+    """
+    if analysis1 is None or analysis2 is None:
         return ()
     return ("counterexample_replay_missing",)
 
@@ -262,6 +322,8 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
     analysis2: FunctionReturnAnalysis,
     *,
     current_counterexample_raw: Optional[Mapping[str, Any]] = None,
+    expected_binding: Any = None,
+    expected_execution_receipt_digest: Optional[str] = None,
 ) -> bool:
     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SAT_SAFETY_TYPED_REASON_IDS,
@@ -293,8 +355,102 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
         )
         if evidence_model_sha256 != current_model_sha256:
             continue
+        if expected_binding is not None and not _replay_evidence_matches_binding(
+            self,
+            counterexample_replay,
+            expected_binding,
+            expected_execution_receipt_digest,
+        ):
+            continue
         return _v2_complete_sat_unsafety_and_true(self, reason_record, proof_content)
     return False
+
+
+def _replay_binding_fields(
+    evidence_binding: Any,
+    execution_receipt_digest: Optional[str],
+) -> Dict[str, Any]:
+    """Proof-content fields that pin a replay to one query/model/premise/pair."""
+    if evidence_binding is None:
+        return {}
+    fields: Dict[str, Any] = {
+        "formula_digest": str(evidence_binding.formula_digest),
+        "model_digest": str(evidence_binding.model_digest),
+        "premise_digest": str(evidence_binding.premise_digest),
+        "pair_key": tuple(evidence_binding.pair_key),
+    }
+    if execution_receipt_digest:
+        fields["solver_execution_receipt_digest"] = str(execution_receipt_digest)
+    return fields
+
+
+def _replay_evidence_matches_binding(
+    owner: Any,
+    counterexample_replay: Mapping[str, Any],
+    expected_binding: Any,
+    expected_execution_receipt_digest: Optional[str],
+) -> bool:
+    """A replay proof may only discharge the witness it was recorded for."""
+    for field_name in ("formula_digest", "model_digest", "premise_digest"):
+        if owner._evidence_text(counterexample_replay, field_name) != str(
+            getattr(expected_binding, field_name)
+        ):
+            return False
+    recorded_pair = owner._normalize_nested_tuple(counterexample_replay.get("pair_key"))
+    if recorded_pair != owner._normalize_nested_tuple(tuple(expected_binding.pair_key)):
+        return False
+    if expected_execution_receipt_digest and owner._evidence_text(
+        counterexample_replay, "solver_execution_receipt_digest"
+    ) != str(expected_execution_receipt_digest):
+        return False
+    return True
+
+
+def _impl__record_pairwise_counterexample_replay_proof(
+    self,
+    reason_record: UnknownReasonRecord,
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    base_ctx: Mapping[str, Any],
+    counterexample_raw: Optional[Mapping[str, Any]],
+    binding: Any,
+    execution_receipt_digest: Optional[str],
+    pair_id: str,
+) -> bool:
+    """Record the pairwise case-partition replay as a bound replay proof.
+
+    Only a SAT with a concrete model, at least one fixed-model assertion, a
+    validated solver execution receipt and an evidence binding qualifies; the
+    replay itself (feasibility, per-side consistency, no equal cross-case
+    pair) has already succeeded when this is called.
+    """
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+        count_counterexample_model_assertions,
+    )
+
+    if not counterexample_raw or binding is None or not execution_receipt_digest:
+        self._debug_print(
+            f"  Pair {pair_id}: replay proof not recorded (model, binding or receipt missing)"
+        )
+        return False
+    fixed_count = count_counterexample_model_assertions(base_ctx, counterexample_raw)
+    if fixed_count <= 0:
+        self._debug_print(
+            f"  Pair {pair_id}: replay proof not recorded (model fixes no declared symbol)"
+        )
+        return False
+    self._record_completed_sat_counterexample_replay_proof(
+        reason_record,
+        analysis1,
+        analysis2,
+        counterexample_raw=counterexample_raw,
+        fixed_model_assertion_count=fixed_count,
+        replay_source="pairwise_case_split_counterexample_validation",
+        evidence_binding=binding,
+        execution_receipt_digest=execution_receipt_digest,
+    )
+    return True
 
 def _impl__record_completed_sat_counterexample_replay_proof(
     self,
@@ -305,6 +461,8 @@ def _impl__record_completed_sat_counterexample_replay_proof(
     counterexample_raw: Optional[Mapping[str, Any]] = None,
     fixed_model_assertion_count: int = 0,
     replay_source: str,
+    evidence_binding: Any = None,
+    execution_receipt_digest: Optional[str] = None,
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
@@ -361,6 +519,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
                     "fixed_model_assertion_count": fixed_model_assertion_count,
                     "counterexample_symbol_keys": counterexample_keys,
                     "counterexample_model_sha256": counterexample_model_sha256,
+                    **_replay_binding_fields(evidence_binding, execution_receipt_digest),
                 },
                 "active_unsafety_discharge": {
                     "status": "discharged",
@@ -889,6 +1048,59 @@ def _v2_complete_sat_unsafety_and_true(
         proof_artifact_digest=_v2_sat_safety_proof_digest(proof_content),
     )
     return True
+
+
+def _impl__supersede_rejected_witness_blocker(
+    self,
+    kind: str,
+    evidence_refs: Sequence[str],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    case1: Any,
+    case2: Any,
+    pair_id: str,
+    reason_record: UnknownReasonRecord,
+    decisive_binding: Any,
+) -> None:
+    """Retire a witness-scoped blocker once another witness is validated.
+
+    A rejected candidate counterexample (ambiguous partition replay, or a SAT
+    whose replay proof could not be recorded) only says that *that* model is
+    not a witness; it is not an analysis-level unsafety.  A validated,
+    bound counterexample on another case pair therefore supersedes it.  The
+    completion artifact names the superseding witness so the audit trail
+    shows why the blocker no longer applies (Issue #28).
+    """
+    proof_content = {
+        "object_target_key": self._normalize_nested_tuple(reason_record.object_target_key),
+        "superseded_by_validated_witness": {
+            "formula_digest": str(decisive_binding.formula_digest),
+            "model_digest": str(decisive_binding.model_digest),
+            "premise_digest": str(decisive_binding.premise_digest),
+            "pair_key": tuple(decisive_binding.pair_key),
+        },
+    }
+    proof_digest = _v2_sat_safety_proof_digest(proof_content)
+    refs = tuple(str(ref) for ref in evidence_refs or ())
+    if kind == "ambiguity":
+        target_key = self._sat_counterexample_ambiguous_object_target_key(
+            evidence_refs,
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id=pair_id,
+        )
+        _emit_v2_sat_safety_ambiguity_if_observed(
+            refs, target_key, proof_artifact_digest=proof_digest,
+        )
+        return
+    _emit_v2_sat_safety_blockers_completed_if_observed(
+        refs,
+        self._normalize_nested_tuple(reason_record.object_target_key),
+        proof_artifact_digest=proof_digest,
+    )
 
 
 def _impl__complete_v2_sat_counterexample_ambiguity_if_observed(
