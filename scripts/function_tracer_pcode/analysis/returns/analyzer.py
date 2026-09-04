@@ -361,6 +361,7 @@ class ReturnAnalyzer:
     _accept_effect_rewrite_without_rank_gain = _svc_effect_integration._impl__accept_effect_rewrite_without_rank_gain
     _accept_effect_sensitive_rewrite = _svc_effect_integration._impl__accept_effect_sensitive_rewrite
     _apply_local_store_effect = _svc_effect_integration._impl__apply_local_store_effect
+    _apply_observable_effect_surface = _svc_effect_integration._impl__apply_observable_effect_surface
     _build_effect_summary = _svc_effect_integration._impl__build_effect_summary
     _build_function_control_effect_profile = _svc_effect_integration._impl__build_function_control_effect_profile
     _collapse_effect_sensitive_case_wrapper = _svc_effect_integration._impl__collapse_effect_sensitive_case_wrapper

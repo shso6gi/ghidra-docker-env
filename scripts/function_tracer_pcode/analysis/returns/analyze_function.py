@@ -414,6 +414,11 @@ def _impl_analyze_function(
         ):
             result.analysis_notes.append("symbolic_post_state_reads")
 
+        # Non-void functions with caller-observable stores are compared on
+        # stores ⊕ return value (Issue #13); done before the outcome
+        # partition summaries so they describe the compared surface.
+        self._apply_observable_effect_surface(result, return_type_obj, return_type)
+
         self._apply_outcome_partition_summaries(
             function,
             high_function,

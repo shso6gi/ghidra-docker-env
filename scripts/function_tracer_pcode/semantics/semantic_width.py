@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.analysis import derive_memory_effect_bit_width
 from scripts.function_tracer_pcode.semantics.param_semantics import (
     ParameterSemanticHint,
     infer_parameter_semantics_by_identity,
@@ -663,6 +664,22 @@ class SemanticWidthNormalizer:
         return Expression.constant(narrowed, size=max(1, narrow_bits // 8))
 
 
+def _rewritten_expr_bit_width(expr: Any) -> int:
+    if expr is None:
+        return 0
+    try:
+        return max(0, int(expression_smt_bit_width(expr) or 0))
+    except Exception:
+        pass
+    get_bit_width = getattr(expr, "get_bit_width", None)
+    if callable(get_bit_width):
+        try:
+            return max(0, int(get_bit_width() or 0))
+        except Exception:
+            return 0
+    return 0
+
+
 def normalize_analysis_semantic_width(
     analysis: FunctionReturnAnalysis,
     hints: Optional[Dict[int, ParameterSemanticHint]] = None,
@@ -1168,19 +1185,13 @@ def _rewrite_analysis_expressions(
 
     rewritten_comparison_surface = getattr(analysis, "comparison_surface", None)
     if rewritten_comparison_surface is not None and rewritten_comparison_surface.kind == "memory_effect":
-        synthetic_expr = (
-            getattr(rewritten_effect_summary, "synthetic_expr", None)
-            if rewritten_effect_summary is not None
-            else None
+        # The surface width follows the rewritten comparison values (the
+        # returns), which for a void function is the synthetic effect
+        # expression and for stores ⊕ return value the wider combined
+        # expression; see FunctionReturnAnalysis.memory_effect_surface_bit_width.
+        explicit_bits = derive_memory_effect_bit_width(
+            rewritten_returns, rewritten_effect_summary, _rewritten_expr_bit_width
         )
-        explicit_bits = 0
-        if synthetic_expr is not None:
-            get_bit_width = getattr(synthetic_expr, "get_bit_width", None)
-            if callable(get_bit_width):
-                try:
-                    explicit_bits = max(0, int(get_bit_width() or 0))
-                except Exception:
-                    explicit_bits = 0
         if explicit_bits > 0 and explicit_bits != rewritten_comparison_surface.explicit_bit_width:
             changed = True
             rewritten_comparison_surface = replace(
