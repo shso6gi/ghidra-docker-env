@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 
 
@@ -13,8 +14,8 @@ class PlaceholderAlgebraService:
 
     facade 状態のうち読むのは ReturnAnalyzer が解析ごとに差し替える現在パラメータのみで、
     ``current_parameters`` supplier（引数なし callable）として注入し呼び出し時に読む。
-    条件論理は ``ConditionLogicService`` を直接依存として受け取り、
-    未抽出 family が所有する 3 helper（``constant_int_value`` / ``condition_identity_key`` /
+    条件論理は ``ConditionLogicService``、定数値抽出は ``StackProtectorService`` を直接依存として受け取り、
+    未抽出 family が所有する 2 helper（``condition_identity_key`` /
     ``branch_guarded_expression_is_param_minus_one``）は facade 経由で遅延 dispatch する callable として注入する。
     """
 
@@ -23,13 +24,13 @@ class PlaceholderAlgebraService:
         *,
         condition_logic: ConditionLogicService,
         current_parameters: Callable[[], Sequence[Any]],
-        constant_int_value: Callable[..., Any],
+        stack_protector: StackProtectorService,
         condition_identity_key: Callable[..., Any],
         branch_guarded_expression_is_param_minus_one: Callable[..., Any],
     ) -> None:
         self.condition_logic = condition_logic
         self.current_parameters = current_parameters
-        self.constant_int_value = constant_int_value
+        self.stack_protector = stack_protector
         self.condition_identity_key = condition_identity_key
         self.branch_guarded_expression_is_param_minus_one = branch_guarded_expression_is_param_minus_one
 
@@ -122,7 +123,7 @@ class PlaceholderAlgebraService:
         expr: Optional[Expression],
         conditions: Sequence[Condition],
     ) -> bool:
-        if self.constant_int_value(expr) == 0:
+        if self.stack_protector.constant_int_value(expr) == 0:
             return True
         current = self.strip_transparent_unary(expr)
         if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
@@ -136,7 +137,7 @@ class PlaceholderAlgebraService:
             return False
         if operator == "INT_SLESS":
             left, right = operands
-            if self.constant_int_value(right) == 1 and getattr(left, "expr_type", None) == ExpressionType.PARAMETER:
+            if self.stack_protector.constant_int_value(right) == 1 and getattr(left, "expr_type", None) == ExpressionType.PARAMETER:
                 if any(
                     self.condition_logic.condition_is_signed_positive_of_param(condition, left)
                     for condition in conditions or ()
@@ -144,7 +145,7 @@ class PlaceholderAlgebraService:
                     return True
         if operator == "INT_SUB":
             left, right = operands
-            if self.expression_is_one_under_conditions(left, conditions) and self.constant_int_value(right) == 1:
+            if self.expression_is_one_under_conditions(left, conditions) and self.stack_protector.constant_int_value(right) == 1:
                 return True
         return self.condition_logic.expressions_equal_under_conditions_smt(
             current,
@@ -247,7 +248,7 @@ class PlaceholderAlgebraService:
         if getattr(current, "operator", None) != "INT_SUB":
             return None
         operands = tuple(getattr(current, "operands", ()) or ())
-        if len(operands) != 2 or self.constant_int_value(operands[1]) != 1:
+        if len(operands) != 2 or self.stack_protector.constant_int_value(operands[1]) != 1:
             return None
         flag_expr = self.strip_transparent_unary(operands[0])
         if flag_expr is None:
@@ -296,15 +297,15 @@ class PlaceholderAlgebraService:
         operator = getattr(current, "operator", None)
         left, right = operands
         if operator == "INT_ADD":
-            if self.condition_logic.expressions_same_key(left, placeholder) and self.constant_int_value(right) == constant:
+            if self.condition_logic.expressions_same_key(left, placeholder) and self.stack_protector.constant_int_value(right) == constant:
                 return True
-            if self.condition_logic.expressions_same_key(right, placeholder) and self.constant_int_value(left) == constant:
+            if self.condition_logic.expressions_same_key(right, placeholder) and self.stack_protector.constant_int_value(left) == constant:
                 return True
-            wrapped = self.constant_int_value(right)
+            wrapped = self.stack_protector.constant_int_value(right)
             if self.condition_logic.expressions_same_key(left, placeholder) and wrapped is not None:
                 return self.signed_unit_constant_matches(wrapped, constant, getattr(current, "size", None))
         if operator == "INT_SUB":
-            if self.condition_logic.expressions_same_key(left, placeholder) and self.constant_int_value(right) == -constant:
+            if self.condition_logic.expressions_same_key(left, placeholder) and self.stack_protector.constant_int_value(right) == -constant:
                 return True
         return False
 
@@ -331,9 +332,9 @@ class PlaceholderAlgebraService:
             return False
         operator = getattr(expr, "operator", None)
         if operator == "INT_SLESSEQUAL" and not getattr(condition, "negated", False):
-            return self.branch_guarded_expression_is_param_minus_one(operands[0], param, target_conditions) and self.constant_int_value(operands[1]) == 0
+            return self.branch_guarded_expression_is_param_minus_one(operands[0], param, target_conditions) and self.stack_protector.constant_int_value(operands[1]) == 0
         if operator == "INT_SLESS" and getattr(condition, "negated", False):
-            return self.constant_int_value(operands[0]) == 0 and self.branch_guarded_expression_is_param_minus_one(operands[1], param, target_conditions)
+            return self.stack_protector.constant_int_value(operands[0]) == 0 and self.branch_guarded_expression_is_param_minus_one(operands[1], param, target_conditions)
         return False
 
     def expression_is_one_under_conditions(
@@ -341,7 +342,7 @@ class PlaceholderAlgebraService:
         expr: Optional[Expression],
         target_conditions: Sequence[Condition],
     ) -> bool:
-        if self.constant_int_value(expr) == 1:
+        if self.stack_protector.constant_int_value(expr) == 1:
             return True
         current = expr
         while (
@@ -359,7 +360,7 @@ class PlaceholderAlgebraService:
             operands = tuple(getattr(current, "operands", ()) or ())
             if (
                 len(operands) == 2
-                and self.constant_int_value(operands[1]) == 1
+                and self.stack_protector.constant_int_value(operands[1]) == 1
                 and getattr(operands[0], "expr_type", None) == ExpressionType.PARAMETER
                 and any(
                     self.condition_logic.condition_is_signed_nonpositive_of_param(condition, operands[0])

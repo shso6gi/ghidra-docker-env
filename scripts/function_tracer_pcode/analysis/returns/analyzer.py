@@ -14,7 +14,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
     phi_origins as _svc_phi_origins,
-    stack_protector as _svc_stack_protector,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
@@ -23,6 +22,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
     RegionFacts,
@@ -63,15 +63,23 @@ class ReturnAnalyzer:
         self._expression_cases = ExpressionCaseService(
             current_parameters=lambda: self._current_parameters,
         )
+        self._stack_protector = StackProtectorService(
+            extract_stack_protector_memory_probe=lambda *a, **kw: self._extract_stack_protector_memory_probe(*a, **kw),
+            return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
+            make_return_info=lambda *a, **kw: self._make_return_info(*a, **kw),
+            decompose_comparison_condition=lambda *a, **kw: self._decompose_comparison_condition(*a, **kw),
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_flag=lambda: self.debug,
+        )
         self._condition_logic = ConditionLogicService(
-            constant_int_value=lambda expr: self._constant_int_value(expr),
+            stack_protector=self._stack_protector,
             decompose_comparison_condition=lambda condition: self._decompose_comparison_condition(condition),
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
         )
         self._placeholder_algebra = PlaceholderAlgebraService(
             condition_logic=self._condition_logic,
             current_parameters=lambda: self._current_parameters,
-            constant_int_value=lambda *a, **kw: self._constant_int_value(*a, **kw),
+            stack_protector=self._stack_protector,
             condition_identity_key=lambda *a, **kw: self._condition_identity_key(*a, **kw),
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
         )
@@ -466,7 +474,8 @@ class ReturnAnalyzer:
     _collect_scalar_signedness_profiles = _svc_parameters._impl__collect_scalar_signedness_profiles
     _condition_for_identity_key = _svc_divergence_proofs._impl__condition_for_identity_key
     _condition_identity_key = staticmethod(_svc_divergence_proofs._impl__condition_identity_key)
-    _condition_looks_like_stack_protector_guard = _svc_stack_protector._impl__condition_looks_like_stack_protector_guard
+    def _condition_looks_like_stack_protector_guard(self, condition):
+        return self._stack_protector.condition_looks_like_stack_protector_guard(condition)
     def _condition_mentions_param(self, condition, param_name):
         return self._condition_logic.condition_mentions_param(condition, param_name)
     _conditional_progress_guard_keys_from_structural_proof = _svc_divergence_proofs._impl__conditional_progress_guard_keys_from_structural_proof
@@ -475,7 +484,8 @@ class ReturnAnalyzer:
     @staticmethod
     def _constant_expression_value(expr):
         return ConditionLogicService.constant_expression_value(expr)
-    _constant_int_value = _svc_stack_protector._impl__constant_int_value
+    def _constant_int_value(self, expr):
+        return self._stack_protector.constant_int_value(expr)
     _current_function_entry_address = _svc_lifecycle._impl__current_function_entry_address
     _debug_expr_identity_summary = _svc_lifecycle._impl__debug_expr_identity_summary
     _debug_expr_summary = _svc_lifecycle._impl__debug_expr_summary
@@ -507,14 +517,18 @@ class ReturnAnalyzer:
         return self._condition_logic.expression_is_zero_constant(expr)
     def _expression_is_zero_under_conditions(self, expr, conditions):
         return self._placeholder_algebra.expression_is_zero_under_conditions(expr, conditions)
-    _extract_difference_pair = _svc_stack_protector._impl__extract_difference_pair
-    _extract_indirect_probe = _svc_stack_protector._impl__extract_indirect_probe
-    _extract_stack_protector_compare_pair = _svc_stack_protector._impl__extract_stack_protector_compare_pair
+    def _extract_difference_pair(self, expr):
+        return self._stack_protector.extract_difference_pair(expr)
+    def _extract_indirect_probe(self, expr):
+        return self._stack_protector.extract_indirect_probe(expr)
+    def _extract_stack_protector_compare_pair(self, condition):
+        return self._stack_protector.extract_stack_protector_compare_pair(condition)
     _field_value_from_structural_proof = staticmethod(_svc_divergence_proofs._impl__field_value_from_structural_proof)
     _find_matching_parameter_descriptor_index = _svc_parameters._impl__find_matching_parameter_descriptor_index
     _function_entry_address = staticmethod(_svc_lifecycle._impl__function_entry_address)
     _high_function_cyclic_sccs = _svc_divergence_proofs._impl__high_function_cyclic_sccs
-    _is_zero_constant = _svc_stack_protector._impl__is_zero_constant
+    def _is_zero_constant(self, expr):
+        return self._stack_protector.is_zero_constant(expr)
     _merge_parameter_descriptors = _svc_parameters._impl__merge_parameter_descriptors
     def _negated_unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.negated_unit_condition_key_for_expression(expr, conditions)
@@ -532,7 +546,8 @@ class ReturnAnalyzer:
         return self._placeholder_algebra.placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions)
     _prove_scc_must_diverge_under_guard = _svc_divergence_proofs._impl__prove_scc_must_diverge_under_guard
     _prove_single_guard_nonprogress_region_must_diverge = _svc_divergence_proofs._impl__prove_single_guard_nonprogress_region_must_diverge
-    _reads_share_stack_protector_probe = _svc_stack_protector._impl__reads_share_stack_protector_probe
+    def _reads_share_stack_protector_probe(self, left, right):
+        return self._stack_protector.reads_share_stack_protector_probe(left, right)
     _record_scalar_signedness_from_expression = _svc_parameters._impl__record_scalar_signedness_from_expression
     _recursive_scc_certificate = _svc_divergence_proofs._impl__recursive_scc_certificate
     # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
@@ -551,7 +566,8 @@ class ReturnAnalyzer:
     _scc_preserves_guard_dependencies = _svc_divergence_proofs._impl__scc_preserves_guard_dependencies
     _single_guard_condition_matches = _svc_divergence_proofs._impl__single_guard_condition_matches
     _single_guard_conditions_are_contradictory = _svc_divergence_proofs._impl__single_guard_conditions_are_contradictory
-    _strip_stack_protector_only_conditions = _svc_stack_protector._impl__strip_stack_protector_only_conditions
+    def _strip_stack_protector_only_conditions(self, return_infos):
+        return self._stack_protector.strip_stack_protector_only_conditions(return_infos)
     @staticmethod
     def _strip_transparent_unary(expr):
         return PlaceholderAlgebraService.strip_transparent_unary(expr)
