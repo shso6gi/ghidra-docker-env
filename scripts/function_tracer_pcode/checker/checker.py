@@ -183,6 +183,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 DeprecationWarning,
                 stacklevel=2,
             )
+        # 互換 surface（#54 で撤去予定）: 従来どおりの既定値を持つ属性として残す
+        # が、内部コードはこの 2 属性を読まない。
+        self.enable_rewrite = True if enable_rewrite is None else enable_rewrite
+        self.rewrite_direction = "to_modulo" if rewrite_direction is None else rewrite_direction
         self.strategy_name = strategy
         self.normalization_mode = normalization_mode
         self.enable_fact_normalization = enable_fact_normalization
