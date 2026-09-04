@@ -42,3 +42,10 @@ def test_checker_internals_do_not_read_the_compatibility_attributes():
                 if not re.match(r"\s*=(?!=)", code[match.end():]):
                     reads.append(f"{path.name}:{lineno}")
     assert reads == [], f"internal reads of the deprecated attributes: {reads}"
+
+
+def test_cli_still_parses_the_deprecated_flags():
+    parser = build_parser()
+    args = parser.parse_args(["--equiv", "a", "b", "-f", "f", "--no-rewrite", "--rewrite-direction", "to_expansion"])
+    assert args.no_rewrite is True and args.rewrite_direction == "to_expansion"
+    assert "非推奨" in parser.format_help()
