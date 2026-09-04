@@ -2,47 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.runtime_refs import ReadonlyReductionRef, UnknownValueRef
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
-    CallTargetRef,
-    Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
     EffectSummary,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    Mapping,
     PcodeTracer,
-    ReturnInfo,
-    StructuralKey,
     _expressions_equivalent,
     _iter_expression_nodes,
-    cast,
-    expression_key_safe,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionSimplifier,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    ReadonlyReductionRef,
-    ReturnInfo,
-    UnknownValueRef,
     _iter_expression_nodes,
     eval_constant_raw,
 )
 from typing import Any, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
-    Expression,
-    ExpressionType,
-)
 
 
 def _impl__phi_circular_origin_stable_keys(self, expr: Optional[Expression]) -> Set[Tuple[Any, ...]]:

@@ -2,28 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    AddressValueRef,
-    BoundedCallRefiner,
-    CallArgumentEvidence,
-    CallTargetRef,
-    Condition,
-    ConditionSimplifier,
-    ConditionTracker,
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
+from dataclasses import replace
+from scripts.function_tracer_pcode.core.analysis import (
     DeferredCallInfo,
-    DeferredCallRef,
-    Expression,
-    ExpressionType,
     FunctionReturnAnalysis,
-    PcodeOpRef,
-    PcodeTracer,
     ReturnInfo,
     ReturnOutcome,
-    StorageInfo,
-    StructuralKey,
     UnknownOutcome,
+)
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
+from scripts.function_tracer_pcode.core.runtime_refs import (
+    AddressValueRef,
+    DeferredCallRef,
+    PcodeOpRef,
     UnknownValueRef,
+)
+from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.structural import StructuralKey
+from scripts.function_tracer_pcode.analysis.returns._shared import (
+    BoundedCallRefiner,
+    CallArgumentEvidence,
+    ConditionSimplifier,
+    ConditionTracker,
+    PcodeTracer,
     _PCODE_CALL_OPCODES,
     _TrackedReturnValue,
     _build_parameter_replacements,
@@ -33,11 +38,6 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     _reduce_expression_under_conditions,
     _resolve_call_argument_expression,
     _select_explicit_call_arguments_by_semantic_window,
-    cast,
-    coerce_call_target_ref,
-    get_declared_type_signedness,
-    replace,
-    resolve_pcode_intrinsic,
     substitute_condition,
     substitute_expression,
 )

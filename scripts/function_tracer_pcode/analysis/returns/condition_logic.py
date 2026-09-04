@@ -2,46 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
-    CallTargetRef,
-    Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
     EffectSummary,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    Mapping,
     PcodeTracer,
-    ReturnInfo,
-    StructuralKey,
     _expressions_equivalent,
     _iter_expression_nodes,
-    cast,
-    expression_key_safe,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
     _expressions_equivalent_under_conditions,
-    cast,
     eval_constant_raw,
 )
 from typing import Any, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
-    Expression,
-    ExpressionType,
     eval_constant_raw,
 )
 

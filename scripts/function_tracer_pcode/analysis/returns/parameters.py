@@ -2,58 +2,36 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis, ReturnInfo, SignednessResult
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness, is_void_data_type
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
-    CallTargetRef,
-    Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
     EffectSummary,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    Mapping,
     PcodeTracer,
-    ReturnInfo,
-    StructuralKey,
     _SIGNED_COMPARE_TO_UNSIGNED,
     _UNSIGNED_COMPARE_TO_SIGNED,
     _expressions_equivalent,
     _iter_expression_nodes,
-    cast,
-    expression_key_safe,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionSimplifier,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    Iterable,
-    ReturnInfo,
     SignednessDetector,
-    SignednessResult,
-    StorageInfo,
-    StructuralKey,
     _TrackedReturnValue,
     _resolve_call_target_ref,
-    cast,
     eval_constant_raw,
-    get_declared_type_signedness,
-    is_void_data_type,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from typing import Any, List, Optional, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-)
 
 
 def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):

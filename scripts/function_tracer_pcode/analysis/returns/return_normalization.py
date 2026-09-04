@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    Condition,
     ConditionSimplifier,
     ConditionTracker,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
     PcodeTracer,
-    StructuralKey,
     _PCODE_CALL_OPCODES,
     _PCODE_OPCODE_BY_MNEMONIC,
     _PCODE_VALUE_PASSTHROUGH_OPCODES,

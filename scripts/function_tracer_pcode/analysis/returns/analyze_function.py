@@ -2,30 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from scripts.function_tracer_pcode.core.analysis import ComparisonSurface, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
     ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
     AnalysisFailure,
-    CallTargetRef,
-    ComparisonSurface,
-    Condition,
     ConditionNormalizer,
     ConditionSMTOracle,
     ConditionSimplifier,
     EffectSummary,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
-    Mapping,
     PcodeTracer,
-    ReturnInfo,
-    StructuralKey,
     _expressions_equivalent,
     _iter_expression_nodes,
     attach_quarantined_recurrence_proposal,
-    cast,
-    expression_key_safe,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import (
     ConditionTracker,
@@ -33,11 +26,6 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
 )
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    CallTargetRef,
-    Condition,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
     StructuralRecurrenceSummarizer,
     eval_constant_raw,
 )
@@ -45,8 +33,6 @@ from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from typing import Any, Optional, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     AnalysisFailure,
-    Expression,
-    FunctionReturnAnalysis,
 )
 from scripts.function_tracer_pcode.analysis.returns.parameters import (
     _sealed_return_abi_facts,

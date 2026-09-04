@@ -1,48 +1,8 @@
 """Shared dependencies for ReturnAnalyzer services."""
 
-import re
-import hashlib
-from dataclasses import dataclass, replace
-from contextlib import contextmanager
-from functools import cmp_to_key
-from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, Sequence, Mapping, cast
-from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType, Condition
-from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
-from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
+from dataclasses import dataclass
+from typing import Optional, Any
 from scripts.function_tracer_pcode.core.storage import StorageInfo
-from scripts.function_tracer_pcode.core.analysis import (
-    ComparisonSurface,
-    DeferredCallInfo,
-    DivergenceOutcome,
-    ReturnInfo,
-    ReturnOutcome,
-    UnknownOutcome,
-    FunctionReturnAnalysis,
-    SignednessResult,
-    ReturnValueFlowCertificate,
-    ReturnValueFlowStep,
-    VarnodeFlowRef,
-)
-from scripts.function_tracer_pcode.core.runtime_refs import (
-    AddressValueRef,
-    DeferredCallRef,
-    PcodeBlockRef,
-    PcodeOpRef,
-    PostStateValueRef,
-    ReadonlyReductionRef,
-    UnknownValueRef,
-)
-from scripts.function_tracer_pcode.core.signature import (
-    get_declared_type_signedness,
-    is_void_data_type,
-)
-from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
-from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
-from scripts.function_tracer_pcode.config.settings import (
-    BOUNDED_CALL_MAX_CASES,
-    BOUNDED_CALL_REFINEMENT_ENABLED,
-    BOUNDED_CALL_UNROLL_LIMIT,
-)
 from scripts.function_tracer_pcode.analysis import PcodeTracer
 from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
 from scripts.function_tracer_pcode.analysis.condition import (
@@ -137,4 +97,4 @@ class _EffectRewritePrecision:
     observed_loads: int
     phi_nodes: int
 
-__all__ = ('ANALYSIS_STATUS_ANALYSIS_EXCEPTION', 'ANALYSIS_STATUS_DECOMPILATION_FAILED', 'ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS', 'ANALYSIS_STATUS_HIGH_FUNCTION_MISSING', 'AddressValueRef', 'AnalysisFailure', 'AnalysisSession', 'Any', 'BOUNDED_CALL_MAX_CASES', 'BOUNDED_CALL_REFINEMENT_ENABLED', 'BOUNDED_CALL_UNROLL_LIMIT', 'BoundedCallRefiner', 'CallArgumentEvidence', 'CallTargetRef', 'CanonicalLocation', 'ComparisonSurface', 'Condition', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'ConditionTracker', 'DeferredCallInfo', 'DeferredCallRef', 'Dict', 'DivergenceOutcome', 'EFFECT_API', 'EffectSummary', 'Expression', 'ExpressionType', 'FunctionControlEffectProfile', 'FunctionReturnAnalysis', 'Iterable', 'List', 'Mapping', 'Optional', 'PcodeBlockRef', 'PcodeOpRef', 'PcodeTracer', 'PostStateValueRef', 'ReadonlyReductionRef', 'ReturnInfo', 'ReturnOutcome', 'Sequence', 'Set', 'SignednessDetector', 'SignednessResult', 'StorageInfo', 'StructuralKey', 'StructuralRecurrenceSummarizer', 'Tuple', 'UnknownOutcome', 'UnknownValueRef', '_EffectRewritePrecision', '_FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS', '_PCODE_BRANCHLIKE_OPCODES', '_PCODE_CALL_OPCODES', '_PCODE_OPCODE_BY_MNEMONIC', '_PCODE_VALUE_PASSTHROUGH_OPCODES', '_PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS', '_SIGNED_COMPARE_TO_UNSIGNED', '_TrackedReturnValue', '_UNSIGNED_COMPARE_TO_SIGNED', '_build_parameter_replacements', '_call_argument_evidence_storage_key', '_enumerate_constant_expression_branches', '_expression_contains_observed_loads', '_expression_location_ref', '_expression_reads_location', '_expressions_equivalent', '_expressions_equivalent_under_conditions', '_find_matching_effect_value', '_find_unique_effect_location_for_value', '_iter_expression_nodes', '_materialize_existing_effect_value_carrier', '_reduce_expression_under_conditions', '_replay_definite_active_effects_for_location', '_resolve_call_argument_expression', '_resolve_call_target_ref', '_select_explicit_call_arguments_by_semantic_window', '_strip_materialized_post_state_value_refs', 'accept_summary_return_candidates', 'attach_quarantined_recurrence_proposal', 'build_switch_dispatch_summaries', 'canonicalize_expr_read_location', 'cast', 'cmp_to_key', 'coerce_call_target_ref', 'concretize_readonly_loads', 'contextmanager', 'dataclass', 'eval_constant_raw', 'expression_contains_post_state_reads', 'expression_contains_unsupported_smt_ops', 'expression_key_safe', 'expression_matches_stale_post_state_replay', 'get_declared_type_signedness', 'hashlib', 'is_void_data_type', 'locations_match', 'lower_post_state_expression_for_smt', 'materialize_definite_post_state_expression', 'normalize_post_state_expression', 'promote_effect_value_carrier_to_post_state_read', 'promote_effect_value_match_to_post_state_read', 'promote_observed_loads_to_post_state_reads', 're', 'replace', 'resolve_call_targets', 'resolve_definite_post_state_read_for_location', 'resolve_pcode_intrinsic', 'rewrite_loads_from_effects', 'rewrite_observed_loads_from_effects', 'substitute_condition', 'substitute_expression', 'summarize_expression', 'summarize_store_effects')
+__all__ = ('ANALYSIS_STATUS_ANALYSIS_EXCEPTION', 'ANALYSIS_STATUS_DECOMPILATION_FAILED', 'ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS', 'ANALYSIS_STATUS_HIGH_FUNCTION_MISSING', 'AnalysisFailure', 'AnalysisSession', 'BoundedCallRefiner', 'CallArgumentEvidence', 'CanonicalLocation', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'ConditionTracker', 'EFFECT_API', 'EffectSummary', 'FunctionControlEffectProfile', 'PcodeTracer', 'SignednessDetector', 'StructuralRecurrenceSummarizer', '_EffectRewritePrecision', '_FUNCTION_PROFILE_RECOGNIZED_PCODE_MNEMONICS', '_PCODE_BRANCHLIKE_OPCODES', '_PCODE_CALL_OPCODES', '_PCODE_OPCODE_BY_MNEMONIC', '_PCODE_VALUE_PASSTHROUGH_OPCODES', '_PHASE2_MEMORY_FREE_SCALAR_PCODE_MNEMONICS', '_SIGNED_COMPARE_TO_UNSIGNED', '_TrackedReturnValue', '_UNSIGNED_COMPARE_TO_SIGNED', '_build_parameter_replacements', '_call_argument_evidence_storage_key', '_enumerate_constant_expression_branches', '_expression_contains_observed_loads', '_expression_location_ref', '_expression_reads_location', '_expressions_equivalent', '_expressions_equivalent_under_conditions', '_find_matching_effect_value', '_find_unique_effect_location_for_value', '_iter_expression_nodes', '_materialize_existing_effect_value_carrier', '_reduce_expression_under_conditions', '_replay_definite_active_effects_for_location', '_resolve_call_argument_expression', '_resolve_call_target_ref', '_select_explicit_call_arguments_by_semantic_window', '_strip_materialized_post_state_value_refs', 'accept_summary_return_candidates', 'attach_quarantined_recurrence_proposal', 'build_switch_dispatch_summaries', 'canonicalize_expr_read_location', 'concretize_readonly_loads', 'eval_constant_raw', 'expression_contains_post_state_reads', 'expression_matches_stale_post_state_replay', 'locations_match', 'lower_post_state_expression_for_smt', 'materialize_definite_post_state_expression', 'normalize_post_state_expression', 'promote_effect_value_carrier_to_post_state_read', 'promote_effect_value_match_to_post_state_read', 'promote_observed_loads_to_post_state_reads', 'resolve_call_targets', 'resolve_definite_post_state_read_for_location', 'rewrite_loads_from_effects', 'rewrite_observed_loads_from_effects', 'substitute_condition', 'substitute_expression', 'summarize_expression', 'summarize_store_effects')

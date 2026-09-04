@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     AnalysisFailure,
-    Condition,
     ConditionTracker,
-    Expression,
-    ExpressionType,
-    FunctionReturnAnalysis,
 )
-from ._shared import CallTargetRef
 from ._shared import ConditionNormalizer
-from ._shared import Dict
 from ._shared import EffectSummary
-from ._shared import List
 from ._api import PcodeTracer
-from ._shared import Set
-from ._shared import expression_key_safe
 from ._shared import summarize_expression
 
 def _impl__program_is_big_endian(self) -> Optional[bool]:
