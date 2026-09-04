@@ -9,8 +9,10 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     SCHEMA_VERSION,
+    VALIDATED_ONCE,
     authority_digest,
     canonical_value,
+    freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrenceAuthority,
@@ -129,6 +131,13 @@ class ReceiptBoundSolverExecutionEventAuthority:
         receipt = validate_outcome_execution_receipt_authority(
             self.execution_receipt_authority
         )
+        # 記録後に呼び出し側の dict を書き換えても event の内容が変わらないよう、
+        # 不変コピーへ置き換える（digest は不変）。
+        object.__setattr__(
+            self,
+            "execution_receipt_authority",
+            freeze_authority_value(self.execution_receipt_authority),
+        )
         status = receipt["observed_status"]
         if self.terminal_candidate and status != "timeout":
             raise ValueError("only a TIMEOUT receipt may be a terminal candidate")
@@ -176,7 +185,9 @@ class GenericReceiptBoundSolverExecutionEventAuthority:
         )
         receipt = decode_persisted_execution_receipt(self.execution_receipt_authority)
         object.__setattr__(
-            self, "execution_receipt_authority", receipt.to_authority_dict()
+            self,
+            "execution_receipt_authority",
+            freeze_authority_value(receipt.to_authority_dict()),
         )
         if receipt.proof_requirement_id != self.proof_requirement_id:
             raise ValueError("generic solver event requirement differs from receipt")
@@ -492,6 +503,8 @@ class SealedEventStream:
     events: Tuple[RecordedEvent, ...]
 
     def validate(self) -> None:
+        if VALIDATED_ONCE.is_validated(self):
+            return
         if not self.envelope.sealed or not self.events:
             raise ValueError("event stream is empty or unsealed")
         if type(self.envelope.schema_version) is not int or self.envelope.schema_version != SCHEMA_VERSION:
@@ -551,6 +564,7 @@ class SealedEventStream:
             raise ValueError("event stream count mismatch")
         if self.envelope.authority_chain_digest != predecessor:
             raise ValueError("event stream chain digest mismatch")
+        VALIDATED_ONCE.mark(self)
 
 
 _PREFIX_STREAM_VIEW_TOKEN = object()
@@ -719,7 +733,13 @@ class EventRecorder:
             validate_event_authority_payload(
                 intent.event_type, intent.authority_payload
             )
-            payload = intent.authority_payload
+            # 生の dict / list / set を含む payload は不変コピーへ置き換える
+            # （digest は不変）。dataclass payload は同一オブジェクトのまま
+            # （各クラスの __post_init__ がコンテナ型フィールドを凍結する）。
+            # ここでは深い不変性を「要求」しない: 記録時の例外は producer 側で
+            # 握り潰されてイベントが黙って失われるため、封印後の validate-once
+            # キャッシュ側（VALIDATED_ONCE.mark）が深く不変な場合にだけ記録する。
+            payload = freeze_authority_value(intent.authority_payload)
             header = EventHeader(
                 stream_id=self._stream_id,
                 result_occurrence_id=self._result_occurrence_id,

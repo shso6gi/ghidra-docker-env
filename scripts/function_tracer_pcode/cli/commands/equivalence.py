@@ -287,6 +287,9 @@ def _emit_import_error_result(
 def run_equivalence_check(args):
     """等価性判定を実行する。"""
     start_time = time.time()
+    from scripts.function_tracer_pcode.checker.diagnostics import StageClock, attach_stage_timing
+
+    stage_clock = StageClock()
 
     def _get_bool_arg(name: str, default: bool = False) -> bool:
         value = getattr(args, name, default)
@@ -388,14 +391,16 @@ def run_equivalence_check(args):
         )
         print()
 
-    start_headless_pyghidra(
-        pyghidra,
-        install_dir=(
-            Path(runtime_env.ghidra_install_dir)
-            if runtime_env.ghidra_install_dir
-            else None
-        ),
-    )
+    stage_clock.mark("cli_preamble", time.time() - start_time)
+    with stage_clock.timed("jvm_start"):
+        start_headless_pyghidra(
+            pyghidra,
+            install_dir=(
+                Path(runtime_env.ghidra_install_dir)
+                if runtime_env.ghidra_install_dir
+                else None
+            ),
+        )
 
     type_fixer_config = TypeFixerConfig()
     enable_rewrite = not getattr(args, "no_rewrite", False)
@@ -457,31 +462,37 @@ def run_equivalence_check(args):
 
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
-            project_cm = pyghidra.open_project(temp_dir, "EquivCheckProject", create=True)
-            project = project_cm.__enter__()
+            with stage_clock.timed("project_open"):
+                project_cm = pyghidra.open_project(temp_dir, "EquivCheckProject", create=True)
+                project = project_cm.__enter__()
             try:
-                result1_cm, result1 = _load_program_context(
-                    pyghidra,
-                    project,
-                    binary1_path,
-                    "binary1",
-                    quiet=args.quiet,
-                )
-                try:
-                    program1 = result1.getPrimaryDomainObject()
-                    pyghidra.analyze(program1)
-
-                    result2_cm, result2 = _load_program_context(
+                with stage_clock.timed("import_binary1"):
+                    result1_cm, result1 = _load_program_context(
                         pyghidra,
                         project,
-                        binary2_path,
-                        "binary2",
+                        binary1_path,
+                        "binary1",
                         quiet=args.quiet,
                     )
+                try:
+                    program1 = result1.getPrimaryDomainObject()
+                    with stage_clock.timed("auto_analyze_binary1"):
+                        pyghidra.analyze(program1)
+
+                    with stage_clock.timed("import_binary2"):
+                        result2_cm, result2 = _load_program_context(
+                            pyghidra,
+                            project,
+                            binary2_path,
+                            "binary2",
+                            quiet=args.quiet,
+                        )
                     try:
                         program2 = result2.getPrimaryDomainObject()
-                        pyghidra.analyze(program2)
+                        with stage_clock.timed("auto_analyze_binary2"):
+                            pyghidra.analyze(program2)
 
+                        check_started = time.monotonic()
                         result = checker.check_from_binaries(
                             program1,
                             program2,
@@ -497,12 +508,16 @@ def run_equivalence_check(args):
                             binary1_content_identity=binary1_content_identity,
                             binary2_content_identity=binary2_content_identity,
                         )
+                        stage_clock.mark("check", time.monotonic() - check_started)
                     finally:
-                        _safe_close_context(result2_cm)
+                        with stage_clock.timed("close_programs"):
+                            _safe_close_context(result2_cm)
                 finally:
-                    _safe_close_context(result1_cm)
+                    with stage_clock.timed("close_programs"):
+                        _safe_close_context(result1_cm)
             finally:
-                _safe_close_context(project_cm)
+                with stage_clock.timed("close_programs"):
+                    _safe_close_context(project_cm)
     except KeyboardInterrupt:
         if not args.quiet:
             print("\nInterrupted by user.")
@@ -520,11 +535,14 @@ def run_equivalence_check(args):
             binary2_content_identity=binary2_content_identity,
         )
 
+    attach_stage_timing(result, stage_clock)
+    emission_started = time.monotonic()
     output_content = result.to_string(
         verbose=args.verbose,
         show_phase_usage=args.debug,
     )
     output_result(output_content, args.output, args.quiet)
+    render_seconds = time.monotonic() - emission_started
 
     if _get_bool_arg("emit_result_json", False):
         result_payload = result.to_dict()
@@ -556,6 +574,14 @@ def run_equivalence_check(args):
             )
         )
         output_result(json_content, args.output, args.quiet)
+
+    if not args.quiet:
+        # 結果の描画・JSON 化・envelope 永続化に掛かった時間。結果 JSON の中には
+        # 入れられない（JSON 自体の生成時間なので）ためログ行として残す。
+        print(
+            "[EquivalenceCLI] Result emission seconds: "
+            f"render={render_seconds:.3f} total={time.monotonic() - emission_started:.3f}"
+        )
 
     if args.save_formula and result.smt_formula:
         if not args.quiet:

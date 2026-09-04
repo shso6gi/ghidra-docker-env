@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
+from collections.abc import Mapping as _AbcMapping
+from types import MappingProxyType
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
@@ -11,8 +14,14 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
 SCHEMA_VERSION = 2
 
+# canonical_value の fast path 用。Enum は str/int のサブクラスになり得るので、
+# 型が「ちょうど」これらのときだけ即返す（Enum は type が一致しない）。
+_PRIMITIVE_TYPES = frozenset({str, int, float, bool})
+
 
 def canonical_value(value: Any) -> Any:
+    if value is None or type(value) in _PRIMITIVE_TYPES:
+        return value
     if isinstance(value, Enum):
         return value.value
     if hasattr(value, "to_authority_dict"):
@@ -21,7 +30,7 @@ def canonical_value(value: Any) -> Any:
         return tuple(
             (item.name, canonical_value(getattr(value, item.name))) for item in fields(value)
         )
-    if isinstance(value, Mapping):
+    if isinstance(value, _AbcMapping):
         return tuple(
             (str(key), canonical_value(child))
             for key, child in sorted(value.items(), key=lambda item: str(item[0]))
@@ -41,6 +50,107 @@ def authority_digest(value: Any) -> str:
         canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def freeze_authority_value(value: Any) -> Any:
+    """authority ペイロード内の可変コンテナを不変な等価物へ再帰的に変換する。
+
+    dict / Mapping → 新しいコピーの ``MappingProxyType``、list / tuple → tuple、
+    set / frozenset → frozenset。``canonical_value`` の出力（したがって
+    digest）は変わらない。frozen dataclass は同一オブジェクトのまま返す
+    （factory の所有権チェックは同一性で行われるため）。各 dataclass は自分の
+    コンテナ型フィールドを ``__post_init__`` で凍結する責任を持つ。
+    """
+    if value is None or type(value) in _PRIMITIVE_TYPES or isinstance(value, Enum):
+        return value
+    if isinstance(value, _AbcMapping):
+        return MappingProxyType({
+            key: freeze_authority_value(child) for key, child in value.items()
+        })
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_authority_value(child) for child in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(freeze_authority_value(child) for child in value)
+    return value
+
+
+def assert_deep_immutable(value: Any, path: str = "$") -> None:
+    """``value`` が深く不変（プリミティブ / Enum / MappingProxyType / tuple /
+    frozenset / frozen dataclass の入れ子のみ）でなければ ``TypeError``。
+
+    封印済み authority オブジェクトの validate() 結果をプロセス内でキャッシュ
+    してよいかを判定する不変条件。frozen=True はトップレベルの再代入しか防が
+    ないので、内部に dict / list / set が残っていればここで弾く。
+    """
+    if value is None or isinstance(value, (str, int, float, bool, Enum)):
+        # str/int/float/bool のサブクラス（JPype の JInt など）も不変。
+        return
+    if isinstance(value, MappingProxyType):
+        for key, child in value.items():
+            assert_deep_immutable(child, f"{path}.{key}")
+        return
+    if type(value) is tuple:
+        for index, child in enumerate(value):
+            assert_deep_immutable(child, f"{path}[{index}]")
+        return
+    if type(value) is frozenset:
+        for child in value:
+            assert_deep_immutable(child, f"{path}{{}}")
+        return
+    if is_dataclass(value) and not isinstance(value, type):
+        params = getattr(value, "__dataclass_params__", None)
+        if params is None or not params.frozen:
+            raise TypeError(f"authority value is a mutable dataclass at {path}: {type(value).__name__}")
+        for item in fields(value):
+            assert_deep_immutable(getattr(value, item.name), f"{path}.{item.name}")
+        return
+    raise TypeError(f"authority value is mutable at {path}: {type(value).__name__}")
+
+
+class ValidatedOnceRegistry:
+    """封印済み（frozen）authority オブジェクトの validate() 結果をプロセス内で
+    1 回だけ有効にする識別子ベースの記録（Issue #14）。
+
+    記録できるのは ``assert_deep_immutable`` を満たすオブジェクトだけ。frozen
+    dataclass でも内部の dict などが後から書き換えられると、以前は validate()
+    が digest 不一致で検出していた改変を見逃すため、深い不変性を記録の前提に
+    する。
+
+    ``SealedEventStream`` / ``CauseLifecycleSnapshot`` /
+    ``VerifiedLifecycleProjection`` は封印後に変化しない値オブジェクトだが、
+    producer-site の projection を発行するたびに全イベントを再ダイジェストして
+    いたため、finalize が O(sites × events) になっていた。同一オブジェクトの
+    2 回目以降の validate() を O(1) にする。オブジェクトは弱参照で追跡し、回収
+    されれば記録も消えるので id の再利用で誤判定しない。
+    """
+
+    def __init__(self) -> None:
+        self._refs: dict[int, weakref.ref] = {}
+
+    def is_validated(self, obj: Any) -> bool:
+        ref = self._refs.get(id(obj))
+        return ref is not None and ref() is obj
+
+    def mark(self, obj: Any) -> bool:
+        """検証済みとして記録する。深く不変でないオブジェクト（内部に dict /
+        list / set が残る）や弱参照を取れないものは記録せず ``False`` を返し、
+        以後も毎回検証される。"""
+        try:
+            assert_deep_immutable(obj)
+        except TypeError:
+            return False
+        key = id(obj)
+        try:
+            self._refs[key] = weakref.ref(obj, lambda _ref, key=key: self._refs.pop(key, None))
+        except TypeError:
+            return False
+        return True
+
+    def __len__(self) -> int:
+        return len(self._refs)
+
+
+VALIDATED_ONCE = ValidatedOnceRegistry()
 
 
 class IdentityScope(str, Enum):
@@ -913,6 +1023,8 @@ class VerifiedLifecycleProjection:
         )
 
     def validate(self) -> None:
+        if VALIDATED_ONCE.is_validated(self):
+            return
         rebuilt = VerifiedLifecycleProjection.seal(
             result_occurrence_id=self.result_occurrence_id,
             snapshot_digest=self.snapshot_digest,
@@ -923,6 +1035,7 @@ class VerifiedLifecycleProjection:
         )
         if rebuilt != self:
             raise ValueError("verified lifecycle projection digest or relation mismatch")
+        VALIDATED_ONCE.mark(self)
 
 
 _PREFIX_PROJECTION_FACTORY_TOKEN = object()

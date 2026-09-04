@@ -7,10 +7,89 @@
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Any, Dict, Iterable, Mapping, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
+
+
+class StageClock:
+    """ペア 1 件の実行を段階（JVM 起動 / import / auto-analysis / 判定 …）に
+    分けて計測する（Issue #14）。
+
+    ``timed(stage)`` で囲んだ区間の秒数を ``seconds[stage]`` に加算し、同じ
+    stage を複数回囲めば合算する。``mark(stage, seconds)`` は外部で測った値の
+    登録用。``snapshot()`` は結果 JSON の診断ブロックへそのまま入る dict。
+    診断なので計測に失敗しても例外を外へ出さない。
+    """
+
+    def __init__(self) -> None:
+        self.seconds: Dict[str, float] = {}
+        self.order: list = []
+        self.notes: Dict[str, Any] = {}
+        self._process_age_at_start = process_age_seconds()
+        self._started = time.monotonic()
+
+    @contextmanager
+    def timed(self, stage: str) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.mark(stage, time.monotonic() - started)
+
+    def mark(self, stage: str, seconds: float) -> None:
+        try:
+            value = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            return
+        if stage not in self.seconds:
+            self.order.append(stage)
+            self.seconds[stage] = 0.0
+        self.seconds[stage] += value
+
+    def note(self, key: str, value: Any) -> None:
+        self.notes[key] = value
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "schema": "pair-stage-timing-v1",
+            "seconds": {stage: round(self.seconds[stage], 6) for stage in self.order},
+            "elapsed_seconds": round(time.monotonic() - self._started, 6),
+        }
+        if self._process_age_at_start is not None:
+            # Python 起動から計測開始までの時間（インタプリタ起動・import 込み）。
+            payload["process_age_at_start_seconds"] = round(self._process_age_at_start, 6)
+        if self.notes:
+            payload["notes"] = dict(self.notes)
+        return payload
+
+
+def process_age_seconds() -> Optional[float]:
+    """このプロセスの起動からの経過秒（Linux の /proc、fail-open で None）。"""
+    try:
+        with open("/proc/self/stat", "r", encoding="ascii", errors="replace") as handle:
+            stat = handle.read()
+        fields = stat[stat.rindex(")") + 2:].split()
+        start_ticks = int(fields[19])
+        with open("/proc/uptime", "r", encoding="ascii") as handle:
+            uptime = float(handle.read().split()[0])
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+        return max(0.0, uptime - start_ticks / float(ticks_per_second))
+    except Exception:
+        return None
+
+
+def attach_stage_timing(result: Any, clock: StageClock) -> None:
+    """結果オブジェクトの診断ブロックに段階別時間を添付する（署名対象外）。"""
+    try:
+        diagnostics = dict(getattr(result, "diagnostics", None) or {})
+        diagnostics["stages"] = clock.snapshot()
+        result.diagnostics = diagnostics
+    except Exception:
+        return
 
 
 def expression_stats(analysis: Any) -> Dict[str, int]:
@@ -160,8 +239,11 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "analysis_seconds": dict(base.get("analysis_seconds") or {}),
             "solver_seconds": round(solver_seconds, 6),
             "attempts": attempts_out,
+            "stages": dict(base.get("stages") or {}),
+            "boundary_seconds": dict(base.get("boundary_seconds") or {}),
         },
         "expressions": dict(base.get("expressions") or {}),
+        "validated_once_entries": base.get("validated_once_entries"),
         "pairs": pairwise,
         "solver_invocations": solver_invocations,
         "stage_path": list(getattr(result, "stage_path", ()) or ()),

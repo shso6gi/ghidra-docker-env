@@ -580,17 +580,29 @@ run_pair() {
         -o "$resource_metrics_file" "${supervisor_cmd[@]}" \
         > "$log_file" 2>&1 &
     command_pid=$!
-    while kill -0 "$command_pid" 2>/dev/null; do
-        sleep "$EQBENCH_PROGRESS_INTERVAL_SECONDS"
-        write_pair_progress_receipt "$progress_receipt" "RUNNING" \
-            "$function_name" "$left_id" "$right_id" "$started_at" \
-            "-" "-" "-" "-" "-" "-" "$command_pid"
-    done
+    # Refresh the RUNNING receipt from a helper loop while waiting on the pair
+    # process itself: polling the process with `sleep` held every scheduler
+    # slot for up to EQBENCH_PROGRESS_INTERVAL_SECONDS after the pair had
+    # already finished (Issue #14).
+    (
+        while kill -0 "$command_pid" 2>/dev/null; do
+            sleep "$EQBENCH_PROGRESS_INTERVAL_SECONDS" &
+            wait $! 2>/dev/null || break
+            kill -0 "$command_pid" 2>/dev/null || break
+            write_pair_progress_receipt "$progress_receipt" "RUNNING" \
+                "$function_name" "$left_id" "$right_id" "$started_at" \
+                "-" "-" "-" "-" "-" "-" "$command_pid"
+        done
+    ) &
+    local progress_writer_pid=$!
     if wait "$command_pid"; then
         ec=0
     else
         ec=$?
     fi
+    pkill -P "$progress_writer_pid" 2>/dev/null || true
+    kill "$progress_writer_pid" 2>/dev/null || true
+    wait "$progress_writer_pid" 2>/dev/null || true
     if ! supervisor_projection_is_terminal "$authority_output"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" \
             >> "$log_file"
