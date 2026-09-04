@@ -1364,7 +1364,7 @@ def test_prepared_use_domain_mapping_rebuild_rejects_manifest_tampering(tamper_k
     _observe_phase2_call_result(left)
     _observe_phase2_call_result(right)
     source = StrategySourceAnalysisPair.create(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
     prepared = prepare_solver_surface(
         source,
         observation_contract_digest=checker.observation_contract.contract_id,
@@ -1427,7 +1427,7 @@ def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkey
     right = _phase2_caller_analysis("B2", 2, 0x3000)
     _observe_phase2_call_result(left)
     _observe_phase2_call_result(right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
     trusted_validate = checker_module.validate_call_resolution_projection
     call_count = 0
 
@@ -1507,7 +1507,6 @@ def test_observed_call_result_projection_is_lowered_and_receipted():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1537,7 +1536,6 @@ def test_observed_call_result_stored_to_memory_is_proven_and_receipted():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1586,7 +1584,6 @@ def test_observed_call_result_store_does_not_hide_different_call_semantics():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1602,7 +1599,6 @@ def test_no_active_pair_receipt_fails_closed_without_relational_certificate():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1647,7 +1643,6 @@ def test_conditional_call_projection_is_distributed_to_consuming_cases_only():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1668,7 +1663,6 @@ def test_observed_call_to_inline_region_projection_lowers_to_region_value():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1751,7 +1745,6 @@ def test_call_output_use_without_consumer_op_provenance_is_inconclusive():
     assert contract["proven"] is False
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(analysis, counterpart, "left", "right")
     assert result.is_equivalent is None
@@ -1894,7 +1887,6 @@ def test_return_only_unsat_cannot_discharge_call_effect_obligations():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1923,7 +1915,6 @@ def test_typed_pure_direct_call_proofs_can_promote_equivalence():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -1970,7 +1961,7 @@ def test_preflight_rejects_call_invocation_without_acyclic_cfg_proof():
         profile = analysis.effect_summary.function_control_effect_profile
         object.__setattr__(profile, "cfg_acyclic", False)
 
-    result = EquivalenceChecker(timeout=5, enable_rewrite=False).check(
+    result = EquivalenceChecker(timeout=5).check(
         left, right, "left", "right"
     )
 
@@ -2029,7 +2020,7 @@ def test_preflight_preserves_source_arguments_for_pairwise_override(monkeypatch)
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
     original = checker.pairwise_strategy.check
     observed = []
 
@@ -2049,7 +2040,7 @@ def test_preflight_rejects_override_eq_without_consumption_receipt(monkeypatch):
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     def override(_a1, _a2, _save_formula=False):
         return StrategyResult(
@@ -2122,7 +2113,6 @@ def test_preflight_monolithic_branch_consumes_prepared_surface_and_emits_receipt
     result = EquivalenceChecker(
         strategy="monolithic",
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -2138,7 +2128,7 @@ def test_default_preflight_mode_does_not_enter_legacy_post_pairwise_gate(monkeyp
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     def rejected_legacy_path(*_args, **_kwargs):
         raise AssertionError("legacy post-pairwise gate entered")
@@ -2167,7 +2157,6 @@ def test_non_call_effect_summary_incompleteness_cannot_be_cleared_by_call_proof(
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -2195,7 +2184,6 @@ def test_completed_recovery_proof_flag_disables_typed_call_promotion():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=False,
     ).check(left, right, "left", "right")
 
@@ -2356,7 +2344,7 @@ def _call_to_region_memory_proof_inputs(*, region_value_delta: int = 0):
 def test_typed_call_to_region_proves_guard_input_and_output_relations():
     pytest.importorskip("z3")
     left, right, manifest = _call_to_region_proof_inputs()
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -2417,7 +2405,7 @@ def test_v2_typed_call_producer_uses_pinned_execution_and_live_q_open_assignment
             manifest,
             left,
             right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
         assert len(legacy.v2_blocker_signals) == 1
@@ -2519,7 +2507,7 @@ def test_v2_call_effect_pilot_completes_stages_but_keeps_semantic_arms_open():
             manifest,
             left,
             right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
         assert len(legacy.v2_blocker_signals) == 1
@@ -2626,7 +2614,7 @@ def test_v2_call_effect_ambiguous_q_open_refuses_before_execution_and_finishes_u
             manifest,
             left,
             right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
     context = composite.build_call_effect_execution_context(
@@ -2710,7 +2698,7 @@ def test_v2_call_effect_persists_nonselected_timeout_history(monkeypatch):
             manifest,
             left,
             right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
         context = composite.build_call_effect_execution_context(
@@ -2783,7 +2771,7 @@ def test_v2_call_effect_live_solver_timeout_finalizes_as_timeout(monkeypatch):
             manifest,
             left,
             right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
         context = composite.build_call_effect_execution_context(
@@ -2873,7 +2861,6 @@ def test_v2_call_effect_partial_stage_prefix_is_not_replayed(monkeypatch):
             right,
             solver_runner=EquivalenceChecker(
                 timeout=5,
-                enable_rewrite=False,
             ).solver_runner,
             timeout_seconds=5,
         )
@@ -2959,7 +2946,7 @@ def test_v2_call_effect_two_identical_runs_get_distinct_result_occurrences(monke
         with production_signal_scope(session):
             legacy = produce_pure_direct_call_proofs(
                 manifest, left, right,
-                solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+                solver_runner=EquivalenceChecker(timeout=5).solver_runner,
                 timeout_seconds=5,
             )
             context = composite.build_call_effect_execution_context(
@@ -3039,7 +3026,7 @@ def test_v2_call_effect_post_execution_pre_batch_failure_still_seals_ledger(monk
     with production_signal_scope(session):
         legacy = produce_pure_direct_call_proofs(
             manifest, left, right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
         context = composite.build_call_effect_execution_context(
@@ -3101,7 +3088,7 @@ def test_ineligible_call_obligation_emits_typed_prerequisite_frontier():
     with production_signal_scope(session):
         production = produce_pure_direct_call_proofs(
             manifest, left, right,
-            solver_runner=EquivalenceChecker(timeout=5, enable_rewrite=False).solver_runner,
+            solver_runner=EquivalenceChecker(timeout=5).solver_runner,
             timeout_seconds=5,
         )
     projection = session.preview_lifecycle_projection()
@@ -3151,7 +3138,7 @@ def test_totality_ineligible_call_obligation_emits_pure_semantics_frontier():
         production = produce_pure_direct_call_proofs(
             manifest, left, right,
             solver_runner=EquivalenceChecker(
-                timeout=5, enable_rewrite=False
+                timeout=5
             ).solver_runner,
             timeout_seconds=5,
         )
@@ -3190,7 +3177,7 @@ def test_ineligible_call_obligation_splits_blockers_by_sealed_reason():
         production = produce_pure_direct_call_proofs(
             manifest, left, right,
             solver_runner=EquivalenceChecker(
-                timeout=5, enable_rewrite=False
+                timeout=5
             ).solver_runner,
             timeout_seconds=5,
         )
@@ -3222,7 +3209,7 @@ def test_call_prerequisite_rejects_unknown_infrastructure_blocker_code():
         produce_pure_direct_call_proofs(
             manifest, left, right,
             solver_runner=EquivalenceChecker(
-                timeout=5, enable_rewrite=False
+                timeout=5
             ).solver_runner,
             timeout_seconds=5,
         )
@@ -3246,7 +3233,7 @@ def test_call_effect_memory_requirement_is_derived_before_memory_artifact_exists
 def test_typed_call_to_region_proves_ordered_scalar_store_relation():
     pytest.importorskip("z3")
     left, right, manifest = _call_to_region_memory_proof_inputs()
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3316,7 +3303,7 @@ def test_typed_call_to_region_compares_final_post_state_after_overwrite():
         1,
     )
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3342,7 +3329,7 @@ def test_typed_call_to_region_refutes_different_scalar_store_value():
     left, right, manifest = _call_to_region_memory_proof_inputs(
         region_value_delta=1
     )
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3365,7 +3352,7 @@ def test_typed_call_to_region_refutes_different_inline_result():
         Expression.constant(1, size=4),
     )
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3406,7 +3393,7 @@ def test_typed_call_to_region_proves_explicit_signed_abi_width_bridge():
         )
     )
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3433,7 +3420,7 @@ def test_typed_call_to_region_proves_signed_return_observation_width_bridge():
         type_name="long",
     )
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3466,7 +3453,7 @@ def test_typed_call_to_region_rejects_potentially_trapping_inline_result():
         "INT_DIV", parameter, parameter
     )
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3492,7 +3479,6 @@ def test_typed_call_to_region_proofs_can_promote_equivalence():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3515,7 +3501,6 @@ def test_call_to_region_proof_cannot_clear_non_call_unsafety():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3540,7 +3525,7 @@ def test_typed_argument_stage_refutes_one_off_argument_relation():
             Expression.binary_op("INT_ADD", second, Expression.constant(1, size=4)),
         ),
     )
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3575,7 +3560,7 @@ def test_typed_guard_stage_refutes_different_call_reachability():
             Expression.constant(0, size=4),
         )),),),
     )
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3603,7 +3588,7 @@ def test_typed_return_stage_refutes_different_pure_callee_result():
         "return_partitions",
         (((), Expression.binary_op("INT_SUB", arguments[0], arguments[1])),),
     )
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3630,7 +3615,6 @@ def test_typed_scalar_store_call_effects_can_promote_equivalence():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3688,7 +3672,6 @@ def test_typed_call_memory_relation_allows_disjoint_write_reordering():
 
     checker = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     )
     result = checker.check(left, right, "left", "right")
@@ -3753,7 +3736,6 @@ def test_typed_call_memory_relation_compares_final_post_state_after_overwrite():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3854,7 +3836,6 @@ def test_typed_call_memory_relation_uses_callee_cfg_not_address_layout():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3889,7 +3870,6 @@ def test_whole_caller_memory_relation_covers_call_derived_store_provenance():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3917,7 +3897,6 @@ def test_whole_caller_memory_relation_rejects_missing_call_derived_store():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -3944,7 +3923,7 @@ def test_typed_scalar_store_stage_refutes_different_write_value():
     _attach_scalar_store_callee_effect(left)
     _attach_scalar_store_callee_effect(right, value_delta=1)
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -3969,7 +3948,7 @@ def test_typed_scalar_store_stage_rejects_different_write_location():
     _attach_scalar_store_callee_effect(left)
     _attach_scalar_store_callee_effect(right, location_offset=4)
     manifest = _phase2_manifest_with_certificate(left, right)
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -4007,7 +3986,7 @@ def test_typed_return_stage_refutes_noncanonical_wide_high_bits():
     object.__setattr__(effect, "return_semantic_bit_width", 64)
     object.__setattr__(effect, "return_signed", True)
     object.__setattr__(effect, "return_partitions", (((), noncanonical),))
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -4035,7 +4014,7 @@ def test_typed_return_stage_rejects_potentially_trapping_integer_ops(operator):
         "return_partitions",
         (((), Expression.binary_op(operator, arguments[0], arguments[1])),),
     )
-    checker = EquivalenceChecker(timeout=5, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=5)
 
     production = produce_pure_direct_call_proofs(
         manifest,
@@ -4094,7 +4073,7 @@ def test_typed_stage_unknown_or_timeout_never_completes_chain(solver_status):
 
 
 def test_phase2_compatibility_hook_is_decision_neutral():
-    checker = EquivalenceChecker(enable_rewrite=False)
+    checker = EquivalenceChecker()
     strategy_result = SimpleNamespace(is_equivalent=None, unknown_reasons=["keep"])
     manifest = {}
 
@@ -4114,7 +4093,7 @@ def test_phase2_compatibility_hook_is_decision_neutral():
 def test_phase2_discharge_cannot_promote_even_with_fabricated_manifest_proofs():
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
-    checker = EquivalenceChecker(timeout=1, enable_rewrite=False)
+    checker = EquivalenceChecker(timeout=1)
     manifest = build_call_effect_shadow_manifest(
         left,
         right,
@@ -4215,7 +4194,6 @@ def test_different_internal_callees_cannot_be_promoted_from_shape_candidate():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=False,
     ).check(left, right, "left", "right")
 
@@ -4243,7 +4221,6 @@ def test_phase2_relational_discharge_rejects_caller_memory_effect():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4316,7 +4293,6 @@ def test_whole_caller_memory_relation_proves_or_refutes_complete_local_stores(
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4450,7 +4426,6 @@ def test_whole_caller_final_post_state_allows_disjoint_write_reordering():
 
     checker = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     )
     result = checker.check(left, right, "left", "right")
@@ -4487,7 +4462,6 @@ def test_whole_caller_cfg_order_overrides_reverse_address_layout():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4527,7 +4501,6 @@ def test_whole_caller_unordered_same_location_requires_guard_exclusivity_proof()
 
     checker = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     )
     result = checker.check(left, right, "left", "right")
@@ -4562,7 +4535,6 @@ def test_whole_caller_unordered_nonexclusive_writes_remain_unknown():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4588,7 +4560,6 @@ def test_whole_caller_final_post_state_eliminates_overwritten_write():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4613,7 +4584,6 @@ def test_whole_caller_final_post_state_refutes_different_last_write():
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 
@@ -4649,7 +4619,6 @@ def test_whole_caller_final_post_state_keeps_unproven_aliases_unknown(
 
     result = EquivalenceChecker(
         timeout=5,
-        enable_rewrite=False,
         enable_completed_recovery_proofs=True,
     ).check(left, right, "left", "right")
 

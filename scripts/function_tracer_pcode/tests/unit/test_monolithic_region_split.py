@@ -98,7 +98,6 @@ def test_structured_sat_keeps_the_exact_replay_formula_after_later_regions(
 ) -> None:
     checker = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,
-        enable_rewrite=False,
     )
     original_execute = checker.monolithic_strategy._execute_region_plan
     captured = {}
@@ -148,7 +147,6 @@ def test_structured_sat_without_canonical_census_gets_typed_replay_receipts(
     )
     result = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,
-        enable_rewrite=False,
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -177,7 +175,7 @@ def test_rebuilt_unknown_extension_region_queries_are_z3_parseable() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is True
@@ -237,7 +235,7 @@ def test_monolithic_int2float_region_queries_are_z3_parseable() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is True
@@ -267,7 +265,7 @@ def test_monolithic_unsupported_unary_is_inconclusive_not_strategy_error() -> No
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is None
@@ -302,7 +300,7 @@ def test_monolithic_mixed_precision_int2float_is_unknown_not_error() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is None
@@ -331,7 +329,7 @@ def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None
     )
 
     result = EquivalenceChecker(
-        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="pairwise", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is None
@@ -349,7 +347,7 @@ def test_checker_boundary_classifies_typed_unknown_extension_width(
 
     analysis = _analysis("unknown_extension_boundary", 7)
     checker = EquivalenceChecker(
-        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="pairwise", timeout=5, monolithic_timeout=5
     )
 
     def reject_unknown_width(*_args, **_kwargs):
@@ -358,7 +356,8 @@ def test_checker_boundary_classifies_typed_unknown_extension_width(
             operand_bits=32,
         )
 
-    monkeypatch.setattr(checker, "_apply_rewrite", reject_unknown_width)
+    # first collaborator called inside check()'s try block (preflight mode)
+    monkeypatch.setattr(checker, "_call_effect_shadow_manifest", reject_unknown_width)
     result = checker.check(analysis, analysis)
 
     assert result.is_equivalent is None
@@ -378,7 +377,7 @@ def test_checker_boundary_classifies_unsupported_smt_operator(monkeypatch) -> No
 
     analysis = _analysis("unsupported_operator_boundary", 7)
     checker = EquivalenceChecker(
-        strategy="pairwise", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="pairwise", timeout=5, monolithic_timeout=5
     )
 
     def reject_unsupported_operator(*_args, **_kwargs):
@@ -389,7 +388,7 @@ def test_checker_boundary_classifies_unsupported_smt_operator(monkeypatch) -> No
             result_bits=32,
         )
 
-    monkeypatch.setattr(checker, "_apply_rewrite", reject_unsupported_operator)
+    monkeypatch.setattr(checker, "_call_effect_shadow_manifest", reject_unsupported_operator)
     result = checker.check(analysis, analysis)
 
     assert result.is_equivalent is None
@@ -433,7 +432,7 @@ def test_relation_surface_is_not_split() -> None:
 
 def test_split_receipt_is_sealed_before_cleanup_and_rechecked_by_final_gate() -> None:
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
 
     assert result.is_equivalent is True
@@ -455,7 +454,7 @@ def test_split_receipt_is_sealed_before_cleanup_and_rechecked_by_final_gate() ->
 
 def test_decisive_not_eq_terminal_receipt_binds_replay_and_safety() -> None:
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -472,7 +471,7 @@ def test_decisive_not_eq_terminal_receipt_binds_replay_and_safety() -> None:
 
 def test_same_name_not_eq_is_authorized_by_typed_whole_surface_replay() -> None:
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("same_name", 7), _analysis("same_name", 8))
 
     assert result.is_equivalent is False
@@ -484,7 +483,7 @@ def test_same_name_not_eq_is_authorized_by_typed_whole_surface_replay() -> None:
 
 def test_production_split_does_not_trust_monkeypatched_strategy_planner(monkeypatch) -> None:
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
     monkeypatch.setattr(
         checker.monolithic_strategy,
@@ -507,7 +506,7 @@ def test_final_verifier_rejects_forged_unexecuted_unsat_region(monkeypatch) -> N
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
 
     def forged_execute(*_args, **kwargs):
@@ -619,7 +618,7 @@ def test_production_split_uses_import_pinned_query_builder(monkeypatch) -> None:
         lambda *_args, **_kwargs: "(set-logic QF_BV)\n(assert false)\n(check-sat)",
     )
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
 
     assert result.is_equivalent is True
@@ -676,7 +675,7 @@ def test_untrusted_assert_false_in_base_context_fails_closed() -> None:
             return context
 
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
     injected = InjectedFalseFormulaBuilder()
     checker.formula_builder = injected
@@ -709,7 +708,7 @@ def test_region_query_slices_unrelated_assertions_and_deduplicates_prelude() -> 
             return context
 
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
     noisy = NoisyFormulaBuilder()
     checker.formula_builder = noisy
@@ -743,7 +742,7 @@ def test_production_region_queries_share_one_incremental_z3_context() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(analysis, analysis)
 
     assert result.is_equivalent is True
@@ -770,7 +769,7 @@ def test_split_ignores_late_shared_z3_factory_monkeypatch(monkeypatch) -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -826,7 +825,7 @@ def test_split_ignores_late_strategy_module_factory_symbol(monkeypatch) -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -843,7 +842,7 @@ def test_split_ignores_late_shared_z3_execute_monkeypatch(monkeypatch) -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -860,7 +859,7 @@ def test_split_ignores_late_pinned_executor_symbol_monkeypatch(monkeypatch) -> N
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert result.is_equivalent is False
@@ -870,7 +869,7 @@ def test_split_ignores_strategy_executor_attribute(monkeypatch) -> None:
     from scripts.function_tracer_pcode.smt import ParallelResult
 
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
     monkeypatch.setattr(
         checker.monolithic_strategy,
@@ -900,7 +899,7 @@ def test_counterexample_gate_cannot_self_report_proven(monkeypatch) -> None:
         monolithic_authority, "issue_gate_artifact_reference", reject_self_report
     )
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
 
     assert attempted
@@ -918,7 +917,7 @@ def test_final_gate_verifier_is_pinned_and_rechecks_source(monkeypatch) -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
     frame = result._prepared_dispatch_frame
     terminal = frame.monolithic_terminal_receipt
@@ -963,7 +962,7 @@ def test_final_verifier_rejects_forged_record_formula_despite_method_patch(
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
     terminal = frame.monolithic_terminal_receipt
@@ -991,7 +990,7 @@ def test_final_verifier_does_not_dispatch_artifact_validation_methods(
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
     terminal = frame.monolithic_terminal_receipt
@@ -1065,7 +1064,7 @@ def test_final_verifier_rejects_authority_artifact_subclasses() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
     terminal = frame.monolithic_terminal_receipt
@@ -1095,7 +1094,7 @@ def test_proof_bundle_binds_session_to_backend_query_set_and_lease() -> None:
     import scripts.function_tracer_pcode.proof.monolithic_authority as monolithic_authority
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     bundle = result._prepared_dispatch_frame.monolithic_terminal_receipt.proof_bundle
     certificate = replace(
@@ -1114,7 +1113,7 @@ def test_frame_close_revokes_leases_and_rejects_post_close_issuance() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
 
@@ -1133,7 +1132,7 @@ def test_pinned_terminal_verifier_rejects_method_monkeypatch(monkeypatch) -> Non
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
     receipt_type = type(frame.monolithic_terminal_receipt)
@@ -1153,7 +1152,7 @@ def test_import_pinned_verifiers_ignore_late_module_monkeypatch(monkeypatch) -> 
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
     frame = result._prepared_dispatch_frame
     monkeypatch.setattr(
@@ -1172,7 +1171,7 @@ def test_tampered_typed_counterexample_safety_receipt_is_rejected() -> None:
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 8))
     frame = result._prepared_dispatch_frame
     safety = replace(
@@ -1203,7 +1202,7 @@ def test_direct_checker_revokes_parent_lease_when_child_derivation_fails(
     )
 
     result = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))
 
     assert result.is_equivalent is None
@@ -1212,10 +1211,10 @@ def test_direct_checker_revokes_parent_lease_when_child_derivation_fails(
 
 def test_replan_generation_cannot_reuse_stale_child_lease() -> None:
     first = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))._prepared_dispatch_frame
     second = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     ).check(_analysis("left", 7), _analysis("right", 7))._prepared_dispatch_frame
 
     assert first.monolithic_execution_authority_lease.validates(
@@ -1228,7 +1227,7 @@ def test_replan_generation_cannot_reuse_stale_child_lease() -> None:
 
 def test_region_timeout_budget_does_not_mutate_strategy_configuration() -> None:
     checker = EquivalenceChecker(
-        strategy="monolithic", timeout=5, monolithic_timeout=5, enable_rewrite=False
+        strategy="monolithic", timeout=5, monolithic_timeout=5
     )
     configured = checker.monolithic_strategy.per_query_timeout
 
@@ -1243,7 +1242,6 @@ def test_legacy_mode_is_an_explicit_validation_control() -> None:
         timeout=5,
         monolithic_timeout=5,
         monolithic_query_mode="legacy",
-        enable_rewrite=False,
     ).check(_analysis("left", 7), _analysis("right", 7))
 
     assert result.is_equivalent is True
@@ -1259,7 +1257,6 @@ def test_production_split_legacy_unsat_without_bundle_is_inconclusive(
 ) -> None:
     checker = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,
-        enable_rewrite=False,
     )
 
     def unavailable_split(*_args, **_kwargs):
@@ -1290,7 +1287,6 @@ def test_production_split_legacy_sat_has_typed_replay_proof_bundle(
 ) -> None:
     checker = EquivalenceChecker(
         strategy="monolithic", timeout=5, monolithic_timeout=5,
-        enable_rewrite=False,
     )
 
     def unavailable_split(*_args, **_kwargs):

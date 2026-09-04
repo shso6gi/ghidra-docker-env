@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass, replace
 import time
+import warnings
 from uuid import uuid4
 
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, FunctionSignature
@@ -141,8 +142,8 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         timeout: int = 10,
         debug: bool = False,
         type_fixer_config: Optional[TypeFixerConfig] = None,
-        enable_rewrite: bool = True,
-        rewrite_direction: str = "to_modulo",
+        enable_rewrite: Optional[bool] = None,
+        rewrite_direction: Optional[str] = None,
         strategy: str = "pairwise",
         pairwise_timeout: int = 5,
         pairwise_timeout_hard: int = 30,
@@ -166,15 +167,22 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             timeout: SMTソルバーのタイムアウト（秒）
             debug: デバッグ出力を有効にする
             type_fixer_config: 型修正の設定
-            enable_rewrite: 式のリライトを有効にする
-            rewrite_direction: リライト方向 ("to_modulo" or "to_expansion")
+            enable_rewrite: 非推奨・無効（互換のため受け付けるだけ）。
+                リライト段階は object-centric solver-only 方針で解析結果を
+                変更しておらず、設定は判定に影響しない。
+            rewrite_direction: 非推奨・無効（同上）。
             strategy: 判定戦略 ("pairwise" or "monolithic")
         """
         self.timeout = timeout
         self.debug = debug
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
-        self.enable_rewrite = enable_rewrite
-        self.rewrite_direction = rewrite_direction
+        if enable_rewrite is not None or rewrite_direction is not None:
+            warnings.warn(
+                "EquivalenceChecker(enable_rewrite=..., rewrite_direction=...) has no "
+                "effect and is deprecated; the rewrite stage never modified the analysis",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.strategy_name = strategy
         self.normalization_mode = normalization_mode
         self.enable_fact_normalization = enable_fact_normalization
@@ -312,24 +320,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
     def _create_type_fixer(self, program):
         """TypeFixer の生成を 1 箇所に集約する。"""
         return TypeFixer(program, self.type_fixer_config, debug=self.debug)
-    
-    def _apply_rewrite(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis
-    ) -> Tuple[FunctionReturnAnalysis, FunctionReturnAnalysis, RewriteInfo]:
-        """両方の解析結果にリライトを適用"""
-        rewrite_info = RewriteInfo()
-
-        if not self.enable_rewrite:
-            self._debug_print("Rewrite is disabled")
-            return analysis1, analysis2, rewrite_info
-
-        self._debug_print(
-            "Object-centric solver-only policy: skipping rewrite stage "
-            f"(requested direction: {self.rewrite_direction})"
-        )
-        return analysis1, analysis2, rewrite_info
     
     def _get_params_via_decompile(
         self,
@@ -554,9 +544,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
-            # リライトを適用
-            analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
-            
+            # リライト段階は廃止済み（解析結果を変更したことはない）。結果 JSON の
+            # `rewrite_info` は互換のため従来どおりの定数を出す。
+            rewrite_info = RewriteInfo()
+
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
 
