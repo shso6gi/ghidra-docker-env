@@ -355,6 +355,16 @@ def run_check_from_binaries_with_v2_pilot(
         try:
             evidence = _profiled_finish(connector, session, result)
         except Exception as exc:
+            # 判定は ERROR へ落ちるが、原因はログ（stderr）に残す。
+            import sys
+            import traceback
+
+            print(
+                "[ProductionBoundary] connector.finish raised "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
             if session.phase7_runtime is not None:
                 result.legacy_unknown_reasons = list(
                     getattr(result, "unknown_reasons", ()) or ()

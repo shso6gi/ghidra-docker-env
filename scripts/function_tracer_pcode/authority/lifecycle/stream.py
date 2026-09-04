@@ -10,7 +10,6 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.authority.contracts import (
     SCHEMA_VERSION,
     VALIDATED_ONCE,
-    assert_deep_immutable,
     authority_digest,
     canonical_value,
     freeze_authority_value,
@@ -734,15 +733,13 @@ class EventRecorder:
             validate_event_authority_payload(
                 intent.event_type, intent.authority_payload
             )
-            # 記録する authority payload は深く不変でなければならない: 封印後に
-            # 内容を書き換えられないことが validate-once キャッシュの前提
-            # （生の dict / list / set は不変コピーへ、dataclass 内部は各クラスの
-            # __post_init__ が凍結済みであることをここで確認する）。
+            # 生の dict / list / set を含む payload は不変コピーへ置き換える
+            # （digest は不変）。dataclass payload は同一オブジェクトのまま
+            # （各クラスの __post_init__ がコンテナ型フィールドを凍結する）。
+            # ここでは深い不変性を「要求」しない: 記録時の例外は producer 側で
+            # 握り潰されてイベントが黙って失われるため、封印後の validate-once
+            # キャッシュ側（VALIDATED_ONCE.mark）が深く不変な場合にだけ記録する。
             payload = freeze_authority_value(intent.authority_payload)
-            try:
-                assert_deep_immutable(payload)
-            except TypeError as exc:
-                raise TypeError(f"recorded authority payload must be deep-immutable: {exc}") from exc
             header = EventHeader(
                 stream_id=self._stream_id,
                 result_occurrence_id=self._result_occurrence_id,

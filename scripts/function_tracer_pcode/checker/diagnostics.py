@@ -243,6 +243,7 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "boundary_seconds": dict(base.get("boundary_seconds") or {}),
         },
         "expressions": dict(base.get("expressions") or {}),
+        "validated_once_entries": base.get("validated_once_entries"),
         "pairs": pairwise,
         "solver_invocations": solver_invocations,
         "stage_path": list(getattr(result, "stage_path", ()) or ()),

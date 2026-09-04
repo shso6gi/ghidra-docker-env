@@ -82,7 +82,8 @@ def assert_deep_immutable(value: Any, path: str = "$") -> None:
     してよいかを判定する不変条件。frozen=True はトップレベルの再代入しか防が
     ないので、内部に dict / list / set が残っていればここで弾く。
     """
-    if value is None or type(value) in _PRIMITIVE_TYPES or isinstance(value, Enum):
+    if value is None or isinstance(value, (str, int, float, bool, Enum)):
+        # str/int/float/bool のサブクラス（JPype の JInt など）も不変。
         return
     if isinstance(value, MappingProxyType):
         for key, child in value.items():

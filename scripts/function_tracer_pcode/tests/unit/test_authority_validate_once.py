@@ -237,3 +237,19 @@ def test_sealed_stream_content_cannot_be_changed_after_seal():
     with pytest.raises(TypeError):
         authority["x"] = "tampered"
     sealed.validate()
+
+
+def test_immutable_primitive_subclasses_are_accepted():
+    # JPype's JInt / JString are int / str subclasses (immutable); canonical
+    # target keys carry them in production streams.
+    class _JInt(int):
+        pass
+
+    @dataclass(frozen=True)
+    class _Key:
+        parts: tuple
+
+    key = _Key((_JInt(3), "x", 2.5, True, None))
+    assert_deep_immutable(key)
+    registry = ValidatedOnceRegistry()
+    assert registry.mark(key) is True
