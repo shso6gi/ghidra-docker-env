@@ -15,7 +15,13 @@ Imports are collected with ``ast`` over every module of the package
 (tests excluded), including imports inside functions (lazy imports avoid
 runtime cycles but are still layer dependencies) and relative imports
 (``from ..authority import x`` is resolved against the importing module's
-package before the layer check).
+package before the layer check).  Imports of the package-root facade
+(``from scripts.function_tracer_pcode import reporting`` /
+``... import OutputFormatter``, ``import scripts.function_tracer_pcode``,
+or a relative import that resolves to the root such as
+``from ... import authority``) are rejected outright: the root ``__init__``
+re-exports names from every layer lazily, so such an import is not
+layer-explicit and its target layer cannot be checked statically.
 
 Granularity: the baseline pins (importing module, imported *layer*), not
 (importing module, imported module).  It therefore guarantees that no new
@@ -31,7 +37,8 @@ from pathlib import Path
 import pytest
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-PACKAGE_PREFIX = "scripts.function_tracer_pcode."
+PACKAGE_NAME = "scripts.function_tracer_pcode"
+PACKAGE_PREFIX = PACKAGE_NAME + "."
 
 # Bottom -> top.  Same-layer and downward imports are always allowed.
 LAYERS = (
@@ -112,11 +119,22 @@ def _module_name(path: Path, root: Path = PACKAGE_ROOT) -> str:
     return rel[: -len(".__init__")] if rel.endswith(".__init__") else rel
 
 
+class RootFacadeImport(AssertionError):
+    """An import of the package root (``scripts.function_tracer_pcode``)
+    instead of an explicit layer."""
+
+
 def resolve_import_from(current_module: str, is_package: bool, node: ast.ImportFrom):
     """Return the package-relative target of an ``ImportFrom`` (``None`` when
     it points outside the package).  Relative imports are resolved with
-    ``node.level`` against the importing module's package."""
+    ``node.level`` against the importing module's package.  An import whose
+    target is the package root itself raises ``RootFacadeImport``."""
     if node.level == 0:
+        if node.module == PACKAGE_NAME:
+            raise RootFacadeImport(
+                f"{current_module}: `from {PACKAGE_NAME} import "
+                f"{', '.join(alias.name for alias in node.names)}` is not layer-explicit"
+            )
         if node.module and node.module.startswith(PACKAGE_PREFIX):
             return node.module[len(PACKAGE_PREFIX):]
         return None
@@ -127,7 +145,12 @@ def resolve_import_from(current_module: str, is_package: bool, node: ast.ImportF
     base = package_parts[: len(package_parts) - drop] if drop else package_parts
     if node.module:
         base = base + node.module.split(".")
-    return ".".join(base) if base else None
+    if not base:
+        raise RootFacadeImport(
+            f"{current_module}: `from {'.' * node.level} import "
+            f"{', '.join(alias.name for alias in node.names)}` resolves to the package root"
+        )
+    return ".".join(base)
 
 
 def _imported_package_modules(tree: ast.AST, current_module: str, is_package: bool):
@@ -138,6 +161,10 @@ def _imported_package_modules(tree: ast.AST, current_module: str, is_package: bo
                 yield target
         elif isinstance(node, ast.Import):
             for alias in node.names:
+                if alias.name == PACKAGE_NAME:
+                    raise RootFacadeImport(
+                        f"{current_module}: `import {PACKAGE_NAME}` is not layer-explicit"
+                    )
                 if alias.name.startswith(PACKAGE_PREFIX):
                     yield alias.name[len(PACKAGE_PREFIX):]
 
@@ -220,6 +247,28 @@ def test_collector_rejects_modules_outside_every_layer(tmp_path):
     (tmp_path / "helper.py").write_text("x = 1\n")
     with pytest.raises(AssertionError, match="outside every layer: helper"):
         collect_upward_edges(tmp_path)
+
+
+def test_package_root_facade_imports_are_rejected(tmp_path):
+    (tmp_path / "core").mkdir(); (tmp_path / "core" / "__init__.py").write_text("")
+    (tmp_path / "reporting").mkdir(); (tmp_path / "reporting" / "__init__.py").write_text("")
+    cases = {
+        "alias_only.py": "from scripts.function_tracer_pcode import reporting\n",
+        "lazy_name.py": "from scripts.function_tracer_pcode import OutputFormatter\n",
+        "plain_import.py": "import scripts.function_tracer_pcode\n",
+    }
+    for name, source in cases.items():
+        (tmp_path / "core" / name).write_text(source)
+        with pytest.raises(RootFacadeImport, match="not layer-explicit"):
+            collect_upward_edges(tmp_path)
+        (tmp_path / "core" / name).unlink()
+    # relative import that climbs to the package root
+    (tmp_path / "core" / "sub").mkdir(); (tmp_path / "core" / "sub" / "__init__.py").write_text("")
+    (tmp_path / "core" / "sub" / "mod.py").write_text("from ... import authority\n")
+    with pytest.raises(RootFacadeImport, match="resolves to the package root"):
+        collect_upward_edges(tmp_path)
+    (tmp_path / "core" / "sub" / "mod.py").write_text("from .. import sibling\n")  # -> core, fine
+    assert collect_upward_edges(tmp_path) == set()
 
 
 def test_resolve_import_from_levels():
