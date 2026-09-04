@@ -1731,9 +1731,10 @@ def _impl__apply_observable_effect_surface(
     conditions) is concatenated with each return case's value, and the
     comparison surface becomes ``memory_effect`` with the combined width.
 
-    When the effect summary is not trustworthy (unsupported call, incomplete
-    coverage) the surface is not built; the existing equivalence-blocking
-    reasons already keep such functions away from EQUIVALENT.
+    When the effect summary is not trustworthy (``has_unsupported_call`` or
+    any ``incomplete_reasons``) or the return cases disagree on their width,
+    the surface is not built; the existing equivalence-blocking reasons
+    already keep such functions away from EQUIVALENT.
     """
     if result is None or not result.returns:
         return False
@@ -1745,6 +1746,10 @@ def _impl__apply_observable_effect_surface(
     if effect_summary is None:
         return False
     if getattr(effect_summary, "has_unsupported_call", False):
+        return False
+    if tuple(getattr(effect_summary, "incomplete_reasons", ()) or ()):
+        # An incomplete store model must not become a comparison surface:
+        # a missing store on one side could only make the surfaces agree.
         return False
     effects = observable_store_effects(effect_summary)
     if not effects:
@@ -1758,16 +1763,21 @@ def _impl__apply_observable_effect_surface(
     if effects_expr is None:
         return False
     effect_bits = int(effects_expr.get_bit_width() or 0)
-    return_bits = max(
-        (int(ret.value.get_bit_width() or 0) for ret in result.returns if ret.value is not None),
-        default=0,
-    )
+    return_widths = set()
+    for ret in result.returns:
+        if ret.value is None:
+            return False
+        return_widths.add(int(ret.value.get_bit_width() or 0))
+    if len(return_widths) != 1:
+        # Every return case must contribute the same width, otherwise the
+        # combined surface would have no single width; keep the return-value
+        # surface (its own width gates still apply).
+        return False
+    return_bits = return_widths.pop()
     if effect_bits <= 0 or return_bits <= 0:
         return False
     rewritten = []
     for ret in result.returns:
-        if ret.value is None:
-            return False
         combined = concat_expressions(effects_expr, ret.value)
         rewritten.append(replace(ret, value=combined))
     result.returns = rewritten

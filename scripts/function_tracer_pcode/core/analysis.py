@@ -1190,6 +1190,33 @@ _SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS = {
 }
 
 
+def derive_memory_effect_bit_width(returns, effect_summary, expr_bit_width) -> int:
+    """``memory_effect`` 比較面の幅を導出する（``FunctionReturnAnalysis`` と
+    semantic-width 正規化で共有）。
+
+    ``returns`` の値式の幅（すべて正で一致していること）を第一の権威とし、
+    値式から幅が得られないときだけ ``effect_summary.synthetic_expr`` の幅へ
+    戻る。値式の幅が食い違う場合は比較面が定義できないので 0 を返す。
+    """
+
+    value_bits = []
+    for ret in returns or ():
+        value = getattr(ret, "value", None)
+        if value is None:
+            continue
+        bits = int(expr_bit_width(value) or 0)
+        if bits > 0:
+            value_bits.append(bits)
+    if value_bits:
+        if len(set(value_bits)) != 1:
+            return 0
+        return value_bits[0]
+    synthetic_expr = getattr(effect_summary, "synthetic_expr", None) if effect_summary is not None else None
+    if synthetic_expr is None:
+        return 0
+    return max(0, int(expr_bit_width(synthetic_expr) or 0))
+
+
 @dataclass
 class FunctionReturnAnalysis:
     """関数のreturn値解析結果"""
@@ -2077,22 +2104,28 @@ class FunctionReturnAnalysis:
             return max(expr_bits)
         return 32
 
+    def memory_effect_surface_bit_width(self) -> int:
+        """``memory_effect`` 比較面の幅（ビット）。
+
+        比較面の幅の権威は、ソルバーが実際に比較する ``returns`` の値式である。
+        void 関数では副作用要約 ``effect_summary.synthetic_expr`` がそのまま
+        return 値になるため両者は一致するが、store と戻り値を結合した面
+        （``observable_effects_and_return_value``）では return 値の方が広い。
+        return 値から幅が取れない場合に限り ``synthetic_expr`` へ戻る。
+        幅が得られなければ 0。
+        """
+
+        return derive_memory_effect_bit_width(
+            self.returns, getattr(self, "effect_summary", None), self._expr_bit_width
+        )
+
     def _derive_void_effect_surface(self) -> Optional[ComparisonSurface]:
         effect_summary = getattr(self, "effect_summary", None)
         synthetic_expr = getattr(effect_summary, "synthetic_expr", None) if effect_summary is not None else None
         if synthetic_expr is None:
             return None
 
-        bit_width = self._expr_bit_width(synthetic_expr)
-        if bit_width <= 0:
-            bit_width = max(
-                (
-                    self._expr_bit_width(ret.value)
-                    for ret in self.returns
-                    if ret.value is not None
-                ),
-                default=0,
-            )
+        bit_width = self.memory_effect_surface_bit_width()
         if bit_width <= 0:
             return None
 
