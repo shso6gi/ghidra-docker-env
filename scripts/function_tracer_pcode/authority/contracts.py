@@ -82,14 +82,30 @@ def assert_deep_immutable(value: Any, path: str = "$") -> None:
     してよいかを判定する不変条件。frozen=True はトップレベルの再代入しか防が
     ないので、内部に dict / list / set が残っていればここで弾く。
     """
-    if value is None or isinstance(value, (str, int, float, bool, Enum)):
-        # str/int/float/bool のサブクラス（JPype の JInt など）も不変。
+    if value is None or type(value) in _PRIMITIVE_TYPES:
+        return
+    if isinstance(value, (str, int, float)):
+        # str/int/float のサブクラス（JPype の JInt / JLong など）。digest は
+        # json による canonical 化で基底型のデータ（int.__repr__ / str の
+        # 内容 / float.__repr__）から計算され、サブクラスが持つ属性や
+        # __str__ の上書きは値としての digest に届かないので不変扱いでよい。
+        # （mapping の key は str(key) を経由するため別扱い: 下記）
+        return
+    if isinstance(value, Enum):
+        # Enum は canonical 化で .value になるので、その値が深く不変であること。
+        assert_deep_immutable(value.value, f"{path}.value")
         return
     if isinstance(value, MappingProxyType):
-        # キーも検査する: hashable でも可変な独自オブジェクトをキーに持つ
-        # mapping は封印後に内容が変わり得るので、キャッシュ対象にしない。
+        # key は canonical 化で str(key) を経由する。str のサブクラスや int の
+        # サブクラスは __str__ を可変な属性で上書きできるため、key として
+        # 認めるのは「ちょうど str」だけ（strict codec も exact str key を要求
+        # する）。それ以外の key を持つ mapping はキャッシュ対象にしない。
         for key, child in value.items():
-            assert_deep_immutable(key, f"{path}.<key>")
+            if type(key) is not str:
+                raise TypeError(
+                    f"authority mapping key must be an exact str at {path}.<key>: "
+                    f"{type(key).__name__}"
+                )
             assert_deep_immutable(child, f"{path}.{key}")
         return
     if type(value) is tuple:

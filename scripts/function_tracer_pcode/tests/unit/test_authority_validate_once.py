@@ -309,3 +309,69 @@ def test_key_check_keeps_existing_digests():
     frozen = freeze_authority_value(receipt)
     assert_deep_immutable(frozen)
     assert authority_digest(frozen) == expected
+
+
+# ---- primitive subclasses: keys must be exact str, values are digest-stable ----
+
+class _MutableIntKey(int):
+    """An int subclass whose str() depends on mutable state: as a mapping key
+    it would change the canonical key representation after sealing."""
+
+    def __new__(cls, value, label):
+        obj = int.__new__(cls, value)
+        obj.label = label
+        return obj
+
+    def __str__(self):
+        return self.label
+
+    __repr__ = __str__
+
+
+def test_int_subclass_key_with_mutable_str_is_rejected_and_not_cached():
+    key = _MutableIntKey(1, "before")
+    proxy = MappingProxyType({key: "v"})
+    with pytest.raises(TypeError, match=r"exact str at \$\.<key>"):
+        assert_deep_immutable(proxy)
+
+    @dataclass(frozen=True)
+    class _Holder:
+        payload: object
+
+    assert ValidatedOnceRegistry().mark(_Holder(proxy)) is False
+    # The threat that motivates the rule: canonical keys go through str(key).
+    before = authority_digest(proxy)
+    key.label = "after"
+    assert authority_digest(proxy) != before
+
+
+def test_primitive_subclass_values_are_digest_stable_and_accepted():
+    # As a *value* the same object is harmless: json canonicalisation uses the
+    # base int data, so mutating its label cannot change the digest.
+    value = _MutableIntKey(7, "before")
+    frozen = freeze_authority_value({"k": value})
+    assert_deep_immutable(frozen)
+    before = authority_digest(frozen)
+    value.label = "after"
+    assert authority_digest(frozen) == before
+    assert authority_digest(frozen) == authority_digest({"k": 7})
+
+    class _Str(str):
+        def __str__(self):
+            return "overridden"
+
+    frozen_str = freeze_authority_value({"k": _Str("raw")})
+    assert_deep_immutable(frozen_str)
+    assert authority_digest(frozen_str) == authority_digest({"k": "raw"})
+
+
+def test_enum_values_must_be_deep_immutable():
+    class _Good(enum.Enum):
+        A = "a"
+
+    class _Bad(enum.Enum):
+        A = {"mutable": True}
+
+    assert_deep_immutable(_Good.A)
+    with pytest.raises(TypeError, match=r"\$\.value"):
+        assert_deep_immutable(_Bad.A)
