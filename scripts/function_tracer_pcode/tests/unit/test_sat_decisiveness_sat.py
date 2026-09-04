@@ -287,7 +287,9 @@ def test_monolithic_same_function_sat_requires_counterexample_replay(monkeypatch
         for evidence in analysis1.completed_recovery_proof_evidence
     )
 
-def test_monolithic_same_function_sat_accepts_prior_completed_counterexample_replay(monkeypatch):
+def test_monolithic_sat_rejects_prior_replay_proof_without_witness_binding(monkeypatch):
+    """Issue #39: a prior replay proof that is not bound to this witness (no typed
+    evidence binding, no receipt digest) must not make the monolithic SAT decisive."""
     class _SatSolverRunner:
         def __init__(self):
             self.timeout = 5
@@ -347,9 +349,9 @@ def test_monolithic_same_function_sat_accepts_prior_completed_counterexample_rep
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is False
-    assert result.counterexample_raw == {"x_1": 0, "x_2": 0}
-    assert result.unknown_reasons == []
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    assert result.unknown_reasons[0].reason_id == "counterexample_same_function_replay_unproven"
 
 def test_monolithic_same_function_sat_with_unfixed_model_is_unknown():
     class _ReturnOnlySatSolverRunner:
