@@ -13,7 +13,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     condition_logic as _svc_condition_logic,
     divergence_proofs as _svc_divergence_proofs,
     expression_cases as _svc_expression_cases,
-    local_values as _svc_local_values,
     parameters as _svc_parameters,
     pcode_sites as _svc_pcode_sites,
     phi_origins as _svc_phi_origins,
@@ -24,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition
+from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
     RegionFacts,
     input_is_nondata_operand,
@@ -53,6 +53,7 @@ class ReturnAnalyzer:
     def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True):
         self.program = program
         self._region_facts = RegionFacts(program)
+        self._local_values = LocalValueResolver(debug_print=self._debug_print)
         self.debug = debug
         self._binary_id = binary_id
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
@@ -562,8 +563,13 @@ class ReturnAnalyzer:
     _deduplicate_storage_infos = _svc_parameters._impl__deduplicate_storage_infos
     _detect_signedness = _svc_parameters._impl__detect_signedness
     _direct_expression_runtime_guard_conditions = _svc_expression_cases._impl__direct_expression_runtime_guard_conditions
-    _evaluate_local_pcode_expression = _svc_local_values._impl__evaluate_local_pcode_expression
-    _evaluate_local_varnode_expression = _svc_local_values._impl__evaluate_local_varnode_expression
+    # LocalValueResolver collaborator (Phase 5): thin delegators for existing
+    # callers and tests.
+    def _evaluate_local_pcode_expression(self, pcode_op, tracer, local_values, local_storages, local_memory, visiting=None):
+        return self._local_values.evaluate_pcode(pcode_op, tracer, local_values, local_storages, local_memory, visiting)
+
+    def _evaluate_local_varnode_expression(self, varnode, tracer, local_values, local_storages, local_memory, visiting=None):
+        return self._local_values.evaluate_varnode(varnode, tracer, local_values, local_storages, local_memory, visiting)
     _expand_boolean_expression_cases = _svc_expression_cases._impl__expand_boolean_expression_cases
     _expand_object_centric_expression_cases = _svc_expression_cases._impl__expand_object_centric_expression_cases
     _expression_contains_phi = _svc_phi_origins._impl__expression_contains_phi
@@ -595,9 +601,14 @@ class ReturnAnalyzer:
     _is_void_type = _svc_parameters._impl__is_void_type
     _is_zero_constant_varnode = _svc_pcode_sites._impl__is_zero_constant_varnode
     _iter_expression_nodes_for_unconditional_runtime_guards = _svc_expression_cases._impl__iter_expression_nodes_for_unconditional_runtime_guards
-    _local_varnode_key = _svc_local_values._impl__local_varnode_key
-    _lookup_local_alias_expression = _svc_local_values._impl__lookup_local_alias_expression
-    _lookup_local_expression_for_storage = _svc_local_values._impl__lookup_local_expression_for_storage
+    def _local_varnode_key(self, varnode):
+        return self._local_values.varnode_key(varnode)
+
+    def _lookup_local_alias_expression(self, varnode, tracer, local_values, local_storages):
+        return self._local_values.lookup_alias(varnode, tracer, local_values, local_storages)
+
+    def _lookup_local_expression_for_storage(self, target_storage, local_values, local_storages):
+        return self._local_values.lookup_for_storage(target_storage, local_values, local_storages)
     _make_tracer = _svc_lifecycle._impl__make_tracer
     _parameter_constant_assignments_from_conditions = _svc_condition_logic._impl__parameter_constant_assignments_from_conditions
     _parameter_descriptor_quality = _svc_parameters._impl__parameter_descriptor_quality

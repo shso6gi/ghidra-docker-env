@@ -662,7 +662,8 @@ def _impl__build_effect_summary(
     self._effect_summary_cache[summary_cache_key] = summary
     return summary
 
-def _impl__local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
+def local_memory_key(addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
+    """Structural cache key of a local memory access (pure; no facade state)."""
     key_expr = (
         addr_expr.operands[0]
         if getattr(addr_expr, "expr_type", None) == ExpressionType.MEMORY
@@ -678,6 +679,10 @@ def _impl__local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[Str
         int(size),
     )
 
+
+def _impl__local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
+    return local_memory_key(addr_expr, size)
+
 def _impl__apply_local_store_effect(
     self,
     pcode_op,
@@ -688,14 +693,14 @@ def _impl__apply_local_store_effect(
 ) -> None:
     if pcode_op.getNumInputs() < 3:
         return
-    addr_expr = self._evaluate_local_varnode_expression(
+    addr_expr = self._local_values.evaluate_varnode(
         pcode_op.getInput(1),
         tracer,
         local_values,
         local_storages,
         local_memory,
     )
-    value_expr = self._evaluate_local_varnode_expression(
+    value_expr = self._local_values.evaluate_varnode(
         pcode_op.getInput(2),
         tracer,
         local_values,
