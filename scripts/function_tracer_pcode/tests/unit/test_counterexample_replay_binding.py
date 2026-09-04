@@ -33,10 +33,10 @@ def _base_ctx():
 
 def test_replay_requirement_no_longer_depends_on_function_names():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
-    assert strategy._same_function_counterexample_replay_reasons(_analysis("f"), _analysis("g")) == (
+    assert strategy._counterexample_replay_reasons(_analysis("f"), _analysis("g")) == (
         "counterexample_replay_missing",
     )
-    assert strategy._same_function_counterexample_replay_reasons(_analysis("f"), _analysis("f")) == (
+    assert strategy._counterexample_replay_reasons(_analysis("f"), _analysis("f")) == (
         "counterexample_replay_missing",
     )
 
@@ -399,5 +399,5 @@ def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
     # Both obligations (analysis unsafety, bound replay) stay open without a receipt.
     assert {r.reason_id for r in result.unknown_reasons} == {
         "counterexample_analysis_safety_unproven",
-        "counterexample_same_function_replay_unproven",
+        "counterexample_replay_unproven",
     }

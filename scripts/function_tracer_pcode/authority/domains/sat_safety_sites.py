@@ -32,7 +32,7 @@ SAT_SAFETY_BLOCKER_OBSERVED_SITE = SatSafetyProducerSiteSpec(
     "ELIGIBLE",
     (
         "counterexample_analysis_safety_unproven",
-        "counterexample_same_function_replay_unproven",
+        "counterexample_replay_unproven",
     ),
 )
 SAT_SAFETY_BLOCKER_COMPLETED_SITE = SatSafetyProducerSiteSpec(

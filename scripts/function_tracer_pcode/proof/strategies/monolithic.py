@@ -756,7 +756,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 )
                 final_is_equivalent = None
                 counterexample_raw = None
-            same_function_replay_reasons = ()
+            replay_reasons = ()
             if final_is_equivalent is False:
                 typed_whole_surface_replay_complete = bool(
                     typed_counterexample_evidence is not None
@@ -770,13 +770,13 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     )
                 )
                 if not typed_whole_surface_replay_complete:
-                    same_function_replay_reasons = (
-                        self._same_function_counterexample_replay_reasons(
+                    replay_reasons = (
+                        self._counterexample_replay_reasons(
                             analysis1,
                             analysis2,
                         )
                     )
-                    if same_function_replay_reasons:
+                    if replay_reasons:
                         from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
                             counterexample_replay_targets,
                         )
@@ -789,10 +789,10 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         if replay_targets is not None and not replay_targets:
                             # Closed formula: nothing to replay, the SAT query
                             # itself is the complete witness.
-                            same_function_replay_reasons = ()
-            if final_is_equivalent is False and same_function_replay_reasons:
+                            replay_reasons = ()
+            if final_is_equivalent is False and replay_reasons:
                 sat_replay_reason = self._make_sat_unsafety_unknown_reason(
-                    same_function_replay_reasons,
+                    replay_reasons,
                     analysis1,
                     analysis2,
                     case1=None,

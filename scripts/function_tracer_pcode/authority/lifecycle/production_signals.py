@@ -234,7 +234,7 @@ class OutcomePartitionProductionSignal:
 SAT_SAFETY_TYPED_REASON_IDS = frozenset({
     "counterexample_analysis_safety_unproven",
     "counterexample_partition_replay_ambiguous",
-    "counterexample_same_function_replay_unproven",
+    "counterexample_replay_unproven",
 })
 
 

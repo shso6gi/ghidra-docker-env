@@ -335,7 +335,7 @@ class CheckStrategy(ABC):
     _normalize_counterexample_model_value = classmethod(_svc_sat_safety._impl__normalize_counterexample_model_value)
     _record_completed_sat_counterexample_replay_proof = _svc_sat_safety._impl__record_completed_sat_counterexample_replay_proof
     _record_pairwise_counterexample_replay_proof = _svc_sat_safety._impl__record_pairwise_counterexample_replay_proof
-    _same_function_counterexample_replay_reasons = _svc_sat_safety._impl__same_function_counterexample_replay_reasons
+    _counterexample_replay_reasons = _svc_sat_safety._impl__counterexample_replay_reasons
     _pair_return_width_unsafety_reasons = _svc_sat_safety._impl__pair_return_width_unsafety_reasons
     _sat_counterexample_ambiguous_object_target_key = _svc_sat_safety._impl__sat_counterexample_ambiguous_object_target_key
     _sat_unsafety_object_evidence = _svc_sat_safety._impl__sat_unsafety_object_evidence

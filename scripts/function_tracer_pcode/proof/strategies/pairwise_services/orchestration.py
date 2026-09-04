@@ -1113,7 +1113,7 @@ def _impl_check(
                             raw_model,
                         ):
                             return FunctionProofOutcome.INCONCLUSIVE
-                        replay_reasons = self._same_function_counterexample_replay_reasons(
+                        replay_reasons = self._counterexample_replay_reasons(
                             _analysis1,
                             _analysis2,
                         )
@@ -1351,17 +1351,17 @@ def _impl_check(
                     continue
                 self._complete_v2_sat_counterexample_ambiguity_if_observed((result.pair_stage or "unknown",), analysis1, analysis2, case1=case1, case2=case2, pair_id=pair_id, counterexample_raw=result.counterexample_raw); global_case_replay_validated = True
 
-                same_function_replay_reasons = self._same_function_counterexample_replay_reasons(
+                replay_reasons = self._counterexample_replay_reasons(
                     analysis1,
                     analysis2,
                 )
-                same_function_replay_validated = not same_function_replay_reasons
-                if same_function_replay_reasons and not counterexample_replay_targets(base_ctx):
+                replay_validated = not replay_reasons
+                if replay_reasons and not counterexample_replay_targets(base_ctx):
                     # Closed formula: no symbol to fix, nothing to replay; the
                     # validated SAT query is the complete witness.
-                    same_function_replay_reasons = ()
-                    same_function_replay_validated = True
-                if same_function_replay_reasons:
+                    replay_reasons = ()
+                    replay_validated = True
+                if replay_reasons:
                     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                         SatCounterexampleEvidenceBinding,
                     )
@@ -1382,7 +1382,7 @@ def _impl_check(
                         solver_execution_receipt, "authority_digest", None
                     )
                     sat_replay_reason = self._make_sat_unsafety_unknown_reason(
-                        same_function_replay_reasons,
+                        replay_reasons,
                         analysis1,
                         analysis2,
                         case1=case1,
@@ -1412,16 +1412,16 @@ def _impl_check(
                         unknown_count += 1
                         unknown_reasons.append(sat_replay_reason)
                         rejected_witnesses.append((
-                            "replay", tuple(same_function_replay_reasons),
+                            "replay", tuple(replay_reasons),
                             case1, case2, pair_id, sat_replay_reason,
                         ))
                         self._debug_print(
                             "  Pair "
-                            f"{pair_id}: SAT downgraded to UNKNOWN until same-function "
+                            f"{pair_id}: SAT downgraded to UNKNOWN until bound "
                             "counterexample replay is completed"
                         )
                         continue
-                    same_function_replay_validated = True
+                    replay_validated = True
 
                 safety_receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
                     query=sat_terminal_query,
@@ -1430,7 +1430,7 @@ def _impl_check(
                     pair_key=(i, j),
                     analysis_safe=analysis_safety_validated,
                     global_case_replay_safe=global_case_replay_validated,
-                    same_function_replay_safe=same_function_replay_validated,
+                    same_function_replay_safe=replay_validated,
                 )
                 sat_safety_receipt = safety_receipt
                 for kind, refs, r_case1, r_case2, r_pair_id, r_reason in rejected_witnesses:

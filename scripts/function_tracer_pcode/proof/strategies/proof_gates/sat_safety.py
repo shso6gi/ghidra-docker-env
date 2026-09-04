@@ -92,7 +92,7 @@ SEMANTIC_RETURN_WIDTH_BLOCKER_KINDS = frozenset({
 })
 
 
-def _impl__same_function_counterexample_replay_reasons(
+def _impl__counterexample_replay_reasons(
     self,
     analysis1: FunctionReturnAnalysis,
     analysis2: FunctionReturnAnalysis,
@@ -682,7 +682,7 @@ def _impl__make_sat_unsafety_unknown_reason(
             ),
         )
     compatibility_reason_id = (
-        "counterexample_same_function_replay_unproven"
+        "counterexample_replay_unproven"
         if sat_unsafety_reasons
         and all("counterexample_replay" in str(item) for item in sat_unsafety_reasons)
         else "counterexample_analysis_safety_unproven"
@@ -1159,7 +1159,7 @@ def _impl__observe_v2_sat_counterexample_ambiguity(
 
 def _v2_sat_safety_reason_for_ref(reason_ref: str) -> str:
     if "counterexample_replay" in reason_ref:
-        return "counterexample_same_function_replay_unproven"
+        return "counterexample_replay_unproven"
     return "counterexample_analysis_safety_unproven"
 
 

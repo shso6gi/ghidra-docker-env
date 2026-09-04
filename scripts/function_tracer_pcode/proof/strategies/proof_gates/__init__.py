@@ -252,7 +252,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_return_value_extension_ops_object_key": _object_keys._impl__return_value_extension_ops_object_key,
         "_rewrite_atom_encoded_program_identity_key": _object_keys._impl__rewrite_atom_encoded_program_identity_key,
         "_rewrite_program_identity_keys": _object_keys._impl__rewrite_program_identity_keys,
-        "_same_function_counterexample_replay_reasons": _sat_safety._impl__same_function_counterexample_replay_reasons,
+        "_counterexample_replay_reasons": _sat_safety._impl__counterexample_replay_reasons,
         "_pair_return_width_unsafety_reasons": _sat_safety._impl__pair_return_width_unsafety_reasons,
         "_sat_counterexample_ambiguous_object_target_key": _sat_safety._impl__sat_counterexample_ambiguous_object_target_key,
         "_sat_unsafety_object_evidence": _sat_safety._impl__sat_unsafety_object_evidence,
