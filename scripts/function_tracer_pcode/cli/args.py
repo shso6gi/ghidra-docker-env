@@ -49,9 +49,6 @@ CLI_EPILOG = """
   # 詳細出力とSMT式保存
   python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func -v --save-formula
 
-  # リライトを無効にして実行
-  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f modulo --no-rewrite
-
   # 正規化を安全な bit-vector 恒等式のみに制限
   python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --normalize-mode safe
 
@@ -195,13 +192,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-rewrite",
         action="store_true",
-        help="式のリライトを無効にする（デフォルト: 有効）",
+        help="非推奨・無効（互換のため受け付けるだけ。リライト段階は廃止済み）",
     )
     parser.add_argument(
         "--rewrite-direction",
         choices=["to_modulo", "to_expansion"],
         default="to_modulo",
-        help="リライト方向 (to_modulo: 展開形式→剰余演算子, to_expansion: 剰余演算子→展開形式)",
+        help="非推奨・無効（互換のため受け付けるだけ。リライト段階は廃止済み）",
     )
     parser.add_argument(
         "--strategy",
