@@ -10,8 +10,10 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.authority.contracts import (
     SCHEMA_VERSION,
     VALIDATED_ONCE,
+    assert_deep_immutable,
     authority_digest,
     canonical_value,
+    freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrenceAuthority,
@@ -130,6 +132,13 @@ class ReceiptBoundSolverExecutionEventAuthority:
         receipt = validate_outcome_execution_receipt_authority(
             self.execution_receipt_authority
         )
+        # 記録後に呼び出し側の dict を書き換えても event の内容が変わらないよう、
+        # 不変コピーへ置き換える（digest は不変）。
+        object.__setattr__(
+            self,
+            "execution_receipt_authority",
+            freeze_authority_value(self.execution_receipt_authority),
+        )
         status = receipt["observed_status"]
         if self.terminal_candidate and status != "timeout":
             raise ValueError("only a TIMEOUT receipt may be a terminal candidate")
@@ -177,7 +186,9 @@ class GenericReceiptBoundSolverExecutionEventAuthority:
         )
         receipt = decode_persisted_execution_receipt(self.execution_receipt_authority)
         object.__setattr__(
-            self, "execution_receipt_authority", receipt.to_authority_dict()
+            self,
+            "execution_receipt_authority",
+            freeze_authority_value(receipt.to_authority_dict()),
         )
         if receipt.proof_requirement_id != self.proof_requirement_id:
             raise ValueError("generic solver event requirement differs from receipt")
@@ -723,7 +734,15 @@ class EventRecorder:
             validate_event_authority_payload(
                 intent.event_type, intent.authority_payload
             )
-            payload = intent.authority_payload
+            # 記録する authority payload は深く不変でなければならない: 封印後に
+            # 内容を書き換えられないことが validate-once キャッシュの前提
+            # （生の dict / list / set は不変コピーへ、dataclass 内部は各クラスの
+            # __post_init__ が凍結済みであることをここで確認する）。
+            payload = freeze_authority_value(intent.authority_payload)
+            try:
+                assert_deep_immutable(payload)
+            except TypeError as exc:
+                raise TypeError(f"recorded authority payload must be deep-immutable: {exc}") from exc
             header = EventHeader(
                 stream_id=self._stream_id,
                 result_occurrence_id=self._result_occurrence_id,

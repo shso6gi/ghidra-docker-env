@@ -185,6 +185,11 @@ def _attach_boundary_seconds(result: Any, seconds: Dict[str, float]) -> None:
         diagnostics["boundary_seconds"] = {
             key: round(float(value), 6) for key, value in seconds.items()
         }
+        from scripts.function_tracer_pcode.authority.contracts import VALIDATED_ONCE
+
+        # 0 なら validate-once キャッシュが一度も効いていない（深く不変でない
+        # オブジェクトしか無かった）ことを意味する。
+        diagnostics["validated_once_entries"] = len(VALIDATED_ONCE)
         result.diagnostics = diagnostics
     except Exception:
         return

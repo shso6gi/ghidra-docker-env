@@ -6,11 +6,17 @@ import types
 from dataclasses import dataclass
 
 from scripts.function_tracer_pcode.authority import contracts
+from types import MappingProxyType
+
+import pytest
+
 from scripts.function_tracer_pcode.authority.contracts import (
     VALIDATED_ONCE,
     ValidatedOnceRegistry,
+    assert_deep_immutable,
     authority_digest,
     canonical_value,
+    freeze_authority_value,
 )
 
 
@@ -155,3 +161,79 @@ def _seal_minimal_stream(recorder):
         CauseObservedEventAuthority(_occurrence_authority()),
     ))
     return recorder.seal()
+
+
+# ---- deep immutability of sealed authority content ----
+
+def test_freeze_keeps_digest_and_makes_containers_immutable():
+    raw = {"b": [1, {"c": {2, 3}}], "a": ("x", [4])}
+    frozen = freeze_authority_value(raw)
+    assert isinstance(frozen, MappingProxyType)
+    assert isinstance(frozen["b"], tuple) and isinstance(frozen["b"][1]["c"], frozenset)
+    assert authority_digest(frozen) == authority_digest(raw)
+    assert_deep_immutable(frozen)
+    with pytest.raises(TypeError):
+        frozen["a"] = "tampered"
+    # mutating the original afterwards does not reach the frozen copy
+    raw["b"].append(99)
+    assert len(frozen["b"]) == 2
+
+
+def test_registry_refuses_objects_with_nested_mutable_containers():
+    @dataclass(frozen=True)
+    class _Holder:
+        payload: object
+
+    registry = ValidatedOnceRegistry()
+    leaky = _Holder({"k": "v"})
+    assert registry.mark(leaky) is False
+    assert not registry.is_validated(leaky)
+    with pytest.raises(TypeError, match=r"\$\.payload"):
+        assert_deep_immutable(leaky)
+    tight = _Holder(freeze_authority_value({"k": "v"}))
+    assert registry.mark(tight) is True
+
+
+def _receipt_bound_solver_intent():
+    """A SOLVER_UNKNOWN intent whose payload carries a Mapping field, built
+    from a real outcome-stage execution receipt (phase-6 fixture)."""
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        EventIntent,
+        EventType,
+        ReceiptBoundSolverExecutionEventAuthority,
+        outcome_stage_requirement_id,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome import (
+        _execution_receipt,
+    )
+
+    receipt = dict(_execution_receipt("same_kind_consistency", "unknown").to_authority_dict())
+    payload = ReceiptBoundSolverExecutionEventAuthority(
+        outcome_stage_requirement_id(receipt), receipt, False
+    )
+    return EventIntent(EventType.SOLVER_UNKNOWN, payload), receipt
+
+
+def test_sealed_stream_content_cannot_be_changed_after_seal():
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventRecorder
+
+    intent, receipt = _receipt_bound_solver_intent()
+    recorder = EventRecorder(
+        stream_id="stream-1", result_occurrence_id="occ-1", source_snapshot_fingerprint="fp-1",
+    )
+    recorder.append(intent)
+    sealed = recorder.seal()
+    assert VALIDATED_ONCE.is_validated(sealed)          # the cache engaged
+    payload = sealed.events[0].authority_payload
+    authority = payload.execution_receipt_authority
+    assert isinstance(authority, MappingProxyType)
+    # The caller's dict is not the recorded object: tampering with it is inert.
+    receipt["query_digest"] = "tampered"
+    sealed.validate()
+    assert authority["query_digest"] != "tampered"
+    # The recorded content itself cannot be changed at all.
+    with pytest.raises(TypeError):
+        authority["query_digest"] = "tampered"
+    with pytest.raises(TypeError):
+        authority["x"] = "tampered"
+    sealed.validate()
