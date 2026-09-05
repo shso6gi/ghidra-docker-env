@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.returns.local_values import LocalVal
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.effect_integration import EffectIntegrationService
@@ -157,6 +158,30 @@ class ReturnAnalyzer:
             return_normalization=self._return_normalization,
             debug_reporter=self._debug_reporter,
             debug_flag=lambda: self.debug,
+        )
+        self._branch_guarded_while = BranchGuardedWhileProofService(
+            condition_logic=self._condition_logic,
+            placeholder_algebra=self._placeholder_algebra,
+            divergence_proofs=self._divergence_proofs,
+            block_graph=self._block_graph,
+            stack_protector=self._stack_protector,
+            debug_reporter=self._debug_reporter,
+            expression_cases=self._expression_cases,
+            phi_origins=self._phi_origins,
+            program_access=self._program_access,
+            parameters=self._parameters,
+            pcode_sites=self._pcode_sites,
+            acc_phi_flows_to_return_origin_phi=lambda *a, **kw: self._acc_phi_flows_to_return_origin_phi(*a, **kw),
+            return_conditions_cover_region=lambda *a, **kw: self._return_conditions_cover_region(*a, **kw),
+            return_info_candidate_phi_origin_keys=lambda *a, **kw: self._return_info_candidate_phi_origin_keys(*a, **kw),
+            return_info_return_phi_origin_keys=lambda *a, **kw: self._return_info_return_phi_origin_keys(*a, **kw),
+            return_info_summary_identity_key=lambda *a, **kw: self._return_info_summary_identity_key(*a, **kw),
+            return_site_key=lambda *a, **kw: self._return_site_key(*a, **kw),
+            high_function_has_forbidden_control_outcome_ops=lambda *a, **kw: self._high_function_has_forbidden_control_outcome_ops(*a, **kw),
+            debug_flag=lambda: self.debug,
+            enable_completed_recovery_proofs_value=lambda: self.enable_completed_recovery_proofs,
+            program_value=lambda: self.program,
+            current_parameters_value=lambda: self._current_parameters,
         )
         self._effect_integration = EffectIntegrationService(
             program_access=self._program_access,
@@ -400,13 +425,20 @@ class ReturnAnalyzer:
         return self._block_graph.block_successors(block)
     def _block_writes_outcome_guard_state(self, block):
         return self._block_graph.block_writes_outcome_guard_state(block)
-    _branch_guarded_affine_ignored_artifacts_are_shadowed = _svc_control_recovery._impl__branch_guarded_affine_ignored_artifacts_are_shadowed
-    _branch_guarded_affine_phi_step = _svc_control_recovery._impl__branch_guarded_affine_phi_step
-    _branch_guarded_affine_singleton_base_anchor_matches = _svc_control_recovery._impl__branch_guarded_affine_singleton_base_anchor_matches
-    _branch_guarded_artifact_is_imprecise_zero_seed = _svc_control_recovery._impl__branch_guarded_artifact_is_imprecise_zero_seed
-    _branch_guarded_artifact_is_structural_accumulator_seed_projection = _svc_control_recovery._impl__branch_guarded_artifact_is_structural_accumulator_seed_projection
-    _branch_guarded_expression_is_param_minus_one = _svc_control_recovery._impl__branch_guarded_expression_is_param_minus_one
-    _branch_guarded_structural_proof_from_return = _svc_control_recovery._impl__branch_guarded_structural_proof_from_return
+    def _branch_guarded_affine_ignored_artifacts_are_shadowed(self, ignored_artifacts, recursive_returns, parameters):
+        return self._branch_guarded_while.branch_guarded_affine_ignored_artifacts_are_shadowed(ignored_artifacts, recursive_returns, parameters)
+    def _branch_guarded_affine_phi_step(self, value):
+        return self._branch_guarded_while.branch_guarded_affine_phi_step(value)
+    def _branch_guarded_affine_singleton_base_anchor_matches(self, value, conditions, c_param, target_conditions):
+        return self._branch_guarded_while.branch_guarded_affine_singleton_base_anchor_matches(value, conditions, c_param, target_conditions)
+    def _branch_guarded_artifact_is_imprecise_zero_seed(self, artifact, *, zero_ret, parameters):
+        return self._branch_guarded_while.branch_guarded_artifact_is_imprecise_zero_seed(artifact, zero_ret=zero_ret, parameters=parameters)
+    def _branch_guarded_artifact_is_structural_accumulator_seed_projection(self, artifact, *, recursive_returns, parameters):
+        return self._branch_guarded_while.branch_guarded_artifact_is_structural_accumulator_seed_projection(artifact, recursive_returns=recursive_returns, parameters=parameters)
+    def _branch_guarded_expression_is_param_minus_one(self, expr, param, target_conditions):
+        return self._branch_guarded_while.branch_guarded_expression_is_param_minus_one(expr, param, target_conditions)
+    def _branch_guarded_structural_proof_from_return(self, ret):
+        return self._branch_guarded_while.branch_guarded_structural_proof_from_return(ret)
     _check_condition_coverage = _svc_control_recovery._impl__check_condition_coverage
     def _coerce_block_path_entries(self, path_entries):
         return self._block_graph.coerce_block_path_entries(path_entries)
@@ -414,15 +446,18 @@ class ReturnAnalyzer:
     _control_region_returns_are_safe = _svc_control_recovery._impl__control_region_returns_are_safe
     def _direct_cbranch_successor_relation(self, cbranch, block, successor):
         return self._block_graph.direct_cbranch_successor_relation(cbranch, block, successor)
-    _find_branch_guarded_structural_proof_tuple = _svc_control_recovery._impl__find_branch_guarded_structural_proof_tuple
-    _find_branch_guarded_while_return_partition = _svc_control_recovery._impl__find_branch_guarded_while_return_partition
+    def _find_branch_guarded_structural_proof_tuple(self, value):
+        return self._branch_guarded_while.find_branch_guarded_structural_proof_tuple(value)
+    def _find_branch_guarded_while_return_partition(self, analysis, *, high_function, c_param, c_nonpositive, c_positive, t_positive):
+        return self._branch_guarded_while.find_branch_guarded_while_return_partition(analysis, high_function=high_function, c_param=c_param, c_nonpositive=c_nonpositive, c_positive=c_positive, t_positive=t_positive)
     def _first_high_block_cbranch(self, block):
         return self._block_graph.first_high_block_cbranch(block)
     _get_cached_return_path_entries = _svc_control_recovery._impl__get_cached_return_path_entries
     def _high_function_cbranch_count(self, high_function):
         return self._block_graph.high_function_cbranch_count(high_function)
     _high_function_has_forbidden_control_outcome_ops = _svc_control_recovery._impl__high_function_has_forbidden_control_outcome_ops
-    _infer_branch_guarded_while_role_parameters = _svc_control_recovery._impl__infer_branch_guarded_while_role_parameters
+    def _infer_branch_guarded_while_role_parameters(self, analysis):
+        return self._branch_guarded_while.infer_branch_guarded_while_role_parameters(analysis)
     _is_control_outcome_forbidden_fp_mnemonic = _svc_control_recovery._impl__is_control_outcome_forbidden_fp_mnemonic
     def _iter_high_basic_blocks(self, high_function):
         return self._block_graph.iter_high_basic_blocks(high_function)
@@ -432,9 +467,12 @@ class ReturnAnalyzer:
     _materialize_direct_path_specific_return_source = _svc_control_recovery._impl__materialize_direct_path_specific_return_source
     _phase1_direct_branch_escapes_function_body = _svc_control_recovery._impl__phase1_direct_branch_escapes_function_body
     _propagate_multiequal_input_for_return_path = _svc_control_recovery._impl__propagate_multiequal_input_for_return_path
-    _prove_branch_guarded_affine_unit_count_recurrence = _svc_control_recovery._impl__prove_branch_guarded_affine_unit_count_recurrence
-    _prove_branch_guarded_structural_nonprogress_must_diverge = _svc_control_recovery._impl__prove_branch_guarded_structural_nonprogress_must_diverge
-    _prove_branch_guarded_while_nonprogress_must_diverge = _svc_control_recovery._impl__prove_branch_guarded_while_nonprogress_must_diverge
+    def _prove_branch_guarded_affine_unit_count_recurrence(self, high_function, *, analysis, c_param, target_conditions, recursive_returns, candidate_phi_origin_keys=(), return_phi_origin_keys=(), nonprogress_conditions=(), allow_latch_progress_guard=False):
+        return self._branch_guarded_while.prove_branch_guarded_affine_unit_count_recurrence(high_function, analysis=analysis, c_param=c_param, target_conditions=target_conditions, recursive_returns=recursive_returns, candidate_phi_origin_keys=candidate_phi_origin_keys, return_phi_origin_keys=return_phi_origin_keys, nonprogress_conditions=nonprogress_conditions, allow_latch_progress_guard=allow_latch_progress_guard)
+    def _prove_branch_guarded_structural_nonprogress_must_diverge(self, high_function, *, analysis=None, initial_c_ret, invariant_conditions):
+        return self._branch_guarded_while.prove_branch_guarded_structural_nonprogress_must_diverge(high_function, analysis=analysis, initial_c_ret=initial_c_ret, invariant_conditions=invariant_conditions)
+    def _prove_branch_guarded_while_nonprogress_must_diverge(self, high_function, *, invariant_conditions):
+        return self._branch_guarded_while.prove_branch_guarded_while_nonprogress_must_diverge(high_function, invariant_conditions=invariant_conditions)
     _recover_control_flow_returns_from_block_paths = _svc_control_recovery._impl__recover_control_flow_returns_from_block_paths
     _recover_control_region_returns_early = _svc_control_recovery._impl__recover_control_region_returns_early
     _recover_explicit_return_from_block_paths = _svc_control_recovery._impl__recover_explicit_return_from_block_paths
@@ -447,9 +485,12 @@ class ReturnAnalyzer:
     _should_attempt_switch_recovery = _svc_control_recovery._impl__should_attempt_switch_recovery
     _switch_recovery_conflicts_with_unaffected_returns = _svc_control_recovery._impl__switch_recovery_conflicts_with_unaffected_returns
     _switch_recovery_improves_returns = _svc_control_recovery._impl__switch_recovery_improves_returns
-    _synthesize_branch_guarded_affine_initial_count_return = _svc_control_recovery._impl__synthesize_branch_guarded_affine_initial_count_return
-    _try_apply_branch_guarded_while_outcomes = _svc_control_recovery._impl__try_apply_branch_guarded_while_outcomes
-    _validate_branch_guarded_structural_proof = _svc_control_recovery._impl__validate_branch_guarded_structural_proof
+    def _synthesize_branch_guarded_affine_initial_count_return(self, high_function, analysis, *, c_param, c_positive, t_positive, zero_ret):
+        return self._branch_guarded_while.synthesize_branch_guarded_affine_initial_count_return(high_function, analysis, c_param=c_param, c_positive=c_positive, t_positive=t_positive, zero_ret=zero_ret)
+    def _try_apply_branch_guarded_while_outcomes(self, high_function, analysis):
+        return self._branch_guarded_while.try_apply_branch_guarded_while_outcomes(high_function, analysis)
+    def _validate_branch_guarded_structural_proof(self, high_function, *, structural_proof, analysis, initial_c_ret, invariant_conditions):
+        return self._branch_guarded_while.validate_branch_guarded_structural_proof(high_function, structural_proof=structural_proof, analysis=analysis, initial_c_ret=initial_c_ret, invariant_conditions=invariant_conditions)
     # control_recovery (continued)
     def _blocks_match(self, lhs, rhs):
         return self._block_graph.blocks_match(lhs, rhs)
