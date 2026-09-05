@@ -17,7 +17,7 @@ NAMES = {
     "resolve_function_from_program_offset", "get_instruction_with_fallback", "attempt_disassemble_at",
     "get_decompiler", "dispose", "decompile_function", "make_tracer", "find_block_info_for_program_offset",
 }
-FACADE_CALLBACKS = ("address_offset_for_block_endpoint", "decompile_with_broker")
+FACADE_CALLBACKS = ("decompile_with_broker",)
 SUPPLIERS = ("program_value", "binary_id_value", "debug_flag", "decompiler_value")
 
 
@@ -124,6 +124,14 @@ def test_decompile_function_goes_through_the_facade_broker_callback():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ProgramAccessService")
     assert not [n for n in ast.walk(cls) if isinstance(n, ast.Call)
                 and any(isinstance(a, ast.Name) and a.id == "self" for a in list(n.args) + [k.value for k in n.keywords])]
+
+
+def test_address_offset_for_block_endpoint_is_the_pure_control_recovery_function():
+    from scripts.function_tracer_pcode.analysis.returns import control_recovery
+    assert lifecycle.address_offset_for_block_endpoint is control_recovery.address_offset_for_block_endpoint
+    addr = Mock(); addr.getOffset.return_value = 0x40
+    assert control_recovery.address_offset_for_block_endpoint(addr) == 0x40 == ReturnAnalyzer._address_offset_for_block_endpoint(_analyzer(), addr)
+    assert control_recovery.address_offset_for_block_endpoint(None) is None
 
 
 def test_suppliers_read_analyzer_state_at_call_time():

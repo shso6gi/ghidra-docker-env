@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNormalizer, EffectSummary
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
+from scripts.function_tracer_pcode.analysis.returns.control_recovery import address_offset_for_block_endpoint
 
 
 def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool, str, Expression, Expression]]:
@@ -250,14 +251,13 @@ class ProgramAccessService:
     （既存の ``analyzer._decompiler`` seam と ``dispose()`` のリソース所有を変えない）。
     デバッグ出力は ``DebugReporter`` 直接依存。broker の decompile は facade 経由の
     ``decompile_with_broker`` callable（broker は analyzer を第 1 引数に取る）。
-    未抽出 family（control_recovery）が所有する ``address_offset_for_block_endpoint`` は facade 経由 callable。
+    ``address_offset_for_block_endpoint`` は ``control_recovery`` の純関数を import する。
     """
 
     def __init__(
         self,
         *,
         debug_reporter: DebugReporter,
-        address_offset_for_block_endpoint: Callable[..., Any],
         decompile_with_broker: Callable[..., Any],
         program_value: Callable[..., Any],
         binary_id_value: Callable[..., Any],
@@ -266,7 +266,6 @@ class ProgramAccessService:
         set_decompiler: Callable[..., Any],
     ) -> None:
         self.debug_reporter = debug_reporter
-        self.address_offset_for_block_endpoint = address_offset_for_block_endpoint
         self.decompile_with_broker = decompile_with_broker
         self.program_value = program_value
         self.binary_id_value = binary_id_value
@@ -346,8 +345,8 @@ class ProgramAccessService:
             block = getattr(block_info, "block", None)
             if block is None:
                 continue
-            start_offset = self.address_offset_for_block_endpoint(getattr(block, "getStart", lambda: None)())
-            stop_offset = self.address_offset_for_block_endpoint(getattr(block, "getStop", lambda: None)())
+            start_offset = address_offset_for_block_endpoint(getattr(block, "getStart", lambda: None)())
+            stop_offset = address_offset_for_block_endpoint(getattr(block, "getStop", lambda: None)())
             if start_offset is None:
                 continue
             if stop_offset is None:

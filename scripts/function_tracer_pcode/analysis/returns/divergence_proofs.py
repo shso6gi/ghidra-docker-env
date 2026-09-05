@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
 )
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 
 if TYPE_CHECKING:  # placeholder_algebra は本 module の純関数を import するため循環回避
     from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
@@ -49,39 +50,21 @@ class DivergenceProofService:
     def __init__(
         self,
         *,
+        block_graph: BlockGraphService,
         program_access: ProgramAccessService,
         condition_logic: ConditionLogicService,
         placeholder_algebra: "PlaceholderAlgebraService",
         stack_protector: StackProtectorService,
-        block_debug_key: Callable[..., Any],
-        block_successors: Callable[..., Any],
-        same_high_block: Callable[..., Any],
-        iter_high_basic_blocks: Callable[..., Any],
-        first_high_block_cbranch: Callable[..., Any],
-        iter_high_block_ops: Callable[..., Any],
-        direct_cbranch_successor_relation: Callable[..., Any],
-        block_writes_outcome_guard_state: Callable[..., Any],
-        block_predecessor_count: Callable[..., Any],
-        block_has_return_op: Callable[..., Any],
         debug_reporter: DebugReporter,
         program_value: Callable[..., Any],
         direct_call_graph_value: Callable[..., Any],
         direct_call_graph_complete_nodes_value: Callable[..., Any],
     ) -> None:
+        self.block_graph = block_graph
         self.program_access = program_access
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
         self.stack_protector = stack_protector
-        self.block_debug_key = block_debug_key
-        self.block_successors = block_successors
-        self.same_high_block = same_high_block
-        self.iter_high_basic_blocks = iter_high_basic_blocks
-        self.first_high_block_cbranch = first_high_block_cbranch
-        self.iter_high_block_ops = iter_high_block_ops
-        self.direct_cbranch_successor_relation = direct_cbranch_successor_relation
-        self.block_writes_outcome_guard_state = block_writes_outcome_guard_state
-        self.block_predecessor_count = block_predecessor_count
-        self.block_has_return_op = block_has_return_op
         self.debug_reporter = debug_reporter
         self.program_value = program_value
         self.direct_call_graph_value = direct_call_graph_value
@@ -166,7 +149,7 @@ class DivergenceProofService:
             self.debug_reporter.debug_print("Outcome loop divergence proof declined: divergence guard is not param positive")
             return None
 
-        blocks = list(self.iter_high_basic_blocks(high_function))
+        blocks = list(self.block_graph.iter_high_basic_blocks(high_function))
         if not blocks:
             self.debug_reporter.debug_print("Outcome loop divergence proof declined: no high-function blocks")
             return None
@@ -195,12 +178,12 @@ class DivergenceProofService:
             )
             if proof is not None:
                 cfg_blocks = tuple(sorted(
-                    (self.block_debug_key(block) for block in blocks), key=repr
+                    (self.block_graph.block_debug_key(block) for block in blocks), key=repr
                 ))
                 cfg_edges = tuple(sorted((
-                    (self.block_debug_key(block), self.block_debug_key(successor))
+                    (self.block_graph.block_debug_key(block), self.block_graph.block_debug_key(successor))
                     for block in blocks
-                    for successor in self.block_successors(block)
+                    for successor in self.block_graph.block_successors(block)
                 ), key=repr))
                 proof.update(
                     {
@@ -224,13 +207,13 @@ class DivergenceProofService:
         tracer: Optional[PcodeTracer],
     ) -> Optional[Dict[str, Any]]:
         scc_set = set(scc or ())
-        scc_keys = {self.block_debug_key(block) for block in scc_set}
+        scc_keys = {self.block_graph.block_debug_key(block) for block in scc_set}
         if not scc_set:
             return None
-        if any(self.block_has_return_op(block) for block in scc_set):
+        if any(self.block_graph.block_has_return_op(block) for block in scc_set):
             self.debug_reporter.debug_print("Outcome loop divergence proof declined: RETURN in candidate SCC")
             return None
-        if any(self.block_writes_outcome_guard_state(block) for block in scc_set):
+        if any(self.block_graph.block_writes_outcome_guard_state(block) for block in scc_set):
             self.debug_reporter.debug_print("Outcome loop divergence proof declined: guard state write in SCC")
             return None
         if not self.scc_preserves_guard_dependencies(scc_set):
@@ -241,8 +224,8 @@ class DivergenceProofService:
         internal_unconditional_continue = False
         exit_proofs = []
         for block in scc_set:
-            for successor in self.block_successors(block):
-                if self.block_debug_key(successor) in scc_keys:
+            for successor in self.block_graph.block_successors(block):
+                if self.block_graph.block_debug_key(successor) in scc_keys:
                     edge_condition = self.edge_condition_for_successor(block, successor, tracer)
                     if edge_condition is None:
                         internal_unconditional_continue = True
@@ -262,8 +245,8 @@ class DivergenceProofService:
                     return None
                 exit_proofs.append(
                     {
-                        "source": self.block_debug_key(block),
-                        "target": self.block_debug_key(successor),
+                        "source": self.block_graph.block_debug_key(block),
+                        "target": self.block_graph.block_debug_key(successor),
                         "guard_relation": "divergence_guard_and_exit_guard_unsat",
                     }
                 )
@@ -272,21 +255,21 @@ class DivergenceProofService:
         has_guarded_entry = False
         has_unconditional_entry = False
         for block in all_blocks or ():
-            if self.block_debug_key(block) in scc_keys:
+            if self.block_graph.block_debug_key(block) in scc_keys:
                 continue
-            for successor in self.block_successors(block):
-                if self.block_debug_key(successor) not in scc_keys:
+            for successor in self.block_graph.block_successors(block):
+                if self.block_graph.block_debug_key(successor) not in scc_keys:
                     continue
                 edge_condition = self.edge_condition_for_successor(block, successor, tracer)
                 if edge_condition is None:
-                    if self.block_predecessor_count(block) != 0:
+                    if self.block_graph.block_predecessor_count(block) != 0:
                         self.debug_reporter.debug_print("Outcome loop divergence proof declined: unconditional SCC entry is not from function entry")
                         return None
                     has_unconditional_entry = True
                     entry_proofs.append(
                         {
-                            "source": self.block_debug_key(block),
-                            "target": self.block_debug_key(successor),
+                            "source": self.block_graph.block_debug_key(block),
+                            "target": self.block_graph.block_debug_key(successor),
                             "guard_relation": "unconditional_entry_then_internal_guard",
                         }
                     )
@@ -294,8 +277,8 @@ class DivergenceProofService:
                     has_guarded_entry = True
                     entry_proofs.append(
                         {
-                            "source": self.block_debug_key(block),
-                            "target": self.block_debug_key(successor),
+                            "source": self.block_graph.block_debug_key(block),
+                            "target": self.block_graph.block_debug_key(successor),
                             "guard_relation": "entry_guard_equivalent_to_divergence_guard",
                         }
                     )
@@ -320,7 +303,7 @@ class DivergenceProofService:
             return None
 
         return {
-            "scc_blocks": [self.block_debug_key(block) for block in scc_set],
+            "scc_blocks": [self.block_graph.block_debug_key(block) for block in scc_set],
             "entry_edges": entry_proofs,
             "exit_edges": exit_proofs,
             "side_effect_control_safety": {
@@ -335,7 +318,7 @@ class DivergenceProofService:
         }
 
     def high_function_cyclic_sccs(self, blocks: Sequence[Any]) -> List[Tuple[Any, ...]]:
-        key_to_block = {self.block_debug_key(block): block for block in blocks or ()}
+        key_to_block = {self.block_graph.block_debug_key(block): block for block in blocks or ()}
         block_keys = set(key_to_block)
         index_counter = 0
         stack: List[Any] = []
@@ -352,8 +335,8 @@ class DivergenceProofService:
             stack.append(block_key)
             on_stack.add(block_key)
 
-            for successor in self.block_successors(key_to_block[block_key]):
-                successor_key = self.block_debug_key(successor)
+            for successor in self.block_graph.block_successors(key_to_block[block_key]):
+                successor_key = self.block_graph.block_debug_key(successor)
                 if successor_key not in block_keys:
                     continue
                 if successor_key not in indices:
@@ -373,14 +356,14 @@ class DivergenceProofService:
                     break
             component_set = set(component)
             if len(component) > 1 or any(
-                self.block_debug_key(successor) in component_set
+                self.block_graph.block_debug_key(successor) in component_set
                 for item in component
-                for successor in self.block_successors(key_to_block[item])
+                for successor in self.block_graph.block_successors(key_to_block[item])
             ):
                 components.append(tuple(key_to_block[item] for item in component))
 
         for block in blocks or ():
-            key = self.block_debug_key(block)
+            key = self.block_graph.block_debug_key(block)
             if key not in indices:
                 strongconnect(key)
         return components
@@ -388,7 +371,7 @@ class DivergenceProofService:
     def scc_preserves_guard_dependencies(self, scc_set: Set[Any]) -> bool:
         guard_dependency_keys: Set[Tuple[Any, ...]] = set()
         for block in scc_set:
-            cbranch = self.first_high_block_cbranch(block)
+            cbranch = self.block_graph.first_high_block_cbranch(block)
             if cbranch is None:
                 continue
             if getattr(cbranch, "condition_expr", None) is not None and not callable(getattr(cbranch, "getInput", None)):
@@ -411,7 +394,7 @@ class DivergenceProofService:
             return True
 
         for block in scc_set:
-            for op in self.iter_high_block_ops(block):
+            for op in self.block_graph.iter_high_block_ops(block):
                 output = getattr(op, "getOutput", lambda: None)()
                 if output is None:
                     continue
@@ -511,12 +494,12 @@ class DivergenceProofService:
     ) -> Optional[Condition]:
         edge_conditions = getattr(block, "_edge_conditions", None)
         if isinstance(edge_conditions, Mapping):
-            for key in (successor, id(successor), self.block_debug_key(successor)):
+            for key in (successor, id(successor), self.block_graph.block_debug_key(successor)):
                 condition = edge_conditions.get(key)
                 if condition is not None:
                     return condition
 
-        cbranch = self.first_high_block_cbranch(block)
+        cbranch = self.block_graph.first_high_block_cbranch(block)
         if cbranch is None:
             return None
         expr = getattr(cbranch, "condition_expr", None)
@@ -534,11 +517,11 @@ class DivergenceProofService:
 
         true_out = getattr(block, "getTrueOut", lambda: None)()
         false_out = getattr(block, "getFalseOut", lambda: None)()
-        if true_out is not None and self.same_high_block(true_out, successor):
+        if true_out is not None and self.block_graph.same_high_block(true_out, successor):
             return Condition(expr, False)
-        if false_out is not None and self.same_high_block(false_out, successor):
+        if false_out is not None and self.block_graph.same_high_block(false_out, successor):
             return Condition(expr, True)
-        relation = self.direct_cbranch_successor_relation(cbranch, block, successor)
+        relation = self.block_graph.direct_cbranch_successor_relation(cbranch, block, successor)
         if relation == "true":
             return Condition(expr, False)
         if relation == "false":
@@ -704,13 +687,13 @@ class DivergenceProofService:
                     predecessor = None
                 if predecessor is not None and predecessor not in candidate_blocks:
                     candidate_blocks.append(predecessor)
-        header_key = self.block_debug_key(header_block)
+        header_key = self.block_graph.block_debug_key(header_block)
         for block in candidate_blocks:
             cbranch = summarizer._find_cbranch_op(block)
             if cbranch is None or summarizer._safe_pcode_input_count(cbranch) < 2:
                 continue
             if block is not header_block:
-                successor_keys = {self.block_debug_key(successor) for successor in self.block_successors(block)}
+                successor_keys = {self.block_graph.block_debug_key(successor) for successor in self.block_graph.block_successors(block)}
                 if header_key not in successor_keys:
                     continue
             guard_expr = summarizer._build_pcode_expression(
@@ -805,20 +788,20 @@ class DivergenceProofService:
         return cycle_nodes
 
     def high_function_has_cfg_cycle(self, high_function) -> bool:
-        blocks = list(self.iter_high_basic_blocks(high_function))
-        block_keys = {self.block_debug_key(block) for block in blocks}
+        blocks = list(self.block_graph.iter_high_basic_blocks(high_function))
+        block_keys = {self.block_graph.block_debug_key(block) for block in blocks}
         visiting: Set[Any] = set()
         visited: Set[Any] = set()
 
         def visit(block) -> bool:
-            key = self.block_debug_key(block)
+            key = self.block_graph.block_debug_key(block)
             if key in visiting:
                 return True
             if key in visited:
                 return False
             visiting.add(key)
-            for succ in self.block_successors(block):
-                if self.block_debug_key(succ) not in block_keys:
+            for succ in self.block_graph.block_successors(block):
+                if self.block_graph.block_debug_key(succ) not in block_keys:
                     continue
                 if visit(succ):
                     return True
