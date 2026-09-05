@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     PcodeTracer,
     StructuralRecurrenceSummarizer,
 )
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import (
     PcodeTracer,
     StructuralRecurrenceSummarizer,
@@ -60,7 +61,7 @@ class DivergenceProofService:
         block_writes_outcome_guard_state: Callable[..., Any],
         block_predecessor_count: Callable[..., Any],
         block_has_return_op: Callable[..., Any],
-        debug_print: Callable[..., Any],
+        debug_reporter: DebugReporter,
         make_tracer: Callable[..., Any],
         program_value: Callable[..., Any],
         direct_call_graph_value: Callable[..., Any],
@@ -79,7 +80,7 @@ class DivergenceProofService:
         self.block_writes_outcome_guard_state = block_writes_outcome_guard_state
         self.block_predecessor_count = block_predecessor_count
         self.block_has_return_op = block_has_return_op
-        self.debug_print = debug_print
+        self.debug_reporter = debug_reporter
         self.make_tracer = make_tracer
         self.program_value = program_value
         self.direct_call_graph_value = direct_call_graph_value
@@ -155,21 +156,21 @@ class DivergenceProofService:
         if high_function is None or divergence_guard is None:
             return None
         if expression_contains_unsupported_smt_ops(getattr(divergence_guard, "expression", None)):
-            self.debug_print("Outcome loop divergence proof declined: unsupported divergence guard")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: unsupported divergence guard")
             return None
         if not (
             self.condition_logic.conditions_equivalent([divergence_guard], [self.condition_logic.signed_positive_condition(param)])
             or self.condition_logic.condition_is_signed_positive_of_param(divergence_guard, param)
         ):
-            self.debug_print("Outcome loop divergence proof declined: divergence guard is not param positive")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: divergence guard is not param positive")
             return None
 
         blocks = list(self.iter_high_basic_blocks(high_function))
         if not blocks:
-            self.debug_print("Outcome loop divergence proof declined: no high-function blocks")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: no high-function blocks")
             return None
         if not self.high_function_has_cfg_cycle(high_function):
-            self.debug_print("Outcome loop divergence proof declined: no CFG cycle")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: no CFG cycle")
             return None
 
         tracer = None
@@ -180,7 +181,7 @@ class DivergenceProofService:
                 tracer = None
         cyclic_sccs = self.high_function_cyclic_sccs(blocks)
         if not cyclic_sccs:
-            self.debug_print("Outcome loop divergence proof declined: no cyclic SCC")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: no cyclic SCC")
             return None
 
         for scc in cyclic_sccs:
@@ -226,13 +227,13 @@ class DivergenceProofService:
         if not scc_set:
             return None
         if any(self.block_has_return_op(block) for block in scc_set):
-            self.debug_print("Outcome loop divergence proof declined: RETURN in candidate SCC")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: RETURN in candidate SCC")
             return None
         if any(self.block_writes_outcome_guard_state(block) for block in scc_set):
-            self.debug_print("Outcome loop divergence proof declined: guard state write in SCC")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: guard state write in SCC")
             return None
         if not self.scc_preserves_guard_dependencies(scc_set):
-            self.debug_print("Outcome loop divergence proof declined: guard dependency is redefined in SCC")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: guard dependency is redefined in SCC")
             return None
 
         internal_guarded_continue = False
@@ -250,10 +251,10 @@ class DivergenceProofService:
 
                 edge_condition = self.edge_condition_for_successor(block, successor, tracer)
                 if edge_condition is None:
-                    self.debug_print("Outcome loop divergence proof declined: SCC exit without edge guard")
+                    self.debug_reporter.debug_print("Outcome loop divergence proof declined: SCC exit without edge guard")
                     return None
                 if not self.single_guard_conditions_are_contradictory(divergence_guard, edge_condition, param):
-                    self.debug_print(
+                    self.debug_reporter.debug_print(
                         "Outcome loop divergence proof declined: SCC exit is feasible under divergence guard "
                         f"(divergence={divergence_guard.to_string()}, exit={edge_condition.to_string()})"
                     )
@@ -278,7 +279,7 @@ class DivergenceProofService:
                 edge_condition = self.edge_condition_for_successor(block, successor, tracer)
                 if edge_condition is None:
                     if self.block_predecessor_count(block) != 0:
-                        self.debug_print("Outcome loop divergence proof declined: unconditional SCC entry is not from function entry")
+                        self.debug_reporter.debug_print("Outcome loop divergence proof declined: unconditional SCC entry is not from function entry")
                         return None
                     has_unconditional_entry = True
                     entry_proofs.append(
@@ -298,14 +299,14 @@ class DivergenceProofService:
                         }
                     )
                 else:
-                    self.debug_print(
+                    self.debug_reporter.debug_print(
                         "Outcome loop divergence proof declined: SCC entry guard does not match divergence guard "
                         f"(divergence={divergence_guard.to_string()}, entry={edge_condition.to_string()})"
                     )
                     return None
 
         if not has_guarded_entry and not has_unconditional_entry:
-            self.debug_print("Outcome loop divergence proof declined: candidate SCC has no proved external entry")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: candidate SCC has no proved external entry")
             return None
         if has_guarded_entry:
             preservation_ok = internal_unconditional_continue or internal_guarded_continue
@@ -314,7 +315,7 @@ class DivergenceProofService:
         else:
             preservation_ok = False
         if not preservation_ok:
-            self.debug_print("Outcome loop divergence proof declined: no guarded/invariant-preserving continue edge")
+            self.debug_reporter.debug_print("Outcome loop divergence proof declined: no guarded/invariant-preserving continue edge")
             return None
 
         return {

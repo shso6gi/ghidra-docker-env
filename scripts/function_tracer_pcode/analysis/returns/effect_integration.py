@@ -52,6 +52,9 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import collect_java_or_python_iterable
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import function_cache_key as lifecycle_function_cache_key
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import ConditionTracker
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
@@ -127,14 +130,10 @@ class EffectIntegrationService:
         parameters: ParameterService,
         region_facts: RegionFacts,
         local_values: "LocalValueResolver",
-        debug_print: Callable[..., Any],
-        debug_expr_identity_summary: Callable[..., Any],
-        debug_expr_summary: Callable[..., Any],
+        debug_reporter: DebugReporter,
         extend_active_functions: Callable[..., Any],
         current_function_entry_address: Callable[..., Any],
         program_identity: Callable[..., Any],
-        function_cache_key: Callable[..., Any],
-        collect_java_or_python_iterable: Callable[..., Any],
         analysis_scope_key: Callable[..., Any],
         make_tracer: Callable[..., Any],
         get_freshest_callee_parameters: Callable[..., Any],
@@ -171,14 +170,10 @@ class EffectIntegrationService:
         self.parameters = parameters
         self.region_facts = region_facts
         self.local_values = local_values
-        self.debug_print = debug_print
-        self.debug_expr_identity_summary = debug_expr_identity_summary
-        self.debug_expr_summary = debug_expr_summary
+        self.debug_reporter = debug_reporter
         self.extend_active_functions = extend_active_functions
         self.current_function_entry_address = current_function_entry_address
         self.program_identity = program_identity
-        self.function_cache_key = function_cache_key
-        self.collect_java_or_python_iterable = collect_java_or_python_iterable
         self.analysis_scope_key = analysis_scope_key
         self.make_tracer = make_tracer
         self.get_freshest_callee_parameters = get_freshest_callee_parameters
@@ -218,23 +213,23 @@ class EffectIntegrationService:
         if effect_summary is None:
             return False
         if self.phase1_return_type_is_float(return_type, return_type_obj):
-            self.debug_print("Declined pre-return counted loop summary: Phase 1 excludes FP return types")
+            self.debug_reporter.debug_print("Declined pre-return counted loop summary: Phase 1 excludes FP return types")
             return False
         if self.function_body_has_phase1_pure_return_forbidden_ops(function):
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 "Declined pre-return counted loop summary: function body is not Phase 1 pure/no-memory"
             )
             return False
         if self.high_function_has_phase1_pure_return_forbidden_ops(high_function):
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 "Declined pre-return counted loop summary: HighFunction-visible body is not Phase 1 pure/no-memory"
             )
             return False
         if getattr(effect_summary, "effects", None):
-            self.debug_print("Declined pre-return counted loop summary: effect summary contains memory writes")
+            self.debug_reporter.debug_print("Declined pre-return counted loop summary: effect summary contains memory writes")
             return False
         if getattr(effect_summary, "has_unsupported_call", False):
-            self.debug_print("Declined pre-return counted loop summary: effect summary contains unsupported call")
+            self.debug_reporter.debug_print("Declined pre-return counted loop summary: effect summary contains unsupported call")
             return False
         return True
 
@@ -253,7 +248,7 @@ class EffectIntegrationService:
             except Exception:
                 function_identity_key = None
 
-        blocks, blocks_complete = self.collect_java_or_python_iterable(
+        blocks, blocks_complete = collect_java_or_python_iterable(
             getattr(high_function, "getBasicBlocks", lambda: None)()
             if high_function is not None
             and callable(getattr(high_function, "getBasicBlocks", None))
@@ -346,7 +341,7 @@ class EffectIntegrationService:
                     edges_complete = False
             adjacency[block_index] = tuple(successors)
 
-            ops, complete = self.collect_java_or_python_iterable(
+            ops, complete = collect_java_or_python_iterable(
                 getattr(block, "getIterator", lambda: None)()
             )
             pcode_complete = pcode_complete and complete
@@ -673,7 +668,7 @@ class EffectIntegrationService:
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
         bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ):
-        function_cache_key = self.function_cache_key(function)
+        function_cache_key = lifecycle_function_cache_key(function)
         if function_cache_key is None:
             return None
         self.effect_summary_parameter_cache_value()[function_cache_key] = list(parameters)
@@ -755,7 +750,7 @@ class EffectIntegrationService:
             callee_phi_handler = PhiHandler(callee_tracer, callee_tracker)
             callee_tracer.phi_handler = callee_phi_handler
             callee_tracker.build()
-            callee_function_cache_key = self.function_cache_key(callee)
+            callee_function_cache_key = lifecycle_function_cache_key(callee)
             if callee_function_cache_key is not None:
                 self.effect_summary_parameter_cache_value()[callee_function_cache_key] = list(callee_parameters)
             image_base = None
@@ -865,10 +860,10 @@ class EffectIntegrationService:
             effect_summary,
         )
         if self.debug_flag() and rewritten is not None and not _expressions_equivalent(rewritten, value):
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 "Effect-sensitive rewrite candidate: "
-                f"{self.debug_expr_identity_summary(value)} -> "
-                f"{self.debug_expr_identity_summary(rewritten)}"
+                f"{self.debug_reporter.debug_expr_identity_summary(value)} -> "
+                f"{self.debug_reporter.debug_expr_identity_summary(rewritten)}"
             )
         if rewritten is None or _expressions_equivalent(rewritten, value):
             return [(value, conditions)]
@@ -899,11 +894,11 @@ class EffectIntegrationService:
                     ConditionSimplifier.get_simplified_condition_string(cond)
                     for cond in case_conditions
                 ]
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "  effect-sensitive case "
-                    f"[{case_index}]: {self.debug_expr_identity_summary(case_value)}"
+                    f"[{case_index}]: {self.debug_reporter.debug_expr_identity_summary(case_value)}"
                 )
-                self.debug_print(f"    conditions={cond_dump}")
+                self.debug_reporter.debug_print(f"    conditions={cond_dump}")
         if (
             len(deduplicated) == 1
             and _expressions_equivalent(deduplicated[0][0], value)
@@ -912,10 +907,10 @@ class EffectIntegrationService:
             return [(value, conditions)]
 
         if self.debug_flag() and len(deduplicated) > 1:
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 "Split effect-sensitive expanded return into "
                 f"{len(deduplicated)} object-centric cases: "
-                f"{self.debug_expr_summary(value)} -> {self.debug_expr_summary(rewritten)}"
+                f"{self.debug_reporter.debug_expr_summary(value)} -> {self.debug_reporter.debug_expr_summary(rewritten)}"
             )
         return deduplicated
 
@@ -932,10 +927,10 @@ class EffectIntegrationService:
         )
         if precise_object_state_value is not None and precise_object_state_value is not value:
             if self.debug_flag():
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Resolved return to precise object-state carrier before generic rewrite: "
-                    f"{self.debug_expr_identity_summary(value)} -> "
-                    f"{self.debug_expr_identity_summary(precise_object_state_value)}"
+                    f"{self.debug_reporter.debug_expr_identity_summary(value)} -> "
+                    f"{self.debug_reporter.debug_expr_identity_summary(precise_object_state_value)}"
                 )
             return precise_object_state_value
 
@@ -1195,10 +1190,10 @@ class EffectIntegrationService:
                     ):
                         post_state_read = None
                 if self.debug_flag():
-                    self.debug_print(
+                    self.debug_reporter.debug_print(
                         "Collapsed duplicate effect-sensitive binary wrapper: "
-                        f"{self.debug_expr_identity_summary(rewritten)} -> "
-                        f"{self.debug_expr_identity_summary(post_state_read or rewritten_operand)}"
+                        f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} -> "
+                        f"{self.debug_reporter.debug_expr_identity_summary(post_state_read or rewritten_operand)}"
                     )
                 return post_state_read or rewritten_operand
 
@@ -1273,10 +1268,10 @@ class EffectIntegrationService:
             )
             rebuilt = self.expression_cases.fold_constant_expression(rebuilt, fallback_expr=original)
             if self.debug_flag():
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Rebuilt effect-sensitive wrapper around branch-local effect value: "
-                    f"{self.debug_expr_identity_summary(rewritten)} -> "
-                    f"{self.debug_expr_identity_summary(rebuilt)}"
+                    f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} -> "
+                    f"{self.debug_reporter.debug_expr_identity_summary(rebuilt)}"
                 )
             return rebuilt
 
@@ -1352,10 +1347,10 @@ class EffectIntegrationService:
             rewritten_rank = self.effect_sensitive_rewrite_rank(rewritten)
 
         if self.debug_flag() and not accepted:
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 f"Rejected {rewrite_kind} rewrite without object-centric precision gain: "
-                f"{self.debug_expr_identity_summary(original)} -> "
-                f"{self.debug_expr_identity_summary(rewritten)} "
+                f"{self.debug_reporter.debug_expr_identity_summary(original)} -> "
+                f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} "
                 f"rank {original_rank} -> {rewritten_rank} "
                 f"precision {original_precision} -> {rewritten_precision}"
             )
@@ -1573,10 +1568,10 @@ class EffectIntegrationService:
 
         if self.symbolic_post_state_roundtrip_rejected(canonicalized, value, conditions, effect_summary):
             if self.debug_flag():
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Rejected symbolic post-state canonicalization due to non-equivalent round trip: "
-                    f"{self.debug_expr_summary(value)} -> "
-                    f"{self.debug_expr_summary(canonicalized)}"
+                    f"{self.debug_reporter.debug_expr_summary(value)} -> "
+                    f"{self.debug_reporter.debug_expr_summary(canonicalized)}"
                 )
             fallback_replayed = None
             if carrier_post_state_read is not None:
@@ -1805,7 +1800,7 @@ class EffectIntegrationService:
                 debug=self.debug_flag(),
             )
         except Exception as exc:
-            self.debug_print(f"Readonly load concretization failed: {exc}")
+            self.debug_reporter.debug_print(f"Readonly load concretization failed: {exc}")
             return value
 
     def read_memory_value(self, address_value: int, size_bytes: int) -> Optional[int]:
@@ -1916,7 +1911,7 @@ class EffectIntegrationService:
         )
         if "observable_effect_surface" not in result.analysis_notes:
             result.analysis_notes.append("observable_effect_surface")
-        self.debug_print(
+        self.debug_reporter.debug_print(
             f"Observable effect surface: {len(effects)} store effect(s) ({effect_bits} bits) "
             f"combined with the {return_bits}-bit return value"
         )

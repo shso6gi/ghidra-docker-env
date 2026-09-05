@@ -10,14 +10,17 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
     ConditionSimplifier,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import decompose_comparison_condition
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 
 
 class StackProtectorService:
     """ReturnAnalyzer から切り出した stack-protector ガード認識と定数値抽出の collaborator。
 
-    facade 状態は読まない（debug フラグは supplier 経由）。未抽出 family が所有する helper
-    （``extract_stack_protector_memory_probe`` / ``return_site_metadata_from_info`` / ``make_return_info`` /
-    ``decompose_comparison_condition`` / ``debug_print``）は facade 経由で遅延 dispatch する callable として注入する。
+    facade 状態は読まない（debug フラグは supplier 経由）。デバッグ出力は ``DebugReporter``、
+    ``decompose_comparison_condition`` は ``lifecycle`` の純関数。未抽出 family が所有する helper
+    （``extract_stack_protector_memory_probe`` / ``return_site_metadata_from_info`` / ``make_return_info``）は
+    facade 経由で遅延 dispatch する callable として注入する。
     ``constant_int_value`` は ConditionLogicService / PlaceholderAlgebraService が直接依存として利用する。
     """
 
@@ -27,15 +30,13 @@ class StackProtectorService:
         extract_stack_protector_memory_probe: Callable[..., Any],
         return_site_metadata_from_info: Callable[..., Any],
         make_return_info: Callable[..., Any],
-        decompose_comparison_condition: Callable[..., Any],
-        debug_print: Callable[..., Any],
+        debug_reporter: DebugReporter,
         debug_flag: Callable[..., Any],
     ) -> None:
         self.extract_stack_protector_memory_probe = extract_stack_protector_memory_probe
         self.return_site_metadata_from_info = return_site_metadata_from_info
         self.make_return_info = make_return_info
-        self.decompose_comparison_condition = decompose_comparison_condition
-        self.debug_print = debug_print
+        self.debug_reporter = debug_reporter
         self.debug_flag = debug_flag
 
     def strip_stack_protector_only_conditions(
@@ -69,7 +70,7 @@ class StackProtectorService:
                     for cond in info.conditions
                     if cond not in retained_conditions
                 ]
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Dropped object-centric stack-protector guard conditions from "
                     f"return case: {removed_dump}"
                 )
@@ -102,7 +103,7 @@ class StackProtectorService:
         if condition is None:
             return None
 
-        decomposed = self.decompose_comparison_condition(condition)
+        decomposed = decompose_comparison_condition(condition)
         if decomposed is None:
             return None
 

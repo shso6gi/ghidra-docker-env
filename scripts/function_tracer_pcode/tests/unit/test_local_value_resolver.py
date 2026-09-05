@@ -1,6 +1,6 @@
 """Phase 5: LocalValueResolver is the second collaborator extracted from
 ReturnAnalyzer.  It owns no analysis state; pure helpers are imported from
-their owners and only debug_print is injected."""
+their owners and only the DebugReporter is injected."""
 from types import SimpleNamespace
 
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
@@ -73,7 +73,8 @@ class _Storage:
 
 
 def _resolver(messages=None):
-    return LocalValueResolver(debug_print=lambda msg, indent=0: (messages if messages is not None else []).append(msg))
+    reporter = SimpleNamespace(debug_print=lambda msg, indent=0: (messages if messages is not None else []).append(msg))
+    return LocalValueResolver(debug_reporter=reporter)
 
 
 def test_varnode_key_and_synthetic_fallback():

@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     _UNSIGNED_COMPARE_TO_SIGNED,
     _resolve_call_target_ref,
 )
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
@@ -179,7 +180,7 @@ class ParameterService:
         *,
         pcode_sites: PcodeSiteService,
         return_normalization: ReturnNormalizationService,
-        debug_print: Callable[..., Any],
+        debug_reporter: DebugReporter,
         target_active_key: Callable[..., Any],
         should_synthesize_implicit_passthrough_for_call: Callable[..., Any],
         return_site_metadata_from_info: Callable[..., Any],
@@ -192,7 +193,7 @@ class ParameterService:
     ) -> None:
         self.pcode_sites = pcode_sites
         self.return_normalization = return_normalization
-        self.debug_print = debug_print
+        self.debug_reporter = debug_reporter
         self.target_active_key = target_active_key
         self.should_synthesize_implicit_passthrough_for_call = should_synthesize_implicit_passthrough_for_call
         self.return_site_metadata_from_info = return_site_metadata_from_info
@@ -745,7 +746,7 @@ class ParameterService:
             evidence = detector.detect()
             return SignednessResult.from_evidence(evidence)
         except Exception as e:
-            self.debug_print(f"Signedness detection failed: {e}")
+            self.debug_reporter.debug_print(f"Signedness detection failed: {e}")
             return None
 
     def collect_parameters(self, high_function) -> List[Dict]:
@@ -788,7 +789,7 @@ class ParameterService:
                         param_info["index"] = -1
 
                     if self.debug_flag():
-                        self.debug_print(f"Parameter '{sym.getName()}': "
+                        self.debug_reporter.debug_print(f"Parameter '{sym.getName()}': "
                                          f"type={param_info['data_type']}, "
                                          f"signed={param_info['is_signed']}, "
                                          f"storage={param_info['storage']}")
@@ -856,6 +857,6 @@ class ParameterService:
             return storage_info
         except Exception as e:
             if self.debug_flag():
-                self.debug_print(f"Failed to get storage info: {e}")
+                self.debug_reporter.debug_print(f"Failed to get storage info: {e}")
             return None
 
