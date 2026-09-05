@@ -53,11 +53,11 @@ def test_direct_assignment_updates_the_owner_without_coercion():
     assert analyzer._limits.bounded_call_max_cases == "7"
 
 
-def test_owners_are_created_before_any_collaborator_in_the_constructor():
+def test_owners_are_created_before_any_state_dependent_collaborator_in_the_constructor():
     """#84 レビュー指摘: runtime state / limits の所有者は collaborator 構築より前に作る（temporal coupling の解消）。"""
     src = inspect.getsource(ReturnAnalyzer.__init__)
     lines = src.splitlines()
-    idx = {k: next(i for i, l in enumerate(lines) if k in l) for k in ("self._analysis_session = AnalysisSession()", "self._runtime_state = AnalysisRuntimeState()", "self._limits = AnalysisLimits.from_settings()")}
+    idx = {k: next(i for i, l in enumerate(lines) if k in l) for k in ("self._analysis_session = AnalysisSession()", "self._runtime_state = AnalysisRuntimeState()", "self._limits = AnalysisLimits.from_settings()", "self._diagnostics = AnalysisDiagnosticsState()")}
     first_collab = next(i for i, l in enumerate(lines) if "= ExpressionCaseService(" in l or "= StackProtectorService(" in l)
     assert max(idx.values()) < first_collab
     # DebugReporter / LocalValueResolver / ProgramAccessService はそれより前に作られるが、runtime state / limits を受け取らない
@@ -65,4 +65,5 @@ def test_owners_are_created_before_any_collaborator_in_the_constructor():
 
 
 def test_analyzer_no_longer_imports_the_bounded_call_settings_directly():
-    assert not hasattr(analyzer_module, "BOUNDED_CALL_MAX_CASES")
+    for name in ("BOUNDED_CALL_REFINEMENT_ENABLED", "BOUNDED_CALL_UNROLL_LIMIT", "BOUNDED_CALL_MAX_CASES"):
+        assert not hasattr(analyzer_module, name), name

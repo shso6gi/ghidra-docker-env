@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.returns.expression_cases import Expr
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.limits import AnalysisLimits
+from scripts.function_tracer_pcode.analysis.diagnostics_state import AnalysisDiagnosticsState
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
@@ -78,6 +79,7 @@ class ReturnAnalyzer:
         # 長寿命の可変 runtime 状態と bounded-call 設定は collaborator 構築より前に所有者を作る（6a-2 / 6a-3）。
         self._runtime_state = AnalysisRuntimeState()
         self._limits = AnalysisLimits.from_settings()
+        self._diagnostics = AnalysisDiagnosticsState()
         self._current_parameters: List[Dict] = []
         self._expression_cases = ExpressionCaseService(
             current_parameters=lambda: self._current_parameters,
@@ -243,8 +245,6 @@ class ReturnAnalyzer:
         self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
         self._current_blocked_return_path_conditions: List[List[Condition]] = []
         self._current_noreturn_terminal_observations: List[Dict[str, Any]] = []
-        self._last_function_lookup_error: Optional[str] = None
-        self._last_analysis_failure: Optional[AnalysisFailure] = None
         self._current_function_prototype = None
         self._current_function_entry_address_value = None
 
@@ -275,6 +275,30 @@ class ReturnAnalyzer:
             limits = AnalysisLimits.from_settings()
             object.__setattr__(self, '_limits', limits)
             return limits
+
+    def _ensure_diagnostics(self) -> AnalysisDiagnosticsState:
+        try:
+            return object.__getattribute__(self, '_diagnostics')
+        except AttributeError:
+            diagnostics = AnalysisDiagnosticsState()
+            object.__setattr__(self, '_diagnostics', diagnostics)
+            return diagnostics
+
+    @property
+    def _last_function_lookup_error(self):
+        return self._ensure_diagnostics().last_function_lookup_error
+
+    @_last_function_lookup_error.setter
+    def _last_function_lookup_error(self, value):
+        self._ensure_diagnostics().last_function_lookup_error = value
+
+    @property
+    def _last_analysis_failure(self):
+        return self._ensure_diagnostics().last_analysis_failure
+
+    @_last_analysis_failure.setter
+    def _last_analysis_failure(self, value):
+        self._ensure_diagnostics().last_analysis_failure = value
 
     @property
     def _bounded_call_refinement_enabled(self):
