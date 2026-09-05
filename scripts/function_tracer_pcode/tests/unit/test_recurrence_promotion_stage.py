@@ -122,6 +122,9 @@ def test_check_keeps_facade_writes_and_recursion_in_the_fixed_order():
     ret = [n for n in ast.walk(recursive[0]) if isinstance(n, ast.Return) and isinstance(n.value, ast.Call)
            and isinstance(n.value.func, ast.Attribute) and n.value.func.attr == "check" and ast.unparse(n.value.func.value) == "self"]
     assert len(ret) == 1
+    # 再帰呼び出しは promoted pair を位置引数に、元の strategy を force_strategy に渡す
+    assert [ast.unparse(a) for a in ret[0].value.args[:2]] == ["promotion.promoted1", "promotion.promoted2"]
+    assert {k.arg: ast.unparse(k.value) for k in ret[0].value.keywords}["force_strategy"] == "strategy"
     assert prepare < attempt_write[0] < signals < d_runtime[0] < authority_write[0] < ret[0].lineno < recursive[0].finalbody[0].lineno
     # (3) は (4) の条件分岐の外（signals の if の前）にある: attempt write は if の test より前の行
     ifs = [n for n in ast.walk(fn) if isinstance(n, ast.If) and "complete_recurrence_promotion_signals" in ast.unparse(n.test)]
@@ -179,7 +182,9 @@ def test_check_dynamic_order_attempt_signals_runtime_authority_recursion_cleanup
         ("del", "_active_recurrence_promotion_authority"),
     ]
     assert events[0][2] is attempt and events[2][2] == "RT" and events[3][2] is authority
-    assert events[4][2:] == ("P2", checker.check_strategy if False else events[4][3], "RT", authority)
+    # 再帰 check は promoted pair・元の strategy（force_strategy）・(5)(6) で書いた runtime / authority を見る
+    assert events[4] == ("recursive_check", "P1", "P2", checker.check_strategy, "RT", authority)
+    assert events[4][3] is checker.check_strategy
     assert not hasattr(checker, "_active_recurrence_promotion_authority")
     assert checker._last_recurrence_promotion_attempt is attempt
 
