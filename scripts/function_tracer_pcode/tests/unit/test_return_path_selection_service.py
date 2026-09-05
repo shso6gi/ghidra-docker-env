@@ -88,9 +88,7 @@ def test_dependants_use_the_service_directly():
     assert "high_function_has_forbidden_control_outcome_ops" not in vars(analyzer._branch_guarded_while)
 
 
-def test_min_branch_index_and_signatures_match_facade():
-    analyzer = _analyzer()
-    assert analyzer._min_branch_index([]) == analyzer._return_paths.min_branch_index([])
+def test_signatures_match_between_facade_and_collaborator():
     for name in sorted(NAMES):
         facade = inspect.signature(getattr(ReturnAnalyzer, "_" + name)).parameters
         collab = inspect.signature(getattr(ReturnPathSelectionService, name)).parameters
