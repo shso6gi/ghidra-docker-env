@@ -2,6 +2,8 @@
 
 import ast
 import inspect
+
+import pytest
 from contextlib import AbstractContextManager
 from unittest.mock import Mock, patch
 
@@ -65,6 +67,21 @@ def test_decompiler_ownership_stays_on_the_facade():
     assert analyzer._decompiler is None                 # dispose は setter で None に戻す
     analyzer._decompiler = Mock()                       # 既存テストの直接代入 seam
     assert analyzer._program_access.decompiler_value() is analyzer._decompiler
+
+
+def test_get_decompiler_stores_the_instance_before_open_program_like_the_old_implementation():
+    """#77 レビュー指摘: 旧実装は DecompInterface 生成直後（openProgram より前）に _decompiler へ保存していた。
+    openProgram が例外を投げても instance が facade に残り、dispose() で回収できる順序を固定する。"""
+    analyzer = _analyzer()
+    fake = Mock()
+    fake.openProgram.side_effect = RuntimeError("open failed")
+    with patch.dict("sys.modules", {"ghidra": Mock(), "ghidra.app": Mock(), "ghidra.app.decompiler": Mock(DecompInterface=Mock(return_value=fake))}):
+        with pytest.raises(RuntimeError):
+            analyzer._get_decompiler()
+    assert analyzer._decompiler is fake
+    analyzer.dispose()
+    fake.dispose.assert_called_once()
+    assert analyzer._decompiler is None
 
 
 def test_dispose_tolerates_dead_jvm_but_reraises_other_errors():

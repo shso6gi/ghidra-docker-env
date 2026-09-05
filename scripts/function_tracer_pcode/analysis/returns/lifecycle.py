@@ -301,8 +301,10 @@ class ProgramAccessService:
         if decompiler is None:
             from ghidra.app.decompiler import DecompInterface # type: ignore[import]
             decompiler = DecompInterface()
-            decompiler.openProgram(self.program_value())
+            # 旧実装と同じ順序: openProgram() より前に facade へ保存する。openProgram() が例外を投げても
+            # instance は facade に残り、後続の dispose() で回収できる。
             self.set_decompiler(decompiler)
+            decompiler.openProgram(self.program_value())
         return decompiler
 
     @contextmanager
