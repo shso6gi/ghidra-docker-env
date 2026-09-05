@@ -2940,7 +2940,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
         0x401030: [ExpandedValue(Expression.constant(1003, 4), [])],
     }
 
-    with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: table.get(addr)):
+    with patch.object(analyzer._effect_integration, "read_memory_value", side_effect=lambda addr, size: table.get(addr)):
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",
@@ -3077,7 +3077,7 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
         0x2000 + 0x100 + 0x8: 0x401010,
     }
 
-    with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: table.get(addr)):
+    with patch.object(analyzer._effect_integration, "read_memory_value", side_effect=lambda addr, size: table.get(addr)):
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",
@@ -3339,7 +3339,7 @@ def test_return_analyzer_detects_noreturn_target_from_object_centric_readonly_in
     program.getImageBase.return_value = image_base
 
     analyzer = ReturnAnalyzer(program=program, debug=False)
-    analyzer._read_memory_value = lambda addr, size: 0x401234 if addr == 0x500000 else None
+    analyzer._effect_integration.read_memory_value = lambda addr, size: 0x401234 if addr == 0x500000 else None
 
     tracer = Mock()
     tracer.resolve_call_target_ref = lambda *_args, **_kwargs: None
@@ -4329,8 +4329,8 @@ def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
         "_augment_parameters_with_implicit_passthrough",
         side_effect=lambda parameters, *_args, **_kwargs: parameters,
     ), patch.object(
-        analyzer,
-        "_build_effect_summary",
+        analyzer._effect_integration,
+        "build_effect_summary",
         side_effect=_build_effect_summary,
     ), patch.object(
         analyzer,

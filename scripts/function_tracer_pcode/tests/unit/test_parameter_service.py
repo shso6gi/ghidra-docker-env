@@ -7,6 +7,8 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.analysis.returns import parameters as pm_module
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.core.expression import Expression
 
 DIRECT = {
     "pcode_sites": {"coerce_optional_int"},
@@ -76,6 +78,20 @@ def test_current_parameters_is_written_only_through_the_injected_setter():
     new_params = [{"name": "param_1", "index": 0, "size": 4}]
     analyzer._parameters.set_current_parameters(new_params)
     assert analyzer._current_parameters is new_params
+
+
+def test_synchronize_writes_facade_parameters_through_the_setter_end_to_end():
+    """#74 レビュー指摘: setter 単体ではなく synchronize 本体を経由して facade まで届くことを固定する。"""
+    analyzer = _analyzer()
+    analyzer._current_parameters = []
+    referenced = Expression.parameter("param_2", index=1, size=4)
+    analysis = FunctionReturnAnalysis(
+        function_name="f", entry_point="0x1000", parameters=[],
+        returns=[ReturnInfo(address="0x1010", value=referenced)],
+    )
+    analyzer._parameters.synchronize_parameters_with_referenced_parameter_expressions(analysis)
+    assert [p["name"] for p in analysis.parameters] == ["param_2"]
+    assert analyzer._current_parameters is analysis.parameters
 
 
 def test_suppliers_read_analyzer_state_at_call_time():
