@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     PcodeTracer,
     _PCODE_OPCODE_BY_MNEMONIC,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 
 
@@ -41,15 +42,15 @@ class PcodeSiteService:
     def __init__(
         self,
         *,
+        program_access: ProgramAccessService,
         storages_overlap_for_return_recovery: Callable[..., Any],
-        program_identity: Callable[..., Any],
         current_function_entry_address: Callable[..., Any],
         is_pcode_call_op: Callable[..., Any],
         get_implicit_return_target_storages: Callable[..., Any],
         binary_id_value: Callable[..., Any],
     ) -> None:
+        self.program_access = program_access
         self.storages_overlap_for_return_recovery = storages_overlap_for_return_recovery
-        self.program_identity = program_identity
         self.current_function_entry_address = current_function_entry_address
         self.is_pcode_call_op = is_pcode_call_op
         self.get_implicit_return_target_storages = get_implicit_return_target_storages
@@ -105,7 +106,7 @@ class PcodeSiteService:
             "pcode_op_ref": PcodeOpRef.from_pcode_op(
                 pcode_op,
                 binary_id=self.binary_id_value(),
-                program_uid=self.program_identity(),
+                program_uid=self.program_access.program_identity(),
                 function_entry=self.current_function_entry_address(),
             ),
         }
@@ -266,7 +267,7 @@ class PcodeSiteService:
         op_ref = PcodeOpRef.from_pcode_op(
             op,
             binary_id=self.binary_id_value(),
-            program_uid=self.program_identity(),
+            program_uid=self.program_access.program_identity(),
             function_entry=self.current_function_entry_address(),
         )
         if op_ref is None:

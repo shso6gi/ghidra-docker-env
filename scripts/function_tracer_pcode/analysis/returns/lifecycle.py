@@ -2,65 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ANALYSIS_STATUS_ANALYSIS_EXCEPTION,
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     AnalysisFailure,
     ConditionTracker,
 )
-from ._shared import ConditionNormalizer
-from ._shared import EffectSummary
-from ._api import PcodeTracer
-from ._shared import summarize_expression
+from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNormalizer, EffectSummary
+from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 
-def _impl__program_is_big_endian(self) -> Optional[bool]:
-    language_getter = getattr(self.program, "getLanguage", None)
-    if not callable(language_getter):
-        return None
-    try:
-        language = language_getter()
-        is_big_endian = getattr(language, "isBigEndian", None)
-        if callable(is_big_endian):
-            return bool(is_big_endian())
-    except Exception:
-        return None
-    return None
-
-def _impl__program_identity(self) -> Optional[int]:
-    try:
-        getter = getattr(self.program, "getUniqueProgramID", None)
-        if callable(getter):
-            return int(getter())
-    except Exception:
-        return None
-    return None
-
-def _impl__get_decompiler(self):
-    if self._decompiler is None:
-        from ghidra.app.decompiler import DecompInterface # type: ignore[import]
-        self._decompiler = DecompInterface()
-        self._decompiler.openProgram(self.program)
-    return self._decompiler
-
-def _impl__program_transaction(self, description: str):
-    start_transaction = getattr(self.program, "startTransaction", None)
-    end_transaction = getattr(self.program, "endTransaction", None)
-    if not callable(start_transaction) or not callable(end_transaction):
-        yield
-        return
-
-    tx_id = start_transaction(description)
-    try:
-        yield
-        end_transaction(tx_id, True)
-    except Exception:
-        end_transaction(tx_id, False)
-        raise
 
 def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool, str, Expression, Expression]]:
     """条件を比較式 `(negated, op, left, right)` に展開。"""
@@ -85,72 +41,6 @@ def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool,
 def _impl__decompose_comparison_condition(self, condition: Condition):
     return decompose_comparison_condition(condition)
 
-def _impl__program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
-    if userop_id is None:
-        return None
-    language = getattr(self.program, "getLanguage", lambda: None)()
-    get_name = getattr(language, "getUserDefinedOpName", None)
-    if not callable(get_name):
-        return None
-    try:
-        name = get_name(int(userop_id))
-    except Exception:
-        return None
-    return str(name) if name else None
-
-def _impl__find_block_info_for_program_offset(
-    self,
-    condition_tracker: ConditionTracker,
-    address_value: int,
-):
-    block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
-    for block_info in block_by_index.values():
-        block = getattr(block_info, "block", None)
-        if block is None:
-            continue
-        start_offset = self._address_offset_for_block_endpoint(getattr(block, "getStart", lambda: None)())
-        stop_offset = self._address_offset_for_block_endpoint(getattr(block, "getStop", lambda: None)())
-        if start_offset is None:
-            continue
-        if stop_offset is None:
-            stop_offset = start_offset
-        lo = min(start_offset, stop_offset)
-        hi = max(start_offset, stop_offset)
-        if lo <= int(address_value) <= hi:
-            return block_info
-    return None
-
-def _impl__decompile_function(self, function, timeout: int = 60):
-    try:
-        from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
-            LIFECYCLE_HELPER_SOURCE_CONTRACT,
-            decompile_function,
-        )
-        results = decompile_function(
-            self, function, timeout, None,
-            source_contract_id=LIFECYCLE_HELPER_SOURCE_CONTRACT,
-            semantic_owner="subordinate",
-        )
-        if not results.decompileCompleted():
-            return None
-        return results
-    except Exception:
-        return None
-
-def _impl__resolve_function_from_program_offset(self, address_value: int):
-    if self.program is None or address_value < 0:
-        return None
-    try:
-        address_factory = self.program.getAddressFactory()
-        if address_factory is None:
-            return None
-        default_space = address_factory.getDefaultAddressSpace()
-        if default_space is None:
-            return None
-        address = default_space.getAddress(address_value)
-    except Exception:
-        return None
-    return self._resolve_function_from_address(address)
 
 def _impl_analyze_function_by_name(self, function_name: str, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
     self._last_function_lookup_error = None
@@ -175,23 +65,6 @@ def _impl_analyze_function_by_name(self, function_name: str, timeout: int = 60) 
             function_name=function_name,
         )
         raise
-
-def _impl__find_function_by_name(self, function_name: str):
-    if not function_name:
-        return None
-    function_manager = self._get_function_manager()
-    if function_manager is None:
-        return None
-    try:
-        for func in function_manager.getFunctions(True):
-            if func.getName() == function_name:
-                return func
-    except Exception:
-        return None
-    return None
-
-
-# ---- session helpers
 
 
 def _impl__current_function_entry_address(self):
@@ -258,18 +131,6 @@ def _impl__analysis_context(
         self._current_function_prototype = previous_function_prototype
         self._current_function_entry_address_value = previous_function_entry_address
         self._current_noreturn_terminal_observations = previous_noreturn_observations
-
-
-def _impl_dispose(self):
-    if self._decompiler is not None:
-        try:
-            self._decompiler.dispose()
-        except Exception as exc:
-            exc_text = str(exc).lower()
-            if "jvm is not running" not in exc_text and "java virtual machine is not running" not in exc_text:
-                raise
-        finally:
-            self._decompiler = None
 
 
 def collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
@@ -381,116 +242,285 @@ def _impl__extend_active_functions(
     return scoped
 
 
-def _impl__make_tracer(
-    self,
-    high_function,
-    *,
-    bound_parameter_values: Optional[Dict[int, Expression]] = None,
-    bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
-) -> PcodeTracer:
-    try:
-        return PcodeTracer(
-            self.program,
-            high_function,
-            debug=self.debug,
-            bound_parameter_values=bound_parameter_values,
-            bound_parameter_storage_values=bound_parameter_storage_values,
-            binary_id=self._binary_id,
-        )
-    except TypeError:
-        return PcodeTracer(
-            self.program,
-            high_function,
-            debug=self.debug,
-        )
+class ProgramAccessService:
+    """ReturnAnalyzer から切り出した program / decompiler アクセス（lifecycle family B 群）の collaborator。
 
+    facade 状態は program / binary id / debug フラグを supplier で読む。decompiler の遅延生成と破棄は
+    ``decompiler_value`` supplier と ``set_decompiler`` setter を通し、**所有権は ReturnAnalyzer に残す**
+    （既存の ``analyzer._decompiler`` seam と ``dispose()`` のリソース所有を変えない）。
+    デバッグ出力は ``DebugReporter`` 直接依存。broker の decompile は facade 経由の
+    ``decompile_with_broker`` callable（broker は analyzer を第 1 引数に取る）。
+    未抽出 family（control_recovery）が所有する ``address_offset_for_block_endpoint`` は facade 経由 callable。
+    """
 
-def _impl__get_instruction_with_fallback(self, addr):
-    listing = self.program.getListing()
-    instruction = listing.getInstructionAt(addr)
-    if instruction is not None:
-        return instruction
+    def __init__(
+        self,
+        *,
+        debug_reporter: DebugReporter,
+        address_offset_for_block_endpoint: Callable[..., Any],
+        decompile_with_broker: Callable[..., Any],
+        program_value: Callable[..., Any],
+        binary_id_value: Callable[..., Any],
+        debug_flag: Callable[..., Any],
+        decompiler_value: Callable[..., Any],
+        set_decompiler: Callable[..., Any],
+    ) -> None:
+        self.debug_reporter = debug_reporter
+        self.address_offset_for_block_endpoint = address_offset_for_block_endpoint
+        self.decompile_with_broker = decompile_with_broker
+        self.program_value = program_value
+        self.binary_id_value = binary_id_value
+        self.debug_flag = debug_flag
+        self.decompiler_value = decompiler_value
+        self.set_decompiler = set_decompiler
 
-    containing_instruction = getattr(listing, "getInstructionContaining", None)
-    if callable(containing_instruction):
-        instruction = containing_instruction(addr)
-        if instruction is not None:
-            return instruction
+    def program_is_big_endian(self) -> Optional[bool]:
+        language_getter = getattr(self.program_value(), "getLanguage", None)
+        if not callable(language_getter):
+            return None
+        try:
+            language = language_getter()
+            is_big_endian = getattr(language, "isBigEndian", None)
+            if callable(is_big_endian):
+                return bool(is_big_endian())
+        except Exception:
+            return None
+        return None
 
-    if self._attempt_disassemble_at(addr):
+    def program_identity(self) -> Optional[int]:
+        try:
+            getter = getattr(self.program_value(), "getUniqueProgramID", None)
+            if callable(getter):
+                return int(getter())
+        except Exception:
+            return None
+        return None
+
+    def get_decompiler(self):
+        decompiler = self.decompiler_value()
+        if decompiler is None:
+            from ghidra.app.decompiler import DecompInterface # type: ignore[import]
+            decompiler = DecompInterface()
+            # 旧実装と同じ順序: openProgram() より前に facade へ保存する。openProgram() が例外を投げても
+            # instance は facade に残り、後続の dispose() で回収できる。
+            self.set_decompiler(decompiler)
+            decompiler.openProgram(self.program_value())
+        return decompiler
+
+    @contextmanager
+    def program_transaction(self, description: str):
+        start_transaction = getattr(self.program_value(), "startTransaction", None)
+        end_transaction = getattr(self.program_value(), "endTransaction", None)
+        if not callable(start_transaction) or not callable(end_transaction):
+            yield
+            return
+
+        tx_id = start_transaction(description)
+        try:
+            yield
+            end_transaction(tx_id, True)
+        except Exception:
+            end_transaction(tx_id, False)
+            raise
+
+    def program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
+        if userop_id is None:
+            return None
+        language = getattr(self.program_value(), "getLanguage", lambda: None)()
+        get_name = getattr(language, "getUserDefinedOpName", None)
+        if not callable(get_name):
+            return None
+        try:
+            name = get_name(int(userop_id))
+        except Exception:
+            return None
+        return str(name) if name else None
+
+    def find_block_info_for_program_offset(
+        self,
+        condition_tracker: ConditionTracker,
+        address_value: int,
+    ):
+        block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
+        for block_info in block_by_index.values():
+            block = getattr(block_info, "block", None)
+            if block is None:
+                continue
+            start_offset = self.address_offset_for_block_endpoint(getattr(block, "getStart", lambda: None)())
+            stop_offset = self.address_offset_for_block_endpoint(getattr(block, "getStop", lambda: None)())
+            if start_offset is None:
+                continue
+            if stop_offset is None:
+                stop_offset = start_offset
+            lo = min(start_offset, stop_offset)
+            hi = max(start_offset, stop_offset)
+            if lo <= int(address_value) <= hi:
+                return block_info
+        return None
+
+    def decompile_function(self, function, timeout: int = 60):
+        try:
+            from scripts.function_tracer_pcode.ghidra.decompilation_broker import LIFECYCLE_HELPER_SOURCE_CONTRACT
+            # broker は analyzer（facade）を第 1 引数に取るため、facade 経由の callable で呼ぶ
+            results = self.decompile_with_broker(
+                function, timeout, None,
+                source_contract_id=LIFECYCLE_HELPER_SOURCE_CONTRACT,
+                semantic_owner="subordinate",
+            )
+            if not results.decompileCompleted():
+                return None
+            return results
+        except Exception:
+            return None
+
+    def resolve_function_from_program_offset(self, address_value: int):
+        if self.program_value() is None or address_value < 0:
+            return None
+        try:
+            address_factory = self.program_value().getAddressFactory()
+            if address_factory is None:
+                return None
+            default_space = address_factory.getDefaultAddressSpace()
+            if default_space is None:
+                return None
+            address = default_space.getAddress(address_value)
+        except Exception:
+            return None
+        return self.resolve_function_from_address(address)
+
+    def find_function_by_name(self, function_name: str):
+        if not function_name:
+            return None
+        function_manager = self.get_function_manager()
+        if function_manager is None:
+            return None
+        try:
+            for func in function_manager.getFunctions(True):
+                if func.getName() == function_name:
+                    return func
+        except Exception:
+            return None
+        return None
+
+    def dispose(self):
+        decompiler = self.decompiler_value()
+        if decompiler is not None:
+            try:
+                decompiler.dispose()
+            except Exception as exc:
+                exc_text = str(exc).lower()
+                if "jvm is not running" not in exc_text and "java virtual machine is not running" not in exc_text:
+                    raise
+            finally:
+                self.set_decompiler(None)
+
+    def make_tracer(
+        self,
+        high_function,
+        *,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
+    ) -> PcodeTracer:
+        try:
+            return PcodeTracer(
+                self.program_value(),
+                high_function,
+                debug=self.debug_flag(),
+                bound_parameter_values=bound_parameter_values,
+                bound_parameter_storage_values=bound_parameter_storage_values,
+                binary_id=self.binary_id_value(),
+            )
+        except TypeError:
+            return PcodeTracer(
+                self.program_value(),
+                high_function,
+                debug=self.debug_flag(),
+            )
+
+    def get_instruction_with_fallback(self, addr):
+        listing = self.program_value().getListing()
         instruction = listing.getInstructionAt(addr)
         if instruction is not None:
             return instruction
+
+        containing_instruction = getattr(listing, "getInstructionContaining", None)
         if callable(containing_instruction):
             instruction = containing_instruction(addr)
             if instruction is not None:
                 return instruction
 
-    return None
+        if self.attempt_disassemble_at(addr):
+            instruction = listing.getInstructionAt(addr)
+            if instruction is not None:
+                return instruction
+            if callable(containing_instruction):
+                instruction = containing_instruction(addr)
+                if instruction is not None:
+                    return instruction
 
+        return None
 
-def _impl__attempt_disassemble_at(self, addr) -> bool:
-    try:
-        from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import]
-    except Exception:
-        self._debug_print(f"Local target disassembly unavailable at {addr}: import failed")
-        return False
-
-    try:
-        command = DisassembleCommand(addr, None, True)
-    except TypeError:
+    def attempt_disassemble_at(self, addr) -> bool:
         try:
-            command = DisassembleCommand(addr, None)
-        except Exception as exc:
-            self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+            from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import]
+        except Exception:
+            self.debug_reporter.debug_print(f"Local target disassembly unavailable at {addr}: import failed")
             return False
-    except Exception as exc:
-        self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
-        return False
 
-    try:
-        with self._program_transaction(f"Disassemble local target {addr}"):
-            applied = command.applyTo(self.program)
-    except Exception as exc:
-        self._debug_print(f"Local target disassembly failed at {addr}: {exc}")
-        return False
+        try:
+            command = DisassembleCommand(addr, None, True)
+        except TypeError:
+            try:
+                command = DisassembleCommand(addr, None)
+            except Exception as exc:
+                self.debug_reporter.debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+                return False
+        except Exception as exc:
+            self.debug_reporter.debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+            return False
 
-    if applied:
-        self._debug_print(f"Local target disassembly materialized instructions at {addr}")
-    else:
-        self._debug_print(f"Local target disassembly produced no instructions at {addr}")
-    return bool(applied)
+        try:
+            with self.program_transaction(f"Disassemble local target {addr}"):
+                applied = command.applyTo(self.program_value())
+        except Exception as exc:
+            self.debug_reporter.debug_print(f"Local target disassembly failed at {addr}: {exc}")
+            return False
 
+        if applied:
+            self.debug_reporter.debug_print(f"Local target disassembly materialized instructions at {addr}")
+        else:
+            self.debug_reporter.debug_print(f"Local target disassembly produced no instructions at {addr}")
+        return bool(applied)
 
-def _impl__get_function_manager(self):
-    if self.program is None:
-        return None
-    try:
-        return self.program.getFunctionManager()
-    except Exception:
-        return None
-
-
-def _impl__resolve_function_from_address(self, address):
-    if address is None:
-        return None
-    try:
-        function_manager = self._get_function_manager()
-        if function_manager is None:
+    def get_function_manager(self):
+        if self.program_value() is None:
             return None
-        get_function_at = getattr(function_manager, "getFunctionAt", None)
-        if callable(get_function_at):
-            function = get_function_at(address)
-            if function is not None:
-                return function
-        get_referenced_function = getattr(function_manager, "getReferencedFunction", None)
-        if callable(get_referenced_function):
-            function = get_referenced_function(address)
-            if function is not None:
-                return function
-    except Exception:
+        try:
+            return self.program_value().getFunctionManager()
+        except Exception:
+            return None
+
+    def resolve_function_from_address(self, address):
+        if address is None:
+            return None
+        try:
+            function_manager = self.get_function_manager()
+            if function_manager is None:
+                return None
+            get_function_at = getattr(function_manager, "getFunctionAt", None)
+            if callable(get_function_at):
+                function = get_function_at(address)
+                if function is not None:
+                    return function
+            get_referenced_function = getattr(function_manager, "getReferencedFunction", None)
+            if callable(get_referenced_function):
+                function = get_referenced_function(address)
+                if function is not None:
+                    return function
+        except Exception:
+            return None
         return None
-    return None
+
 
 
 def _impl_get_last_function_lookup_error(self) -> Optional[str]:

@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.returns.local_values import LocalVal
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.effect_integration import EffectIntegrationService
 from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
@@ -56,6 +57,16 @@ class ReturnAnalyzer:
         self._region_facts = RegionFacts(program)
         self._debug_reporter = DebugReporter(debug_flag=lambda: self.debug)
         self._local_values = LocalValueResolver(debug_reporter=self._debug_reporter)
+        self._program_access = ProgramAccessService(
+            debug_reporter=self._debug_reporter,
+            address_offset_for_block_endpoint=lambda *a, **kw: self._address_offset_for_block_endpoint(*a, **kw),
+            decompile_with_broker=lambda *a, **kw: self._decompile_with_broker(*a, **kw),
+            program_value=lambda: self.program,
+            binary_id_value=lambda: self._binary_id,
+            debug_flag=lambda: self.debug,
+            decompiler_value=lambda: self._decompiler,
+            set_decompiler=lambda value: setattr(self, "_decompiler", value),
+        )
         self.debug = debug
         self._binary_id = binary_id
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
@@ -77,8 +88,8 @@ class ReturnAnalyzer:
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
         )
         self._pcode_sites = PcodeSiteService(
+            program_access=self._program_access,
             storages_overlap_for_return_recovery=lambda *a, **kw: self._storages_overlap_for_return_recovery(*a, **kw),
-            program_identity=lambda *a, **kw: self._program_identity(*a, **kw),
             current_function_entry_address=lambda *a, **kw: self._current_function_entry_address(*a, **kw),
             is_pcode_call_op=lambda *a, **kw: self._is_pcode_call_op(*a, **kw),
             get_implicit_return_target_storages=lambda *a, **kw: self._get_implicit_return_target_storages(*a, **kw),
@@ -125,6 +136,7 @@ class ReturnAnalyzer:
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
         )
         self._divergence_proofs = DivergenceProofService(
+            program_access=self._program_access,
             condition_logic=self._condition_logic,
             placeholder_algebra=self._placeholder_algebra,
             stack_protector=self._stack_protector,
@@ -139,7 +151,6 @@ class ReturnAnalyzer:
             block_predecessor_count=lambda *a, **kw: self._block_predecessor_count(*a, **kw),
             block_has_return_op=lambda *a, **kw: self._block_has_return_op(*a, **kw),
             debug_reporter=self._debug_reporter,
-            make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
             program_value=lambda: self.program,
             direct_call_graph_value=lambda: self._direct_call_graph,
             direct_call_graph_complete_nodes_value=lambda: self._direct_call_graph_complete_nodes,
@@ -153,6 +164,7 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
         )
         self._effect_integration = EffectIntegrationService(
+            program_access=self._program_access,
             expression_cases=self._expression_cases,
             return_normalization=self._return_normalization,
             stack_protector=self._stack_protector,
@@ -165,9 +177,7 @@ class ReturnAnalyzer:
             debug_reporter=self._debug_reporter,
             extend_active_functions=lambda *a, **kw: self._extend_active_functions(*a, **kw),
             current_function_entry_address=lambda *a, **kw: self._current_function_entry_address(*a, **kw),
-            program_identity=lambda *a, **kw: self._program_identity(*a, **kw),
             analysis_scope_key=lambda *a, **kw: self._analysis_scope_key(*a, **kw),
-            make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
             get_freshest_callee_parameters=lambda *a, **kw: self._get_freshest_callee_parameters(*a, **kw),
             make_call_resolver=lambda *a, **kw: self._make_call_resolver(*a, **kw),
             bound_parameter_values_from_call_args=lambda *a, **kw: self._bound_parameter_values_from_call_args(*a, **kw),
@@ -510,16 +520,25 @@ class ReturnAnalyzer:
     def _symbolic_post_state_roundtrip_rejected(self, canonicalized, original, conditions, effect_summary):
         return self._effect_integration.symbolic_post_state_roundtrip_rejected(canonicalized, original, conditions, effect_summary)
     # analyzer_services.lifecycle
-    _decompile_function = _svc_lifecycle._impl__decompile_function
+    def _decompile_function(self, function, timeout=60):
+        return self._program_access.decompile_function(function, timeout)
     _decompose_comparison_condition = _svc_lifecycle._impl__decompose_comparison_condition
-    _find_block_info_for_program_offset = _svc_lifecycle._impl__find_block_info_for_program_offset
-    _find_function_by_name = _svc_lifecycle._impl__find_function_by_name
-    _get_decompiler = _svc_lifecycle._impl__get_decompiler
-    _program_identity = _svc_lifecycle._impl__program_identity
-    _program_is_big_endian = _svc_lifecycle._impl__program_is_big_endian
-    _program_transaction = contextmanager(_svc_lifecycle._impl__program_transaction)
-    _program_userop_name = _svc_lifecycle._impl__program_userop_name
-    _resolve_function_from_program_offset = _svc_lifecycle._impl__resolve_function_from_program_offset
+    def _find_block_info_for_program_offset(self, condition_tracker, address_value):
+        return self._program_access.find_block_info_for_program_offset(condition_tracker, address_value)
+    def _find_function_by_name(self, function_name):
+        return self._program_access.find_function_by_name(function_name)
+    def _get_decompiler(self):
+        return self._program_access.get_decompiler()
+    def _program_identity(self):
+        return self._program_access.program_identity()
+    def _program_is_big_endian(self):
+        return self._program_access.program_is_big_endian()
+    def _program_transaction(self, description):
+        return self._program_access.program_transaction(description)
+    def _program_userop_name(self, userop_id):
+        return self._program_access.program_userop_name(userop_id)
+    def _resolve_function_from_program_offset(self, address_value):
+        return self._program_access.resolve_function_from_program_offset(address_value)
     analyze_function_by_name = _svc_lifecycle._impl_analyze_function_by_name
     # return_extraction
     _acc_phi_flows_to_return_origin_phi = _svc_return_extraction._impl__acc_phi_flows_to_return_origin_phi
@@ -776,12 +795,14 @@ class ReturnAnalyzer:
     def _varnodes_same_storage(self, left, right):
         return self._pcode_sites.varnodes_same_storage(left, right)
     analyze_function = _svc_analyze_function._impl_analyze_function
-    dispose = _svc_lifecycle._impl_dispose
+    def dispose(self):
+        return self._program_access.dispose()
     # session helpers (continued)
     _analysis_is_fully_argument_specialized = _svc_analyze_function._impl__analysis_is_fully_argument_specialized
     _analysis_needs_wrapper_recovery = _svc_analyze_function._impl__analysis_needs_wrapper_recovery
     _analysis_scope_key = _svc_lifecycle._impl__analysis_scope_key
-    _attempt_disassemble_at = _svc_lifecycle._impl__attempt_disassemble_at
+    def _attempt_disassemble_at(self, addr):
+        return self._program_access.attempt_disassemble_at(addr)
     def _augment_parameters_with_implicit_passthrough(self, parameters, tracer, active_functions):
         return self._parameters.augment_parameters_with_implicit_passthrough(parameters, tracer, active_functions)
     def _build_condition_signature_set(self, conditions):
@@ -891,8 +912,10 @@ class ReturnAnalyzer:
     def _fold_constant_expression(self, expr, *, fallback_expr=None):
         return self._expression_cases.fold_constant_expression(expr, fallback_expr=fallback_expr)
     _function_cache_key = _svc_lifecycle._impl__function_cache_key
-    _get_function_manager = _svc_lifecycle._impl__get_function_manager
-    _get_instruction_with_fallback = _svc_lifecycle._impl__get_instruction_with_fallback
+    def _get_function_manager(self):
+        return self._program_access.get_function_manager()
+    def _get_instruction_with_fallback(self, addr):
+        return self._program_access.get_instruction_with_fallback(addr)
     def _get_pcode_opcode(self, pcode_op):
         return self._pcode_sites.get_pcode_opcode(pcode_op)
     def _get_storage_info(self, sym):
@@ -921,7 +944,8 @@ class ReturnAnalyzer:
 
     def _lookup_local_expression_for_storage(self, target_storage, local_values, local_storages):
         return self._local_values.lookup_for_storage(target_storage, local_values, local_storages)
-    _make_tracer = _svc_lifecycle._impl__make_tracer
+    def _make_tracer(self, high_function, *, bound_parameter_values=None, bound_parameter_storage_values=None):
+        return self._program_access.make_tracer(high_function, bound_parameter_values=bound_parameter_values, bound_parameter_storage_values=bound_parameter_storage_values)
     def _parameter_constant_assignments_from_conditions(self, conditions):
         return self._condition_logic.parameter_constant_assignments_from_conditions(conditions)
     def _parameter_descriptor_quality(self, parameters):
@@ -956,7 +980,8 @@ class ReturnAnalyzer:
         return self._phi_origins.readonly_reduction_contract_priority_score(info)
     def _readonly_reduction_ref_contract_priority_score(self, runtime_ref):
         return self._phi_origins.readonly_reduction_ref_contract_priority_score(runtime_ref)
-    _resolve_function_from_address = _svc_lifecycle._impl__resolve_function_from_address
+    def _resolve_function_from_address(self, address):
+        return self._program_access.resolve_function_from_address(address)
     def _resolve_precise_object_state_value(self, value, conditions, effect_summary):
         return self._expression_cases.resolve_precise_object_state_value(value, conditions, effect_summary)
     def _runtime_ref_guard_conditions(self, runtime_ref):

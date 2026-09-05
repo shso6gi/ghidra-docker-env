@@ -30,8 +30,8 @@ DIRECT = {
     "local_values": {"evaluate_varnode"},
 }
 FACADE_CALLBACKS = ( "extend_active_functions",
-    "current_function_entry_address", "program_identity",
-    "analysis_scope_key", "make_tracer",
+    "current_function_entry_address",
+    "analysis_scope_key",
     "get_freshest_callee_parameters", "make_call_resolver", "bound_parameter_values_from_call_args",
     "bound_parameter_storage_values_from_call_args", "target_active_key", "resolve_target_function",
     "make_deferred_call_recorder", "is_semantically_lossless_effect_sensitive_rewrite",
@@ -53,10 +53,11 @@ def _analyzer(debug=False):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._effect_integration
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
-    assert service.debug_reporter is analyzer._debug_reporter, attr
+    assert service.debug_reporter is analyzer._debug_reporter
+    assert service.program_access is analyzer._program_access, attr
 
 
 def test_every_delegator_forwards_to_the_collaborator():

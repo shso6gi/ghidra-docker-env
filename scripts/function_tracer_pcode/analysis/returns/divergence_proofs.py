@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     PcodeTracer,
     StructuralRecurrenceSummarizer,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import (
     PcodeTracer,
@@ -48,6 +49,7 @@ class DivergenceProofService:
     def __init__(
         self,
         *,
+        program_access: ProgramAccessService,
         condition_logic: ConditionLogicService,
         placeholder_algebra: "PlaceholderAlgebraService",
         stack_protector: StackProtectorService,
@@ -62,11 +64,11 @@ class DivergenceProofService:
         block_predecessor_count: Callable[..., Any],
         block_has_return_op: Callable[..., Any],
         debug_reporter: DebugReporter,
-        make_tracer: Callable[..., Any],
         program_value: Callable[..., Any],
         direct_call_graph_value: Callable[..., Any],
         direct_call_graph_complete_nodes_value: Callable[..., Any],
     ) -> None:
+        self.program_access = program_access
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
         self.stack_protector = stack_protector
@@ -81,7 +83,6 @@ class DivergenceProofService:
         self.block_predecessor_count = block_predecessor_count
         self.block_has_return_op = block_has_return_op
         self.debug_reporter = debug_reporter
-        self.make_tracer = make_tracer
         self.program_value = program_value
         self.direct_call_graph_value = direct_call_graph_value
         self.direct_call_graph_complete_nodes_value = direct_call_graph_complete_nodes_value
@@ -176,7 +177,7 @@ class DivergenceProofService:
         tracer = None
         if self.program_value() is not None:
             try:
-                tracer = self.make_tracer(high_function)
+                tracer = self.program_access.make_tracer(high_function)
             except Exception:
                 tracer = None
         cyclic_sccs = self.high_function_cyclic_sccs(blocks)

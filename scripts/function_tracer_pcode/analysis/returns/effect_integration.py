@@ -52,6 +52,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import collect_java_or_python_iterable
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import function_cache_key as lifecycle_function_cache_key
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
@@ -121,6 +122,7 @@ class EffectIntegrationService:
     def __init__(
         self,
         *,
+        program_access: ProgramAccessService,
         expression_cases: ExpressionCaseService,
         return_normalization: ReturnNormalizationService,
         stack_protector: StackProtectorService,
@@ -133,9 +135,7 @@ class EffectIntegrationService:
         debug_reporter: DebugReporter,
         extend_active_functions: Callable[..., Any],
         current_function_entry_address: Callable[..., Any],
-        program_identity: Callable[..., Any],
         analysis_scope_key: Callable[..., Any],
-        make_tracer: Callable[..., Any],
         get_freshest_callee_parameters: Callable[..., Any],
         make_call_resolver: Callable[..., Any],
         bound_parameter_values_from_call_args: Callable[..., Any],
@@ -161,6 +161,7 @@ class EffectIntegrationService:
         binary_id_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
+        self.program_access = program_access
         self.expression_cases = expression_cases
         self.return_normalization = return_normalization
         self.stack_protector = stack_protector
@@ -173,9 +174,7 @@ class EffectIntegrationService:
         self.debug_reporter = debug_reporter
         self.extend_active_functions = extend_active_functions
         self.current_function_entry_address = current_function_entry_address
-        self.program_identity = program_identity
         self.analysis_scope_key = analysis_scope_key
-        self.make_tracer = make_tracer
         self.get_freshest_callee_parameters = get_freshest_callee_parameters
         self.make_call_resolver = make_call_resolver
         self.bound_parameter_values_from_call_args = bound_parameter_values_from_call_args
@@ -357,7 +356,7 @@ class EffectIntegrationService:
                 region_ref = PcodeOpRef.from_pcode_op(
                     op,
                     binary_id=self.binary_id_value(),
-                    program_uid=self.program_identity(),
+                    program_uid=self.program_access.program_identity(),
                     function_entry=self.current_function_entry_address(),
                     local_op_ordinal=local_ordinal,
                 )
@@ -402,7 +401,7 @@ class EffectIntegrationService:
                     ref = PcodeOpRef.from_pcode_op(
                         op,
                         binary_id=self.binary_id_value(),
-                        program_uid=self.program_identity(),
+                        program_uid=self.program_access.program_identity(),
                         function_entry=self.current_function_entry_address(),
                         local_op_ordinal=local_ordinal,
                     )
@@ -737,7 +736,7 @@ class EffectIntegrationService:
                 args,
                 callee_parameters,
             )
-            callee_tracer = self.make_tracer(
+            callee_tracer = self.program_access.make_tracer(
                 callee_high,
                 bound_parameter_values=callee_bound_parameter_values,
                 bound_parameter_storage_values=callee_bound_parameter_storage_values,
