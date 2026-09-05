@@ -596,7 +596,7 @@ def test_return_analyzer_falls_back_to_legacy_switch_recovery_without_jump_table
         0x2000 + 0x100 + 0x8: 0x401010,
     }
 
-    with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: table.get(addr)):
+    with patch.object(analyzer._effect_integration, "read_memory_value", side_effect=lambda addr, size: table.get(addr)):
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",

@@ -88,7 +88,7 @@ def _old_and_new_constructors():
 
 def _analyzer():
     analyzer = ReturnAnalyzer(Mock(), debug=False)
-    analyzer._is_void_type = lambda dtype: str(dtype) == "void"
+    analyzer._parameters.is_void_type = lambda dtype: str(dtype) == "void"
     return analyzer
 
 

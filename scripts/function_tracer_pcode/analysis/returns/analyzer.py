@@ -5,7 +5,6 @@ from contextlib import contextmanager
 from scripts.function_tracer_pcode.analysis.returns import (
     call_recovery as _svc_call_recovery,
     control_recovery as _svc_control_recovery,
-    effect_integration as _svc_effect_integration,
     lifecycle as _svc_lifecycle,
     return_extraction as _svc_return_extraction,
     analyze_function as _svc_analyze_function,
@@ -17,6 +16,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.effect_integration import EffectIntegrationService
 from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
@@ -151,6 +151,51 @@ class ReturnAnalyzer:
             pcode_sites=self._pcode_sites,
             return_normalization=self._return_normalization,
             debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_flag=lambda: self.debug,
+        )
+        self._effect_integration = EffectIntegrationService(
+            expression_cases=self._expression_cases,
+            return_normalization=self._return_normalization,
+            stack_protector=self._stack_protector,
+            pcode_sites=self._pcode_sites,
+            phi_origins=self._phi_origins,
+            divergence_proofs=self._divergence_proofs,
+            parameters=self._parameters,
+            region_facts=self._region_facts,
+            local_values=self._local_values,
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_expr_identity_summary=lambda *a, **kw: self._debug_expr_identity_summary(*a, **kw),
+            debug_expr_summary=lambda *a, **kw: self._debug_expr_summary(*a, **kw),
+            extend_active_functions=lambda *a, **kw: self._extend_active_functions(*a, **kw),
+            current_function_entry_address=lambda *a, **kw: self._current_function_entry_address(*a, **kw),
+            program_identity=lambda *a, **kw: self._program_identity(*a, **kw),
+            function_cache_key=lambda *a, **kw: self._function_cache_key(*a, **kw),
+            collect_java_or_python_iterable=lambda *a, **kw: self._collect_java_or_python_iterable(*a, **kw),
+            analysis_scope_key=lambda *a, **kw: self._analysis_scope_key(*a, **kw),
+            make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
+            get_freshest_callee_parameters=lambda *a, **kw: self._get_freshest_callee_parameters(*a, **kw),
+            make_call_resolver=lambda *a, **kw: self._make_call_resolver(*a, **kw),
+            bound_parameter_values_from_call_args=lambda *a, **kw: self._bound_parameter_values_from_call_args(*a, **kw),
+            bound_parameter_storage_values_from_call_args=lambda *a, **kw: self._bound_parameter_storage_values_from_call_args(*a, **kw),
+            target_active_key=lambda *a, **kw: self._target_active_key(*a, **kw),
+            resolve_target_function=lambda *a, **kw: self._resolve_target_function(*a, **kw),
+            make_deferred_call_recorder=lambda *a, **kw: self._make_deferred_call_recorder(*a, **kw),
+            is_semantically_lossless_effect_sensitive_rewrite=lambda *a, **kw: self._is_semantically_lossless_effect_sensitive_rewrite(*a, **kw),
+            direct_call_target_function_key=lambda *a, **kw: self._direct_call_target_function_key(*a, **kw),
+            coerce_runtime_target_ref=lambda *a, **kw: self._coerce_runtime_target_ref(*a, **kw),
+            make_tracked_return_value=lambda *a, **kw: self._make_tracked_return_value(*a, **kw),
+            function_body_has_phase1_pure_return_forbidden_ops=lambda *a, **kw: self._function_body_has_phase1_pure_return_forbidden_ops(*a, **kw),
+            high_function_has_phase1_pure_return_forbidden_ops=lambda *a, **kw: self._high_function_has_phase1_pure_return_forbidden_ops(*a, **kw),
+            phase1_return_type_is_float=lambda *a, **kw: self._phase1_return_type_is_float(*a, **kw),
+            decompile_with_broker=lambda *a, **kw: self._decompile_with_broker(*a, **kw),
+            current_parameters_value=lambda: self._current_parameters,
+            current_effect_summary_value=lambda: self._current_effect_summary,
+            effect_summary_cache_value=lambda: self._effect_summary_cache,
+            effect_summary_parameter_cache_value=lambda: self._effect_summary_parameter_cache,
+            direct_call_graph_value=lambda: self._direct_call_graph,
+            direct_call_graph_complete_nodes_value=lambda: self._direct_call_graph_complete_nodes,
+            program_value=lambda: self.program,
+            binary_id_value=lambda: self._binary_id,
             debug_flag=lambda: self.debug,
         )
         self._current_effect_summary: Optional[EffectSummary] = None
@@ -405,35 +450,70 @@ class ReturnAnalyzer:
     _select_path_specific_return_source = _svc_control_recovery._impl__select_path_specific_return_source
     _split_branch_index = _svc_control_recovery._impl__split_branch_index
     # analyzer_services.effect_integration
-    _accept_effect_rewrite_without_rank_gain = _svc_effect_integration._impl__accept_effect_rewrite_without_rank_gain
-    _accept_effect_sensitive_rewrite = _svc_effect_integration._impl__accept_effect_sensitive_rewrite
-    _apply_local_store_effect = _svc_effect_integration._impl__apply_local_store_effect
-    _apply_observable_effect_surface = _svc_effect_integration._impl__apply_observable_effect_surface
-    _build_effect_summary = _svc_effect_integration._impl__build_effect_summary
-    _build_function_control_effect_profile = _svc_effect_integration._impl__build_function_control_effect_profile
-    _collapse_effect_sensitive_case_wrapper = _svc_effect_integration._impl__collapse_effect_sensitive_case_wrapper
-    _concretize_readonly_loads = _svc_effect_integration._impl__concretize_readonly_loads
-    _count_memory_reads = _svc_effect_integration._impl__count_memory_reads
-    _count_observed_loads = _svc_effect_integration._impl__count_observed_loads
-    _effect_sensitive_rewrite_precision = _svc_effect_integration._impl__effect_sensitive_rewrite_precision
-    _effect_sensitive_rewrite_rank = _svc_effect_integration._impl__effect_sensitive_rewrite_rank
-    _effect_summary_allows_pre_return_structural_summary = _svc_effect_integration._impl__effect_summary_allows_pre_return_structural_summary
-    _expression_contains_stale_effect_value_for_post_state = _svc_effect_integration._impl__expression_contains_stale_effect_value_for_post_state
-    _extract_stack_protector_memory_probe = _svc_effect_integration._impl__extract_stack_protector_memory_probe
-    _invoke_build_effect_summary = _svc_effect_integration._impl__invoke_build_effect_summary
-    _iter_effect_sensitive_rewrite_candidates = _svc_effect_integration._impl__iter_effect_sensitive_rewrite_candidates
-    _local_memory_key = _svc_effect_integration._impl__local_memory_key
-    _make_empty_effect_summary = _svc_effect_integration._impl__make_empty_effect_summary
-    _matched_effect_locations = _svc_effect_integration._impl__matched_effect_locations
-    _normalize_return_value_with_effect_summary = _svc_effect_integration._impl__normalize_return_value_with_effect_summary
-    _prefer_lossless_materialized_post_state_roundtrip = _svc_effect_integration._impl__prefer_lossless_materialized_post_state_roundtrip
-    _propagate_indirect_return_effect = _svc_effect_integration._impl__propagate_indirect_return_effect
-    _read_memory_value = _svc_effect_integration._impl__read_memory_value
-    _rebuild_effect_sensitive_case_wrapper = _svc_effect_integration._impl__rebuild_effect_sensitive_case_wrapper
-    _return_info_effective_region_conditions = _svc_effect_integration._impl__return_info_effective_region_conditions
-    _rewrite_effect_sensitive_return_value = _svc_effect_integration._impl__rewrite_effect_sensitive_return_value
-    _split_effect_sensitive_return_case = _svc_effect_integration._impl__split_effect_sensitive_return_case
-    _symbolic_post_state_roundtrip_rejected = _svc_effect_integration._impl__symbolic_post_state_roundtrip_rejected
+    def _accept_effect_rewrite_without_rank_gain(self, original, rewritten, conditions, effect_summary):
+        return self._effect_integration.accept_effect_rewrite_without_rank_gain(original, rewritten, conditions, effect_summary)
+    def _accept_effect_sensitive_rewrite(self, original, rewritten, conditions, effect_summary, *, rewrite_kind):
+        return self._effect_integration.accept_effect_sensitive_rewrite(original, rewritten, conditions, effect_summary, rewrite_kind=rewrite_kind)
+    def _apply_local_store_effect(self, pcode_op, tracer, local_values, local_storages, local_memory):
+        return self._effect_integration.apply_local_store_effect(pcode_op, tracer, local_values, local_storages, local_memory)
+    def _apply_observable_effect_surface(self, result, return_type_obj, return_type):
+        return self._effect_integration.apply_observable_effect_surface(result, return_type_obj, return_type)
+    def _build_effect_summary(self, function, high_function, tracer, condition_tracker, parameters, active_functions, bound_parameter_values=None, bound_parameter_storage_values=None):
+        return self._effect_integration.build_effect_summary(function, high_function, tracer, condition_tracker, parameters, active_functions, bound_parameter_values, bound_parameter_storage_values)
+    def _build_function_control_effect_profile(self, high_function, function=None, parameters=None):
+        return self._effect_integration.build_function_control_effect_profile(high_function, function, parameters)
+    def _collapse_effect_sensitive_case_wrapper(self, original, rewritten, conditions, effect_summary):
+        return self._effect_integration.collapse_effect_sensitive_case_wrapper(original, rewritten, conditions, effect_summary)
+    def _concretize_readonly_loads(self, value, conditions, parameters):
+        return self._effect_integration.concretize_readonly_loads(value, conditions, parameters)
+    def _count_memory_reads(self, expr):
+        return self._effect_integration.count_memory_reads(expr)
+    def _count_observed_loads(self, expr):
+        return self._effect_integration.count_observed_loads(expr)
+    def _effect_sensitive_rewrite_precision(self, expr, conditions, effect_summary):
+        return self._effect_integration.effect_sensitive_rewrite_precision(expr, conditions, effect_summary)
+    def _effect_sensitive_rewrite_rank(self, expr):
+        return self._effect_integration.effect_sensitive_rewrite_rank(expr)
+    def _decompile_with_broker(self, function, timeout, monitor, **kwargs):
+        """decompilation_broker.decompile_function を facade（analyzer）を第 1 引数として呼ぶ。"""
+        from scripts.function_tracer_pcode.ghidra.decompilation_broker import decompile_function
+
+        return decompile_function(self, function, timeout, monitor, **kwargs)
+
+    def _effect_summary_allows_pre_return_structural_summary(self, effect_summary, *, function=None, high_function=None, return_type=None, return_type_obj=None):
+        return self._effect_integration.effect_summary_allows_pre_return_structural_summary(effect_summary, function=function, high_function=high_function, return_type=return_type, return_type_obj=return_type_obj)
+    def _expression_contains_stale_effect_value_for_post_state(self, expr, target_post_state, conditions, effect_summary):
+        return self._effect_integration.expression_contains_stale_effect_value_for_post_state(expr, target_post_state, conditions, effect_summary)
+    def _extract_stack_protector_memory_probe(self, expr):
+        return self._effect_integration.extract_stack_protector_memory_probe(expr)
+    def _invoke_build_effect_summary(self, function, high_function, tracer, condition_tracker, parameters, active_functions, *, bound_parameter_values=None, bound_parameter_storage_values=None):
+        return self._effect_integration.invoke_build_effect_summary(function, high_function, tracer, condition_tracker, parameters, active_functions, bound_parameter_values=bound_parameter_values, bound_parameter_storage_values=bound_parameter_storage_values)
+    def _iter_effect_sensitive_rewrite_candidates(self, value, conditions, effect_summary):
+        return self._effect_integration.iter_effect_sensitive_rewrite_candidates(value, conditions, effect_summary)
+    def _local_memory_key(self, addr_expr, size):
+        return self._effect_integration.local_memory_key(addr_expr, size)
+    def _make_empty_effect_summary(self, parameters):
+        return self._effect_integration.make_empty_effect_summary(parameters)
+    def _matched_effect_locations(self, expr, conditions, effect_summary):
+        return self._effect_integration.matched_effect_locations(expr, conditions, effect_summary)
+    def _normalize_return_value_with_effect_summary(self, value, conditions, effect_summary):
+        return self._effect_integration.normalize_return_value_with_effect_summary(value, conditions, effect_summary)
+    def _prefer_lossless_materialized_post_state_roundtrip(self, canonicalized, original, conditions, effect_summary):
+        return self._effect_integration.prefer_lossless_materialized_post_state_roundtrip(canonicalized, original, conditions, effect_summary)
+    def _propagate_indirect_return_effect(self, tracked, pcode_op, tracer):
+        return self._effect_integration.propagate_indirect_return_effect(tracked, pcode_op, tracer)
+    def _read_memory_value(self, address_value, size_bytes):
+        return self._effect_integration.read_memory_value(address_value, size_bytes)
+    def _rebuild_effect_sensitive_case_wrapper(self, original, rewritten, conditions, effect_summary):
+        return self._effect_integration.rebuild_effect_sensitive_case_wrapper(original, rewritten, conditions, effect_summary)
+    def _return_info_effective_region_conditions(self, info):
+        return self._effect_integration.return_info_effective_region_conditions(info)
+    def _rewrite_effect_sensitive_return_value(self, value, conditions, effect_summary):
+        return self._effect_integration.rewrite_effect_sensitive_return_value(value, conditions, effect_summary)
+    def _split_effect_sensitive_return_case(self, value, conditions):
+        return self._effect_integration.split_effect_sensitive_return_case(value, conditions)
+    def _symbolic_post_state_roundtrip_rejected(self, canonicalized, original, conditions, effect_summary):
+        return self._effect_integration.symbolic_post_state_roundtrip_rejected(canonicalized, original, conditions, effect_summary)
     # analyzer_services.lifecycle
     _decompile_function = _svc_lifecycle._impl__decompile_function
     _decompose_comparison_condition = _svc_lifecycle._impl__decompose_comparison_condition

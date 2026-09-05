@@ -425,8 +425,8 @@ def test_analyze_function_skips_effect_summary_when_control_region_recovery_succ
         "_recover_control_region_returns_early",
         return_value=(recovered, ["control_region_return_recovery"]),
     ), patch.object(
-        analyzer,
-        "_build_effect_summary",
+        analyzer._effect_integration,
+        "build_effect_summary",
         side_effect=AssertionError("effect_summary should not be built"),
     ), patch.object(
         analyzer,
