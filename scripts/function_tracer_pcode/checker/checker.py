@@ -3,7 +3,7 @@
 
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import time
 import warnings
 
@@ -85,14 +85,6 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_signals import
 )
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     CallProofDecisionMode,
-    PreparedDispatchFrame,
-    StrategySourceAnalysisPair,
-    close_prepared_dispatch_frame,
-    diagnostic_projection,
-    finalize_pairwise_comparison_receipt,
-    prepare_solver_surface,
-    push_prepared_dispatch_frame,
-    validate_call_resolution_projection,
     verify_monolithic_terminal_receipt,
     verify_monolithic_proof_receipt,
 )
@@ -108,6 +100,13 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDi
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
 from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext, build_branch_check_context
+from scripts.function_tracer_pcode.checker.strategy_execution import (
+    build_prepared_dispatch_frame,
+    prepare_preflight_projection,
+    prepare_strategy_runtime,
+    run_legacy_strategy,
+    run_strategy_branch,
+)
 from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMixin
 from scripts.function_tracer_pcode.checker.root_causes import RootCauseMixin
 from scripts.function_tracer_pcode.checker.recovery_proofs import RecoveryProofMixin
@@ -576,46 +575,31 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             branch_id = ctx.branch_id
             decision_mode = ctx.decision_mode
             dispatch_frame = None
-            locally_issued_branch_authority = None
-            cleanup_complete = True
             preflight_gate_delta_diagnostic = None
 
             if decision_mode == CallProofDecisionMode.PREFLIGHT_PROJECTION:
-                source_pair = StrategySourceAnalysisPair.create(analysis1, analysis2)
-                prepared_pair = prepare_solver_surface(
-                    source_pair,
-                    observation_contract_digest=self.observation_contract.contract_id,
-                    comparison_session_id=comparison_session_id,
-                    branch_id=branch_id,
-                    generation=generation,
-                    decision_mode=decision_mode,
-                )
-                call_effect_shadow_manifest = self._call_effect_shadow_manifest(
-                    prepared_pair.analysis1,
-                    prepared_pair.analysis2,
+                projection_preparation = prepare_preflight_projection(
+                    ctx,
+                    analysis1,
+                    analysis2,
                     binary1_name,
                     binary2_name,
+                    observation_contract_id=self.observation_contract.contract_id,
+                    trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
+                    enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+                    call_effect_shadow_manifest=self._call_effect_shadow_manifest,
                 )
-                projection = validate_call_resolution_projection(
-                    call_effect_shadow_manifest,
-                    prepared_pair,
-                    generation=generation,
-                    trusted_proof_artifacts=self._last_internal_call_effect_artifacts,
-                )
-                if not self.enable_completed_recovery_proofs and projection.required:
-                    projection = replace(
-                        projection,
-                        status="inconclusive",
-                        root_blockers=("completed_recovery_proofs_disabled",),
-                        covered_blockers=(),
-                    )
                 branch_authority = ctx.production_branch_authority_lease
+                locally_issued_branch_authority = None
                 if (
                     isinstance(strategy, MonolithicStrategy)
                     and branch_authority is None
                 ):
                     # Direct checker calls are a compatibility execution domain;
                     # production stage execution supplies the parent lease.
+                    # 6b-2: issue_production_branch_authority は呼び出し元を
+                    # EquivalenceChecker.check の code object に pin する authority TCB
+                    # なので、発行は（projection の後・frame 構築の前という位置のまま）check() に残す。
                     from scripts.function_tracer_pcode.proof.monolithic_authority import (
                         issue_production_branch_authority,
                     )
@@ -626,176 +610,51 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         "direct_checker_compatibility_view",
                     )
                     branch_authority = locally_issued_branch_authority
-                try:
-                    dispatch_frame = PreparedDispatchFrame(
-                        comparison_session_id=comparison_session_id,
-                        branch_id=branch_id,
-                        generation=generation,
-                        source=source_pair,
-                        prepared=prepared_pair,
-                        projection=projection,
-                        preflight_manifest=call_effect_shadow_manifest,
-                        trusted_proof_artifacts=tuple(
-                            self._last_internal_call_effect_artifacts
-                        ),
-                        decision_mode=decision_mode,
-                        production_branch_authority_lease=branch_authority,
-                    )
-                except Exception:
-                    if locally_issued_branch_authority is not None:
-                        from scripts.function_tracer_pcode.proof.monolithic_authority import (
-                            revoke_production_branch_authority,
-                        )
-                        revoke_production_branch_authority(
-                            locally_issued_branch_authority
-                        )
-                        locally_issued_branch_authority = None
-                    raise
-                obligation_runtime = getattr(
-                    self, "_obligation_runtime_session", None
+                dispatch_frame = build_prepared_dispatch_frame(
+                    ctx,
+                    projection_preparation,
+                    trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
+                    branch_authority=branch_authority,
+                    locally_issued_branch_authority=locally_issued_branch_authority,
                 )
-                if (
-                    obligation_runtime is not None
-                    and replan_plan is None
-                    and obligation_runtime.pair_ledger_manager.pending_successor
-                    is not None
-                ):
-                    # A successor intent is branch-local authority.  Recursive
-                    # abstraction or another strategy must not consume it.
-                    from scripts.function_tracer_pcode.proof.obligations.runtime import (
-                        ObligationRuntimeSession,
-                    )
-
-                    obligation_runtime = ObligationRuntimeSession.create(
-                        analysis1, analysis2
-                    )
-                if obligation_runtime is None:
-                    from scripts.function_tracer_pcode.proof.obligations.runtime import (
-                        ObligationRuntimeSession,
-                    )
-
-                    obligation_runtime = ObligationRuntimeSession.create(
-                        analysis1, analysis2
-                    )
-                    self._obligation_runtime_session = obligation_runtime
-                try:
-                    strategy._obligation_runtime_session = obligation_runtime
-                except (AttributeError, TypeError):
-                    pass
-                dispatch_frame.obligation_runtime = obligation_runtime
-                if replan_plan is not None:
-                    current_plan = (
-                        obligation_runtime.pair_ledger_manager.pending_successor
-                    )
-                    if current_plan is not replan_plan:
-                        raise RuntimeError("pair_replan_successor_plan_missing")
-                    dispatch_frame.replan_successor_plan = replan_plan
-
-                self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
-                if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
-                    token = None
-                    try:
-                        token = push_prepared_dispatch_frame(dispatch_frame)
-                        strategy_result = strategy.check(analysis1, analysis2, save_formula)
-                        if (
-                            isinstance(strategy, PairwiseStrategy)
-                            and dispatch_frame.pair_disposition_ledger is not None
-                            and dispatch_frame.receipt is None
-                        ):
-                            strategy_result.comparison_execution_receipt = (
-                                finalize_pairwise_comparison_receipt(dispatch_frame)
-                            )
-                    finally:
-                        if token is None:
-                            dispatch_frame.close()
-                            dispatch_frame.cleanup_complete = True
-                            cleanup_complete = True
-                        else:
-                            cleanup_complete = close_prepared_dispatch_frame(
-                                dispatch_frame,
-                                token,
-                            )
-                        if locally_issued_branch_authority is not None:
-                            from scripts.function_tracer_pcode.proof.monolithic_authority import (
-                                revoke_production_branch_authority,
-                            )
-                            revoke_production_branch_authority(
-                                locally_issued_branch_authority
-                            )
-                else:
-                    # Non-built-in compatibility branches cannot consume a
-                    # projection.  Their EQ is vetoed below whenever call proof
-                    # preflight is required.
-                    try:
-                        strategy_result = strategy.check(analysis1, analysis2, save_formula)
-                    finally:
-                        dispatch_frame.close()
-                        dispatch_frame.cleanup_complete = True
-                ordinary_outcome = strategy_result.is_equivalent
-                stage_runner_owns_finalization = str(branch_id).startswith("S_")
-                if (
-                    isinstance(strategy, PairwiseStrategy)
-                    and dispatch_frame.pair_disposition_ledger is not None
-                    and not stage_runner_owns_finalization
-                ):
-                    strategy_result.comparison_execution_receipt = (
-                        finalize_pairwise_comparison_receipt(dispatch_frame)
-                    )
-                elif isinstance(strategy, MonolithicStrategy) and not stage_runner_owns_finalization:
-                    from scripts.function_tracer_pcode.proof.call_effect.preflight import (
-                        finalize_monolithic_comparison_receipt,
-                    )
-                    strategy_result.comparison_execution_receipt = (
-                        finalize_monolithic_comparison_receipt(dispatch_frame)
-                    )
-                if not stage_runner_owns_finalization:
-                    self._apply_preflight_final_gate(
-                        strategy_result,
-                        dispatch_frame,
-                        cleanup_complete=cleanup_complete,
-                    )
-                call_effect_shadow_manifest = diagnostic_projection(
-                    call_effect_shadow_manifest,
+                runtime_preparation = prepare_strategy_runtime(
+                    getattr(self, "_obligation_runtime_session", None),
+                    replan_plan,
+                    analysis1,
+                    analysis2,
+                )
+                if runtime_preparation.store_on_facade:
+                    # 6b-2: facade write は check() に残す。strategy 実行より前、必要な場合のみ。
+                    self._obligation_runtime_session = runtime_preparation.runtime
+                outcome = run_strategy_branch(
+                    ctx,
                     dispatch_frame,
+                    runtime_preparation.runtime,
+                    analysis1,
+                    analysis2,
+                    save_formula,
+                    locally_issued_branch_authority=locally_issued_branch_authority,
+                    call_effect_shadow_manifest=projection_preparation.call_effect_shadow_manifest,
+                    debug_print=self._debug_print,
+                    apply_preflight_final_gate=self._apply_preflight_final_gate,
                 )
-                preflight_gate_delta_diagnostic = {
-                    "status": "diagnostic_not_legacy_canary",
-                    "ordinary_comparison_outcome": (
-                        "EQ" if ordinary_outcome is True
-                        else "NOT_EQ" if ordinary_outcome is False
-                        else "UNKNOWN"
-                    ),
-                    "preflight_terminal_outcome": (
-                        "EQ" if strategy_result.is_equivalent is True
-                        else "NOT_EQ" if strategy_result.is_equivalent is False
-                        else "UNKNOWN"
-                    ),
-                    "gate_effect": (
-                        "agree"
-                        if ordinary_outcome is strategy_result.is_equivalent
-                        else "preflight_veto"
-                    ),
-                    "decision_mode": "preflight_projection",
-                    "comparison_branch": branch_id,
-                }
-                call_effect_shadow_manifest["preflight_gate_delta_diagnostic"] = (
-                    preflight_gate_delta_diagnostic
-                )
+                strategy_result = outcome.strategy_result
+                call_effect_shadow_manifest = outcome.call_effect_shadow_manifest
+                preflight_gate_delta_diagnostic = outcome.preflight_gate_delta_diagnostic
             else:
-                self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
-                strategy_result = strategy.check(analysis1, analysis2, save_formula)
-                call_effect_shadow_manifest = self._call_effect_shadow_manifest(
+                legacy_outcome = run_legacy_strategy(
+                    strategy,
                     analysis1,
                     analysis2,
                     binary1_name,
                     binary2_name,
+                    save_formula,
+                    debug_print=self._debug_print,
+                    call_effect_shadow_manifest=self._call_effect_shadow_manifest,
+                    apply_phase2_relational_call_discharge=self._apply_phase2_relational_call_discharge,
                 )
-                self._apply_phase2_relational_call_discharge(
-                    strategy_result,
-                    analysis1,
-                    analysis2,
-                    call_effect_shadow_manifest,
-                )
+                strategy_result = legacy_outcome.strategy_result
+                call_effect_shadow_manifest = legacy_outcome.call_effect_shadow_manifest
             comparison_identity = self._call_effect_comparison_identity(
                 analysis1,
                 analysis2,

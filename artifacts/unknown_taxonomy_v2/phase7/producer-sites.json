@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "57c7cbeaef673b00f128bd5b10dd8aa59ad4dcade1ccbdc2ee18013958e9bfb5",
+  "manifest_digest": "a584e7c549e1348330078a94c736625eee2f775b7ee8deead7f4dc68dcf3aa66",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -151,10 +151,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "check",
       "expected_cause_slots": [],
-      "line": 867,
+      "line": 726,
       "path": "scripts/function_tracer_pcode/checker/checker.py",
       "producer_site_manifest_id": "checker-recurrence-validation-completed",
-      "source_sha256": "b3dc1a3c577700a01c430433a18089f79935d1cdb84321e8c1d0ea12787df902"
+      "source_sha256": "b19cf6c8488b1805ba0f0ad938a9b3fa32d3243bc45a4ee8c196a7735f042505"
     },
     {
       "allowed_dispositions": [
