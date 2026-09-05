@@ -1,3 +1,4 @@
+from unittest.mock import Mock
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
 
 def test_condition_implication_keeps_named_parameters_with_placeholder_indices_distinct():
@@ -171,8 +172,7 @@ def test_phase1_high_function_visible_scan_rejects_memory_call_control_and_fp_op
         assert analyzer._high_function_has_phase1_pure_return_forbidden_ops(high_function) is True
 
 def test_phase1_function_body_scan_rejects_forbidden_ops_not_seen_in_high_function():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([
         _Phase1FakeInstruction(["COPY", "INT_ADD"]),
         _Phase1FakeInstruction(["LOAD", "RETURN"]),
@@ -189,8 +189,7 @@ def test_phase1_function_body_scan_rejects_forbidden_ops_not_seen_in_high_functi
     ) is False
 
 def test_phase1_function_body_scan_still_rejects_forbidden_high_function_ops():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([
         _Phase1FakeInstruction(["COPY", "INT_ADD", "CBRANCH"]),
         _Phase1FakeInstruction(["MULTIEQUAL", "INT_MULT", "RETURN"]),
@@ -207,8 +206,7 @@ def test_phase1_function_body_scan_still_rejects_forbidden_high_function_ops():
     ) is False
 
 def test_phase1_function_body_and_high_function_scan_allow_integer_no_effect_body():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([
         _Phase1FakeInstruction(["COPY", "INT_ADD", "CBRANCH"]),
         _Phase1FakeInstruction(["MULTIEQUAL", "INT_MULT", "RETURN"]),
@@ -226,23 +224,20 @@ def test_phase1_function_body_and_high_function_scan_allow_integer_no_effect_bod
     ) is True
 
 def test_phase1_function_body_scan_failure_is_conservative():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = Mock()
     analyzer.program.getListing.side_effect = RuntimeError("listing unavailable")
 
     assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
 
 def test_phase1_function_body_pcode_iterator_failure_after_safe_op_is_conservative():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([_Phase1BrokenInstruction()])
 
     assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
 
 def test_phase1_function_body_scan_rejects_direct_branch_outside_body():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([
         _Phase1FakeInstruction(["COPY", "BRANCH"], flows=[_Phase1FakeAddress(0x2000)]),
     ])
@@ -250,8 +245,7 @@ def test_phase1_function_body_scan_rejects_direct_branch_outside_body():
     assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is True
 
 def test_phase1_function_body_scan_allows_direct_branch_inside_body():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     analyzer.program = _Phase1FakeProgram([
         _Phase1FakeInstruction(["COPY", "BRANCH"], flows=[_Phase1FakeAddress(0x1010)]),
         _Phase1FakeInstruction(["RETURN"]),
@@ -260,8 +254,7 @@ def test_phase1_function_body_scan_allows_direct_branch_inside_body():
     assert analyzer._function_body_has_phase1_pure_return_forbidden_ops(_Phase1FakeFunction()) is False
 
 def test_phase1_pre_return_effect_gate_rejects_impure_high_function():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     high_function = _Phase1FakeHighFunction([["COPY", "LOAD", "RETURN"]])
     effect_summary = EffectSummary(parameter_names=[], effects=[])
 
@@ -271,8 +264,7 @@ def test_phase1_pre_return_effect_gate_rejects_impure_high_function():
     ) is False
 
 def test_phase1_pre_return_effect_gate_rejects_float_return_type():
-    analyzer = ReturnAnalyzer.__new__(ReturnAnalyzer)
-    analyzer.debug = False
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)  # 通常の生成; collaborator を揃える（program は各テストが後から差し替える）
     high_function = _Phase1FakeHighFunction([["COPY", "INT_ADD", "RETURN"]])
     effect_summary = EffectSummary(parameter_names=[], effects=[])
 
