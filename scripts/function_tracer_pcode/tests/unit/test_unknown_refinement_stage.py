@@ -128,8 +128,9 @@ def test_check_calls_the_stage_once_and_no_longer_calls_the_four_mixins_directly
     assert writes == []
     # refine は strategy 実行（run_strategy_branch）の後、recurrence promotion authority の前
     run_line = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "run_strategy_branch"][0].lineno
-    promo_line = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                  and n.func.attr == "_recurrence_promotion_authority"][0].lineno
+    # 6b-4 以降、recurrence promotion authority の判定は prepare_recurrence_promotion(...) 経由
+    promo_line = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                  and getattr(n.func, "id", "") == "prepare_recurrence_promotion"][0].lineno
     assert run_line < calls[0].lineno < promo_line
 
 

@@ -89,9 +89,7 @@ from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     verify_monolithic_proof_receipt,
 )
 from scripts.function_tracer_pcode.proof.recurrence_promotion import (
-    PairPromotionState,
     PairRecurrencePromotionAuthority,
-    promote_recurrence_pair,
 )
 from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDigestCodec
 
@@ -101,6 +99,10 @@ from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
 from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext, build_branch_check_context
 from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unknown_reasons
+from scripts.function_tracer_pcode.checker.recurrence_promotion import (
+    complete_recurrence_promotion_signals,
+    prepare_recurrence_promotion,
+)
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
     prepare_preflight_projection,
@@ -676,67 +678,27 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             # blockers observed above and is intentionally absent from the
             # function-local unary artifact.
             if getattr(self, "_active_recurrence_promotion_authority", None) is None:
-                authority = self._recurrence_promotion_authority(
+                # 6b-4: (1)(2) は段関数、(3) の facade write はその直後・(4) より前に check() が書く。
+                promotion = prepare_recurrence_promotion(
                     strategy_result,
+                    analysis1,
+                    analysis2,
                     comparison_session_id=comparison_session_id,
                     branch_id=branch_id,
+                    recurrence_promotion_authority=self._recurrence_promotion_authority,
                 )
-                if authority is not None:
-                    (
-                        promoted1,
-                        promoted2,
-                        recurrence_runtime,
-                        recurrence_attempt,
-                    ) = promote_recurrence_pair(analysis1, analysis2, authority)
-                    self._last_recurrence_promotion_attempt = recurrence_attempt
-                    if recurrence_attempt.state == PairPromotionState.ABORTED:
-                        self._debug_print(
-                            "Recurrence promotion declined: "
-                            + str(recurrence_attempt.failure or "unknown")
-                        )
-                    elif recurrence_attempt.state == PairPromotionState.COMPOSED and (
-                        recurrence_attempt.left is not None
-                        and recurrence_attempt.left.proposal is not None
-                        or recurrence_attempt.right is not None
-                        and recurrence_attempt.right.proposal is not None
+                if promotion is not None:
+                    self._last_recurrence_promotion_attempt = promotion.attempt
+                    if complete_recurrence_promotion_signals(
+                        promotion.attempt,
+                        debug_print=self._debug_print,
                     ):
-                        for promoted_side in (
-                            recurrence_attempt.left,
-                            recurrence_attempt.right,
-                        ):
-                            if (
-                                promoted_side is None
-                                or promoted_side.proposal is None
-                            ):
-                                continue
-                            try:
-                                from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
-                                    RecurrenceValidationCompletionSignal,
-                                )
-                                from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-                                    emit_loop_recurrence_signal,
-                                )
-
-                                emit_loop_recurrence_signal(
-                                    RecurrenceValidationCompletionSignal.from_side_promotion(
-                                        promoted_side
-                                    ),
-                                    producer_site_manifest_id=(
-                                        "checker-recurrence-validation-completed"
-                                    ),
-                                )
-                            except Exception as exc:
-                                from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-                                    record_production_pilot_shadow_error,
-                                )
-
-                                record_production_pilot_shadow_error(exc)
-                        self._obligation_runtime_session = recurrence_runtime
-                        self._active_recurrence_promotion_authority = authority
+                        self._obligation_runtime_session = promotion.recurrence_runtime
+                        self._active_recurrence_promotion_authority = promotion.authority
                         try:
                             return self.check(
-                                promoted1,
-                                promoted2,
+                                promotion.promoted1,
+                                promotion.promoted2,
                                 binary1_name,
                                 binary2_name,
                                 save_formula,
