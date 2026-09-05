@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, TYPE_CHECKING, Tuple
 from scripts.function_tracer_pcode.core.analysis import ReturnInfo
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.runtime_refs import ReadonlyReductionRef, UnknownValueRef
@@ -14,14 +14,29 @@ from scripts.function_tracer_pcode.analysis.returns.condition_logic import Condi
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 
+if TYPE_CHECKING:  # return_normalization は本 module の純関数を import するため循環回避
+    from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
+
+
+def expression_contains_phi(expr: Optional[Expression]) -> bool:
+    """式木に PHI ノードが含まれるか。純関数（facade 状態なし）。"""
+    if expr is None:
+        return False
+    if expr.expr_type == ExpressionType.PHI:
+        return True
+    for operand in getattr(expr, "operands", []) or []:
+        if expression_contains_phi(operand):
+            return True
+    return False
+
 
 class PhiOriginService:
     """ReturnAnalyzer から切り出した PHI 起源鍵・PHI 循環判定・有限パラメータ到達分割の collaborator。
 
     facade 状態は読まない（debug フラグは supplier 経由）。条件論理は ``ConditionLogicService``、
-    定数値抽出は ``StackProtectorService``、p-code op 鍵は ``PcodeSiteService`` を直接依存として受け取る。
-    未抽出 family が所有する helper（``normalize_expanded_return_value`` / ``debug_print``）は
-    facade 経由で遅延 dispatch する callable として注入する。
+    定数値抽出は ``StackProtectorService``、p-code op 鍵は ``PcodeSiteService``、return 値正規化は
+    ``ReturnNormalizationService`` を直接依存として受け取る。未抽出 family が所有する ``debug_print`` は
+    facade 経由で遅延 dispatch する callable として注入する。``expression_contains_phi`` は module 関数が実装。
     """
 
     def __init__(
@@ -30,14 +45,14 @@ class PhiOriginService:
         condition_logic: ConditionLogicService,
         stack_protector: StackProtectorService,
         pcode_sites: PcodeSiteService,
-        normalize_expanded_return_value: Callable[..., Any],
+        return_normalization: "ReturnNormalizationService",
         debug_print: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
         self.condition_logic = condition_logic
         self.stack_protector = stack_protector
         self.pcode_sites = pcode_sites
-        self.normalize_expanded_return_value = normalize_expanded_return_value
+        self.return_normalization = return_normalization
         self.debug_print = debug_print
         self.debug_flag = debug_flag
 
@@ -123,14 +138,7 @@ class PhiOriginService:
         return any(self.expression_contains_phi_circular(operand) for operand in getattr(expr, "operands", []) or [])
 
     def expression_contains_phi(self, expr: Optional[Expression]) -> bool:
-        if expr is None:
-            return False
-        if expr.expr_type == ExpressionType.PHI:
-            return True
-        for operand in getattr(expr, "operands", []) or []:
-            if self.expression_contains_phi(operand):
-                return True
-        return False
+        return expression_contains_phi(expr)
 
     def phi_origin_keys_from_varnode_defs(
         self,
@@ -185,7 +193,7 @@ class PhiOriginService:
         skipped_phi = 0
         skipped_none = 0
         for finite_conditions in finite_condition_sets:
-            finite_value = self.normalize_expanded_return_value(
+            finite_value = self.return_normalization.normalize_expanded_return_value(
                 fallback_value,
                 finite_conditions,
             )
